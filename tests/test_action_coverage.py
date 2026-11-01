@@ -32,6 +32,9 @@ _NOT_ACTIONS: frozenset[str] = frozenset({
     "app_state.py:get_plist_watch_config_endpoint",
     "build_app.py:build_progress",  # a read, polled every 10s during a build
     "recordings.py:list_recordings",
+    "profiles.py:list_profiles",        # reads: kept profiles, their summaries and files
+    "profiles.py:get_profile",
+    "profiles.py:get_profile_file",
     "sessions.py:list_sessions",
     # Remote listener (#254, phase 3): its status is a read; the hello step
     # changes nothing -- the pairing it starts is logged when it completes.

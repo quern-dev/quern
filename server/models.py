@@ -1973,6 +1973,15 @@ class PerformanceSnapshot(BaseModel):
     unavailable: dict[str, str] = Field(default_factory=dict)
 
 
+class StartProfileRequest(BaseModel):
+    """Request body for POST /api/v1/profiles (#245)."""
+
+    bundle_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_.-]+$")
+    udid: str | None = None
+    preset: Literal["hangs", "cpu", "hitches", "launch"] = "hangs"
+    time_limit_s: int = Field(default=30, ge=1, le=300)
+
+
 class DeviceError(Exception):
     """Raised when a device operation fails."""
 

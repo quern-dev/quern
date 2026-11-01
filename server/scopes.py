@@ -218,6 +218,9 @@ ROUTES: dict[tuple[str, str], Rule] = {
                                          owner_fields=frozenset({"output_dir"})),
     ("POST", "/api/v1/recordings/{recording_id}/stop"): _PATH_ID,
     ("POST", "/api/v1/recordings/{recording_id}/keyframe"): _PATH_ID,
+    # A profile launches and terminates the app it records (#245).
+    ("POST", "/api/v1/profiles"): _RESOLVED,
+    ("POST", "/api/v1/profiles/{profile_id}/stop"): _PATH_ID,
 
     # -- the pool picks and boots devices; a client reserves instead ----------
     ("POST", "/api/v1/devices/resolve"): _OWNER,
@@ -277,6 +280,9 @@ ROUTES: dict[tuple[str, str], Rule] = {
 
     # -- recordings ------------------------------------------------------------
     ("GET", "/api/v1/recordings"): _VIEW,
+    ("GET", "/api/v1/profiles"): _VIEW,
+    ("GET", "/api/v1/profiles/{profile_id}"): _VIEW,
+    ("GET", "/api/v1/profiles/{profile_id}/files/{name}"): _VIEW,
     ("GET", "/api/v1/recordings/events"): _OWNER,            # reads any directory on the Mac
     # Downloaded by their own principal, from another machine (#254, phase 3b).
     ("GET", "/api/v1/recordings/{recording_id}/files"): _VIEW,
@@ -366,6 +372,9 @@ BLIND: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/proxy/flows/wait"): "filtered",
     ("GET", "/api/v1/proxy/mocks"): "filtered",
     ("GET", "/api/v1/recordings"): "filtered",
+    ("GET", "/api/v1/profiles"): "filtered",
+    ("GET", "/api/v1/profiles/{profile_id}"): "filtered",
+    ("GET", "/api/v1/profiles/{profile_id}/files/{name}"): "filtered",
     ("GET", "/api/v1/recordings/{recording_id}/files"): "filtered",
     ("GET", "/api/v1/screenshots"): "filtered",
     ("GET", "/api/v1/recordings/{recording_id}/files/{name}"): "filtered",

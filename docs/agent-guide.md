@@ -446,6 +446,7 @@ Open real-time video windows to see what's happening on USB-connected physical d
 - Uninstall app: `uninstall_app`
 - List installed apps: `list_apps`
 - How hard an app is working: `get_performance` (CPU, memory, threads; Android frames; null with a reason when something can't be read)
+- Why the app froze or stuttered: `start_profile` (relaunches the app under Instruments; presets hangs, cpu, hitches, launch), drive the app, then `stop_profile` for hangs, hitches and hot functions; `download_profile` for the trace itself
 - Screenshot: `take_screenshot`
 - Location: `set_location` (simulators only)
 - Permissions: `grant_permission` (simulators only)

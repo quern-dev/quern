@@ -485,6 +485,7 @@ class TestTheGuardCoversEveryRoute:
         ("PATCH", "/api/v1/proxy/mocks/{rule_id}"): "route checks the rule's simulator_udid",
         ("DELETE", "/api/v1/proxy/mocks/{rule_id}"): "route checks the rule's simulator_udid",
         ("POST", "/api/v1/recordings/{recording_id}/stop"): "route checks the recording's udid",
+        ("POST", "/api/v1/profiles/{profile_id}/stop"): "route checks the profile's udid",
         ("POST", "/api/v1/recordings/{recording_id}/keyframe"): "route checks the recording's udid",
         ("POST", "/api/v1/recordings/{recording_id}/viewer"):
             "route checks the recording is the caller's (#559); no device",

@@ -509,7 +509,7 @@ def _group_members(group: str, devices: list, pool) -> list:
 
 async def _end_client_work(app: FastAPI, registry: SessionRegistry,
                            session: HeldSession) -> list[dict]:
-    """A client key's mock rules and recordings on a device end when its hold
+    """A client key's mock rules, recordings and profiles on a device end when its hold
     on the device does. Left in place, the next holder's traffic was answered
     by the previous holder's rules -- whose patterns and bodies a blind
     server then showed it -- and the previous holder's recording went on
@@ -563,6 +563,23 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
             except Exception as e:  # noqa: BLE001 -- reported, never raised
                 actions.append({"udid": udid, "action": "recording_stopped", "ok": False,
                                 "recording": rec.id, "error": str(e)})
+        # A client's profile is stopped too (#245): left running, it went on
+        # recording the next holder's use of the app.
+        profiles = getattr(app.state, "profiles", None)
+        for prof in list(profiles.list() if profiles is not None else []) if is_client else []:
+            if prof.udid != udid or prof.principal != session.principal \
+                    or prof.state != "recording":
+                continue
+            try:
+                # Asked to stop, not waited on: saving and summarising take
+                # a minute or more, and this runs in the sweep every
+                # session's expiry waits on.
+                await profiles.request_stop(prof.id, reason="session_ended")
+                actions.append({"udid": udid, "action": "profile_stopped", "ok": True,
+                                "profile": prof.id})
+            except Exception as e:  # noqa: BLE001 -- reported, never raised
+                actions.append({"udid": udid, "action": "profile_stopped", "ok": False,
+                                "profile": prof.id, "error": str(e)})
         # Its session capture (#558): the names it asked for on this device,
         # and any session proxy nobody else's capture uses.
         session_proxies = getattr(app.state, "session_proxies", None)

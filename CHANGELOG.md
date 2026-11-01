@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Profile an iOS app with Instruments: `start_profile`, `stop_profile`, `get_profile`, `download_profile` (#245).** xctrace records the app on a simulator or a physical device; the summary lists main-thread hangs, late frames with Instruments' explanation of each, and the functions taking CPU time, and the trace is kept for download and opening in Instruments.
+  - **Presets:** `hangs` (the default), `cpu`, `hitches` (physical devices only: simulators refuse Animation Hitches) and `launch`, which on a physical device gives each launch phase with Instruments' explanation and the time to the first frame.
+  - **It relaunches the app.** xctrace launches the app it records and ends it when recording stops, and the answer says so. Attaching to an app already running was measured broken on a physical iPhone.
+  - **Physical devices just work.** xctrace waits for a device's CoreDevice tunnel instead of bringing it up, and reported the iPhone "offline" whenever nothing else held it; quern brings the tunnel up first.
+  - **Profiles survive a restart.** xctrace keeps recording to its time limit when quern stops, and the next quern picks it up and summarises it.
+  - **Disk is bounded:** kept profiles share `profiles.max_mb` in config.json (default 2048), and the oldest finished ones make room. A start refused because recordings fill it removes nothing.
+  - **Finished means saved.** xctrace's bundle exists from the moment it starts, so a profile is finished only once xctrace says it saved the trace; otherwise it is failed, with xctrace's last words.
 - **Device requests pick on one platform (#582).** iOS 16 and Android 16 both exist, and a bare `os_version="16"` matched both, so asking for an Android 16 emulator could hand back an iOS 16 simulator.
   - **The project decides by default.** The MCP sends the agent's project's platform: `.quern/config.json`'s new `"platform"`, else what the project is (an Xcode project, an Android app module). An iOS project never gets an Android device it didn't ask for, except ones named that are no more than it asked for ("Pixel 8").
   - **"A device" is a virtual one on both platforms.** `resolve_device` and `ensure_devices` default to a simulator on iOS and an emulator on Android; a physical phone needs `device_type`.

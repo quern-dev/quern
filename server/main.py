@@ -45,6 +45,7 @@ from server.api.device_pool import router as device_pool_router
 from server.api.device_ui import router as device_ui_router
 from server.api.landmarks import router as landmarks_router
 from server.api.logs import router as logs_router
+from server.api.profiles import router as profiles_router
 from server.api.proxy import router as proxy_router
 from server.api.proxy_certs import router as proxy_certs_router
 from server.api.proxy_intercept import router as proxy_intercept_router
@@ -330,6 +331,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         resumed = []
     if resumed:
         logger.info("Resumed recordings: %s", ", ".join(resumed))
+    # Profiles a previous server left recording keep going under xctrace's
+    # own time limit; this picks them back up (#245).
+    from server.config import profile_settings
+    from server.profiling.manager import ProfileManager
+    if note := profile_settings()["note"]:
+        logger.warning(note)
+    app.state.profiles = ProfileManager()
+    try:
+        adopted = await app.state.profiles.resume()
+    except Exception:  # noqa: BLE001 -- a profile must never stop the server starting
+        logger.exception("Could not pick up the profiles that were running")
+        adopted = []
+    if adopted:
+        logger.info("Picked up profiles: %s", ", ".join(adopted))
     proxy = ProxyAdapter(
         device_id=config.default_device_id,
         on_entry=dedup.process,
@@ -728,6 +743,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:  # noqa: BLE001 -- shutdown must carry on regardless
             logger.exception("Could not pause the running recordings")
 
+    # Profiles: stop watching, and leave xctrace to finish its trace (#245).
+    profiles = getattr(app.state, "profiles", None)
+    if profiles is not None:
+        try:
+            await profiles.shutdown()
+        except Exception:  # noqa: BLE001 -- shutdown must carry on regardless
+            logger.exception("Could not save the profiles")
+
     # Shutdown: cancel background tasks, stop adapters, flush deduplicator
     for task in (
         watchdog_task, update_check_task, network_monitor_task,
@@ -943,6 +966,7 @@ def create_app(
     app.include_router(logs_router)
     app.include_router(trace_router)
     app.include_router(recordings_router)
+    app.include_router(profiles_router)
     app.include_router(sessions_router)
     from server.api.remote import router as remote_router
     app.include_router(remote_router)

@@ -1,0 +1,133 @@
+<?xml version="1.0"?>
+
+<trace-toc>
+    <run number="1">
+        <info>
+            <target>
+                <device platform="iOS" model="iPhone 11" memory-size="4039901184" name="iPhone 11" os-version="26.7 (23H24)" uuid="00008030-000C59623A69802E"/>
+                <host-device platform="macOS" model="Mac mini" name="scorpius" os-version="27.0.1 (26A434)" uuid="FABE530E-A33F-5865-8887-84555696350E"/>
+                <process type="launched" return-exit-status="0" name="QuernProbe" pid="20772" termination-reason="exit(0)"/>
+            </target>
+            <summary>
+                <start-date>2026-10-31T20:17:37.697-07:00</start-date>
+                <end-date>2026-10-31T20:18:13.587-07:00</end-date>
+                <duration>35.890540</duration>
+                <end-reason>Time limit reached</end-reason>
+                <instruments-version>27.2 (27B52)</instruments-version>
+                <template-name>Animation Hitches</template-name>
+                <recording-mode>Deferred</recording-mode>
+                <time-limit>35 seconds</time-limit>
+                <intruments-recording-settings>
+                    <instrument name="Hangs">
+                        <options>
+                            <option key="Reporting Threshold" value="Include All Potential Interaction Delays (&gt;33ms)"/>
+                        </options>
+                    </instrument>
+                </intruments-recording-settings>
+            </summary>
+        </info>
+        <processes>
+            <process name="QuernProbe" pid="20772" path="/private/var/containers/Bundle/Application/AF060D9B-7BCA-46F5-B1AE-B34B7E70E999/QuernProbe.app"/>
+            <process name="kernel" pid="0" path="Unknown"/>
+            <process name="backboardd" pid="72" path="/usr/libexec/backboardd"/>
+            <process name="WidgetRenderer_Default" pid="20735" path="/Applications/WidgetRenderer_Default.app/WidgetRenderer_Default"/>
+            <process name="testmanagerd" pid="20745" path="/System/Developer/usr/libexec/testmanagerd"/>
+            <process name="DTServiceHub" pid="824" path="/System/Library/PrivateFrameworks/DVTInstrumentsFoundation.framework/DTServiceHub"/>
+        </processes>
+        <data>
+            <table codes="&quot;0x1,0xc&quot; &quot;0x4,0xc&quot;" schema="kdebug" callstack="user" target="SINGLE" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x07,0x00&quot; &quot;0x1f,0x05&quot;" target="SINGLE" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x2b,0x65&quot;" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x7,0x0&quot;" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x34,0x11&quot; &quot;0x34,0x0f&quot;" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x85,0xc2&quot;" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x85,0xAF&quot; &quot;0x34,0x11&quot; &quot;0x34,0x0f&quot;" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x85,0x1&quot; &quot;0x85,0x8&quot;" callstack="user" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x85,0xc0&quot; &quot;0x85,0xc1&quot; &quot;0x31,0xca&quot;" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x85,0x30&quot;" callstack="user" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x85,0x9&quot; &quot;0x85,0x18&quot;" callstack="user" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x85,0x2&quot;" callstack="user" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table schema="hitches-renders"/>
+            <table codes="&quot;0x85,0x20&quot; &quot;0x31,0x80&quot;" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table schema="context-switch" target-pid="SINGLE" documentation="Tracks a context switch for a given thread."/>
+            <table schema="display-compositor-events-interval" documentation="Shows generic compositor events"/>
+            <table codes="&quot;0x31,0xb0&quot; &quot;0x31,0xd0&quot;" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x1,0x9&quot; &quot;0x1,0x5&quot;" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x1,0x40&quot;" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x1,0x40,0x0&quot; &quot;0x1,0x40,0x2&quot;" schema="kdebug" callstack="user" target="SINGLE" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x26,0x38,0xa&quot; &quot;0x26,0x19,0x8&quot;" schema="kdebug" callstack="" target="SINGLE" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x7,0x0,0x3&quot;" schema="kdebug" callstack="" target="SINGLE" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x1,0x40,0x27&quot;" schema="kdebug" callstack="" target="SINGLE" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x1,0x25&quot;" target="SINGLE" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x2b,0xd8&quot;" target="SINGLE" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x2b,0xdc&quot;" target="SINGLE" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table schema="display-surface-queue" documentation="Describes display surface queueing events."/>
+            <table codes="&quot;0x31,0xca&quot;" target="SINGLE" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x2d,*&quot;" schema="kdebug" callstack="user" target="SINGLE" documentation="Tracing the kernel and some system frameworks."/>
+            <table schema="hitches"/>
+            <table schema="displayed-surfaces-interval" target-pid="SINGLE" documentation="Shows when a surface is being displayed."/>
+            <table sample-rate-micro-seconds="1000" target="SINGLE" schema="time-sample" callstack="user" all-thread-states="NO" documentation="Holds a raw CPU profiling sample."/>
+            <table schema="syscall" target-pid="SINGLE" documentation="A system call that was active on a given thread for a given interval of time."/>
+            <table schema="hitches-framewait"/>
+            <table track-id-base="2000" schema="metal-object-dependency-chain-display" documentation="VObject Dependency for Metal System Trace"/>
+            <table codes="&quot;0x1f,0x7&quot;" target="SINGLE" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x07,0x00&quot;" target="SINGLE" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table swift-table="&quot;any_AnalysisCoreTable(value: InstrumentsPlugIn.SystemCPUUsage(dataSource: InstrumentsPlugIn.CPUUsageModeling(profileTable: LegacyTableBridge.LegacyTables.Sampling.TimeProfiles(mustTargetAllProcesses: false, highFrequencySampling: false, needsKernelCallstack: false, recordWaitingThreads: false, contextSwitchSampling: false), bucketStart: 0, systemWeight: 0, processWeight: [:], threadWeight: [:], threadProcess: [:])))&quot;" schema="SystemCPUUsage"/>
+            <table codes="&quot;0x2b,0x87&quot;" target="SINGLE" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;33,0x11&quot;" target="SINGLE" schema="kdebug" documentation="Tracing the kernel and some system frameworks."/>
+            <table codes="&quot;0x1f,0x05&quot;" target="SINGLE" schema="kdebug-strings" documentation="Associates numeric arguments with strings in kdebug trace points."/>
+            <table codes="&quot;33,0x11&quot;" target="SINGLE" schema="kdebug-strings" documentation="Associates numeric arguments with strings in kdebug trace points."/>
+            <table schema="metal-gpu-info" documentation="Marks GPU info"/>
+            <table schema="hitches-updates"/>
+            <table schema="virtual-memory" target-pid="SINGLE" documentation="Describes a virtual memory fault happening on the thread over a period of time."/>
+            <table schema="dyld-library-load" target-pid="SINGLE"/>
+            <table enable-priority-inversion-detection="0" target-pid="SINGLE" message-type="Fault" schema="os-log" category="&quot;Hang Risk&quot; &quot;Severe Hang Risk&quot; CFNetwork Contacts CoreML" subsystem="&quot;com.apple.runtime-issues&quot;" documentation="Holds a message from the OS's Unified Logging and Tracing component."/>
+            <table schema="process-info" documentation="Associates processes with their process names."/>
+            <table schema="runloop-events" target-pid="SINGLE"/>
+            <table schema="time-info" documentation="Raw data needed transform a mach-absolute-time to a trace relative timestamp"/>
+            <table schema="device-display-info" documentation="Marks related info about Displays connected to the machine."/>
+            <table schema="metal-command-buffer-completed" documentation="Marks when Metal Command Buffer are completed"/>
+            <table schema="hang-risks" detect-priority-inversions="0" target-pid="SINGLE"/>
+            <table schema="metal-ar-events" documentation="Marks AR events"/>
+            <table content="metal-connection-chains" schema="visual-chain" target-pid="SINGLE" documentation="Connects multiple objects on a graph to be treated a single, selectable chain of events."/>
+            <table swift-table="&quot;any_AnalysisCoreTable(value: InstrumentsPlugIn.ThreadActivity())&quot;" schema="ThreadActivity"/>
+            <table swift-table="&quot;any_AnalysisCoreTable(value: InstrumentsPlugIn.ProcessCPUUsage(dataSource: InstrumentsPlugIn.CPUUsageModeling(profileTable: LegacyTableBridge.LegacyTables.Sampling.TimeProfiles(mustTargetAllProcesses: false, highFrequencySampling: false, needsKernelCallstack: false, recordWaitingThreads: false, contextSwitchSampling: false), bucketStart: 0, systemWeight: 0, processWeight: [:], threadWeight: [:], threadProcess: [:])))&quot;" schema="ProcessCPUUsage"/>
+            <table schema="display-vsyncs-interval" documentation="Marks display vsyncs"/>
+            <table schema="device-thermal-state-intervals" documentation="Denotes the current thermal state of the device."/>
+            <table swift-table="&quot;any_AnalysisCoreTable(value: InstrumentsPlugIn.ThreadCPUUsage(dataSource: InstrumentsPlugIn.CPUUsageModeling(profileTable: LegacyTableBridge.LegacyTables.Sampling.TimeProfiles(mustTargetAllProcesses: false, highFrequencySampling: false, needsKernelCallstack: false, recordWaitingThreads: false, contextSwitchSampling: false), bucketStart: 0, systemWeight: 0, processWeight: [:], threadWeight: [:], threadProcess: [:])))&quot;" schema="ThreadCPUUsage"/>
+            <table swift-table="&quot;any_AnalysisCoreTable(value: InstrumentsPlugIn.ThreadPriority())&quot;" schema="ThreadPriority"/>
+            <table hangs-threshold="33" schema="potential-hangs" target-pid="SINGLE"/>
+            <table schema="context-switch-sample" callstack="user" target-pid="SINGLE"/>
+            <table schema="cpu-narrative" documentation="Describes what a logical CPU is doing at a given interval of time in natural language."/>
+            <table content="metal-connections" schema="visual-connection" target-pid="SINGLE" documentation="Connects points on a graph between instruments or tracks."/>
+            <table schema="display-events-interval" documentation="Shows generic display events"/>
+            <table schema="thread-info" documentation="Associates threads with their owning process."/>
+            <table schema="metal-visual-highlight-chain-display" documentation="Visual Highlight for Metal System Trace"/>
+            <table schema="display-compositor-interval" target-pid="SINGLE" documentation="Shows compositor events."/>
+            <table schema="tick" documentation="Provides modelers with a regular reference time for modeling fixed time-based statistics. The ticks are evenly spaced with a configurable frequency specifying the number of events to generate per second, so a tick schema with a frequency of 10 will generate a row every 100ms."/>
+            <table schema="tick" frequency="10" documentation="Provides modelers with a regular reference time for modeling fixed time-based statistics. The ticks are evenly spaced with a configurable frequency specifying the number of events to generate per second, so a tick schema with a frequency of 10 will generate a row every 100ms."/>
+            <table schema="stackshot-info" documentation="Key-value pairs of metadata parsed from stackshot kcdata buffers."/>
+            <table schema="tick" frequency="1" documentation="Provides modelers with a regular reference time for modeling fixed time-based statistics. The ticks are evenly spaced with a configurable frequency specifying the number of events to generate per second, so a tick schema with a frequency of 10 will generate a row every 100ms."/>
+            <table target-pid="SINGLE" context-switch-sampling="0" high-frequency-sampling="0" schema="time-profile" record-waiting-threads="0" needs-kernel-callstack="0" documentation="When combined with other time-profile samples, creates a statistical picture of where your application is spending its time."/>
+            <table schema="thread-snapshot" documentation="Captures the state of a thread at an instant in time."/>
+            <table schema="hitches-gpu"/>
+            <table schema="hitches-frame-lifetimes"/>
+            <table schema="tick" frequency="100" documentation="Provides modelers with a regular reference time for modeling fixed time-based statistics. The ticks are evenly spaced with a configurable frequency specifying the number of events to generate per second, so a tick schema with a frequency of 10 will generate a row every 100ms."/>
+            <table schema="life-cycle-period" target-pid="SINGLE" documentation="Identifies where an application is in its lifecycle."/>
+            <table schema="thread-state" target-pid="SINGLE" documentation="Determines that state of a thread during a given interval of time."/>
+            <table schema="os-signpost" category="InduceCondition" subsystem="&quot;com.apple.ConditionInducer.LowSeverity&quot;" documentation="Holds a signpost event from the OS's Unified Logging and Tracing component."/>
+            <table schema="device-gpu-info" documentation="Marks related info about GPUs connected to the machine."/>
+            <table swift-table="&quot;any_AnalysisCoreTable(value: InstrumentsPlugIn.ThreadQoSTable(is64Bit: true))&quot;" schema="ThreadQoSTable"/>
+            <table schema="cpu-state" target-pid="SINGLE" documentation="Determines that state of a logical CPU during a given interval of time."/>
+            <table schema="metal-io-surface-access" documentation="Denotes IO Surface accesses by Metal Applications"/>
+            <table schema="syscall-name-map" documentation="Maps the ktrace codes for system calls to developer friendly system call names."/>
+            <table swift-table="&quot;any_AnalysisCoreTable(value: InstrumentsPlugIn.ThreadTermination())&quot;" schema="ThreadTermination"/>
+            <table schema="displayed-surfaces-per-second" documentation="Shows how many surfaces have been displayed per second"/>
+            <table schema="display-surface-swap" documentation="Describes display surface swap events."/>
+            <table schema="metal-known-compositor-process" documentation="Marks compositor processes"/>
+            <table schema="metal-command-buffer-frame-assignment" documentation="Resolves Metal Command Buffer frame assignment"/>
+            <table codes="&quot;0x1,0x30&quot;" schema="kdebug" callstack="user" target="SINGLE" documentation="Tracing the kernel and some system frameworks."/>
+        </data>
+        <tracks/>
+    </run>
+</trace-toc>
