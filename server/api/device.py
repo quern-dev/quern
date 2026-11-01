@@ -14,8 +14,7 @@ from starlette.responses import StreamingResponse
 
 from server import visibility
 from server.api.actions import action, logged_action
-from server.device import platform
-from server.device import performance
+from server.device import performance, platform
 from server.device.media import media_engine
 from server.device.media.preview import simulator_entries
 from server.device.pool import DevicePool
