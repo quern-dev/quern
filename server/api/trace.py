@@ -112,7 +112,12 @@ def _live_gauges(request: Request, attributions: list[Attribution],
     return found, described
 
 
-def _live_uncovered(samples: list, started: datetime) -> str:
+def _live_uncovered(rec, samples: list, started: datetime, finished: datetime) -> str:
+    if finished + CAUSAL_GRACE <= rec.started_at:
+        # Not in its file either: pointing there would send the reader to a
+        # recording that began after this action (live).
+        return (f"before recording {rec.id}, which samples this device, started at "
+                f"{rec.started_at.isoformat()}")
     if not samples:
         return "the recording sampling this device has no gauge sample yet"
     if started < samples[0].start:
@@ -447,7 +452,8 @@ async def get_trace(
     per_action = await asyncio.to_thread(
         _gauges_by_action, attributions,
         lambda udid: gauged[udid][1] if udid in gauged else None,
-        lambda udid, started, finished, samples: _live_uncovered(samples, started))
+        lambda udid, started, finished, samples: _live_uncovered(
+            gauged[udid][0], samples, started, finished))
     rows = [_serialise(a, ip_map) for a in attributions]
     for row, gauges in zip(rows, per_action, strict=True):
         row["gauges"] = gauges

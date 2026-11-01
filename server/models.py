@@ -1979,8 +1979,10 @@ class PerformanceSnapshot(BaseModel):
     cpu_percent: float | None = None
     memory_bytes: int | None = None
     #: What `memory_bytes` measures: `phys_footprint` on iOS (the number Xcode
-    #: and Activity Monitor show) or `pss` on Android (Android Studio's).
-    memory_kind: Literal["phys_footprint", "pss"] | None = None
+    #: and Activity Monitor show) or `pss` on Android (Android Studio's) --
+    #: `rss` in a recording's gauges, which read the kernel's figure rather
+    #: than ask the app every second.
+    memory_kind: Literal["phys_footprint", "pss", "rss"] | None = None
     threads: int | None = None
     #: Android only.
     frames: FrameStats | None = None

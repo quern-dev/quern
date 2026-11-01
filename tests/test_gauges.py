@@ -313,6 +313,30 @@ class TestTheSampler:
         assert rec.state == "stopped"
         assert "gauge_stream" in _gauge_lines(tmp_path / "r")[0]["data"]["error"]
 
+    async def test_a_stream_that_goes_quiet_is_said_and_restarted(self, tmp_path, monkeypatch):
+        """Measured on an iPhone: a stream stuck on an app it could not see
+        wrote nothing at all, and the recording read complete."""
+        monkeypatch.setattr(rec_mod, "GAUGE_STALL_MIN_S", 0.1)
+        monkeypatch.setattr(rec_mod, "GAUGE_RETRY_S", 0.05)
+        src, fake = Sources(), FakeGauges()
+        m = _manager(src, fake)
+        rec = await m.start(SIM, str(tmp_path / "r"), Filters(gauges="com.x",
+                                                              gauge_interval_s=0.5))
+        await _until(lambda: len(fake.calls) >= 2)        # gave up on the first, began again
+        await m.stop(rec.id)
+        first = _gauge_lines(tmp_path / "r")[0]["data"]
+        assert "no gauge sample in" in first["error"] and fake.closed >= 1
+
+    async def test_a_timeout_inside_the_stream_is_its_own_failure(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(rec_mod, "GAUGE_RETRY_S", 0.05)
+        src, fake = Sources(), FakeGauges()
+        m = _manager(src, fake)
+        rec = await m.start(SIM, str(tmp_path / "r"), Filters(gauges="com.x"))
+        fake.queue.put_nowait(TimeoutError("ProcessControl took too long"))
+        await _until(lambda: rec.counts.get("gauge", 0) >= 1)
+        await m.stop(rec.id)
+        assert "no gauge sample" not in _gauge_lines(tmp_path / "r")[0]["data"]["error"]
+
     async def test_the_retry_backs_off(self, tmp_path, monkeypatch):
         sleeps = []
         real_sleep = asyncio.sleep
@@ -470,12 +494,31 @@ class TestTheTrace:
                 "udid": SIM, "output_dir": str(tmp_path / "r"), "gauges": "com.x"}).json()["id"]
 
             async def feed():
-                await src.server.append(_action("tap", at=_now(-60), duration_ms=500))
+                await src.server.append(_action("tap", at=_now(), duration_ms=500))
+            client.portal.call(feed)
+            [action] = client.get("/api/v1/trace").json()["actions"]
+            assert action["gauges"]["samples"] == 0
+            assert "no gauge sample yet" in action["gauges"]["unavailable"]["cpu_percent"]
+            client.post(f"/api/v1/recordings/{rid}/stop")
+
+    def test_live_an_action_before_the_recording_does_not_point_at_its_file(self, tmp_path):
+        """Measured live: the buffer still held an earlier run's actions, and
+        each was told the current recording's file had its samples."""
+        src, fake = Sources(), FakeGauges()
+        with TestClient(_gauged_app(src, fake)) as client:
+            client.portal.call(lambda: src.server.append(_action("tap", at=_now(-60))))
+            rid = client.post("/api/v1/recordings", json={
+                "udid": SIM, "output_dir": str(tmp_path / "r"), "gauges": "com.x"}).json()["id"]
+            rec = client.app.state.recordings.get(rid)
+
+            async def feed():
+                fake.push(cpu_percent=1.0)
+                await _until(lambda: rec.counts.get("gauge") == 1)
             client.portal.call(feed)
             [action] = client.get("/api/v1/trace", params={"since": _now(-120).isoformat()},
                                   ).json()["actions"]
-            assert action["gauges"]["samples"] == 0
-            assert "no gauge sample yet" in action["gauges"]["unavailable"]["cpu_percent"]
+            why = action["gauges"]["unavailable"]["cpu_percent"]
+            assert f"before recording {rid}" in why and "recording=" not in why
             client.post(f"/api/v1/recordings/{rid}/stop")
 
     def test_live_an_action_older_than_the_samples_kept_points_at_the_file(self, tmp_path):
@@ -484,6 +527,10 @@ class TestTheTrace:
             rid = client.post("/api/v1/recordings", json={
                 "udid": SIM, "output_dir": str(tmp_path / "r"), "gauges": "com.x"}).json()["id"]
             rec = client.app.state.recordings.get(rid)
+
+            # A recording two minutes old, whose live window no longer
+            # reaches back to an action a minute ago: the file has it.
+            rec.started_at = _now(-120)
 
             async def feed():
                 await src.server.append(_action("tap", at=_now(-60), duration_ms=500))
@@ -605,7 +652,10 @@ class TestTheControllerStream:
         from server.models import DeviceType
         ctrl, _ = self._controller(DeviceType.ANDROID_EMULATOR)
 
-        async def snapshot(adb, serial, app, seconds):
+        kinds = []
+
+        async def snapshot(adb, serial, app, seconds, *, memory="pss"):
+            kinds.append(memory)
             return PerformanceSnapshot(udid=serial, bundle_id=app, platform="android",
                                        running=True, sample_seconds=seconds, cpu_percent=3.0)
         monkeypatch.setattr(performance, "android_snapshot", snapshot)
@@ -616,6 +666,7 @@ class TestTheControllerStream:
             assert (await anext(stream)).cpu_percent == 3.0
             await anext(stream)
         sleep.assert_not_awaited()
+        assert kinds == ["rss", "rss"]          # never meminfo, which runs in the app
 
     async def test_an_app_id_that_could_reach_a_shell_is_refused(self):
         from server.models import DeviceType
@@ -623,6 +674,39 @@ class TestTheControllerStream:
         with pytest.raises(InvalidDeviceRequestError):
             await anext(ctrl.gauge_stream(SIM, "com.x; reboot", 1.0))
         ctrl.resolve_udid.assert_not_awaited()
+
+
+class TestAndroidRss:
+    """Measured on a Pixel 3 XL: `dumpsys meminfo` once a second cost the app
+    4.7% of a core, `/proc` nothing -- so gauges read RSS from `/proc`."""
+
+    async def test_rss_comes_from_proc_and_meminfo_is_never_asked(self):
+        from tests.test_performance import FakeAdb, fixture
+        adb = FakeAdb(stat=(0, fixture("android10-stat.out") + "VmRSS:\t  116452 kB\n", ""))
+        snap = await performance.android_snapshot(adb, "S", "com.quern.probe", 1.0,
+                                                  memory="rss")
+        assert (snap.memory_bytes, snap.memory_kind) == (116452 * 1024, "rss")
+        assert not any("meminfo" in a for a in adb.calls)
+        script = next(a[1] for a in adb.calls if a[0] == "shell" and "sleep" in a[1])
+        assert script.rstrip().endswith("/proc/6403/status")       # read after the sleep
+        assert snap.cpu_percent == 0.0 and snap.frames is not None
+
+    async def test_no_rss_line_says_why(self):
+        from tests.test_performance import FakeAdb
+        snap = await performance.android_snapshot(FakeAdb(), "S", "com.quern.probe", 1.0,
+                                                  memory="rss")
+        assert snap.memory_bytes is None and "VmRSS" in snap.unavailable["memory_bytes"]
+
+    async def test_a_failed_sample_is_the_memory_reason_too(self):
+        from tests.test_performance import FakeAdb
+        adb = FakeAdb(stat=DeviceError("device offline", tool="adb"))
+        snap = await performance.android_snapshot(adb, "S", "com.quern.probe", 1.0,
+                                                  memory="rss")
+        assert "device offline" in snap.unavailable["memory_bytes"]
+
+    def test_the_last_rss_line_wins(self):
+        assert performance.parse_proc_status_rss_kb("VmRSS: 10 kB\nVmRSS:\t20 kB\n") == 20
+        assert performance.parse_proc_status_rss_kb("VmRSS: lots\n") is None
 
 
 class _FakeSysmontap:
@@ -747,6 +831,19 @@ class TestThePhoneStream:
         assert got[2].cpu_percent == 100.0
         rsd.connect.assert_awaited_once()
 
+    async def test_a_pid_sysmontap_does_not_list_is_said_not_looped_on(self, monkeypatch):
+        """Measured: an app in the background ran as pid 979 and was not among
+        sysmontap's 545 processes; the stream looked it up forever, silent."""
+        lib, rsd, dvt = _fake_lib(pids=[979, 979, 979], ticks=[[{"pid": 7}], [{"pid": 7}]])
+        monkeypatch.setattr(performance, "_pmd3", lambda: lib)
+        stream = performance.device_stream("UUID", "com.x", 1.0)
+        async with contextlib.aclosing(stream):
+            snaps = [await anext(stream), await anext(stream)]
+        for snap in snaps:
+            assert snap.running is True and snap.cpu_percent is None
+            assert "not in sysmontap's process list" in snap.unavailable["cpu_percent"]
+            assert "foreground" in snap.unavailable["memory_bytes"]
+
     async def test_an_app_that_exits_is_looked_for_again(self, monkeypatch):
         ns = 10**9
         lib, _, _ = _fake_lib(pids=[42, 0], ticks=[_tick(42, 0, 0, ns), _tick(42, ns, 0, 2 * ns),
@@ -755,7 +852,9 @@ class TestThePhoneStream:
         stream = performance.device_stream("UUID", "com.x", 1.0)
         async with contextlib.aclosing(stream):
             assert (await anext(stream)).running is True
-            assert (await anext(stream)).running is False
+            exited = await anext(stream)
+            assert exited.running is False and "exited" in exited.unavailable["cpu_percent"]
+            assert (await anext(stream)).running is False        # and looked up again: gone
 
     async def test_fps_that_cannot_be_read_says_why_and_costs_nothing_else(self, monkeypatch):
         ns = 10**9

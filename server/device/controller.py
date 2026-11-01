@@ -1766,7 +1766,10 @@ class DeviceController(DeviceControllerUI):
         resolved = await self.resolve_udid(udid, set_active=False)
         if self._is_android(resolved):
             def sample():
-                return performance.android_snapshot(self.adb, resolved, app, interval)
+                # RSS, not PSS: meminfo runs in the app and would inflate
+                # the CPU it is sampled beside (see android_snapshot).
+                return performance.android_snapshot(self.adb, resolved, app, interval,
+                                                    memory="rss")
         elif self._is_physical(resolved):
             async for snap in performance.device_stream(resolved, app, interval):
                 yield snap

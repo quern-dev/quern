@@ -315,6 +315,10 @@ LIVE_GAUGE_SAMPLES = 3600
 #: most. A device that went away is asked again, but not hammered.
 GAUGE_RETRY_S = 2.0
 GAUGE_RETRY_MAX_S = 30.0
+#: How long a gauge stream may go without a sample, at the least, before it
+#: is taken as stuck: ended, said, and started again. A stream that hangs
+#: otherwise writes nothing, which reads as a quiet app (live, on an iPhone).
+GAUGE_STALL_MIN_S = 30.0
 
 
 @dataclass
@@ -968,9 +972,21 @@ class RecordingManager:
         while True:
             why = "the gauge stream ended"
             try:
+                stall = max(GAUGE_STALL_MIN_S, f.gauge_interval_s * 5)
                 async with contextlib.aclosing(
                         self._gauge_source(rec.udid, f.gauges, f.gauge_interval_s)) as stream:
-                    async for snap in stream:
+                    while True:
+                        deadline = asyncio.timeout(stall)
+                        try:
+                            async with deadline:
+                                snap = await anext(stream)
+                        except StopAsyncIteration:
+                            break
+                        except TimeoutError:
+                            if not deadline.expired():
+                                raise           # the stream's own, said as its failure
+                            why = f"no gauge sample in {stall:g}s; the device is not answering"
+                            break
                         data = snap if isinstance(snap, dict) else snap.model_dump()
                         end = _now()
                         seconds = data.get("sample_seconds")

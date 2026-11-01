@@ -175,6 +175,18 @@ def parse_android_cpu_sample(text: str, pid: int) -> tuple[float, int | None, fl
     return (ticks[1] - ticks[0]) / USER_HZ / elapsed * 100, threads, elapsed
 
 
+def parse_proc_status_rss_kb(text: str) -> int | None:
+    """Resident set size in kB from `/proc/<pid>/status`'s `VmRSS:` line,
+    the last one when the text holds several."""
+    found = None
+    for line in text.splitlines():
+        if line.strip().startswith("VmRSS:"):
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                found = int(parts[1])
+    return found
+
+
 def parse_meminfo_total_pss_kb(text: str) -> int | None:
     """Total PSS in KB from `dumpsys meminfo <pid>`'s App Summary.
 
@@ -343,8 +355,14 @@ PACKAGE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 async def android_snapshot(
-    adb: AdbBackend, serial: str, package: str, seconds: float,
+    adb: AdbBackend, serial: str, package: str, seconds: float, *, memory: str = "pss",
 ) -> PerformanceSnapshot:
+    """`memory="rss"` reads the kernel's resident size from `/proc` instead of
+    `dumpsys meminfo`'s PSS. For sampling every second: meminfo is answered
+    inside the app's own process, and measured on a Pixel 3 XL it cost the
+    app 4.7% of a core at one call a second -- an idle app at 0.2% read as
+    eight to sixteen. `/proc` cost it nothing; gfxinfo, which frames need,
+    0.4%."""
     if not PACKAGE_NAME.fullmatch(package):
         raise InvalidDeviceRequestError(f"{package!r} is not a package name")
     snap = PerformanceSnapshot(
@@ -366,10 +384,14 @@ async def android_snapshot(
 
     script = (f"cat /proc/uptime /proc/{pid}/stat; grep '^Threads:' /proc/{pid}/status; "
               f"sleep {seconds:g}; cat /proc/uptime /proc/{pid}/stat")
+    if memory == "rss":
+        script += f"; grep '^VmRSS:' /proc/{pid}/status"
+    sample_text: list[str] = []
 
     async def cpu_and_threads() -> tuple[float, int | None, float] | None:
         rc, sample, err = await adb._run_unjudged(
             serial, "shell", script, timeout=seconds + _ANSWER_SLACK_S)
+        sample_text.append(sample)
         parsed = parse_android_cpu_sample(sample, pid)
         if parsed is None and (rc != 0 or err.strip()):
             # adb itself failed (device offline, unauthorized): not the app's doing.
@@ -377,7 +399,9 @@ async def android_snapshot(
                               f"{(err or sample).strip() or f'exit {rc}'}", tool="adb")
         return parsed
 
-    async def memory() -> int | None:
+    async def pss() -> int | None:
+        if memory == "rss":
+            return None                 # read from the CPU sample's text below
         stdout, _ = await adb._run_adb_for_device(
             serial, "shell", "dumpsys", "meminfo", str(pid), timeout=_ANSWER_SLACK_S)
         kb = parse_meminfo_total_pss_kb(stdout)
@@ -389,7 +413,11 @@ async def android_snapshot(
         return parse_gfxinfo(stdout, pid)
 
     sampled, mem, fr = await asyncio.gather(
-        cpu_and_threads(), memory(), frames(), return_exceptions=True)
+        cpu_and_threads(), pss(), frames(), return_exceptions=True)
+    if memory == "rss" and not isinstance(mem, BaseException):
+        kb = parse_proc_status_rss_kb(sample_text[0]) if sample_text else None
+        mem = kb * 1024 if kb is not None else (
+            sampled if isinstance(sampled, BaseException) else None)
     if isinstance(sampled, tuple):
         cpu, threads, elapsed = sampled
         if elapsed < seconds / 2:
@@ -406,9 +434,11 @@ async def android_snapshot(
     else:
         reason = _reason(sampled, f"/proc/{pid} could not be read twice; has the app exited?")
         snap.unavailable["cpu_percent"] = snap.unavailable["threads"] = reason
-    _store(snap, "memory_bytes", mem, f"dumpsys meminfo {pid} had no total PSS")
+    _store(snap, "memory_bytes", mem,
+           f"/proc/{pid}/status had no VmRSS: line; has the app exited?" if memory == "rss"
+           else f"dumpsys meminfo {pid} had no total PSS")
     if snap.memory_bytes is not None:
-        snap.memory_kind = "pss"
+        snap.memory_kind = "rss" if memory == "rss" else "pss"
     _store(snap, "frames", fr, f"gfxinfo reported no frames for pid {pid}; "
                                "the app may have no window")
     if len(pids) > 1:
@@ -558,6 +588,9 @@ async def device_stream(uuid: str, bundle_id: str, interval: float):
                     async for snap in _sysmon_stream(lib.Sysmontap, dvt, uuid, bundle_id,
                                                      pid, interval, fps):
                         yield snap
+                    # It exited, or sysmontap never listed it: paced, so an
+                    # app sysmontap cannot see is not asked about in a loop.
+                    await asyncio.sleep(_NOT_RUNNING_POLL_S)
             finally:
                 feed.cancel()
                 with contextlib.suppress(BaseException):
@@ -574,13 +607,44 @@ async def device_stream(uuid: str, bundle_id: str, interval: float):
 
 async def _sysmon_stream(Sysmontap, dvt, uuid: str, bundle_id: str, pid: int,
                          interval: float, fps: dict):
-    """One sample per sysmontap tick for `pid`, until it leaves the list."""
+    """One sample per sysmontap tick for `pid`, until it leaves the list.
+
+    A pid Instruments names for the app can be missing from sysmontap's list
+    from the start: measured on an iPhone 11, an app left in the background
+    was absent from all 545 processes listed, and the same app brought to the
+    foreground was there. That is said as a sample -- running, unmeasured --
+    rather than read as an exit, which looked the pid up again and again and
+    wrote nothing at all (live).
+    """
     previous: dict | None = None
     async with await Sysmontap.create(dvt, interval=max(100, int(interval * 1000))) as s:
         async for procs in s.iter_processes():
             mine = next((p for p in procs if p.get("pid") == pid), None)
             if mine is None:
-                return                      # it exited; the caller looks again
+                if previous is None:
+                    snap = PerformanceSnapshot(udid=uuid, bundle_id=bundle_id,
+                                               platform="ios_device", running=True, pid=pid,
+                                               sample_seconds=interval)
+                    why = (f"pid {pid} is running but not in sysmontap's process list; iOS "
+                           f"leaves out an app in the background -- bring it to the foreground")
+                    for name in ("cpu_percent", "memory_bytes", "threads"):
+                        snap.unavailable[name] = why
+                    if fps["value"] is None:
+                        snap.unavailable["display_fps"] = fps["why"]
+                    else:
+                        snap.display_fps = fps["value"]
+                    yield _finish(snap)
+                else:
+                    # Said, not skipped: until the next pid's first full tick
+                    # -- measured at about 3 s after a relaunch -- there is
+                    # otherwise no sample at all.
+                    gone = PerformanceSnapshot(udid=uuid, bundle_id=bundle_id,
+                                               platform="ios_device", running=False, pid=pid,
+                                               sample_seconds=interval)
+                    for name in MEASURED["ios_device"]:
+                        gone.unavailable[name] = f"pid {pid} left sysmontap's list: the app exited"
+                    yield _finish(gone)
+                return                      # exited, or unseen; the caller looks again
             if previous is None:
                 previous = mine
                 continue
