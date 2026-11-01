@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="714" viewBox="0 0 1200 714" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect width="1200" height="714" rx="16" fill="#ffffff"/>
+<text x="600.0" y="52" text-anchor="middle" font-size="26" font-weight="700" fill="#0f172a">What Quern does, and the tools it does it with</text>
+<text x="600.0" y="80" text-anchor="middle" font-size="15" fill="#475569">One server on your Mac wraps each platform's own tooling behind the same MCP tools and HTTP API</text>
+<rect x="80.0" y="112" width="300" height="52" rx="12" fill="#ffffff" stroke="#0f172a" stroke-width="1.5"/>
+<text x="230.0" y="134" text-anchor="middle" font-size="16" font-weight="650" fill="#0f172a">Your AI agent</text>
+<text x="230.0" y="152" text-anchor="middle" font-size="12.5" fill="#64748b">Claude Code, Cursor, Codex, …</text>
+<line x1="388.0" y1="138.0" x2="440.0" y2="138.0" stroke="#94a3b8" stroke-width="2"/>
+<path d="M440.0,132.0 L450.0,138.0 L440.0,144.0 Z" fill="#94a3b8"/>
+<rect x="450.0" y="112" width="300" height="52" rx="12" fill="#ffffff" stroke="#0f172a" stroke-width="1.5"/>
+<text x="600.0" y="134" text-anchor="middle" font-size="16" font-weight="650" fill="#0f172a">Quern MCP tools / HTTP API</text>
+<text x="600.0" y="152" text-anchor="middle" font-size="12.5" fill="#64748b">the same calls for every platform</text>
+<line x1="758.0" y1="138.0" x2="810.0" y2="138.0" stroke="#94a3b8" stroke-width="2"/>
+<path d="M810.0,132.0 L820.0,138.0 L810.0,144.0 Z" fill="#94a3b8"/>
+<rect x="820.0" y="112" width="300" height="52" rx="12" fill="#0f172a" stroke="#0f172a" stroke-width="1.5"/>
+<text x="970.0" y="134" text-anchor="middle" font-size="16" font-weight="650" fill="#ffffff">Quern server</text>
+<text x="970.0" y="152" text-anchor="middle" font-size="12.5" fill="#cbd5e1">on your Mac, localhost:9110</text>
+<text x="600.0" y="198" text-anchor="middle" font-size="14" fill="#475569">…which does each job with the platform's own tool:</text>
+<text x="52" y="248" font-size="14" font-weight="700" fill="#475569" letter-spacing="0.5">FEATURE</text>
+<rect x="290" y="222" width="280" height="40" rx="10" fill="#2563eb"/>
+<text x="430.0" y="248" text-anchor="middle" font-size="16" font-weight="700" fill="#ffffff">iOS Simulator</text>
+<rect x="580" y="222" width="280" height="40" rx="10" fill="#334155"/>
+<text x="720.0" y="248" text-anchor="middle" font-size="16" font-weight="700" fill="#ffffff">iPhone / iPad</text>
+<rect x="870" y="222" width="280" height="40" rx="10" fill="#15803d"/>
+<text x="1010.0" y="248" text-anchor="middle" font-size="16" font-weight="700" fill="#ffffff">Android</text>
+<rect x="40" y="270" width="240" height="44" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="54" y="297.5" font-size="16" font-weight="650" fill="#0f172a">Logs</text>
+<rect x="290" y="270" width="280" height="44" rx="10" fill="#eff4ff"/>
+<text x="430.0" y="297.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">simctl log stream</text>
+<rect x="580" y="270" width="280" height="44" rx="10" fill="#f1f5f9"/>
+<text x="720.0" y="297.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">pymobiledevice3 syslog</text>
+<rect x="870" y="270" width="280" height="44" rx="10" fill="#eefaf1"/>
+<text x="1010.0" y="297.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">adb logcat</text>
+<rect x="40" y="320" width="240" height="44" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="54" y="347.5" font-size="16" font-weight="650" fill="#0f172a">Crash reports</text>
+<rect x="290" y="320" width="280" height="44" rx="10" fill="#eff4ff"/>
+<text x="430.0" y="347.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">DiagnosticReports watcher</text>
+<rect x="580" y="320" width="280" height="44" rx="10" fill="#f1f5f9"/>
+<text x="720.0" y="347.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">pymobiledevice3 crash</text>
+<rect x="870" y="320" width="280" height="44" rx="10" fill="#eefaf1"/>
+<text x="1010.0" y="347.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">dumpsys dropbox</text>
+<rect x="40" y="370" width="240" height="44" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="54" y="397.5" font-size="16" font-weight="650" fill="#0f172a">Network capture</text>
+<rect x="290" y="370" width="280" height="44" rx="10" fill="#eff4ff"/>
+<text x="430.0" y="397.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">mitmproxy · local capture</text>
+<rect x="580" y="370" width="280" height="44" rx="10" fill="#f1f5f9"/>
+<text x="720.0" y="397.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">mitmproxy · Wi-Fi proxy</text>
+<rect x="870" y="370" width="280" height="44" rx="10" fill="#eefaf1"/>
+<text x="1010.0" y="397.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">mitmproxy · proxy set over adb</text>
+<rect x="40" y="420" width="240" height="44" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="54" y="447.5" font-size="16" font-weight="650" fill="#0f172a">UI tree &amp; gestures</text>
+<rect x="290" y="420" width="280" height="44" rx="10" fill="#eff4ff"/>
+<text x="430.0" y="447.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">sim-bridge (idb on Intel)</text>
+<rect x="580" y="420" width="280" height="44" rx="10" fill="#f1f5f9"/>
+<text x="720.0" y="447.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">WebDriverAgent</text>
+<rect x="870" y="420" width="280" height="44" rx="10" fill="#eefaf1"/>
+<text x="1010.0" y="447.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">uiautomator2 · scrcpy</text>
+<rect x="40" y="470" width="240" height="44" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="54" y="497.5" font-size="16" font-weight="650" fill="#0f172a">Devices &amp; apps</text>
+<rect x="290" y="470" width="280" height="44" rx="10" fill="#eff4ff"/>
+<text x="430.0" y="497.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">simctl</text>
+<rect x="580" y="470" width="280" height="44" rx="10" fill="#f1f5f9"/>
+<text x="720.0" y="497.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">devicectl · pymobiledevice3</text>
+<rect x="870" y="470" width="280" height="44" rx="10" fill="#eefaf1"/>
+<text x="1010.0" y="497.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">adb</text>
+<rect x="40" y="520" width="240" height="44" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="54" y="547.5" font-size="16" font-weight="650" fill="#0f172a">Screenshots</text>
+<rect x="290" y="520" width="280" height="44" rx="10" fill="#eff4ff"/>
+<text x="430.0" y="547.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">simctl</text>
+<rect x="580" y="520" width="280" height="44" rx="10" fill="#f1f5f9"/>
+<text x="720.0" y="547.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">pymobiledevice3</text>
+<rect x="870" y="520" width="280" height="44" rx="10" fill="#eefaf1"/>
+<text x="1010.0" y="547.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">adb</text>
+<rect x="40" y="570" width="240" height="44" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="54" y="597.5" font-size="16" font-weight="650" fill="#0f172a">Live preview</text>
+<rect x="290" y="570" width="280" height="44" rx="10" fill="#eff4ff"/>
+<text x="430.0" y="597.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">quern-media (framebuffer)</text>
+<rect x="580" y="570" width="280" height="44" rx="10" fill="#f1f5f9"/>
+<text x="720.0" y="597.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">CoreMediaIO over USB</text>
+<rect x="870" y="570" width="280" height="44" rx="10" fill="#eefaf1"/>
+<text x="1010.0" y="597.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">scrcpy</text>
+<rect x="40" y="620" width="240" height="44" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+<text x="54" y="647.5" font-size="16" font-weight="650" fill="#0f172a">Builds</text>
+<rect x="290" y="620" width="280" height="44" rx="10" fill="#eff4ff"/>
+<text x="430.0" y="647.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">xcodebuild</text>
+<rect x="580" y="620" width="280" height="44" rx="10" fill="#f1f5f9"/>
+<text x="720.0" y="647.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">xcodebuild</text>
+<rect x="870" y="620" width="280" height="44" rx="10" fill="#eefaf1"/>
+<text x="1010.0" y="647.0" text-anchor="middle" font-size="14" font-family="SFMono-Regular, Menlo, Consolas, monospace" fill="#1e293b">Gradle</text>
+<text x="600.0" y="688" text-anchor="middle" font-size="13" fill="#64748b">Also on the Mac itself: macOS unified logs (log stream), the system proxy, and pairing with other Macs to share their devices.</text>
+</svg>
