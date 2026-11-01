@@ -209,17 +209,90 @@ class TestEnsureEndpoint:
         data = resp.json()
         assert len(data["devices"]) == 3
 
-    async def test_ensure_not_enough_returns_error(self, app, auth_headers, mock_device_pool):
-        """Ensure with impossible count returns error."""
+    async def _ensure(self, app, auth_headers, **body):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post(
-                "/api/v1/devices/ensure",
-                headers=auth_headers,
-                json={"count": 10, "name": "iPhone 16 Pro"},
-            )
-        assert resp.status_code == 500 or resp.status_code == 404
-        assert "Need 10" in resp.json()["detail"] or "10" in resp.json()["detail"]
+            return await client.post("/api/v1/devices/ensure", headers=auth_headers, json=body)
+
+    async def test_ensure_more_than_exist_is_409(self, app, auth_headers, mock_device_pool):
+        """Some match but too few: the caller's request, not a server fault.
+        It was a 500 (#586 follow-up)."""
+        resp = await self._ensure(app, auth_headers, count=10, name="iPhone 16 Pro")
+        assert resp.status_code == 409
+        assert "Need 10" in resp.json()["detail"]
+
+    async def test_ensure_with_no_match_is_404(self, app, auth_headers, mock_device_pool):
+        resp = await self._ensure(app, auth_headers, count=1, name="No Such Phone")
+        assert resp.status_code == 404
+        assert "only 0 available (0 booted, 0 shutdown)" in resp.json()["detail"]
+
+    async def test_ensure_without_booting_says_why_shut_down_ones_did_not_count(
+            self, app, auth_headers, mock_device_pool):
+        # Three iPhone 16 Pros, one shut down: three wanted with auto_boot
+        # off is two available, and the answer says so.
+        resp = await self._ensure(app, auth_headers, count=3, name="iPhone 16 Pro",
+                                  auto_boot=False)
+        assert resp.status_code == 409
+        assert "auto_boot is off" in resp.json()["detail"]
+
+    @staticmethod
+    def _real_listing(pool, simctl):
+        """The controller's own list_devices over a fake simctl (the fixture
+        swaps it for simctl's), every other backend empty."""
+        ctrl = pool.controller
+        del ctrl.list_devices
+        ctrl.simctl.list_devices = simctl
+        for backend in (ctrl.devicectl, ctrl.usbmux, ctrl.adb):
+            backend.list_devices = AsyncMock(return_value=[])
+        pool._last_refresh_at = None
+
+    async def test_ensure_when_listing_failed_is_503_not_404(self, app, auth_headers,
+                                                             mock_device_pool):
+        """simctl ran and failed: the empty list is "could not tell", not
+        "none exist" (review)."""
+        from server.models import DeviceError
+
+        self._real_listing(mock_device_pool, AsyncMock(
+            side_effect=DeviceError("CoreSimulatorService connection invalid", tool="simctl")))
+        resp = await self._ensure(app, auth_headers, count=1, name="No Such Phone")
+        assert resp.status_code == 503
+        assert "listing devices failed (simctl: CoreSimulatorService" in resp.json()["detail"]
+        # An Android pick is not about simctl: still "none".
+        resp = await self._ensure(app, auth_headers, count=1, name="No Such Phone",
+                                  platform="android")
+        assert resp.status_code == 404
+
+    async def test_ensure_reads_the_failures_of_the_listing_it_used(self, app, auth_headers,
+                                                                    mock_device_pool):
+        """A listing elsewhere, inside the pool's cache window, must not
+        change the answer drawn from the cached state (review)."""
+        from server.models import DeviceError
+
+        self._real_listing(mock_device_pool, AsyncMock(
+            side_effect=DeviceError("CoreSimulatorService connection invalid", tool="simctl")))
+        await mock_device_pool.refresh()
+        mock_device_pool.controller.listing_failures = {}    # an unrelated listing since
+        resp = await self._ensure(app, auth_headers, count=1, name="No Such Phone")
+        assert resp.status_code == 503
+
+    async def test_ensure_without_xcode_is_still_404(self, app, auth_headers, mock_device_pool):
+        """A tool that is not installed is absent, not failed."""
+        self._real_listing(mock_device_pool, AsyncMock(side_effect=FileNotFoundError("xcrun")))
+        resp = await self._ensure(app, auth_headers, count=1, name="No Such Phone")
+        assert resp.status_code == 404
+
+    async def test_ensure_counts_a_booting_match(self, app, auth_headers, mock_device_pool):
+        """The only match still booting: it exists, so 409, and it is named
+        in the count (review)."""
+        self._real_listing(mock_device_pool, AsyncMock(return_value=[
+            DeviceInfo(udid="EEEE-5555", name="iPhone Booting", state=DeviceState.BOOTING,
+                       device_type=DeviceType.SIMULATOR, os_version="iOS 18.2",
+                       runtime="com.apple.CoreSimulator.SimRuntime.iOS-18-2",
+                       device_family="iPhone"),
+        ]))
+        resp = await self._ensure(app, auth_headers, count=1, name="iPhone Booting")
+        assert resp.status_code == 409
+        assert "1 booting or otherwise busy" in resp.json()["detail"]
 
     async def test_ensure_with_device_type(self, app, auth_headers, mock_device_pool):
         """Ensure with device_type='simulator' returns only simulators."""

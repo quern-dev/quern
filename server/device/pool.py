@@ -21,6 +21,17 @@ POOL_FILE = CONFIG_DIR / "device-pool.json"
 REFRESH_CACHE_TTL_SECONDS = 2  # Avoid redundant simctl calls
 
 
+class NotEnoughDevices(DeviceError):
+    """`ensure_devices` found fewer usable devices than asked for. A caller's
+    request, not a server fault: ``matched`` is how many match at all, so the
+    route can tell "none exist" from "some exist, too few or not usable". It
+    was answered as a 500, reading to the caller like a crash."""
+
+    def __init__(self, message: str, *, matched: int) -> None:
+        super().__init__(message, tool="pool")
+        self.matched = matched
+
+
 class DevicePool:
     """Manages the pool of available devices.
 
@@ -34,6 +45,10 @@ class DevicePool:
         self._pool_file = POOL_FILE
         self._pool_file.parent.mkdir(parents=True, exist_ok=True)
         self._last_refresh_at: datetime | None = None
+        #: The controller's listing failures as of the refresh this state
+        #: came from, so an answer drawn from the cached state reads the
+        #: failures of the same listing, not of whichever ran since (review).
+        self.listing_failures: dict[str, str] = {}
 
     # ----------------------------------------------------------------
     # Public API
@@ -82,6 +97,7 @@ class DevicePool:
 
         # Get current devices from simctl (~200-500ms, expensive)
         simctl_devices = await self.controller.list_devices()
+        self.listing_failures = dict(getattr(self.controller, "listing_failures", None) or {})
 
         with self._lock_pool_file():
             state = self._read_state()
@@ -669,6 +685,7 @@ class DevicePool:
             [d for d in matching if d.state == DeviceState.SHUTDOWN],
             key=self._rank_candidate,
         )
+        booting = len(matching) - len(booted_available) - len(shutdown_available)
 
         total_available = len(booted_available) + (len(shutdown_available) if auto_boot else 0)
         if total_available < count:
@@ -680,11 +697,14 @@ class DevicePool:
             if effective_family:
                 criteria_parts.append(f"device_family='{effective_family}'")
             criteria_str = ", ".join(criteria_parts) if criteria_parts else "any"
-            raise DeviceError(
+            raise NotEnoughDevices(
                 f"Need {count} devices matching {criteria_str} "
                 f"but only {total_available} available "
-                f"({len(booted_available)} booted, {len(shutdown_available)} shutdown).",
-                tool="pool",
+                f"({len(booted_available)} booted, {len(shutdown_available)} shutdown"
+                + (f", {booting} booting or otherwise busy" if booting else "") + ")."
+                + (" auto_boot is off, so the shut-down ones were not counted."
+                   if shutdown_available and not auto_boot else ""),
+                matched=len(matching),
             )
 
         # Select devices: booted first (ranked), then shutdown to boot (ranked)
