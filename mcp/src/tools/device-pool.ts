@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
+import { PLATFORM_DESCRIPTION, platformFields } from "../platform.js";
 
 export function registerDevicePoolTools(server: McpServer): void {
   server.registerTool("resolve_device", {
@@ -28,16 +29,16 @@ auto_boot is enabled).`,
       os_version: z
         .string()
         .optional()
-        .describe("OS version prefix — '18' matches 18.x, '18.2' matches 18.2 exactly. Accepts both '18.2' and 'iOS 18.2'."),
+        .describe("OS version prefix — '18' matches 18.x, '18.2' matches 18.2 exactly. Accepts '18.2', 'iOS 18.2' and 'Android 16'; a prefix names the platform."),
       device_family: z
         .string()
         .optional()
-        .describe("Device family filter: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'. Defaults to 'iPhone' (configurable in ~/.quern/config.json)."),
+        .describe("Device family filter: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'. Defaults to 'iPhone' on iOS (configurable in ~/.quern/config.json)."),
       type: z
         .enum(["simulator", "device", "android_emulator", "android_device"])
         .optional()
-        .default("simulator")
-        .describe("Device type filter. Defaults to 'simulator' to avoid accidentally targeting physical devices."),
+        .describe("Device type filter. Defaults to a virtual device -- 'simulator' on iOS, 'android_emulator' on Android -- to avoid accidentally targeting physical devices."),
+      platform: z.enum(["ios", "android"]).optional().describe(PLATFORM_DESCRIPTION),
       auto_boot: z
         .coerce.boolean()
         .optional()
@@ -46,9 +47,9 @@ auto_boot is enabled).`,
           "Boot a matching shutdown device if no booted ones available (default: true)"
         ),
     }),
-  }, async ({ udid, name, os_version, device_family, type, auto_boot }) => {
+  }, async ({ udid, name, os_version, device_family, type, platform, auto_boot }) => {
       try {
-        const body: Record<string, unknown> = {};
+        const body: Record<string, unknown> = { ...platformFields(platform) };
         if (udid) body.udid = udid;
         if (name) body.name = name;
         if (os_version) body.os_version = os_version;
@@ -99,25 +100,25 @@ The first device becomes the active device for subsequent tool calls.`,
       os_version: z
         .string()
         .optional()
-        .describe("OS version prefix — '18' matches 18.x, '18.2' matches 18.2 exactly. Accepts both '18.2' and 'iOS 18.2'."),
+        .describe("OS version prefix — '18' matches 18.x, '18.2' matches 18.2 exactly. Accepts '18.2', 'iOS 18.2' and 'Android 16'; a prefix names the platform."),
       device_family: z
         .string()
         .optional()
-        .describe("Device family filter: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'. Defaults to 'iPhone' (configurable in ~/.quern/config.json)."),
+        .describe("Device family filter: 'iPhone', 'iPad', 'Apple Watch', 'Apple TV'. Defaults to 'iPhone' on iOS (configurable in ~/.quern/config.json)."),
       type: z
         .enum(["simulator", "device", "android_emulator", "android_device"])
         .optional()
-        .default("simulator")
-        .describe("Device type filter. Defaults to 'simulator' to avoid accidentally targeting physical devices."),
+        .describe("Device type filter. Defaults to a virtual device -- 'simulator' on iOS, 'android_emulator' on Android -- to avoid accidentally targeting physical devices."),
+      platform: z.enum(["ios", "android"]).optional().describe(PLATFORM_DESCRIPTION),
       auto_boot: z
         .coerce.boolean()
         .optional()
         .default(true)
         .describe("Boot shutdown devices if not enough booted ones"),
     }),
-  }, async ({ count, name, os_version, device_family, type, auto_boot }) => {
+  }, async ({ count, name, os_version, device_family, type, platform, auto_boot }) => {
       try {
-        const body: Record<string, unknown> = { count };
+        const body: Record<string, unknown> = { count, ...platformFields(platform) };
         if (name) body.name = name;
         if (os_version) body.os_version = os_version;
         if (device_family) body.device_family = device_family;

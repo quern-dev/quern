@@ -6,12 +6,12 @@ import asyncio
 import fcntl
 import json
 import logging
-import re
 import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
 from server.config import CONFIG_DIR, get_default_device_family
+from server.device import platform
 from server.device.controller import DeviceController
 from server.models import DeviceError, DevicePoolEntry, DevicePoolState, DeviceState, DeviceType
 
@@ -136,10 +136,13 @@ class DevicePool:
     # ----------------------------------------------------------------
 
     @staticmethod
-    def _os_version_matches(device_os: str, requested: str) -> bool:
+    def _os_version_matches(device_os: str, requested: str,
+                            device_type: DeviceType | None = None) -> bool:
         """Check if device OS version matches the requested version prefix.
 
-        Accepts both bare versions ("18.2") and prefixed ("iOS 18.2").
+        Accepts both bare versions ("18.2") and prefixed ("iOS 18.2",
+        "android16"). A prefix names the platform: "Android 14" is not iOS
+        14, so it needs the device's type to match (#582).
 
         Examples:
             _os_version_matches("iOS 18.2", "18") → True
@@ -148,16 +151,7 @@ class DevicePool:
             _os_version_matches("iOS 18.2", "18.6") → False
             _os_version_matches("iOS 17.5", "18") → False
         """
-        match = re.search(r"[\d.]+", device_os)
-        if not match:
-            return False
-        device_version = match.group()
-        # Strip platform prefix from requested (e.g. "iOS 18.2" → "18.2")
-        req_match = re.search(r"[\d.]+", requested)
-        if not req_match:
-            return False
-        req_version = req_match.group()
-        return device_version == req_version or device_version.startswith(req_version + ".")
+        return platform.os_matches(device_os, device_type, requested)
 
     def _match_criteria(
         self,
@@ -165,6 +159,7 @@ class DevicePool:
         os_version: str | None = None,
         device_type: DeviceType | None = None,
         device_family: str | None = None,
+        on_platform: str | None = None,
     ) -> bool:
         """Check if a device matches the given criteria (excluding name).
 
@@ -176,7 +171,10 @@ class DevicePool:
         """
         if not device.is_available:
             return False
-        if os_version and not self._os_version_matches(device.os_version, os_version):
+        if os_version and not self._os_version_matches(
+                device.os_version, os_version, device.device_type):
+            return False
+        if on_platform and platform.platform_of(device.device_type) != on_platform:
             return False
         if device_type and device.device_type != device_type:
             return False
@@ -185,9 +183,31 @@ class DevicePool:
         return True
 
     @staticmethod
+    def _fold(text: str) -> str:
+        return text.replace("_", " ").lower()
+
+    @classmethod
+    def _has_exact_name(cls, devices: list, name: str) -> bool:
+        wanted = cls._fold(name)
+        return any(wanted in (cls._fold(d.name), cls._fold(d.model or "")) for d in devices)
+
+    @classmethod
+    def _name_finder(cls, criteria, name: str | None, scope: list[str]):
+        """``find`` for `platform.choose`: ``criteria(platform)`` is the
+        candidates on a platform under every criterion but the name, and the
+        name is applied after -- exact matches preferred over substrings
+        across every platform in ``scope``, so an exact "CI" on one platform
+        is not called ambiguous with a substring "CI 3" on the other (review).
+        """
+        exact = (cls._has_exact_name([d for p in scope for d in criteria(p)], name)
+                 if name else None)
+        return lambda on: cls._filter_by_name(criteria(on), name, exact=exact)
+
+    @staticmethod
     def _filter_by_name(
         devices: list[DevicePoolEntry],
         name: str | None,
+        exact: bool | None = None,
     ) -> list[DevicePoolEntry]:
         """Filter devices by name or model, preferring exact matches over
         substring.
@@ -196,17 +216,21 @@ class DevicePool:
         return only exact matches. Otherwise fall back to substring matching.
         The model counts as well as the name: a simulator renamed "CI 3" is
         still an "iPhone 15 Pro", and asking for one should find it.
+        Underscores read as spaces, so "Pixel 7" finds the AVD
+        "Pixel_7_API_34" (#582). ``exact`` decides exact-or-substring from
+        outside, when the preference spans more than these devices.
         """
         if not name:
             return devices
-        name_lower = name.lower()
+        fold = DevicePool._fold
+        name_lower = fold(name)
 
         def fields(d: DevicePoolEntry) -> tuple[str, str]:
-            return d.name.lower(), (d.model or "").lower()
+            return fold(d.name), fold(d.model or "")
 
-        exact = [d for d in devices if name_lower in fields(d)]
-        if exact:
-            return exact
+        exact_matches = [d for d in devices if name_lower in fields(d)]
+        if exact or (exact is None and exact_matches):
+            return exact_matches
         return [d for d in devices if any(name_lower in f for f in fields(d) if f)]
 
     @staticmethod
@@ -233,6 +257,7 @@ class DevicePool:
         name: str | None,
         device_family: str | None,
         device_type: DeviceType | None = None,
+        on_platform: str | None = None,
     ) -> str | None:
         """Determine effective device_family filter for resolution.
 
@@ -245,6 +270,8 @@ class DevicePool:
         if device_family is not None:
             return device_family
         if device_type in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE):
+            return None
+        if on_platform == platform.ANDROID:
             return None
         if name:
             name_lower = name.lower()
@@ -265,6 +292,7 @@ class DevicePool:
         os_version: str | None = None,
         device_type: DeviceType | None = None,
         device_family: str | None = None,
+        on_platform: str | None = None,
     ) -> list[DevicePoolEntry]:
         """Find candidates matching all criteria including name and device_family.
 
@@ -282,9 +310,56 @@ class DevicePool:
                 d, os_version=os_version,
                 device_type=device_type,
                 device_family=device_family,
+                on_platform=on_platform,
             )
         ]
         return self._filter_by_name(matched, name)
+
+    def _choose_platform(
+        self,
+        all_devices: list[DevicePoolEntry],
+        *,
+        name: str | None,
+        os_version: str | None,
+        device_type: DeviceType | None,
+        device_family: str | None,
+        requested_platform: str | None,
+        platform_source: str | None,
+        default_device_type: DeviceType | None = None,
+        wanted: int = 1,
+    ) -> tuple[platform.PlatformChoice, DeviceType | None, str | None]:
+        """The candidates for resolve and ensure, under the platform rule
+        (`server/device/platform.py`). Returns the choice and the device type
+        and family it was found with, for the error when it is empty.
+
+        `default_device_type` is the API's documented default, a simulator.
+        It means "a virtual device": on an Android pick, an emulator, so a
+        caller that said nothing is never handed a physical phone (review)."""
+        hard = platform.requested_platform(
+            platform=requested_platform, source=platform_source,
+            device_type=device_type, os_version=os_version)
+        soft = requested_platform if requested_platform and not hard else None
+        used: dict[str | None, tuple[DeviceType | None, str | None]] = {}
+        found: dict[str | None, list[DevicePoolEntry]] = {}
+
+        def criteria(on: str | None) -> list[DevicePoolEntry]:
+            if on not in found:
+                dtype = device_type
+                if dtype is None and default_device_type is not None:
+                    dtype = platform.VIRTUAL[on] if on else default_device_type
+                family = self._infer_device_family(name, device_family, dtype, on)
+                used[on] = (dtype, family)
+                found[on] = self._find_candidates(
+                    all_devices, os_version=os_version, device_type=dtype,
+                    device_family=family, on_platform=on)
+            return found[on]
+
+        choice = platform.choose(
+            self._name_finder(criteria, name, [hard] if hard else list(platform.PLATFORMS)),
+            requested=hard, default=soft, default_source=platform_source,
+            has_criteria=any([name, os_version, device_family]), wanted=wanted)
+        dtype, family = used.get(choice.platform, (device_type, device_family))
+        return choice, dtype, family
 
     def _rank_candidate(self, device: DevicePoolEntry) -> tuple:
         """Return sort key for candidate ranking (lower = better).
@@ -374,8 +449,12 @@ class DevicePool:
         os_version: str | None = None,
         device_type: DeviceType | None = None,
         device_family: str | None = None,
+        on_platform: str | None = None,
     ) -> DeviceError:
-        """Build a diagnostic error explaining why resolution failed."""
+        """Build a diagnostic error explaining why resolution failed --
+        about the platform the pick was made on, never naming the other
+        platform's devices as matches (review)."""
+        all_devices = platform.on_platform(all_devices, on_platform)
         name_matched = self._filter_by_name(
             [d for d in all_devices if d.is_available], name,
         )
@@ -383,7 +462,7 @@ class DevicePool:
             d for d in all_devices
             if d.is_available and (
                 not os_version
-                or self._os_version_matches(d.os_version, os_version)
+                or self._os_version_matches(d.os_version, os_version, d.device_type)
             )
         ]
         both_matched = self._find_candidates(
@@ -453,6 +532,10 @@ class DevicePool:
         device_type: DeviceType | None = None,
         device_family: str | None = None,
         auto_boot: bool = True,
+        requested_platform: str | None = None,
+        platform_source: str | None = None,
+        report: dict | None = None,
+        default_device_type: DeviceType | None = None,
     ) -> str:
         """Resolve a device matching criteria, optionally booting it.
 
@@ -465,20 +548,31 @@ class DevicePool:
         4. Shutdown + auto_boot → boot best match
         5. No matches → diagnostic error
         """
-        # Short-circuit: no criteria and active device already set.
-        # device_type is excluded from has_criteria because the API defaults
-        # it to "simulator" (never None). Instead, when we have an active
-        # device, we verify it matches the requested type before returning it.
+        # Short-circuit: no criteria and active device already set, as long
+        # as it is of the type asked for -- the default type when nothing
+        # says otherwise -- and on a platform the request named.
+        # The project's platform counts here too: with no criteria a pick
+        # never crosses platforms, so an active device on the other platform
+        # -- set by anyone, the active device being server-wide -- is not
+        # returned to it (review).
         has_criteria = any([udid, name, os_version, device_family])
+        on = None if udid else (platform.requested_platform(
+            platform=requested_platform, source=platform_source,
+            device_type=device_type, os_version=os_version) or requested_platform)
+        device_type_for_active = device_type
+        if device_type is None and default_device_type is not None:
+            device_type_for_active = platform.VIRTUAL[on] if on else default_device_type
         if not has_criteria and self.controller._active_udid:
-            if device_type is not None:
+            if device_type_for_active is not None or on:
                 # Check the pool's own state for device type — it's always
                 # populated after refresh(), unlike the controller's cache
                 # which depends on list_devices() having been called.
                 await self.refresh()
                 pool_state = self._read_state()
                 entry = pool_state.devices.get(self.controller._active_udid)
-                if entry and entry.device_type != device_type:
+                if entry and (
+                        (device_type_for_active and entry.device_type != device_type_for_active)
+                        or (on and platform.platform_of(entry.device_type) != on)):
                     pass  # Type mismatch — fall through to re-resolve
                 else:
                     return self.controller._active_udid
@@ -495,19 +589,21 @@ class DevicePool:
             self.controller._active_udid = udid
             return udid
 
-        effective_family = self._infer_device_family(name, device_family, device_type)
-
         state = self._read_state()
         all_devices = list(state.devices.values())
-        candidates = self._find_candidates(
-            all_devices, name=name, os_version=os_version,
-            device_type=device_type, device_family=effective_family,
-        )
+        choice, device_type, effective_family = self._choose_platform(
+            all_devices, name=name, os_version=os_version, device_type=device_type,
+            device_family=device_family, requested_platform=requested_platform,
+            platform_source=platform_source, default_device_type=default_device_type)
+        if report is not None:
+            report.update(choice.report())
+        candidates = choice.devices
 
         if not candidates:
             raise self._build_resolution_error(
                 all_devices, name=name, os_version=os_version,
                 device_type=device_type, device_family=effective_family,
+                on_platform=choice.platform,
             )
 
         candidates.sort(key=self._rank_candidate)
@@ -531,6 +627,7 @@ class DevicePool:
         raise self._build_resolution_error(
             all_devices, name=name, os_version=os_version,
             device_type=device_type, device_family=effective_family,
+            on_platform=choice.platform,
         )
 
     async def ensure_devices(
@@ -541,6 +638,10 @@ class DevicePool:
         device_type: DeviceType | None = None,
         device_family: str | None = None,
         auto_boot: bool = True,
+        requested_platform: str | None = None,
+        platform_source: str | None = None,
+        report: dict | None = None,
+        default_device_type: DeviceType | None = None,
     ) -> list[str]:
         """Ensure N devices matching criteria are booted and available.
 
@@ -549,14 +650,16 @@ class DevicePool:
         """
         await self.refresh()
 
-        effective_family = self._infer_device_family(name, device_family, device_type)
-
         state = self._read_state()
         all_devices = list(state.devices.values())
-        matching = self._find_candidates(
-            all_devices, name=name, os_version=os_version,
-            device_type=device_type, device_family=effective_family,
-        )
+        choice, device_type, effective_family = self._choose_platform(
+            all_devices, name=name, os_version=os_version, device_type=device_type,
+            device_family=device_family, requested_platform=requested_platform,
+            platform_source=platform_source, default_device_type=default_device_type,
+            wanted=count)
+        if report is not None:
+            report.update(choice.report())
+        matching = choice.devices
 
         booted_available = sorted(
             [d for d in matching if d.state == DeviceState.BOOTED],

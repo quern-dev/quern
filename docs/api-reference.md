@@ -480,7 +480,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
-| `list_devices` | GET | `/api/v1/device/list` | List simulators, emulators, and physical devices. Each carries `model`: what the hardware is, as Apple names it ("iPad Pro 11-inch (M4)"), whatever the device is called -- a simulator's from its device type, a physical device's marketing name or product type ("iPhone16,1") -- or "" when unknown. A `name` criterion in `reserve_devices` and `resolve_device` matches the model too, so a renamed simulator is still found by what it is. An Android emulator also carries `avd_name`, its AVD, running or not: a running one is listed by its serial (`emulator-5554`), and a `device_groups` entry `avd:<name>` finds it by this. It is "" when the emulator's console cannot be asked -- one attached over TCP (`adb connect`), or one whose console did not answer -- and an `avd:` group entry cannot find such an emulator. Through the MCP, a list filtered by name, OS, family or type that comes back empty carries `elsewhere`: which paired servers have matching free devices, and the `use_remote` call to get there |
+| `list_devices` | GET | `/api/v1/device/list` | List simulators, emulators, and physical devices. Each carries `model`: what the hardware is, as Apple names it ("iPad Pro 11-inch (M4)"), whatever the device is called -- a simulator's from its device type, a physical device's marketing name or product type ("iPhone16,1") -- or "" when unknown. An Android emulator's model is its AVD's hardware profile ("Pixel 7"), a phone's its product model. A `name` criterion in `list_devices`, `reserve_devices` and `resolve_device` matches the model too, so a renamed simulator is still found by what it is. `platform` picks on one platform (see "Choosing a platform"). An Android emulator also carries `avd_name`, its AVD, running or not: a running one is listed by its serial (`emulator-5554`), and a `device_groups` entry `avd:<name>` finds it by this. It is "" when the emulator's console cannot be asked -- one attached over TCP (`adb connect`), or one whose console did not answer -- and an `avd:` group entry cannot find such an emulator. Through the MCP, a list filtered by name, OS, family or type that comes back empty carries `elsewhere`: which paired servers have matching free devices, and the `use_remote` call to get there |
 | `boot_device` | POST | `/api/v1/device/boot` | Boot simulator |
 | `shutdown_device` | POST | `/api/v1/device/shutdown` | Shutdown simulator |
 | `erase_device` | POST | `/api/v1/device/erase` | Erase a simulator or Android emulator, resetting it to factory state (an emulator is relaunched, possibly on a new serial) |
@@ -564,8 +564,19 @@ holds in `flow_store`. `flows_captured` is only what survived.
 
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
-| `resolve_device` | POST | `/api/v1/devices/resolve` | Resolve a device by criteria *or* by explicit `udid` (sets active device) |
-| `ensure_devices` | POST | `/api/v1/devices/ensure` | Ensure N devices matching criteria are booted |
+| `resolve_device` | POST | `/api/v1/devices/resolve` | Resolve a device by criteria *or* by explicit `udid` (sets active device). Picks on one platform -- see "Choosing a platform" below |
+| `ensure_devices` | POST | `/api/v1/devices/ensure` | Ensure N devices matching criteria are booted, on one platform as `resolve_device` |
+
+#### Choosing a platform
+
+iOS 16 and Android 16 both exist, so a bare `os_version` can mean either (#582). `resolve_device`, `ensure_devices`, `reserve_devices` by count, and `list_devices` take `platform` (`ios` or `android`) and `platform_source`, and pick on one platform, first that applies:
+
+1. **The request names it**: `platform` with no `platform_source`, a `device_type`, or a prefixed `os_version` ("Android 16", "ios18.6"). This restricts the pick; naming two platforms is a 400.
+2. **The project names it**: `platform` with a `platform_source`. The MCP sends the agent's project's platform this way when the agent didn't give one: `.quern/config.json`'s `"platform"` (`knowledge_base`), else read from its files (`project`) -- an Xcode project is iOS, an Android app module Android, a project with both is neither. It is a default: a request with criteria that matches nothing on it gets the other platform's matches when they are no more than it needs (one, or `count`); more are a 409 `other_platform` listing them. A request with no criteria never crosses, and `resolve_device` with no criteria does not return an active device on the other platform. `platform_source` is one of `request`, `knowledge_base`, `project`.
+3. **The criteria name it**: matches on one platform only are that platform's. Matches on both are a 409 `ambiguous_platform`, with `matches` (up to 10 per platform), `match_counts`, and `retry_with` (the `platform` values that would choose). `list_devices` lists both instead of refusing.
+4. **Nothing does**: as before. `resolve_device` and `ensure_devices` default to a virtual device -- an iOS simulator of the configured family, or on an Android pick an emulator -- so a physical phone is picked only when `device_type` asks for one.
+
+Answers say which platform was used and why: `platform`, and `platform_source` -- `request`, the project's source, or `only_match`. Names match a device's name or model, with underscores read as spaces, so "Pixel 7" finds the AVD `Pixel_7_API_34`; an exact match on either platform wins over substrings on both.
 
 ### Sessions and reservations
 

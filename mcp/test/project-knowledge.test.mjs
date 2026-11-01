@@ -470,3 +470,85 @@ test("a session opened afresh gets its knowledge base again, or is told it did n
   assert.equal(told.length, 1);
   assert.match(told[0], /lost with the session and could not be loaded again \(HTTP 413/);
 });
+
+import { detectProjectPlatform, projectPlatforms } from "../dist/project-knowledge.js";
+import { platformFields } from "../dist/platform.js";
+
+test("a project's platform: the knowledge base's word, else its files (#582)", () => {
+  const ios = project({ files: { "App.xcodeproj": "dir" } });
+  assert.deepEqual(detectProjectPlatform(ios), { platform: "ios", source: "project" });
+
+  const android = project({ files: { "settings.gradle.kts": "", "app/src/main/AndroidManifest.xml": MANIFEST } });
+  assert.deepEqual(detectProjectPlatform(android), { platform: "android", source: "project" });
+
+  const both = project({ files: { "pubspec.yaml": "", "ios/Runner.xcodeproj": "dir",
+    "android/settings.gradle": "", "android/app/src/main/AndroidManifest.xml": MANIFEST } });
+  assert.deepEqual([...projectPlatforms(both)].sort(), ["android", "ios"]);
+  assert.equal(detectProjectPlatform(both), null, "cross-platform: the request or the matches decide");
+
+  const backend = project({ files: { "settings.gradle": "" } });
+  assert.equal(detectProjectPlatform(backend), null, "a JVM build with no Android module says nothing");
+
+  mkdirSync(join(both, ".quern"), { recursive: true });
+  mkdirSync(join(ios, ".quern"), { recursive: true });
+  writeFileSync(join(both, ".quern", "config.json"), JSON.stringify({ platform: "android" }));
+  assert.deepEqual(detectProjectPlatform(both), { platform: "android", source: "knowledge_base" });
+  writeFileSync(join(ios, ".quern", "config.json"), JSON.stringify({ platform: ["ios", "android"] }));
+  assert.equal(detectProjectPlatform(ios), null, "both named: deliberately neither, the files not asked");
+  writeFileSync(join(ios, ".quern", "config.json"), JSON.stringify({ platform: "Android" }));
+  assert.deepEqual(detectProjectPlatform(ios), { platform: "android", source: "knowledge_base" },
+                   "the natural spelling counts");
+  writeFileSync(join(ios, ".quern", "config.json"), JSON.stringify({ platform: null }));
+  assert.deepEqual(detectProjectPlatform(ios), { platform: "ios", source: "project" },
+                   "unset falls through to the files");
+});
+
+test("a request's platform: the agent's restricts, the project's is a default (#582)", () => {
+  const project = { platform: "ios", source: "knowledge_base" };
+  assert.deepEqual(platformFields("android", project), { platform: "android" });
+  assert.deepEqual(platformFields(undefined, project),
+                   { platform: "ios", platform_source: "knowledge_base" });
+  assert.deepEqual(platformFields(undefined, null), {});
+});
+
+import { registerAppKnowledgeTools } from "../dist/tools/app-knowledge.js";
+import { readFileSync } from "node:fs";
+
+test("init_app_knowledge writes the project's platform into a new config (#582)", async () => {
+  const tools = {};
+  registerAppKnowledgeTools({ registerTool: (name, _def, handler) => { tools[name] = handler; } });
+  const ios = project({ files: { "App.xcodeproj": "dir" } });
+  const r = await tools.init_app_knowledge({ project_dir: ios });
+  assert.match(r.content[0].text, /platform: ios \(read from the project/);
+  assert.equal(JSON.parse(readFileSync(join(ios, ".quern", "config.json"), "utf-8")).platform, "ios");
+
+  const both = project({ files: { "ios/Runner.xcodeproj": "dir", "android/settings.gradle": "",
+    "android/app/src/main/AndroidManifest.xml": MANIFEST } });
+  const r2 = await tools.init_app_knowledge({ project_dir: both });
+  assert.match(r2.content[0].text, /builds for iOS and Android/);
+  assert.equal(JSON.parse(readFileSync(join(both, ".quern", "config.json"), "utf-8")).platform, null);
+});
+
+test("the device tools send the project's platform, and the agent's (#582)", async () => {
+  const run = (kind) => new Promise((ok, fail) => {
+    const child = spawn(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), "platform-wiring.mjs"), kind]);
+    let out = "", err = "";
+    child.stdout.on("data", (b) => { out += b; });
+    child.stderr.on("data", (b) => { err += b; });
+    child.on("exit", () => { try { ok(JSON.parse(out.trim().split("\n").pop())); } catch { fail(new Error(err || out)); } });
+  });
+  const ios = await run("ios-project");
+  for (const tool of ["resolve_device", "ensure_devices", "reserve_devices"]) {
+    assert.equal(ios[tool].error, undefined, tool);
+    assert.equal(ios[tool].body.platform, "ios", tool);
+    assert.equal(ios[tool].body.platform_source, "project", tool);
+  }
+  assert.equal(ios.resolve_device.body.device_type, undefined, "no forced simulator: the server applies its default per platform");
+  assert.deepEqual([ios.list_devices.query.platform, ios.list_devices.query.platform_source], ["ios", "project"]);
+  assert.equal(ios["reserve_devices:asked"].body.platform, "android");
+  assert.equal(ios["reserve_devices:asked"].body.platform_source, undefined, "the agent's own platform restricts");
+
+  const none = await run("no-project");
+  assert.equal(none.resolve_device.body.platform, undefined);
+  assert.equal(none.list_devices.query.platform, undefined);
+});

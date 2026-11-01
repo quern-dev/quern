@@ -14,8 +14,10 @@ from starlette.responses import StreamingResponse
 
 from server import visibility
 from server.api.actions import action, logged_action
+from server.device import platform
 from server.device.media import media_engine
 from server.device.media.preview import simulator_entries
+from server.device.pool import DevicePool
 from server.logging_ext import current_action
 from server.models import (
     BootDeviceRequest,
@@ -240,6 +242,9 @@ async def list_devices(
     device_family: str | None = Query(default=None),
     cert_installed: bool | None = Query(default=None),
     include_disconnected: bool = Query(default=False),
+    platform_: str | None = Query(default=None, alias="platform", pattern="^(ios|android)$"),
+    platform_source: str | None = Query(default=None,
+                                        pattern="^(request|knowledge_base|project)$"),
 ):
     """List all devices (simulators + physical) and tool availability.
 
@@ -253,6 +258,10 @@ async def list_devices(
       against the device for booted devices rather than read from quern's
       record, since an erased simulator keeps a record saying installed.
     - include_disconnected: Include paired but unreachable physical devices
+    - platform: ios or android (#582). With platform_source (where the
+      caller read it: "knowledge_base", "project") it is a default the
+      criteria can override; without, it restricts. See
+      server/device/platform.py.
     """
     controller = _get_controller(request)
     try:
@@ -268,34 +277,35 @@ async def list_devices(
             dt = DeviceType(device_type)
             devices = [d for d in devices if d.device_type == dt]
 
-        # Name filter: exact match preferred, substring fallback
-        if name:
-            name_lower = name.lower()
-            exact = [d for d in devices if d.name.lower() == name_lower]
-            if exact:
-                devices = exact
-            else:
-                devices = [d for d in devices if name_lower in d.name.lower()]
+        # Name (or model), OS version and family, on a platform (#582): the
+        # pool's own matching, so a list and a reservation never disagree on
+        # what "Pixel 7" or "Android 16" means. A listing that matches both
+        # platforms shows both rather than refusing: it is an answer, not a
+        # guess.
+        try:
+            hard = platform.requested_platform(
+                platform=platform_, source=platform_source,
+                device_type=device_type, os_version=os_version)
+        except platform.PlatformConflict as e:
+            raise HTTPException(status_code=400, detail=str(e)) from None
+        listed = devices
 
-        # OS version filter: prefix match
-        if os_version:
-            import re
-            def _os_matches(device_os: str, requested: str) -> bool:
-                m = re.search(r"[\d.]+", device_os)
-                if not m:
-                    return False
-                dev_ver = m.group()
-                rm = re.search(r"[\d.]+", requested)
-                if not rm:
-                    return False
-                req_ver = rm.group()
-                return dev_ver == req_ver or dev_ver.startswith(req_ver + ".")
-            devices = [d for d in devices if _os_matches(d.os_version, os_version)]
+        def criteria(on: str | None) -> list:
+            return [d for d in platform.on_platform(listed, on)
+                    if (not os_version
+                        or platform.os_matches(d.os_version, d.device_type, os_version))
+                    and (not device_family
+                         or d.device_family.lower() == device_family.lower())]
 
-        # Device family filter: case-insensitive
-        if device_family:
-            family_lower = device_family.lower()
-            devices = [d for d in devices if d.device_family.lower() == family_lower]
+        choice = platform.choose(
+            DevicePool._name_finder(criteria, name,
+                                    [hard] if hard else list(platform.PLATFORMS)),
+            requested=hard,
+            default=platform_ if platform_ and not hard else None,
+            default_source=platform_source,
+            has_criteria=any([name, os_version, device_family]),
+            refuse_ambiguous=False)
+        devices = choice.devices
 
         device_dicts = [d.model_dump() for d in devices]
 
@@ -352,6 +362,7 @@ async def list_devices(
             "devices": _with_reservations(request, device_dicts),
             "tools": tools,
             "active_udid": controller._active_udid,
+            **choice.report(),
         }
     except DeviceError as e:
         raise _handle_device_error(e)

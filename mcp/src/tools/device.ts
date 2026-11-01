@@ -5,12 +5,13 @@ import { z } from "zod";
 import { discoverServer } from "../config.js";
 import { apiRequest, quernHeaders, ServerRefused, serverFetch } from "../http.js";
 import { mustUpload, type Uploaded, uploadApp } from "../remote-paths.js";
+import { PLATFORM_DESCRIPTION, platformFields } from "../platform.js";
 import { strictParams, errorText } from "./helpers.js";
 import { elsewhereHint } from "./system.js";
 
 export function registerDeviceTools(server: McpServer): void {
   server.registerTool("list_devices", {
-    description: `List available iOS and Android devices (simulators, emulators, physical), plus tool availability (simctl, idb, devicectl, adb). Returns device UDIDs, names, models (what the hardware is, e.g. "iPhone 15 Pro", whatever the device is called), states, and OS versions; the name filter matches names only. Does NOT change the active device. A filtered list that comes back empty may carry "elsewhere": paired servers that have matching devices, and the use_remote call to get there.`,
+    description: `List available iOS and Android devices (simulators, emulators, physical), plus tool availability (simctl, idb, devicectl, adb). Returns device UDIDs, names, models (what the hardware is, e.g. "iPhone 15 Pro", whatever the device is called), states, and OS versions; the name filter matches names and models. On this project's platform by default (see platform). Does NOT change the active device. A filtered list that comes back empty may carry "elsewhere": paired servers that have matching devices, and the use_remote call to get there.`,
     inputSchema: strictParams({
       state: z
         .enum(["booted", "shutdown"])
@@ -23,11 +24,13 @@ export function registerDeviceTools(server: McpServer): void {
       name: z
         .string()
         .optional()
-        .describe("Filter by device name (case-insensitive, exact match preferred, substring fallback)"),
+        .describe("Filter by device name or model (case-insensitive, underscores as spaces, exact match preferred, substring fallback)"),
       os_version: z
         .string()
         .optional()
-        .describe("Filter by OS version prefix (e.g. '18', '18.2', 'iOS 18.2')"),
+        .describe("Filter by OS version prefix (e.g. '18', '18.2', 'iOS 18.2', 'Android 16')"),
+      platform: z.enum(["ios", "android"]).optional().describe(
+        PLATFORM_DESCRIPTION.replace("is refused with the matches on each side", "lists both")),
       device_family: z
         .string()
         .optional()
@@ -44,9 +47,11 @@ export function registerDeviceTools(server: McpServer): void {
           "Include physical devices that are paired but not currently reachable. By default, only connected devices are shown."
         ),
     }),
-  }, async ({ state, type, name, os_version, device_family, cert_installed, include_disconnected }) => {
+  }, async ({ state, type, name, os_version, device_family, platform, cert_installed,
+               include_disconnected }) => {
+    const picking = platformFields(platform);
     try {
-      const params: Record<string, string | number | boolean | undefined> = {};
+      const params: Record<string, string | number | boolean | undefined> = { ...picking };
       if (state) params.state = state;
       if (type) params.device_type = type;
       if (name) params.name = name;
@@ -71,6 +76,7 @@ export function registerDeviceTools(server: McpServer): void {
           state === undefined && cert_installed === undefined) {
         const hint = await elsewhereHint({
           name, os_version, device_family, device_type: type, listing: true,
+          ...picking,
         }, "None here", "list_devices");
         if (hint) data.elsewhere = hint.trim();
       }

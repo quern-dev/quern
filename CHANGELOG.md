@@ -7,8 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Device requests pick on one platform (#582).** iOS 16 and Android 16 both exist, and a bare `os_version="16"` matched both, so asking for an Android 16 emulator could hand back an iOS 16 simulator.
+  - **The project decides by default.** The MCP sends the agent's project's platform: `.quern/config.json`'s new `"platform"`, else what the project is (an Xcode project, an Android app module). An iOS project never gets an Android device it didn't ask for, except ones named that are no more than it asked for ("Pixel 8").
+  - **"A device" is a virtual one on both platforms.** `resolve_device` and `ensure_devices` default to a simulator on iOS and an emulator on Android; a physical phone needs `device_type`.
+  - **The request can say.** `platform="ios"`/`"android"`, a `device_type`, or a prefixed version ("Android 16") restricts the pick.
+  - **Otherwise, ambiguity is refused.** A bare version both platforms have is a 409 `ambiguous_platform` listing each side and the `platform` that would choose. `list_devices` lists both.
+  - **Answers say what was used**: `platform` and `platform_source`. This covers `resolve_device`, `ensure_devices`, `reserve_devices` and `list_devices`, and the hint pointing at paired servers keeps to the same platform.
+  - **`init_app_knowledge` records the platform** for a project that builds for one.
+- **Android devices carry `model`, and are found by it (#582).** An emulator's model is its AVD's hardware profile ("Pixel 7"), a phone's its product model. Names match with underscores as spaces, so "Pixel 7" finds the AVD `Pixel_7_API_34`. `list_devices` now matches models as well as names, as reservations do.
+
 ### Fixed
 - **Reserving a shut-down Android emulator works (#582).** A shut-down AVD is listed as `avd:<name>`, and once booted it comes up as its adb serial (`emulator-5554`). Reservations by count or criteria, `resolve_device` and `ensure_devices` waited for the `avd:` id, which never appears, so each failed after the boot ("did not boot within 30s") and left the emulator running, unreserved. The reservation now holds the emulator under the serial it booted as, and `shutdown_booted` shuts down that serial.
+- **A shut-down AVD newer than Android 16 reports its release (#582).** It reported its raw API level ("37") while the same image running reported its release ("17"), so a version request matched one and not the other.
 
 ## [0.25.0] - 2026-10-31
 

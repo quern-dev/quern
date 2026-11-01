@@ -625,3 +625,64 @@ class TestSetLocationRefusesWithoutAConsole:
             await backend.set_location("emulator-5554", 37.5, -122.25)
         args = run.call_args[0]
         assert args[:6] == ("emulator-5554", "emu", "geo", "fix", "-122.25", "37.5"), args
+
+
+class TestAndroidModelAndVersion:
+    """#582: Android rows carry `model`, and a shut-down AVD reports the
+    release it will report running."""
+
+    @pytest.mark.parametrize("api, expected", [
+        ("34", "14"), ("36", "16"), ("36.1", "16"), ("37", "17"), ("38", "18"), ("29", "10"),
+    ])
+    def test_a_shut_down_avd_reports_its_release(self, api, expected):
+        assert AdbBackend()._parse_api_string(api)[0] == expected
+
+    @pytest.mark.parametrize("profile, model", [
+        ("pixel_7", "Pixel 7"), ("pixel_9_pro_xl", "Pixel 9 Pro XL"),
+        ("medium_phone", "Medium Phone"), ("pixel_7a", "Pixel 7a"),
+    ])
+    def test_an_avds_model_is_its_hardware_profile(self, tmp_path, profile, model):
+        backend = AdbBackend()
+        config = tmp_path / "config.ini"
+        config.write_text(f"avd.ini.encoding=UTF-8\nhw.device.name={profile}\n")
+        backend._avd_config = lambda name: (config, tmp_path / "missing.ini")
+        assert backend._read_avd_model("Any_AVD") == model
+
+    def test_spaced_config_lines_are_read(self, tmp_path):
+        # The AVD config generator writes `key = value` (review).
+        backend = AdbBackend()
+        config = tmp_path / "config.ini"
+        config.write_text("hw.device.name = pixel_7\n"
+                          "image.sysdir.1 = system-images/android-34/google_apis/arm64-v8a/\n"
+                          "tag.id = google_apis\n")
+        backend._avd_config = lambda name: (config, tmp_path / "x.ini")
+        assert backend._read_avd_model("Any_AVD") == "Pixel 7"
+        assert backend._read_avd_version("Any_AVD") == ("14", "API 34 · Google APIs")
+
+    def test_no_profile_is_no_model(self, tmp_path):
+        backend = AdbBackend()
+        backend._avd_config = lambda name: (tmp_path / "absent.ini", tmp_path / "x.ini")
+        assert backend._read_avd_model("Any_AVD") == ""
+
+    async def test_listed_rows_carry_the_model(self, tmp_path):
+        backend = AdbBackend()
+        fixture_text = (FIXTURES_DIR / "adb_devices.txt").read_text()
+
+        async def mock_run_adb(*args):
+            if args == ("devices", "-l"):
+                return fixture_text, ""
+            raise DeviceError("unexpected call", tool="adb")
+
+        backend._run_adb = AsyncMock(side_effect=mock_run_adb)
+        backend._adb_path = "/usr/bin/adb"
+        backend._get_device_property = AsyncMock(return_value="")
+        backend._get_emulator_name = AsyncMock(return_value="Pixel_7_API_34")
+        backend.list_avds = AsyncMock(return_value=["Pixel_7_API_34", "Tablet_API_35"])
+        config = tmp_path / "config.ini"
+        config.write_text("hw.device.name=pixel_7\n")
+        backend._avd_config = lambda name: (config, tmp_path / "x.ini")
+
+        devices = {d.udid: d for d in await backend.list_devices()}
+        assert devices["emulator-5554"].model == "Pixel 7"     # not the image's sdk model
+        assert devices["R5CR10XXXXX"].model == "SM G960F"
+        assert devices["avd:Tablet_API_35"].model == "Pixel 7"

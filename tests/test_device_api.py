@@ -146,6 +146,59 @@ class TestListDevices:
         assert data["tools"]["simctl"] is True
         assert data["active_udid"] == "AAAA-1111"
 
+    async def _listed(self, app, auth_headers, mock_controller, **params):
+        mock_controller.list_devices = AsyncMock(return_value=[
+            DeviceInfo(udid="SIM-16", name="iPhone 14", state=DeviceState.BOOTED,
+                       device_type=DeviceType.SIMULATOR, os_version="iOS 16.4",
+                       device_family="iPhone"),
+            DeviceInfo(udid="emulator-5554", name="Pixel_8_API_36", state=DeviceState.BOOTED,
+                       device_type=DeviceType.ANDROID_EMULATOR, os_version="16",
+                       device_family="Android", model="Pixel 8"),
+        ])
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.get("/api/v1/device/list", headers=auth_headers, params=params)
+
+    async def test_a_prefixed_version_lists_one_platform(self, app, auth_headers,
+                                                         mock_controller):
+        # #582: "Android 16" is not iOS 16.
+        resp = await self._listed(app, auth_headers, mock_controller, os_version="Android 16")
+        assert [d["udid"] for d in resp.json()["devices"]] == ["emulator-5554"]
+        assert resp.json()["platform_source"] == "request"
+
+    async def test_a_bare_version_lists_both_platforms(self, app, auth_headers,
+                                                       mock_controller):
+        # A listing is an answer, so both sides rather than a refusal.
+        resp = await self._listed(app, auth_headers, mock_controller, os_version="16")
+        assert {d["udid"] for d in resp.json()["devices"]} == {"SIM-16", "emulator-5554"}
+        assert "platform" not in resp.json()
+
+    async def test_the_projects_platform_narrows_the_list(self, app, auth_headers,
+                                                          mock_controller):
+        resp = await self._listed(app, auth_headers, mock_controller, os_version="16",
+                                  platform="ios", platform_source="knowledge_base")
+        assert [d["udid"] for d in resp.json()["devices"]] == ["SIM-16"]
+        assert resp.json()["platform_source"] == "knowledge_base"
+
+    async def test_a_name_finds_the_model_and_the_spaced_avd_name(self, app, auth_headers,
+                                                                  mock_controller):
+        for name in ("Pixel 8", "Pixel 8 API 36"):
+            resp = await self._listed(app, auth_headers, mock_controller, name=name)
+            assert [d["udid"] for d in resp.json()["devices"]] == ["emulator-5554"], name
+
+    async def test_a_name_finds_a_model_the_name_does_not_contain(self, app, auth_headers,
+                                                                   mock_controller):
+        mock_controller.list_devices = AsyncMock(return_value=[
+            DeviceInfo(udid="SIM-CI", name="CI 3", state=DeviceState.BOOTED,
+                       device_type=DeviceType.SIMULATOR, os_version="iOS 18.6",
+                       device_family="iPhone", model="iPhone 15 Pro"),
+        ])
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/v1/device/list", headers=auth_headers,
+                                    params={"name": "iPhone 15 Pro"})
+        assert [d["udid"] for d in resp.json()["devices"]] == ["SIM-CI"]
+
     async def test_list_devices_error(self, app, auth_headers, mock_controller):
         mock_controller.list_devices = AsyncMock(
             side_effect=DeviceError("simctl failed", tool="simctl")
