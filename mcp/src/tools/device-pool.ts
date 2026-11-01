@@ -37,7 +37,7 @@ auto_boot is enabled).`,
       type: z
         .enum(["simulator", "device", "android_emulator", "android_device"])
         .optional()
-        .describe("Device type filter. Defaults to 'simulator' on iOS, to avoid accidentally targeting physical devices; on Android, emulators and phones alike."),
+        .describe("Device type filter. Defaults to a virtual device -- 'simulator' on iOS, 'android_emulator' on Android -- to avoid accidentally targeting physical devices."),
       platform: z.enum(["ios", "android"]).optional().describe(PLATFORM_DESCRIPTION),
       auto_boot: z
         .coerce.boolean()
@@ -108,7 +108,7 @@ The first device becomes the active device for subsequent tool calls.`,
       type: z
         .enum(["simulator", "device", "android_emulator", "android_device"])
         .optional()
-        .describe("Device type filter. Defaults to 'simulator' on iOS, to avoid accidentally targeting physical devices; on Android, emulators and phones alike."),
+        .describe("Device type filter. Defaults to a virtual device -- 'simulator' on iOS, 'android_emulator' on Android -- to avoid accidentally targeting physical devices."),
       platform: z.enum(["ios", "android"]).optional().describe(PLATFORM_DESCRIPTION),
       auto_boot: z
         .coerce.boolean()

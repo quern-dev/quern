@@ -29,7 +29,8 @@ from pydantic import BaseModel, Field
 from server import principal, visibility
 from server.api.actions import logged_action
 from server.device import platform
-from server.models import Platform
+from server.device.pool import DevicePool
+from server.models import Platform, PlatformSource
 from server.session import current_session, parse_session
 from server.session_registry import (
     ON_RELEASE,
@@ -136,7 +137,7 @@ class ReserveRequest(BaseModel):
     #: iOS or Android, for a count with criteria (#582): see
     #: `server/device/platform.py`. With a source it is a default.
     platform: Platform | None = None
-    platform_source: str | None = None
+    platform_source: PlatformSource | None = None
 
 
 @router.post("")
@@ -428,17 +429,20 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
             raise HTTPException(400, str(e)) from None
         everything = devices
 
-        def find(on: str | None) -> list:
+        def criteria(on: str | None) -> list:
             return pool._find_candidates(
-                everything, name=body.name, os_version=body.os_version,
-                device_type=dtype, device_family=body.device_family, on_platform=on)
+                everything, os_version=body.os_version, device_type=dtype,
+                device_family=body.device_family, on_platform=on)
 
         try:
             choice = platform.choose(
-                find, requested=hard,
+                DevicePool._name_finder(criteria, body.name,
+                                        [hard] if hard else list(platform.PLATFORMS)),
+                requested=hard,
                 default=body.platform if body.platform and not hard else None,
                 default_source=body.platform_source,
-                has_criteria=any([body.name, body.os_version, body.device_family]))
+                has_criteria=any([body.name, body.os_version, body.device_family]),
+                wanted=body.count or 1)
         except platform.PlatformRefusal as e:
             raise HTTPException(409, e.detail) from None
         devices = choice.devices

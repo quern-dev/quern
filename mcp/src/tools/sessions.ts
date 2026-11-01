@@ -65,7 +65,7 @@ After a use_remote switch, the first reservation that includes simulators also s
       // connection, or a race lost, is not fixed by going elsewhere (review).
       if (/HTTP 409.*asked for \d+ device\(s\), \d+ free/.test(message) &&
           !args.udids && !args.group) {
-        const hint = await elsewhereHint({ ...args, platform: picking.platform });
+        const hint = await elsewhereHint({ ...args, ...picking });
         if (hint) {
           return { content: [{ type: "text" as const, text: errorText(e) + hint }], isError: true };
         }

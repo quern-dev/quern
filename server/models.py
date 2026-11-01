@@ -2871,6 +2871,9 @@ class DevicePoolState(BaseModel):
 #: read it from -- it is a default the request's own matches can override.
 #: See `server/device/platform.py`.
 Platform = Literal["ios", "android"]
+#: Where a platform came from: "request" (or none) restricts; the others are
+#: the MCP's reading of the agent's project, and make it a default.
+PlatformSource = Literal["request", "knowledge_base", "project"]
 
 
 class ResolveDeviceRequest(BaseModel):
@@ -2884,7 +2887,7 @@ class ResolveDeviceRequest(BaseModel):
     device_type: str | None = None
     auto_boot: bool = True
     platform: Platform | None = None
-    platform_source: str | None = None
+    platform_source: PlatformSource | None = None
 
 
 class EnsureDevicesRequest(BaseModel):
@@ -2897,7 +2900,7 @@ class EnsureDevicesRequest(BaseModel):
     device_type: str | None = None
     auto_boot: bool = True
     platform: Platform | None = None
-    platform_source: str | None = None
+    platform_source: PlatformSource | None = None
 
 
 # ---------------------------------------------------------------------------

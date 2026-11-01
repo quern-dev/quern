@@ -76,7 +76,7 @@ export function registerDeviceTools(server: McpServer): void {
           state === undefined && cert_installed === undefined) {
         const hint = await elsewhereHint({
           name, os_version, device_family, device_type: type, listing: true,
-          platform: picking.platform,
+          ...picking,
         }, "None here", "list_devices");
         if (hint) data.elsewhere = hint.trim();
       }

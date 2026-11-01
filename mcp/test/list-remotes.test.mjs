@@ -203,3 +203,26 @@ test("elsewhere: a hint stays on the request's platform and reads 'Android 16' (
   assert.deepEqual(udids(matchingElsewhere(list, "local", { name: "pixel 8", listing: true })),
                    ["romulus:A16"], "a listing matches the model too, as the server's list now does");
 });
+
+test("elsewhere: the project's platform is crossed as the server crosses it (#582 review)", () => {
+  const list = { remotes: [{ name: "romulus", devices: [
+    { udid: "P8", name: "Pixel_8_API_36", model: "Pixel 8", os_version: "16",
+      device_family: "Android", device_type: "android_emulator", free: true, state: "booted" },
+    { udid: "P9", name: "Pixel_9_API_36", model: "Pixel 9", os_version: "16",
+      device_family: "Android", device_type: "android_emulator", free: true, state: "booted" },
+    { udid: "I18", name: "iPhone 16", os_version: "iOS 18.6", device_family: "iPhone",
+      device_type: "simulator", free: true, state: "booted" },
+  ] }] };
+  const soft = { platform: "ios", platform_source: "project" };
+  assert.deepEqual(udids(matchingElsewhere(list, "local", { ...soft, name: "Pixel 8" })),
+                   ["romulus:P8"], "one match on the other platform: the server would use it");
+  assert.deepEqual(matchingElsewhere(list, "local", { ...soft, os_version: "16" }), [],
+                   "two, for one wanted: the server would list, not pick");
+  assert.deepEqual(udids(matchingElsewhere(list, "local", { ...soft, os_version: "16", count: 2 })),
+                   ["romulus:P8", "romulus:P9"]);
+  assert.deepEqual(matchingElsewhere(list, "local", { platform: "ios", name: "Pixel 8" }), [],
+                   "the agent's own platform restricts");
+  assert.deepEqual(udids(matchingElsewhere(list, "local", { platform: "ios", name: "iPhone", listing: true })),
+                   ["romulus:I18"], "a listing keeps to a restricting platform too");
+  assert.deepEqual(matchingElsewhere(list, "local", { platform: "android", name: "iPhone", listing: true }), []);
+});

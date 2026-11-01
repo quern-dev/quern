@@ -243,7 +243,8 @@ async def list_devices(
     cert_installed: bool | None = Query(default=None),
     include_disconnected: bool = Query(default=False),
     platform_: str | None = Query(default=None, alias="platform", pattern="^(ios|android)$"),
-    platform_source: str | None = Query(default=None),
+    platform_source: str | None = Query(default=None,
+                                        pattern="^(request|knowledge_base|project)$"),
 ):
     """List all devices (simulators + physical) and tool availability.
 
@@ -289,16 +290,17 @@ async def list_devices(
             raise HTTPException(status_code=400, detail=str(e)) from None
         listed = devices
 
-        def find(on: str | None) -> list:
-            found = [d for d in platform.on_platform(listed, on)
-                     if (not os_version
-                         or platform.os_matches(d.os_version, d.device_type, os_version))
-                     and (not device_family
-                          or d.device_family.lower() == device_family.lower())]
-            return DevicePool._filter_by_name(found, name)
+        def criteria(on: str | None) -> list:
+            return [d for d in platform.on_platform(listed, on)
+                    if (not os_version
+                        or platform.os_matches(d.os_version, d.device_type, os_version))
+                    and (not device_family
+                         or d.device_family.lower() == device_family.lower())]
 
         choice = platform.choose(
-            find, requested=hard,
+            DevicePool._name_finder(criteria, name,
+                                    [hard] if hard else list(platform.PLATFORMS)),
+            requested=hard,
             default=platform_ if platform_ and not hard else None,
             default_source=platform_source,
             has_criteria=any([name, os_version, device_family]),

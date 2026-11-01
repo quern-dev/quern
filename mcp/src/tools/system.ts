@@ -5,7 +5,7 @@ import { switchHeldSession } from "../held-session.js";
 import { SESSION_ID, ServerTimeout, ServerUnreachable, apiRequest, serverFetch } from "../http.js";
 import { loadRemote } from "../remote.js";
 import { cleanUpStranded, moveOut } from "../carried.js";
-import { osMatches, platformOf, type Platform } from "../platform.js";
+import { osMatches, parseOs, platformOf, type Platform } from "../platform.js";
 
 /** Run after a switch is live: loads this project's knowledge base on the new
  * server, as at start (index.ts wires it in). Its answer goes into use_remote's. */
@@ -283,9 +283,11 @@ async function proxyThere(): Promise<Record<string, unknown>> {
 }
 
 export interface ReserveCriteria {
-  /** The platform the request was made on, the agent's or the project's:
-   * a hint never offers the other platform's devices (#582). */
+  /** The platform the request was made on (#582): the agent's, which
+   * restricts, or the project's, with platform_source, which the server may
+   * cross for as many matches on the other platform as the request needs. */
   platform?: Platform;
+  platform_source?: string;
   device_type?: string;
   os_version?: string;
   name?: string;
@@ -326,7 +328,6 @@ function reservable(devices: Record<string, unknown>[], c: ReserveCriteria): Rec
     if (d.is_available === false) return false;
     const bootable = c.auto_boot !== false && d.state === "shutdown";
     if (d.state !== "booted" && !bootable) return false;
-    if (c.platform && platformOf(d.device_type) !== c.platform) return false;
     if (c.os_version && !osMatches(d.os_version, d.device_type, c.os_version)) return false;
     if (c.device_type && d.device_type !== c.device_type) return false;
     if (c.device_family && familyOf(d).toLowerCase() !== c.device_family.toLowerCase()) return false;
@@ -340,7 +341,6 @@ function reservable(devices: Record<string, unknown>[], c: ReserveCriteria): Rec
  * then the name or model, exact before substring. */
 function listed(devices: Record<string, unknown>[], c: ReserveCriteria): Record<string, unknown>[] {
   let out = c.device_type ? devices.filter((d) => d.device_type === c.device_type) : devices;
-  if (c.platform) out = out.filter((d) => platformOf(d.device_type) === c.platform);
   if (c.os_version) out = out.filter((d) => osMatches(d.os_version, d.device_type, c.os_version));
   if (c.device_family) {
     const want = c.device_family.toLowerCase();
@@ -357,6 +357,27 @@ function listed(devices: Record<string, unknown>[], c: ReserveCriteria): Record<
  * is, else a substring; booted, or shut down when auto_boot allows booting;
  * and only servers with `count` of them. Servers that could not be asked are
  * left out. */
+/** The server's platform rule (server/device/platform.py) over devices that
+ * match every other criterion: a platform the request names restricts; the
+ * project's is a default, crossed for no more matches than the request
+ * needs (a listing: any); with neither, matches on both platforms would be
+ * refused as ambiguous, so none are offered (a listing shows both). */
+function onePlatform(devices: Record<string, unknown>[], c: ReserveCriteria): Record<string, unknown>[] {
+  const named = (c.platform && !c.platform_source ? c.platform : undefined)
+    ?? platformOf(c.device_type) ?? parseOs(c.os_version).platform;
+  const on = (p: Platform) => devices.filter((d) => platformOf(d.device_type) === p);
+  if (named) return on(named);
+  const hasCriteria = !!(c.name || c.os_version || c.device_family);
+  if (c.platform) {
+    const mine = on(c.platform);
+    if (mine.length || !hasCriteria) return mine;
+    const other = on(c.platform === "ios" ? "android" : "ios");
+    return c.listing || other.length <= (c.count ?? 1) ? other : [];
+  }
+  if (!hasCriteria || c.listing) return devices;
+  return on("ios").length && on("android").length ? [] : devices;
+}
+
 export function matchingElsewhere(
   data: unknown, current: string, criteria: ReserveCriteria,
 ): { name: string; devices: Record<string, unknown>[] }[] {
@@ -368,8 +389,8 @@ export function matchingElsewhere(
     const all = r.devices as Record<string, unknown>[];
     // A listing shows held devices too, so its name rule runs over all of
     // them; only the free ones it keeps are offered.
-    const devices = (criteria.listing ? listed(all, criteria)
-      : reservable(all.filter((d) => d.free), criteria)).filter((d) => d.free);
+    const devices = onePlatform(criteria.listing ? listed(all, criteria)
+      : reservable(all.filter((d) => d.free), criteria), criteria).filter((d) => d.free);
     if (devices.length && devices.length >= (criteria.count ?? 1)) {
       out.push({ name: String(r.name), devices });
     }

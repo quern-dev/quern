@@ -210,15 +210,18 @@ async def test_resolve_with_nothing_said_keeps_the_simulator_default(pool):
     assert udid in {IOS16.udid, IOS18.udid}
 
 
-async def test_the_active_device_is_kept_only_on_a_requested_platform(pool):
-    # No criteria returns the active device -- unless the request names a
-    # platform it is not on. The project's platform does not override it:
-    # the agent chose that device.
+async def test_the_active_device_is_kept_only_on_the_requests_platform(pool):
+    # No criteria returns the active device -- unless it is on another
+    # platform than the request's, the project's included: the active device
+    # is server-wide, so anyone may have set it, and a pick with no criteria
+    # never crosses platforms (review).
+    for source in (None, "project"):
+        pool.controller._active_udid = IOS18.udid
+        assert await pool.resolve_device(requested_platform="android",
+                                         platform_source=source) in {
+            ANDROID16.udid, ANDROID14.udid}, source
     pool.controller._active_udid = IOS18.udid
-    assert await pool.resolve_device(requested_platform="android") in {
-        ANDROID16.udid, ANDROID14.udid}
-    pool.controller._active_udid = IOS18.udid
-    assert await pool.resolve_device(requested_platform="android",
+    assert await pool.resolve_device(requested_platform="ios",
                                      platform_source="project") == IOS18.udid
 
 
@@ -289,3 +292,86 @@ def test_the_resolve_route_refuses_two_platforms_with_400(client):
     r = client.post("/api/v1/devices/resolve",
                     json={"device_type": "simulator", "os_version": "android 16"})
     assert r.status_code == 400
+
+
+# ----------------------------------------------------------------------------
+# Review findings (#582)
+# ----------------------------------------------------------------------------
+
+
+PHONE14 = _entry("R5CR10XXXXX", "SM-G960F", "14", DeviceType.ANDROID_DEVICE,
+                 family="Android", model="Galaxy S9")
+
+
+def _pool_of(tmp_path, devices):
+    controller = MagicMock()
+    controller._active_udid = None
+    p = DevicePool(controller)
+    p._pool_file = tmp_path / "device-pool.json"
+    state = DevicePoolState(updated_at=datetime.now(UTC), devices={d.udid: d for d in devices})
+    p.refresh = AsyncMock()
+    p._read_state = lambda: state
+    return p
+
+
+async def test_saying_nothing_never_resolves_a_physical_phone(tmp_path):
+    # The simulator default means "a virtual device": crossing to Android by
+    # criteria is to an emulator, not to a phone on the desk.
+    p = _pool_of(tmp_path, [IOS18, PHONE14])
+    with pytest.raises(Exception, match="No device matching"):
+        await p.resolve_device(os_version="14", default_device_type=DeviceType.SIMULATOR)
+    p = _pool_of(tmp_path, [IOS18, PHONE14, ANDROID14])
+    assert await p.resolve_device(os_version="14",
+                                  default_device_type=DeviceType.SIMULATOR) == ANDROID14.udid
+    # Asked for by type, the phone is found as before.
+    assert await p.resolve_device(os_version="14", device_type=DeviceType.ANDROID_DEVICE,
+                                  default_device_type=DeviceType.SIMULATOR) == PHONE14.udid
+
+
+async def test_crossing_takes_as_many_as_the_request_needs(tmp_path):
+    p = _pool_of(tmp_path, [IOS18, ANDROID16, ANDROID14])
+    udids = await p.ensure_devices(count=2, device_family="Android",
+                                   requested_platform="ios", platform_source="project",
+                                   default_device_type=DeviceType.SIMULATOR)
+    assert set(udids) == {ANDROID16.udid, ANDROID14.udid}
+
+
+async def test_an_exact_name_on_one_platform_beats_a_substring_on_the_other(tmp_path):
+    ci_avd = _entry("emulator-5560", "CI", "15", DeviceType.ANDROID_EMULATOR, family="Android")
+    ci_sim = _entry("A1B2C3D4-0000-0000-0000-0000000000C3", "CI 3", "iOS 18.6",
+                    DeviceType.SIMULATOR, family="iPhone")
+    p = _pool_of(tmp_path, [ci_avd, ci_sim])
+    assert await p.resolve_device(name="CI", default_device_type=DeviceType.SIMULATOR) == \
+        ci_avd.udid
+
+
+async def test_the_error_is_about_the_platform_asked_for(tmp_path):
+    shut = _entry("A1B2C3D4-0000-0000-0000-000000000017", "iPhone 15", "iOS 17.5",
+                  DeviceType.SIMULATOR, state=DeviceState.SHUTDOWN, family="iPhone")
+    p = _pool_of(tmp_path, [IOS18, shut])
+    # No type default (a pool-level caller): the diagnosis used to look at
+    # every platform and offer the iOS simulator as a shut-down "match".
+    for kwargs in ({"default_device_type": DeviceType.SIMULATOR}, {}):
+        with pytest.raises(Exception) as e:
+            await p.resolve_device(requested_platform="android", auto_boot=False, **kwargs)
+        assert "iPhone" not in str(e.value) and "auto_boot" not in str(e.value), kwargs
+
+
+async def test_a_udid_is_not_refused_over_its_other_fields(tmp_path):
+    p = _pool_of(tmp_path, [IOS18])
+    assert await p.resolve_device(udid=IOS18.udid, device_type=DeviceType.SIMULATOR,
+                                  os_version="Android 16") == IOS18.udid
+
+
+def test_the_ensure_route_answers_refusals_and_conflicts(client):
+    r = client.post("/api/v1/devices/ensure", json={"count": 1, "os_version": "16"})
+    assert r.status_code == 409 and r.json()["detail"]["error"] == "ambiguous_platform"
+    r = client.post("/api/v1/devices/ensure",
+                    json={"count": 1, "device_type": "simulator", "os_version": "android 16"})
+    assert r.status_code == 400
+
+
+def test_an_unknown_platform_source_is_refused(client):
+    r = client.post("/api/v1/devices/resolve",
+                    json={"platform": "ios", "platform_source": "REQUEST"})
+    assert r.status_code == 422

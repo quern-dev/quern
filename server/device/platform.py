@@ -40,8 +40,12 @@ _TYPES = {
     ANDROID: (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE),
 }
 
-#: The sources that make a platform a default rather than a restriction.
+#: The source that makes a platform a restriction; any other is a default.
 REQUEST = "request"
+
+#: Each platform's virtual device: what "a device" means when a surface
+#: avoids physical hardware unless asked (resolve and ensure, #582).
+VIRTUAL = {IOS: DeviceType.SIMULATOR, ANDROID: DeviceType.ANDROID_EMULATOR}
 
 #: "16", "18.6", "iOS 18.6", "ios18", "Android 16", "android16", "v14".
 _OS = re.compile(r"^\s*(?P<platform>ios|android)?\s*v?(?P<version>\d+(?:\.\d+)*)?\s*$",
@@ -81,7 +85,8 @@ def os_matches(device_os: str, device_type: DeviceType | str | None, requested: 
     prefix ("18" matches "iOS 18.2", not "iOS 180"), and a named platform
     only on that platform -- "Android 14" is not iOS 14."""
     platform, version = parse_os(requested)
-    if platform and platform_of(device_type) != platform:
+    # With no type, the device's own version says: "iOS 18.2" is iOS.
+    if platform and (platform_of(device_type) or parse_os(device_os)[0]) != platform:
         return False
     if version is None:
         return platform is not None
@@ -168,13 +173,16 @@ def _count(n: int, platform: str) -> str:
 
 def choose(find: Callable[[str | None], list], *, requested: str | None,
            default: str | None, default_source: str | None,
-           has_criteria: bool, refuse_ambiguous: bool = True) -> PlatformChoice:
+           has_criteria: bool, refuse_ambiguous: bool = True,
+           wanted: int = 1) -> PlatformChoice:
     """Apply the order in the module docstring. ``find(platform)`` returns
     the candidates on that platform (``None``: either) under every other
     criterion of the request.
 
     ``refuse_ambiguous=False`` is for a listing, where showing both sides is
-    an answer rather than a guess."""
+    an answer rather than a guess. ``wanted`` is how many devices the request
+    needs: the other platform's matches are used when they are no more than
+    that -- exactly the devices named -- and listed otherwise."""
     if requested:
         return PlatformChoice(find(requested), requested, REQUEST)
     if default:
@@ -183,7 +191,7 @@ def choose(find: Callable[[str | None], list], *, requested: str | None,
             return PlatformChoice(found, default, default_source)
         other = OTHER[default]
         theirs = find(other)
-        if len(theirs) == 1 or (theirs and not refuse_ambiguous):
+        if theirs and (len(theirs) <= wanted or not refuse_ambiguous):
             return PlatformChoice(theirs, other, "only_match")
         if theirs:
             raise PlatformRefusal(

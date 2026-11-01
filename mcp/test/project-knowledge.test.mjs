@@ -495,6 +495,9 @@ test("a project's platform: the knowledge base's word, else its files (#582)", (
   assert.deepEqual(detectProjectPlatform(both), { platform: "android", source: "knowledge_base" });
   writeFileSync(join(ios, ".quern", "config.json"), JSON.stringify({ platform: ["ios", "android"] }));
   assert.equal(detectProjectPlatform(ios), null, "both named: deliberately neither, the files not asked");
+  writeFileSync(join(ios, ".quern", "config.json"), JSON.stringify({ platform: "Android" }));
+  assert.deepEqual(detectProjectPlatform(ios), { platform: "android", source: "knowledge_base" },
+                   "the natural spelling counts");
   writeFileSync(join(ios, ".quern", "config.json"), JSON.stringify({ platform: null }));
   assert.deepEqual(detectProjectPlatform(ios), { platform: "ios", source: "project" },
                    "unset falls through to the files");
@@ -524,4 +527,28 @@ test("init_app_knowledge writes the project's platform into a new config (#582)"
   const r2 = await tools.init_app_knowledge({ project_dir: both });
   assert.match(r2.content[0].text, /builds for iOS and Android/);
   assert.equal(JSON.parse(readFileSync(join(both, ".quern", "config.json"), "utf-8")).platform, null);
+});
+
+test("the device tools send the project's platform, and the agent's (#582)", async () => {
+  const run = (kind) => new Promise((ok, fail) => {
+    const child = spawn(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), "platform-wiring.mjs"), kind]);
+    let out = "", err = "";
+    child.stdout.on("data", (b) => { out += b; });
+    child.stderr.on("data", (b) => { err += b; });
+    child.on("exit", () => { try { ok(JSON.parse(out.trim().split("\n").pop())); } catch { fail(new Error(err || out)); } });
+  });
+  const ios = await run("ios-project");
+  for (const tool of ["resolve_device", "ensure_devices", "reserve_devices"]) {
+    assert.equal(ios[tool].error, undefined, tool);
+    assert.equal(ios[tool].body.platform, "ios", tool);
+    assert.equal(ios[tool].body.platform_source, "project", tool);
+  }
+  assert.equal(ios.resolve_device.body.device_type, undefined, "no forced simulator: the server applies its default per platform");
+  assert.deepEqual([ios.list_devices.query.platform, ios.list_devices.query.platform_source], ["ios", "project"]);
+  assert.equal(ios["reserve_devices:asked"].body.platform, "android");
+  assert.equal(ios["reserve_devices:asked"].body.platform_source, undefined, "the agent's own platform restricts");
+
+  const none = await run("no-project");
+  assert.equal(none.resolve_device.body.platform, undefined);
+  assert.equal(none.list_devices.query.platform, undefined);
 });

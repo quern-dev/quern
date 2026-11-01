@@ -186,6 +186,19 @@ class TestListDevices:
             resp = await self._listed(app, auth_headers, mock_controller, name=name)
             assert [d["udid"] for d in resp.json()["devices"]] == ["emulator-5554"], name
 
+    async def test_a_name_finds_a_model_the_name_does_not_contain(self, app, auth_headers,
+                                                                   mock_controller):
+        mock_controller.list_devices = AsyncMock(return_value=[
+            DeviceInfo(udid="SIM-CI", name="CI 3", state=DeviceState.BOOTED,
+                       device_type=DeviceType.SIMULATOR, os_version="iOS 18.6",
+                       device_family="iPhone", model="iPhone 15 Pro"),
+        ])
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/v1/device/list", headers=auth_headers,
+                                    params={"name": "iPhone 15 Pro"})
+        assert [d["udid"] for d in resp.json()["devices"]] == ["SIM-CI"]
+
     async def test_list_devices_error(self, app, auth_headers, mock_controller):
         mock_controller.list_devices = AsyncMock(
             side_effect=DeviceError("simctl failed", tool="simctl")

@@ -118,7 +118,9 @@ export function projectPlatforms(dir: string): Set<Platform> {
 /** The config's "platform": "ios", "android", or a list naming one of them.
  * A list naming both, null, or anything else says nothing. */
 function configuredPlatform(value: unknown): Platform | null | undefined {
+  // "iOS" and "Android" are the natural spellings.
   const named = (Array.isArray(value) ? value : [value])
+    .map((v) => (typeof v === "string" ? v.trim().toLowerCase() : v))
     .filter((v): v is Platform => v === "ios" || v === "android");
   const unique = [...new Set(named)];
   if (unique.length === 1) return unique[0];
