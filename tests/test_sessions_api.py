@@ -1191,6 +1191,18 @@ class TestReservingAShutDownAvd:
             udid="emulator-5554", state=DeviceState.BOOTED, is_available=True, name=name)
         return b
 
+    def test_a_group_of_the_booting_session_is_short_not_an_empty_success(
+            self, client, pool, registry, monkeypatch):
+        # A phone connecting during the boot reads as the booting session's
+        # until the boot ends; that is no reservation, so the group is short
+        # rather than "already held" (CodeRabbit).
+        monkeypatch.setattr("server.config.read_user_config",
+                            lambda **k: {"device_groups": {"g": ["emulator-5554"]}})
+        b = self._booting_elsewhere(client, pool, registry)
+        r = _reserve(client, "claude-b", group="g")
+        assert r.status_code == 409, r.text
+        b.close()
+
     def test_nor_by_a_concurrent_request_of_the_booting_session(self, client, pool,
                                                                  registry):
         # The booting session's own second request must not count its
