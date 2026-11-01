@@ -93,6 +93,8 @@ To install by hand, provision a machine with no terminal (`quern setup -y`), or 
 
 Setup installs a Quern app in your menu bar, and for most people it is all they need after installing: start, stop and restart the server from it, with no terminal. It also shows the server's state, the active device and the proxy's port, opens a live screen mirror of a device, and picks the update channel. Quitting the app leaves the server running. See [the Quern app guide](docs/guides/menu-bar-app.md).
 
+<img src="docs/images/quern-menubar.png" alt="The Quern menu open in the macOS menu bar, showing the server running, the active device and the proxy port" width="356">
+
 ### Run
 
 From the terminal, or in a script:
