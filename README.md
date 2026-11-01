@@ -162,6 +162,7 @@ Everything the MCP tools do is also reachable over plain HTTP. The complete refe
 |---|---|
 | [User guides](docs/guides/index.md) | Task-by-task guides for the person working with the agent: setup, proxying, physical devices, workflows |
 | [Agent guide](docs/agent-guide.md) | What an agent should reach for, and what each refusal means |
+| [App knowledge base](docs/guides/app-knowledge.md) | What the knowledge base is, why it saves the agent time, and how to build one with your agent |
 | [What Quern does](docs/features.md) | Log sources, proxy features and setup, device control and automation backends |
 | [MCP tools](docs/mcp-tools.md) | Every MCP tool, by category |
 | [API reference](docs/api-reference.md) | Every tool, the HTTP endpoint behind it, and the endpoints with no tool |
