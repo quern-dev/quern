@@ -1117,7 +1117,7 @@ class TestReservingAShutDownAvd:
     failed after the boot and left the emulator running unreserved."""
 
     @pytest.fixture
-    def pool(self, client):
+    def pool(self, client, registry):
         from types import SimpleNamespace
 
         from server.models import DeviceState
@@ -1130,6 +1130,10 @@ class TestReservingAShutDownAvd:
                 self.devices[serial] = SimpleNamespace(
                     udid=serial, state=DeviceState.BOOTED, is_available=True,
                     name="Pixel_8_API35")
+                # Who holds the emulator the moment it appears, before the
+                # route moves the hold to it: the booting session (review).
+                held = registry.holder_of(serial)
+                self.held_while_booting = held.session.id if held else None
                 return serial
 
         pool = AvdPool({})
@@ -1147,22 +1151,95 @@ class TestReservingAShutDownAvd:
         assert r.json()["reserved"][0]["booted_here"] is True
         assert registry.holder_of("emulator-5554").session.id == "claude-a"
         assert registry.holder_of("avd:Pixel_8_API35") is None
+        assert pool.held_while_booting == "claude-a", "held from the moment it appeared"
         a.close()
 
-    def test_a_running_emulator_whose_avd_is_held_is_not_picked(self, client, pool, registry):
+    def _booting_elsewhere(self, client, pool, registry, *, name="Pixel_8_API35"):
         # Another session is booting the AVD: its emulator appears under the
-        # serial before the hold moves; a count reservation must not take it.
+        # serial before the hold moves to it -- here listed under `name`,
+        # which a failed console query can leave as the model (review).
         from types import SimpleNamespace
 
         from server.models import DeviceState
 
         b = Held(client, "claude-b")
         registry.reserve("claude-b", ["avd:Pixel_8_API35"])
+        registry.begin_avd_boot("claude-b", "avd:Pixel_8_API35", {"avd:Pixel_8_API35"})
         pool.devices["emulator-5554"] = SimpleNamespace(
-            udid="emulator-5554", state=DeviceState.BOOTED, is_available=True,
-            name="Pixel_8_API35")
+            udid="emulator-5554", state=DeviceState.BOOTED, is_available=True, name=name)
+        return b
+
+    @pytest.mark.parametrize("name", ["Pixel_8_API35", "sdk_gphone64_arm64"])
+    def test_an_emulator_appearing_during_another_boot_is_not_picked(self, client, pool,
+                                                                     registry, name):
+        b = self._booting_elsewhere(client, pool, registry, name=name)
+        a = Held(client, "claude-a")
+        assert _reserve(client, "claude-a", count=1).status_code == 409
+        a.close()
+        b.close()
+
+    def test_a_free_device_is_picked_instead(self, client, pool, registry):
+        # Not a refusal when something else is free: the booting emulator is
+        # passed over, not chosen and then refused.
+        from types import SimpleNamespace
+
+        from server.models import DeviceState
+
+        # Ranked after the emulator (the fake ranks by udid), so it is picked
+        # only if the booting emulator is passed over.
+        sim = "f5af3736-c05f-493f-aa52-ca883b13b18c"
+        b = self._booting_elsewhere(client, pool, registry)
+        pool.devices[sim] = SimpleNamespace(udid=sim, state=DeviceState.BOOTED,
+                                            is_available=True, name="iPhone 16 Pro")
+        a = Held(client, "claude-a")
+        r = _reserve(client, "claude-a", count=1)
+        assert r.status_code == 200, r.text
+        assert [x["udid"] for x in r.json()["reserved"]] == [sim]
+        a.close()
+        b.close()
+
+    def test_nor_reserved_by_its_serial(self, client, pool, registry):
+        # Explicit udids went past the name check entirely (review).
+        b = self._booting_elsewhere(client, pool, registry)
+        a = Held(client, "claude-a")
+        r = _reserve(client, "claude-a", udids=["emulator-5554"])
+        assert r.status_code == 409 and "claude-b" in r.text
+        registry.end_avd_boot("avd:Pixel_8_API35")
+        a.close()
+        b.close()
+
+    def test_a_rekey_conflict_is_409_and_shuts_nothing_of_theirs_down(self, client, pool,
+                                                                      registry):
+        # Another session already holds the serial the AVD came up as: not a
+        # failed boot, and their emulator is not shut down (review).
+        b = Held(client, "claude-b")
+        registry.reserve("claude-b", ["emulator-5554"])
         a = Held(client, "claude-a")
         r = _reserve(client, "claude-a", count=1)
         assert r.status_code == 409, r.text
+        assert "another session holds" in r.json()["detail"]
+        assert client.app.state.device_controller.shutdowns == []
+        assert registry.holder_of("avd:Pixel_8_API35") is None
+        assert registry.holder_of("emulator-5554").session.id == "claude-b"
         a.close()
         b.close()
+
+
+def test_a_group_entry_naming_an_avd_finds_its_running_emulator(monkeypatch):
+    # Booted and held under its serial, an `avd:` group entry still names it
+    # (review: the group read as empty).
+    from types import SimpleNamespace
+
+    from server.api import sessions as sessions_api
+    from server.session_registry import SessionRegistry
+
+    reg = SessionRegistry()
+    s, t = reg.open("a")
+    reg.attach(s.id, t)
+    reg.reserve("a", ["avd:Pixel_8_API35"])
+    reg.rekey("a", "avd:Pixel_8_API35", "emulator-5554")
+    monkeypatch.setattr("server.config.read_user_config",
+                        lambda: {"device_groups": {"pixels": ["avd:Pixel_8_API35"]}})
+    devices = [SimpleNamespace(udid="emulator-5554", name="Pixel_8_API35")]
+    members = sessions_api._group_members("pixels", devices, None, reg)
+    assert [d.udid for d in members] == ["emulator-5554"]

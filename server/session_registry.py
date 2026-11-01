@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 import time
 from collections.abc import Callable, Iterable
@@ -58,6 +59,10 @@ def clamp_grace(value: object) -> int:
 def _digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8", "replace")).hexdigest()
 
+
+#: A simulator's or iPhone's id; anything else here is an Android serial or `avd:`.
+_UUID = re.compile(r"[0-9A-Fa-f]{8}(-?[0-9A-Fa-f]{4}){3}-?[0-9A-Fa-f]{12}"
+                   r"|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}")
 
 @dataclass
 class Reservation:
@@ -141,6 +146,15 @@ class SessionRegistry:
         #: whoever drains them (`take_released`): grace that ran out in a
         #: sweep has nobody waiting on it to act.
         self._released: list[HeldSession] = []
+        #: AVD boots in progress (#582): `avd:<name>` -> the session booting it
+        #: and the device ids already present when the boot began. Until the
+        #: hold moves to the serial the emulator comes up as, any new Android
+        #: serial is that session's -- by when it appeared, not by its name,
+        #: which a failed console query can leave as the model (review).
+        self._avd_boots: dict[str, tuple[str, frozenset[str]]] = {}
+        #: `avd:<name>` -> the serial a session's hold moved to, so a group
+        #: entry naming the AVD still finds its running emulator.
+        self._aliases: dict[str, str] = {}
         #: Devices a client key released whose clean-up -- its mock rules,
         #: its recordings -- has not run yet, by the releasing principal. Not
         #: reservable by anyone else until it has: in the gap the previous
@@ -313,6 +327,7 @@ class SessionRegistry:
         reservation = session.reservations.pop(old)
         reservation.udid = new
         session.reservations[new] = reservation
+        self._aliases[old] = new
 
     def withdraw(self, session_id: str, udids: Iterable[str]) -> None:
         """Take back reservations this request just made, as if never made:
@@ -339,12 +354,32 @@ class SessionRegistry:
         return freed
 
     def holder_of(self, udid: str) -> Held | None:
-        """The session holding `udid`, after expiring stale grace."""
+        """The session holding `udid`, after expiring stale grace -- or, for
+        an Android serial that appeared while an AVD boot was in progress,
+        the session booting it."""
         self.expire_due()
         for session in self._sessions.values():
             if udid in session.reservations:
                 return Held(udid=udid, session=session)
+        if not _UUID.fullmatch(udid) and not udid.startswith("avd:"):
+            for avd, (session_id, before) in self._avd_boots.items():
+                session = self._sessions.get(session_id)
+                if session is not None and avd in session.reservations and udid not in before:
+                    return Held(udid=udid, session=session)
         return None
+
+    def begin_avd_boot(self, session_id: str, avd: str, present: Iterable[str]) -> None:
+        """`session_id` is booting the AVD it holds as `avd`; `present` is
+        every device id there before the boot began."""
+        self._avd_boots[avd] = (session_id, frozenset(present))
+
+    def end_avd_boot(self, avd: str) -> None:
+        self._avd_boots.pop(avd, None)
+
+    def alias_of(self, avd: str) -> str | None:
+        """The serial a hold on `avd` moved to, while that serial is held."""
+        serial = self._aliases.get(avd)
+        return serial if serial is not None and self.holder_of(serial) is not None else None
 
     def held_udids(self, *, except_session: str = "") -> set[str]:
         """Every device some *other* session holds."""

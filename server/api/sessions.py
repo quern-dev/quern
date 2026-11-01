@@ -33,6 +33,7 @@ from server.session_registry import (
     ON_RELEASE,
     OWNER,
     HeldSession,
+    SessionConflict,
     SessionError,
     SessionRegistry,
     UnknownSession,
@@ -251,24 +252,50 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
     controller = getattr(request.app.state, "device_controller", None)
     pool = getattr(controller, "_pool", None)
     started: list[str] = []
-    try:
-        for udid in to_boot:
-            booted_as = await pool._boot_and_wait(udid) or udid
-            started.append(booted_as)
-            # An AVD comes up under its adb serial: the hold moves with it, or
-            # it would cover an id the pool no longer lists (#582).
-            if booted_as != udid:
-                registry.rekey(session_id, udid, booted_as)
-                added = [booted_as if u == udid else u for u in added]
-    except Exception as e:  # noqa: BLE001 -- any failed boot withdraws the claim
+    current = ""
+
+    async def undo() -> None:
         # Only what this request added: devices the session held before stay
-        # held, and no other session's queued release policy is touched.
+        # held, and no other session's queued release policy is touched. What
+        # it booted is shut down -- unless another session holds it now.
         registry.withdraw(session_id, added)
         for udid in started:
+            held = registry.holder_of(udid)
+            if held is not None and held.session.id != session_id:
+                continue
             with contextlib.suppress(Exception):
                 await controller.shutdown(udid)
-        raise HTTPException(502, f"could not boot {to_boot[len(started)]} for the "
-                                 f"reservation, so nothing was reserved: {e}") from None
+
+    try:
+        for udid in to_boot:
+            current = udid
+            if not udid.startswith("avd:"):
+                started.append(await pool._boot_and_wait(udid) or udid)
+                continue
+            # An AVD comes up under its adb serial, and the hold moves with it
+            # (#582). Until then any new Android serial is this session's
+            # (registry.holder_of), so nothing else can take the emulator as
+            # it appears -- one AVD boot at a time, so a new serial can only
+            # be this one.
+            async with _AVD_BOOT_LOCK:
+                present = await _present_ids(controller, pool)
+                registry.begin_avd_boot(session_id, udid, present)
+                try:
+                    booted_as = await pool._boot_and_wait(udid) or udid
+                    started.append(booted_as)
+                    if booted_as != udid:
+                        registry.rekey(session_id, udid, booted_as)
+                        added = [booted_as if u == udid else u for u in added]
+                finally:
+                    registry.end_avd_boot(udid)
+    except SessionConflict as e:
+        await undo()
+        raise HTTPException(409, f"{current} booted, but another session holds the device "
+                                 f"it came up as, so nothing was reserved: {e}") from None
+    except Exception as e:  # noqa: BLE001 -- any failed boot withdraws the claim
+        await undo()
+        raise HTTPException(502, f"could not boot {current} for the reservation, so "
+                                 f"nothing was reserved: {e}") from None
     if len(session.reservations) == 1:
         # One device: it becomes this session's active device, so unqualified
         # calls go to it (the per-session slot, #460).
@@ -283,6 +310,21 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
                           "on_release": r.on_release, "booted_here": r.booted_here}
                          for r in reservations],
             "holding": list(session.reservations)}
+
+
+#: One AVD boot at a time: a serial that appears during it can only be its own.
+_AVD_BOOT_LOCK = asyncio.Lock()
+
+
+async def _present_ids(controller: Any, pool: Any) -> set[str]:
+    """Every device id there now: adb's current serials and the pool's. What
+    could not be read is left out, which only widens what counts as new."""
+    ids: set[str] = set()
+    with contextlib.suppress(Exception):
+        ids |= {d.udid for d in await controller.adb.list_devices()}
+    with contextlib.suppress(Exception):
+        ids |= set(pool._read_state().devices)
+    return ids
 
 
 def _what(device: Any) -> dict:
@@ -360,7 +402,7 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
     held = registry.held_udids(except_session=session_id)
     mine = registry.held_udids() - held
     if body.group is not None:
-        devices = _group_members(body.group, devices, pool)
+        devices = _group_members(body.group, devices, pool, registry)
         # No count means "the whole group": only the members this session does
         # not hold yet -- holding them all already is success, not a 409 for a
         # shortage that does not exist (CodeRabbit). A count means that many more.
@@ -376,12 +418,14 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
     # `count` is how many *more* devices: not ones another session holds, and
     # not ones this session already holds (CodeRabbit: they ranked first, so
     # count=2 with one held gave one new device).
-    # A running emulator whose AVD a session is booting counts as held: it
-    # appears under its serial before that session's hold moves to it (#582).
-    def taken(d: Any, ids: set[str]) -> bool:
-        return d.udid in ids or f"avd:{getattr(d, 'name', '')}" in ids
-    devices = sorted((d for d in devices
-                      if not taken(d, held) and not taken(d, mine) and d.is_available),
+    # holder_of also sees an emulator appearing while another session boots
+    # its AVD (#582), by when it appeared rather than by its name.
+    def taken(d: Any) -> bool:
+        if d.udid in held or d.udid in mine:
+            return True
+        holder = registry.holder_of(d.udid)
+        return holder is not None and holder.session.id != session_id
+    devices = sorted((d for d in devices if not taken(d) and d.is_available),
                      key=pool._rank_candidate)
     booted = [d for d in devices if d.state == DeviceState.BOOTED]
     shutdown = [d for d in devices if d.state == DeviceState.SHUTDOWN]
@@ -400,7 +444,8 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
     return [d.udid for d in picked], to_boot
 
 
-def _group_members(group: str, devices: list, pool) -> list:
+def _group_members(group: str, devices: list, pool,
+                   registry: SessionRegistry | None = None) -> list:
     """The devices a named group (`device_groups` in config.json) covers: each
     entry a udid, or criteria matched like the pool's."""
     from server.config import read_user_config
@@ -413,7 +458,9 @@ def _group_members(group: str, devices: list, pool) -> list:
     members: dict[str, object] = {}
     for entry in entries:
         if isinstance(entry, str):
-            members.update({d.udid: d for d in devices if d.udid == entry})
+            # An `avd:` entry whose emulator is running is that serial (#582).
+            alias = registry.alias_of(entry) if registry is not None else None
+            members.update({d.udid: d for d in devices if d.udid in (entry, alias)})
         elif isinstance(entry, dict):
             dtype = entry.get("device_type")
             for d in pool._find_candidates(
