@@ -401,12 +401,22 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
     devices = list(pool._read_state().devices.values())
     held = registry.held_udids(except_session=session_id)
     mine = registry.held_udids() - held
+
+    def held_by_me(udid: str) -> bool:
+        # Including an emulator still coming up for this session's own AVD
+        # boot, which a concurrent request could otherwise take as one more
+        # device (CodeRabbit).
+        if udid in mine:
+            return True
+        holder = registry.holder_of(udid)
+        return holder is not None and holder.session.id == session_id
+
     if body.group is not None:
         devices = _group_members(body.group, devices, pool)
         # No count means "the whole group": only the members this session does
         # not hold yet -- holding them all already is success, not a 409 for a
         # shortage that does not exist (CodeRabbit). A count means that many more.
-        wanted = body.count or len([d for d in devices if d.udid not in mine])
+        wanted = body.count or len([d for d in devices if not held_by_me(d.udid)])
         if wanted == 0:
             return [], []
     else:
@@ -421,10 +431,7 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
     # holder_of also sees an emulator appearing while another session boots
     # its AVD (#582), by when it appeared rather than by its name.
     def taken(d: Any) -> bool:
-        if d.udid in held or d.udid in mine:
-            return True
-        holder = registry.holder_of(d.udid)
-        return holder is not None and holder.session.id != session_id
+        return d.udid in held or d.udid in mine or registry.holder_of(d.udid) is not None
     devices = sorted((d for d in devices if not taken(d) and d.is_available),
                      key=pool._rank_candidate)
     booted = [d for d in devices if d.state == DeviceState.BOOTED]

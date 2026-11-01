@@ -1191,6 +1191,14 @@ class TestReservingAShutDownAvd:
             udid="emulator-5554", state=DeviceState.BOOTED, is_available=True, name=name)
         return b
 
+    def test_nor_by_a_concurrent_request_of_the_booting_session(self, client, pool,
+                                                                 registry):
+        # The booting session's own second request must not count its
+        # emulator, still coming up, as one more free device (CodeRabbit).
+        b = self._booting_elsewhere(client, pool, registry)
+        assert _reserve(client, "claude-b", count=1).status_code == 409
+        b.close()
+
     @pytest.mark.parametrize("name", ["Pixel_8_API35", "sdk_gphone64_arm64"])
     def test_an_emulator_appearing_during_another_boot_is_not_picked(self, client, pool,
                                                                      registry, name):
