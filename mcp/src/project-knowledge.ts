@@ -90,6 +90,57 @@ export function appProjectMarker(dir: string): string | null {
   return null;
 }
 
+export type Platform = "ios" | "android";
+
+/** The platform a project's devices are on, and where that was read (#582):
+ * the knowledge base's `.quern/config.json` "platform", or the project's own
+ * files. Sent with device requests as a default, so an iOS project is never
+ * handed an Android device it did not ask for -- and the reverse. */
+export interface ProjectPlatform {
+  platform: Platform;
+  source: "knowledge_base" | "project";
+}
+
+/** The platforms a project builds for, from its files: an Xcode project or
+ * workspace (at the root, in ios/, or KMP's iosApp/) and an Android app
+ * module (at the root or in android/). Flutter and React Native projects have
+ * both, and so read as neither one. */
+export function projectPlatforms(dir: string): Set<Platform> {
+  const found = new Set<Platform>();
+  const xcode = (d: string) => entries(d).some((e) => e.endsWith(".xcodeproj") || e.endsWith(".xcworkspace"));
+  if (xcode(dir) || xcode(join(dir, "ios")) || xcode(join(dir, "iosApp"))) found.add("ios");
+  const gradle = (d: string) => ["settings.gradle", "settings.gradle.kts"].some((f) =>
+    existsSync(join(d, f))) && hasAndroidModule(d);
+  if (gradle(dir) || gradle(join(dir, "android"))) found.add("android");
+  return found;
+}
+
+/** The config's "platform": "ios", "android", or a list naming one of them.
+ * A list naming both, null, or anything else says nothing. */
+function configuredPlatform(value: unknown): Platform | null | undefined {
+  const named = (Array.isArray(value) ? value : [value])
+    .filter((v): v is Platform => v === "ios" || v === "android");
+  const unique = [...new Set(named)];
+  if (unique.length === 1) return unique[0];
+  // Both named: deliberately cross-platform, so the files are not asked.
+  return unique.length === 2 ? null : undefined;
+}
+
+export function detectProjectPlatform(
+  dir: string = projectDirFromEnv(process.env.QUERN_PROJECT_DIR, process.cwd()),
+): ProjectPlatform | null {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, ".quern", "config.json"), "utf-8"));
+    const configured = configuredPlatform(parsed?.platform);
+    if (configured === null) return null;
+    if (configured) return { platform: configured, source: "knowledge_base" };
+  } catch {
+    // No config, or not JSON: the files decide.
+  }
+  const found = projectPlatforms(dir);
+  return found.size === 1 ? { platform: [...found][0], source: "project" } : null;
+}
+
 /** QUERN_PROJECT_DIR as a path: `~` expanded, relative made absolute. */
 export function projectDirFromEnv(value: string | undefined, cwd: string): string {
   if (!value) return cwd;

@@ -164,16 +164,17 @@ test("use_remote's selection wins over QUERN_REMOTE, and 'local' means this Mac"
   }
 });
 
-test("the listing hint is list_devices' own filter: name first, stored family", () => {
+test("the listing hint is list_devices' own filter: criteria, then name, stored family", () => {
   const data = { remotes: [{ name: "romulus", devices: [
     { udid: "A", name: "iPhone 15", os_version: "iOS 18.6", device_family: "iPhone", free: true, state: "booted" },
     { udid: "B", name: "iPhone 15 Pro", os_version: "iOS 17.5", device_family: "iPhone", free: true, state: "booted" },
     { udid: "C", name: "iPhone SE (2nd generation)", os_version: "iOS 17.5", device_family: "", free: true, state: "booted" },
     { udid: "D", name: "iPhone SE", os_version: "iOS 17.5", device_family: "iPhone", free: false, state: "booted" },
   ] }] };
-  // The exact name wins before the OS filter, as in the endpoint: listing
-  // there finds nothing, so nothing is offered (CodeRabbit).
-  assert.deepEqual(matchingElsewhere(data, "local", { name: "iPhone 15", os_version: "17.5", listing: true }), []);
+  // The OS filter runs before the name, as the endpoint now does -- the
+  // pool's order, so a list and a reservation agree (#582).
+  assert.deepEqual(udids(matchingElsewhere(data, "local", { name: "iPhone 15", os_version: "17.5", listing: true })),
+                   ["romulus:B"]);
   assert.deepEqual(udids(matchingElsewhere(data, "local", { name: "iPhone 15", os_version: "17.5" })),
                    ["romulus:B"], "the pool filters first, then names");
   // No family stored: the listing compares it as stored, so it is not an iPhone.
@@ -182,4 +183,23 @@ test("the listing hint is list_devices' own filter: name first, stored family", 
   // A held exact match still decides what the listing shows: it lists the
   // held one, not the free substring match, so none is offered.
   assert.deepEqual(matchingElsewhere(data, "local", { name: "iPhone SE", listing: true }), []);
+});
+
+test("elsewhere: a hint stays on the request's platform and reads 'Android 16' (#582)", () => {
+  const list = { remotes: [{ name: "romulus", devices: [
+    { udid: "I16", name: "iPhone 14", os_version: "iOS 16.4", device_family: "iPhone",
+      device_type: "simulator", free: true, state: "booted" },
+    { udid: "A16", name: "Pixel_8_API_36", model: "Pixel 8", os_version: "16",
+      device_family: "Android", device_type: "android_emulator", free: true, state: "shutdown" },
+  ] }] };
+  assert.deepEqual(udids(matchingElsewhere(list, "local", { os_version: "16", platform: "android" })),
+                   ["romulus:A16"], "an Android request is not offered an iOS 16 simulator");
+  assert.deepEqual(udids(matchingElsewhere(list, "local", { os_version: "Android 16" })),
+                   ["romulus:A16"], "a prefixed version names the platform");
+  assert.deepEqual(udids(matchingElsewhere(list, "local", { os_version: "iOS 16", listing: true })),
+                   ["romulus:I16"]);
+  assert.deepEqual(udids(matchingElsewhere(list, "local", { name: "Pixel 8 API 36" })),
+                   ["romulus:A16"], "underscores read as spaces");
+  assert.deepEqual(udids(matchingElsewhere(list, "local", { name: "pixel 8", listing: true })),
+                   ["romulus:A16"], "a listing matches the model too, as the server's list now does");
 });

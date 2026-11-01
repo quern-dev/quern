@@ -5,6 +5,7 @@ import { switchHeldSession } from "../held-session.js";
 import { SESSION_ID, ServerTimeout, ServerUnreachable, apiRequest, serverFetch } from "../http.js";
 import { loadRemote } from "../remote.js";
 import { cleanUpStranded, moveOut } from "../carried.js";
+import { osMatches, platformOf, type Platform } from "../platform.js";
 
 /** Run after a switch is live: loads this project's knowledge base on the new
  * server, as at start (index.ts wires it in). Its answer goes into use_remote's. */
@@ -282,6 +283,9 @@ async function proxyThere(): Promise<Record<string, unknown>> {
 }
 
 export interface ReserveCriteria {
+  /** The platform the request was made on, the agent's or the project's:
+   * a hint never offers the other platform's devices (#582). */
+  platform?: Platform;
   device_type?: string;
   os_version?: string;
   name?: string;
@@ -304,22 +308,13 @@ function familyOf(d: Record<string, unknown>): string {
   return "";
 }
 
-/** The OS version's number part: "iOS 18.6" -> "18.6". */
-function versionOf(v: unknown): string | undefined {
-  return String(v ?? "").match(/[\d.]+/)?.[0];
-}
-
-function osMatches(have: unknown, wanted: string | undefined): boolean {
-  const want = versionOf(wanted);
-  const v = versionOf(have);
-  return !!want && !!v && (v === want || v.startsWith(want + "."));
-}
-
-/** Exact (case-insensitive) on any of `fields` if one is, else a substring. */
+/** Exact (case-insensitive, underscores as spaces) on any of `fields` if one
+ * is, else a substring: "Pixel 7" finds the AVD Pixel_7_API_34 (#582). */
 function byName(devices: Record<string, unknown>[], name: string,
                 fields: (d: Record<string, unknown>) => string[]): Record<string, unknown>[] {
-  const n = name.toLowerCase();
-  const of = (d: Record<string, unknown>) => fields(d).map((f) => f.toLowerCase()).filter(Boolean);
+  const fold = (t: string) => t.replace(/_/g, " ").toLowerCase();
+  const n = fold(name);
+  const of = (d: Record<string, unknown>) => fields(d).map(fold).filter(Boolean);
   const exact = devices.filter((d) => of(d).includes(n));
   return exact.length ? exact : devices.filter((d) => of(d).some((f) => f.includes(n)));
 }
@@ -331,7 +326,8 @@ function reservable(devices: Record<string, unknown>[], c: ReserveCriteria): Rec
     if (d.is_available === false) return false;
     const bootable = c.auto_boot !== false && d.state === "shutdown";
     if (d.state !== "booted" && !bootable) return false;
-    if (c.os_version && !osMatches(d.os_version, c.os_version)) return false;
+    if (c.platform && platformOf(d.device_type) !== c.platform) return false;
+    if (c.os_version && !osMatches(d.os_version, d.device_type, c.os_version)) return false;
     if (c.device_type && d.device_type !== c.device_type) return false;
     if (c.device_family && familyOf(d).toLowerCase() !== c.device_family.toLowerCase()) return false;
     return true;
@@ -339,17 +335,18 @@ function reservable(devices: Record<string, unknown>[], c: ReserveCriteria): Rec
   return c.name ? byName(out, c.name, (d) => [String(d.name ?? ""), String(d.model ?? "")]) : out;
 }
 
-/** What list_devices would list, in its own order (server/api/device.py):
- * type, then the name -- the name alone, exact before substring -- then the
- * OS version prefix, then the stored family, nothing inferred (CodeRabbit). */
+/** What list_devices would list (server/api/device.py): type and platform,
+ * the OS version prefix, the stored family (nothing inferred, CodeRabbit),
+ * then the name or model, exact before substring. */
 function listed(devices: Record<string, unknown>[], c: ReserveCriteria): Record<string, unknown>[] {
   let out = c.device_type ? devices.filter((d) => d.device_type === c.device_type) : devices;
-  if (c.name) out = byName(out, c.name, (d) => [String(d.name ?? "")]);
-  if (c.os_version) out = out.filter((d) => osMatches(d.os_version, c.os_version));
+  if (c.platform) out = out.filter((d) => platformOf(d.device_type) === c.platform);
+  if (c.os_version) out = out.filter((d) => osMatches(d.os_version, d.device_type, c.os_version));
   if (c.device_family) {
     const want = c.device_family.toLowerCase();
     out = out.filter((d) => String(d.device_family ?? "").toLowerCase() === want);
   }
+  if (c.name) out = byName(out, c.name, (d) => [String(d.name ?? ""), String(d.model ?? "")]);
   return out;
 }
 

@@ -1,9 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { strictParams, errorText } from "./helpers.js";
-import { existsSync, cpSync, readdirSync, readFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { existsSync, cpSync, readdirSync, readFileSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { projectPlatforms } from "../project-knowledge.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = join(__dirname, "..", "..", "..", "templates", "app-knowledge");
@@ -49,9 +50,28 @@ After initialization, read the quern://app-knowledge-guide resource for instruct
 
       // Create config.json at .quern/config.json if it doesn't exist
       const configExisted = existsSync(configPath);
+      let platformNote = "";
       if (!configExisted && existsSync(CONFIG_TEMPLATE)) {
         mkdirSync(quernDir, { recursive: true });
         cpSync(CONFIG_TEMPLATE, configPath);
+        // The platform device requests default to (#582), from the project's
+        // files: one platform is written; a cross-platform project is left
+        // for the user, since only they know which they test on.
+        const found = [...projectPlatforms(project_dir)];
+        try {
+          const config = JSON.parse(readFileSync(configPath, "utf-8"));
+          if (found.length === 1) {
+            config.platform = found[0];
+            writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
+            platformNote = `- platform: ${found[0]} (read from the project; device requests default to it)`;
+          } else {
+            platformNote = found.length === 2
+              ? "- platform: not set -- this project builds for iOS and Android. Set \"platform\" in .quern/config.json to the one you test on, or leave it null to choose per request."
+              : "- platform: not set -- no Xcode or Android project found. Set \"platform\" in .quern/config.json to \"ios\" or \"android\".";
+          }
+        } catch {
+          platformNote = "- platform: not set (the new config.json could not be read)";
+        }
       }
 
       // Build a summary of what's in the knowledge base
@@ -81,7 +101,7 @@ After initialization, read the quern://app-knowledge-guide resource for instruct
         : [
             "Next steps:",
             "1. Read the quern://app-knowledge-guide resource for the full guided tour process.",
-            "2. Fill in .quern/config.json with the app's bundle ID, app name, workspace, and schemes.",
+            "2. Fill in .quern/config.json with the app's bundle ID, app name, workspace, and schemes, and check its platform (\"ios\" or \"android\").",
             "3. Fill in app.md with entry points, global navigation, and test accounts.",
             "4. Launch the app and begin documenting screens with the user.",
           ].join("\n");
@@ -89,7 +109,8 @@ After initialization, read the quern://app-knowledge-guide resource for instruct
       return {
         content: [{
           type: "text" as const,
-          text: [status, "", summary, configStatus, "", nextSteps].join("\n"),
+          text: [status, "", summary, configStatus, ...(platformNote ? [platformNote] : []), "",
+            nextSteps].join("\n"),
         }],
       };
     } catch (e) {

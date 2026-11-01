@@ -5,6 +5,7 @@ import { SESSION_ID, apiRequest } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
 import { betweenSwitches, elsewhereHint } from "./system.js";
 import { applyOnReserve, released } from "../carried.js";
+import { PLATFORM_DESCRIPTION, platformFields } from "../platform.js";
 
 function answer(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -33,13 +34,15 @@ After a use_remote switch, the first reservation that includes simulators also s
       count: z.number().int().min(1).max(64).optional().describe("How many devices to pick (default 1 with criteria)"),
       group: z.string().optional().describe("A named group from config.json's device_groups"),
       device_type: z.enum(["simulator", "device", "android_emulator", "android_device"]).optional(),
-      os_version: z.string().optional().describe("OS version prefix, e.g. '18'"),
-      name: z.string().optional().describe("Device name or model, e.g. 'iPhone 16' or 'iPad Pro 11-inch (M4)'; matches a renamed simulator by its model"),
+      os_version: z.string().optional().describe("OS version prefix, e.g. '18', 'iOS 18.6', 'Android 16'"),
+      platform: z.enum(["ios", "android"]).optional().describe(PLATFORM_DESCRIPTION),
+      name: z.string().optional().describe("Device name or model, e.g. 'iPhone 16', 'Pixel 7' or 'iPad Pro 11-inch (M4)'; matches a renamed simulator by its model, and an AVD's name with spaces for underscores"),
       device_family: z.string().optional().describe("'iPhone', 'iPad', ..."),
       auto_boot: z.boolean().optional().describe("Boot shutdown devices to make up the count (default true)"),
       on_release: z.enum(["none", "shutdown_booted"]).optional().describe("shutdown_booted: when released, shut down the simulators this reservation booted. Default none"),
     }),
-  }, async (args) => {
+  }, async ({ platform, ...args }) => {
+    const picking = platformFields(platform);
     try {
       // Never during a switch: reserved on the old server after use_remote
       // checked what is held there, it was released by the switch's clean
@@ -48,7 +51,8 @@ After a use_remote switch, the first reservation that includes simulators also s
       // same turn of the queue: two reservations at once, or one and a
       // switch, applied it twice or lost it (review).
       const { data, carried } = await betweenSwitches(async () => {
-        const data = (await apiRequest("POST", path("/reservations"), undefined, args)) as
+        const data = (await apiRequest("POST", path("/reservations"), undefined,
+          { ...args, ...picking })) as
           { reserved?: { udid?: string; device_type?: string }[] } | null;
         return { data, carried: await applyOnReserve(data?.reserved ?? []) };
       });
@@ -61,7 +65,7 @@ After a use_remote switch, the first reservation that includes simulators also s
       // connection, or a race lost, is not fixed by going elsewhere (review).
       if (/HTTP 409.*asked for \d+ device\(s\), \d+ free/.test(message) &&
           !args.udids && !args.group) {
-        const hint = await elsewhereHint(args);
+        const hint = await elsewhereHint({ ...args, platform: picking.platform });
         if (hint) {
           return { content: [{ type: "text" as const, text: errorText(e) + hint }], isError: true };
         }
