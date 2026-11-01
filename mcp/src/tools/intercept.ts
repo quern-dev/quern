@@ -224,7 +224,9 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
 
 ONE SIMULATOR: pass simulator_udid to mock only that simulator's requests. Every other device's matching requests reach the real server and are captured as usual, so other simulators (CI runs, other agents) are unaffected. No filter pattern can do this: every simulator's traffic arrives from 127.0.0.1. Quern decides from the process that opened the connection, walked up the live process tree, so it covers that simulator's web views too (its WebKit and Safari traffic). A request quern cannot attribute is NOT mocked by a scoped rule. Needs local capture to be reliable; with only the system proxy, the connection's process may not be known yet when the request arrives. Can't mock HTTPS from a simulator whose TLS is passed through because it does not trust the CA, and never mocks replay_flow (replays come from quern itself). The response's warning says when any of these applies, or when the UDID is not a booted simulator.
 
-ORDER: rules scoped to the requesting simulator are checked before unscoped ones, so a catch-all never shadows a simulator's own mock; within each group, the first rule set wins, and update_mock keeps a rule's place.
+ONE ANDROID DEVICE: pass its serial as simulator_udid (e.g. emulator-5554). An emulator's requests are told by the emulator process that opened the connection, a phone's by its Wi-Fi address, which quern reads over adb (or from device-proxy-config's record); a phone whose address it cannot find is refused. The device must be routed through this proxy (record_device_proxy_config with apply=true): the warning says when it isn't. A request whose device cannot be told is not mocked.
+
+ORDER: rules scoped to the requesting device -- a simulator or an Android device -- are checked before unscoped ones, so a catch-all never shadows a device's own mock; within each group, the first rule set wins, and update_mock keeps a rule's place.
 
 A mocked request is recorded once, like any other flow, with mock_rule_id set and the tag "mocked", so captured traffic tells synthetic responses from real ones.`,
       inputSchema: strictParams({
@@ -233,9 +235,10 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           .describe('Filter pattern (e.g. "~d api.example.com & ~u /v1/users", "~m POST & ~u /v1/login")'),
         simulator_udid: z
           .string()
+          .trim()
           .optional()
           .describe(
-            "Mock only this simulator's requests (its UDID, from list_devices). Omit to mock every device."
+            "Mock only this device's requests: a simulator's UDID, or an Android emulator's or phone's serial (e.g. emulator-5554), from list_devices. Omit to mock every device."
           ),
         status_code: z
           .coerce.number()
@@ -274,7 +277,8 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
         // Kept as set, so a switch can move it (carried.ts).
         const ruleId = (data as { rule_id?: unknown } | null)?.rule_id;
         if (typeof ruleId === "string") {
-          recordMock(ruleId, { pattern, response, simulator_udid: simulator_udid ?? null });
+          recordMock(ruleId, { pattern, response, simulator_udid: simulator_udid ?? null,
+                               platform: (data as { platform?: unknown } | null)?.platform });
         }
 
         return {
@@ -328,7 +332,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
   server.registerTool(
     "update_mock",
     {
-      description: `Update an existing mock rule's pattern, response fields or simulator scope. Only provided fields are changed: omitting simulator_udid keeps the rule's scope, a UDID re-scopes it, and null makes it mock every device.`,
+      description: `Update an existing mock rule's pattern, response fields or device scope. Only provided fields are changed: omitting simulator_udid keeps the rule's scope, a simulator UDID or Android serial re-scopes it (a phone's address is read again then), and null makes it mock every device.`,
       inputSchema: strictParams({
         rule_id: z.string().describe("The mock rule ID to update"),
         pattern: z
@@ -351,10 +355,11 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           .describe("New response body string"),
         simulator_udid: z
           .string()
+          .trim()
           .nullable()
           .optional()
           .describe(
-            "A UDID to scope the rule to that simulator, or null to mock every device. Omit to keep the current scope."
+            "A simulator UDID or Android serial to scope the rule to that device, or null to mock every device. Omit to keep the current scope."
           ),
       }),
     },
@@ -386,7 +391,8 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           undefined,
           payload
         );
-        updateMock(rule_id, payload as Parameters<typeof updateMock>[1]);
+        updateMock(rule_id, { ...payload,
+          platform: (data as { platform?: unknown } | null)?.platform } as Parameters<typeof updateMock>[1]);
 
         return {
           content: [
