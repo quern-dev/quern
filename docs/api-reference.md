@@ -566,7 +566,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
 | `resolve_device` | POST | `/api/v1/devices/resolve` | Resolve a device by criteria *or* by explicit `udid` (sets active device). Picks on one platform -- see "Choosing a platform" below |
-| `ensure_devices` | POST | `/api/v1/devices/ensure` | Ensure N devices matching criteria are booted, on one platform as `resolve_device`. Fewer usable than asked for is a 404 when none match, and a 409 when some do but too few, or shut down with `auto_boot` off |
+| `ensure_devices` | POST | `/api/v1/devices/ensure` | Ensure N devices matching criteria are booted, on one platform as `resolve_device`. Fewer usable than asked for is a 404 when none match, and a 409 when some do but too few, booting, or shut down with `auto_boot` off. None matching while listing that platform's devices failed (simctl ran and errored) is a 503: it could not tell |
 
 #### Choosing a platform
 

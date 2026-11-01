@@ -38,6 +38,18 @@ def _platform_error(e: Exception) -> HTTPException:
     return HTTPException(status_code=400, detail=str(e))
 
 
+#: Which platform each listing backend finds devices for.
+_LISTED_PLATFORM = {"simctl": "ios", "devicectl": "ios", "usbmux": "ios", "adb": "android"}
+
+
+def _listing_failed(pool, on_platform: str | None) -> str:
+    """The listing failures that bear on a pick on ``on_platform`` (any, when
+    None), as "tool: why; ...", or "" when there were none."""
+    failures = getattr(pool.controller, "listing_failures", None) or {}
+    return "; ".join(f"{tool}: {why}" for tool, why in failures.items()
+                     if on_platform is None or _LISTED_PLATFORM.get(tool) == on_platform)
+
+
 def _parse_device_type(value: str | None) -> DeviceType | None:
     """Convert a string device_type to DeviceType enum, or None."""
     if value is None:
@@ -117,8 +129,10 @@ async def ensure_devices(request: Request, body: EnsureDevicesRequest):
 
     The first device becomes the active device for subsequent tool calls.
     Returns 200 with device list on success.
-    Returns 404 if not enough matching devices exist.
-    Returns 503 if boot failed for one or more devices.
+    Returns 404 if no device matches, 409 if some do but too few are usable
+    (too few, booting, or shut down with auto_boot off).
+    Returns 503 if boot failed, or if no device matched while listing devices
+    on the platform asked for failed -- "could not tell", not "none".
     """
     pool = _get_pool(request)
     report: dict = {}
@@ -154,9 +168,13 @@ async def ensure_devices(request: Request, body: EnsureDevicesRequest):
     except (platform.PlatformRefusal, platform.PlatformConflict) as e:
         raise _platform_error(e)
     except NotEnoughDevices as e:
-        # None match: 404, as resolve's "no device matching". Some do, but
-        # too few or not usable (shut down with auto_boot off): 409, as a
-        # reservation's "asked for N, M free".
+        # None match: 404, as resolve's "no device matching" -- unless the
+        # listing that found none failed, which is not an answer (review).
+        # Some do, but too few or not usable: 409, as a reservation's
+        # "asked for N, M free".
+        if e.matched == 0 and (failed := _listing_failed(pool, report.get("platform"))):
+            raise HTTPException(status_code=503, detail=(
+                f"{e} But listing devices failed ({failed}), so they may exist."))
         raise HTTPException(status_code=404 if e.matched == 0 else 409, detail=str(e))
     except DeviceError as e:
         raise _handle_pool_error(e)

@@ -219,6 +219,13 @@ class DeviceController(DeviceControllerUI):
         # Device info cache for screen dimensions
         # Device type cache: udid -> DeviceType (populated by list_devices)
         self._device_type_cache: dict[str, DeviceType] = {}
+        #: The device-listing backends that ran and failed in the last
+        #: list_devices, by name ("simctl", ...), with why. A tool that is not
+        #: installed is absent, not failed, and is left out: a host without
+        #: Xcode has no simulators, and saying "could not list them" would be
+        #: wrong too. Read so "nothing matched" is not claimed on an empty
+        #: list that only means discovery failed (review).
+        self.listing_failures: dict[str, str] = {}
         # Simulators whose input services have been checked this boot.
         # See server/device/ios/sim_input.py; the check costs a `simctl
         # spawn` (~0.5s), so it is paid once per device rather than per
@@ -935,26 +942,34 @@ class DeviceController(DeviceControllerUI):
         # which is the one case it names. On a Mac every binary is present and
         # nothing noticed; a host without Xcode took the exception through
         # resolve_udid and out of whatever call warmed the cache.
+        failures: dict[str, str] = {}
+
+        def failed(tool: str, e: Exception) -> None:
+            logger.debug("%s list_devices failed", tool, exc_info=True)
+            if not isinstance(e, FileNotFoundError):
+                failures[tool] = str(e) or type(e).__name__
+
         try:
             sim_devices = await self.simctl.list_devices()
-        except (DeviceError, OSError):
-            logger.debug("simctl list_devices failed (simctl unavailable)", exc_info=True)
+        except (DeviceError, OSError) as e:
+            failed("simctl", e)
             sim_devices = []
         try:
             physical_devices = await self.devicectl.list_devices()
-        except (DeviceError, OSError):
-            logger.debug("devicectl list_devices failed", exc_info=True)
+        except (DeviceError, OSError) as e:
+            failed("devicectl", e)
             physical_devices = []
         try:
             usbmux_devices = await self.usbmux.list_devices()
-        except (DeviceError, OSError):
-            logger.debug("usbmux list_devices failed", exc_info=True)
+        except (DeviceError, OSError) as e:
+            failed("usbmux", e)
             usbmux_devices = []
         try:
             android_devices = await self.adb.list_devices()
-        except (DeviceError, OSError):
-            logger.debug("adb list_devices failed", exc_info=True)
+        except (DeviceError, OSError) as e:
+            failed("adb", e)
             android_devices = []
+        self.listing_failures = failures
 
         # Populate device type cache and WDA os_version cache
         for d in sim_devices:

@@ -680,6 +680,7 @@ class DevicePool:
             [d for d in matching if d.state == DeviceState.SHUTDOWN],
             key=self._rank_candidate,
         )
+        booting = len(matching) - len(booted_available) - len(shutdown_available)
 
         total_available = len(booted_available) + (len(shutdown_available) if auto_boot else 0)
         if total_available < count:
@@ -694,10 +695,11 @@ class DevicePool:
             raise NotEnoughDevices(
                 f"Need {count} devices matching {criteria_str} "
                 f"but only {total_available} available "
-                f"({len(booted_available)} booted, {len(shutdown_available)} shutdown)."
+                f"({len(booted_available)} booted, {len(shutdown_available)} shutdown"
+                + (f", {booting} booting or otherwise busy" if booting else "") + ")."
                 + (" auto_boot is off, so the shut-down ones were not counted."
                    if shutdown_available and not auto_boot else ""),
-                matched=len(booted_available) + len(shutdown_available),
+                matched=len(matching),
             )
 
         # Select devices: booted first (ranked), then shutdown to boot (ranked)
