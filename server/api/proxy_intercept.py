@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from pathlib import Path
 
@@ -208,6 +209,86 @@ async def replay_flow(
 _SCOPE_LISTING_TIMEOUT_S = 5.0
 
 
+async def _android_mock_scope(request: Request, scope: str | None) -> str | None:
+    """Check a mock scope that names an Android device, and return how its
+    requests are told (#582): None for an emulator, which its QEMU process
+    identifies, or a physical phone's Wi-Fi address, which is the peer of
+    every connection it makes. A simulator scope, or none, is left as it was.
+
+    Refused (422) when the serial is not an Android device quern knows, and
+    when a phone's address cannot be found: either would be a mock that never
+    fires, which is the state scope validation exists to refuse."""
+    from server.models import DeviceType, is_simulator_scope
+
+    if scope is None or is_simulator_scope(scope):
+        return None
+    controller = getattr(request.app.state, "device_controller", None)
+    if controller is None:
+        raise HTTPException(503, "the device controller is not available")
+    device_type = getattr(controller, "_device_type", None)
+    kind = device_type(scope) if device_type else None
+    if kind is None and device_type:
+        # A cold cache is not "unknown device": list once, bounded.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(controller.list_devices(), _SCOPE_LISTING_TIMEOUT_S)
+        kind = device_type(scope)
+    if kind not in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE):
+        raise HTTPException(422, (
+            f"{scope} is not a simulator UDID or the serial of an Android device "
+            "quern can see (list_devices). A mock scoped to it would never fire."))
+    if controller.adb.is_console_serial(scope):
+        return None
+    host = scope.rsplit(":", 1)[0] if ":" in scope else ""
+    if host in ("localhost", "127.0.0.1", "::1"):
+        raise HTTPException(422, (
+            f"{scope} is an emulator reached over TCP. Its traffic is attributed "
+            "to its console serial, emulator-<port>: scope the mock to that."))
+    ip = await controller.adb.get_lan_ip(scope)
+    if not ip:
+        from server.proxy.cert_state import read_cert_state_for_device
+
+        record = read_cert_state_for_device(scope) or {}
+        ip = next((c.get("client_ip") for c in (record.get("wifi_proxy_configs") or {}).values()
+                   if c.get("client_ip")), None)
+    if not ip:
+        raise HTTPException(422, (
+            f"Could not find {scope}'s network address, which is how its requests "
+            "are told apart. Route it through the proxy with device-proxy-config "
+            "(apply=true), which reads and records it, then set the mock."))
+    return ip
+
+
+def _scope_platform(scope: str | None) -> str | None:
+    """Which platform a mock's scope is on, for the MCP's carried record
+    (#582): its copies go to the same kind of device on the next server."""
+    from server.models import is_simulator_scope
+
+    if scope is None:
+        return None
+    return "ios" if is_simulator_scope(scope) else "android"
+
+
+async def _android_scope_warning(request: Request, serial: str) -> str | None:
+    """Why a mock scoped to an Android device may not fire: it is not routed
+    through this proxy, as far as adb can tell."""
+    from server.api.proxy_certs import _read_device_proxy
+
+    controller = getattr(request.app.state, "device_controller", None)
+    adapter = getattr(request.app.state, "proxy_adapter", None)
+    if controller is None:
+        return None
+    proxy, read = await _read_device_proxy(controller, serial)
+    port = getattr(adapter, "listen_port", None)
+    if not read:
+        return (f"Could not read {serial}'s proxy setting, so whether its traffic "
+                "reaches this proxy is unknown. The mock applies only if it does.")
+    if not proxy or (port and not proxy.endswith(f":{port}")):
+        return (f"{serial} is not routed through this proxy (its proxy setting is "
+                f"{proxy or 'empty'}), so the mock cannot see its requests. Apply "
+                "device-proxy-config with apply=true first.")
+    return None
+
+
 async def _mock_scope_warning(request: Request, udid: str | None) -> str | None:
     """Why a mock scoped to `udid` may not fire, or None if nothing is known.
 
@@ -218,6 +299,10 @@ async def _mock_scope_warning(request: Request, udid: str | None) -> str | None:
     """
     if udid is None:
         return None
+    from server.models import is_simulator_scope
+
+    if not is_simulator_scope(udid):
+        return await _android_scope_warning(request, udid)
     reasons: list[str] = []
 
     adapter = getattr(request.app.state, "proxy_adapter", None)
@@ -282,11 +367,13 @@ async def _mock_scope_warning(request: Request, udid: str | None) -> str | None:
 async def set_mock(request: Request, body: SetMockRequest) -> dict:
     """Add a mock response rule. Matching requests get a synthetic response."""
     adapter = _require_running_proxy(request)
+    client_ip = await _android_mock_scope(request, body.simulator_udid)
     try:
         rule_id = await adapter.set_mock(
             pattern=body.pattern,
             response=body.response.model_dump(),
             simulator_udid=body.simulator_udid,
+            client_ip=client_ip,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -298,6 +385,7 @@ async def set_mock(request: Request, body: SetMockRequest) -> dict:
     result = {
         "status": "accepted", "rule_id": rule_id, "pattern": body.pattern,
         "simulator_udid": body.simulator_udid,
+        "platform": _scope_platform(body.simulator_udid),
     }
     warning = await _mock_scope_warning(request, body.simulator_udid)
     if warning:
@@ -352,6 +440,7 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
         from server import device_access
 
         device_access.require_owner("removing a mock rule's simulator_udid")
+    client_ip = await _android_mock_scope(request, body.simulator_udid) if scope_given else None
     try:
         rule = await adapter.update_mock(
             rule_id=rule_id,
@@ -360,6 +449,7 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
             response=body.response.model_dump(exclude_unset=True) if body.response else None,
             simulator_udid=body.simulator_udid,
             scope_given=scope_given,
+            client_ip=client_ip,
         )
     except ValueError as e:
         detail = str(e)
@@ -369,6 +459,7 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
         "status": "updated", "rule_id": rule_id,
         "pattern": rule["pattern"], "response": rule["response"],
         "simulator_udid": rule.get("simulator_udid"),
+        "platform": _scope_platform(rule.get("simulator_udid")),
     }
     warning = (
         await _mock_scope_warning(request, rule.get("simulator_udid")) if scope_given else None

@@ -297,3 +297,12 @@ test("a server that answers with an error is still asked to release and remove",
   assert.ok(r.logs.local.includes("DELETE /api/v1/proxy/mocks/mock_local2"));
   assert.equal(r.away.carried.still_on_old, undefined, "both removed: nothing left there");
 });
+
+test("a mock scoped to an Android device moves to an Android device, not a simulator (#582)", async () => {
+  const r = await run("carry-android");
+  const posts = r.bodies.romulus.filter((b) => b.path === "POST /api/v1/proxy/mocks").map((b) => b.body);
+  assert.deepEqual(posts.map((b) => [b.pattern, b.simulator_udid]),
+                   [["~u /sim", "SIM-R1"], ["~u /emu", "emulator-5556"]]);
+  assert.deepEqual(r.onSimulator.carried.still_waiting, { mocks: 1, session_capture: 0 });
+  assert.equal(r.onEmulator.carried.still_waiting, undefined);
+});

@@ -1717,22 +1717,35 @@ _SIMULATOR_UDID_RE = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
 )
 
+#: An adb serial: `emulator-5554`, a phone's `8BAY0WCL7`, `192.168.1.9:5555`.
+_ANDROID_SERIAL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$")
+
+
+def is_simulator_scope(scope: str) -> bool:
+    return bool(_SIMULATOR_UDID_RE.match(scope))
+
 
 def _normalise_mock_scope(value: str | None) -> str | None:
-    """A simulator UDID, upper-cased, or None for an unscoped rule.
+    """A simulator UDID, upper-cased; an Android serial as adb spells it
+    (#582); or None for an unscoped rule. The name stays `simulator_udid`.
 
     Refused rather than stored when malformed: a scoped rule matches only its
-    simulator's requests and fails closed, so a typo would be a mock that
-    silently never fires -- success and broken looking identical.
+    device's requests and fails closed, so a typo would be a mock that
+    silently never fires -- success and broken looking identical. Whether a
+    serial names an Android device quern knows is checked by the route.
     """
     if value is None:
         return None
-    if not isinstance(value, str) or not _SIMULATOR_UDID_RE.match(value.strip()):
-        raise ValueError(
-            "simulator_udid must be a simulator UDID such as "
-            "'32593887-01F3-47B8-AF34-B2D444DB37FA'; omit it to mock every device"
-        )
-    return value.strip().upper()
+    text = value.strip() if isinstance(value, str) else ""
+    if _SIMULATOR_UDID_RE.match(text):
+        return text.upper()
+    if _ANDROID_SERIAL_RE.match(text):
+        return text
+    raise ValueError(
+        "simulator_udid must be a simulator UDID such as "
+        "'32593887-01F3-47B8-AF34-B2D444DB37FA' or an Android serial such as "
+        "'emulator-5554'; omit it to mock every device"
+    )
 
 
 class MockResponseSpec(BaseModel):
@@ -1757,10 +1770,11 @@ class SetMockRequest(BaseModel):
     headers: dict[str, str] | None = None
     body: str | None = None
     simulator_udid: str | None = None
-    """Apply the mock only to requests from this simulator.
+    """Apply the mock only to requests from this device: a simulator's UDID,
+    or an Android emulator's or phone's serial (#582).
 
     Every other device's matching requests go through untouched, and are
-    captured as usual. A request whose simulator cannot be determined is not
+    captured as usual. A request whose device cannot be determined is not
     mocked -- the rule fails closed. Omit to mock every device, as before."""
 
     @field_validator("simulator_udid")

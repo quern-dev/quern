@@ -37,7 +37,7 @@ A switch is made only once the agent's session is live on the new server. If tha
 
 ## What follows your agent to the new server
 
-- **Its mocks.** The mock responses your agent set are removed from the server it leaves and set up again on the simulators of its first reservation on the new one. That reservation's answer lists the new rule ids, and anything that couldn't be set up yet -- for example because the new server's proxy isn't running -- waits for a later reservation.
+- **Its mocks.** The mock responses your agent set are removed from the server it leaves and set up again on the devices of its first reservation on the new one -- a mock scoped to a simulator on its simulators, one scoped to an Android device on its Android devices. That reservation's answer lists the new rule ids, and anything that couldn't be set up yet -- for example because the new server's proxy isn't running -- waits for a later reservation.
 - **Its session capture.** Apps it asked to capture with `add_session_capture` are captured again on the newly reserved simulators.
 - **Your project's knowledge base.** If your project has one (`.quern/knowledge`), it's loaded on the new server for your agent's session, so screen identification keeps working.
 

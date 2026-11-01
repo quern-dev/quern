@@ -94,6 +94,12 @@ const plans = {
           { "POST /api/v1/proxy/mocks": mockIds("romulus"),
             "GET /api/v1/proxy/status": json(200, { status: "running", local_capture: ["Metatext"] }),
             "POST /api/v1/sessions/agent-1/reservations": async (b) => [200, { reserved: globalThis.reserved }] }],
+  // #582: a mock scoped to an Android device says so, and moves to Android.
+  "carry-android": [{ "POST /api/v1/proxy/mocks": async (b) => [200, {
+                        status: "accepted", rule_id: b.simulator_udid === "emulator-5554" ? "mock_emu" : "mock_sim",
+                        ...(b.simulator_udid === "emulator-5554" ? { platform: "android" } : {}) }] },
+                    { "POST /api/v1/proxy/mocks": mockIds("romulus"),
+                      "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   "carry-retry": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
                   { "POST /api/v1/proxy/mocks": async (b) => globalThis.mocksDown
                       ? [503, { detail: "proxy is not running" }] : retryIds(b),
@@ -246,6 +252,14 @@ if (scenario === "window") {
   result.reserved = JSON.parse(text(await tools.reserve_devices({ count: 2 })).text);
   globalThis.reserved = [{ udid: "SIM-R3", device_type: "simulator" }];
   result.again = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R3"] })).text);
+} else if (scenario === "carry-android") {
+  await tools.set_mock({ pattern: "~u /emu", simulator_udid: "emulator-5554", status_code: 200, body: "E" });
+  await tools.set_mock({ pattern: "~u /sim", simulator_udid: "SIM-L", status_code: 200, body: "S" });
+  result.switched = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
+  result.onSimulator = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text);
+  globalThis.reserved = [{ udid: "emulator-5556", device_type: "android_emulator" }];
+  result.onEmulator = JSON.parse(text(await tools.reserve_devices({ udids: ["emulator-5556"] })).text);
 } else if (scenario === "carry-retry") {
   await tools.set_mock({ pattern: "~u /a", status_code: 200, body: "A" });
   result.switched = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);

@@ -574,3 +574,210 @@ class TestAnUpdateChangesOnlyWhatItNames:
         r = client.patch(f"/api/v1/proxy/mocks/{rid}", headers=AUTH, json={"body": None})
         assert r.status_code == 200, r.text
         assert r.json()["response"]["body"] == "" and r.json()["response"]["status_code"] == 503
+
+
+# ---------------------------------------------------------------------------
+# Android devices (#582)
+# ---------------------------------------------------------------------------
+
+EMU = "emulator-5554"
+PHONE = "8BAY0WCL7"
+PHONE_IP = "192.168.1.244"
+
+
+def _android_rule(a: IOSDebugAddon, rule_id: str, scope: str, client_ip: str | None = None):
+    with patch("server.proxy.addon.flowfilter.parse", return_value=lambda f: True), Out():
+        a._handle_set_mock({
+            "rule_id": rule_id, "pattern": "~d api.example.com",
+            "response": {"status_code": 200, "body": rule_id},
+            "simulator_udid": scope, "client_ip": client_ip,
+        })
+
+
+def _emulator_conn(client_id: str, serial: str | None, pid: int = 4242):
+    """A connection whose process is an emulator's QEMU, its serial already
+    known to the addon's cache, so the request need not wait for lsof."""
+    cache = {pid: (serial, time.monotonic())} if serial else {}
+    return (patch.dict(addon_mod._client_process_info,
+                       {client_id: {"pid": pid, "process_name": "qemu-system-aarch64"}}),
+            patch.dict(addon_mod._emulator_serial_cache, cache))
+
+
+class TestAnAndroidScopedRule:
+    def test_mocks_its_emulator(self):
+        a = IOSDebugAddon()
+        a._running = True
+        _android_rule(a, "only_emu", EMU)
+        flow = _flow("c-emu")
+        info, cache = _emulator_conn("c-emu", EMU)
+        with info, cache:
+            _run(a, flow)
+        assert _mocked_by(flow) == "only_emu"
+
+    def test_leaves_another_emulator_alone(self):
+        a = IOSDebugAddon()
+        a._running = True
+        _android_rule(a, "only_emu", EMU)
+        flow = _flow("c-other")
+        info, cache = _emulator_conn("c-other", "emulator-5556")
+        with info, cache:
+            _run(a, flow)
+        assert flow.response is None and _mocked_by(flow) is None
+
+    def test_keeps_the_serials_case(self):
+        a = IOSDebugAddon()
+        a._running = True
+        _android_rule(a, "only_phone", "8bay0wcl7", client_ip=PHONE_IP)
+        assert a._mock_rules[0]["simulator_udid"] == "8bay0wcl7"
+
+    def test_mocks_its_phone_by_its_address(self):
+        a = IOSDebugAddon()
+        a._running = True
+        _android_rule(a, "only_phone", PHONE, client_ip=PHONE_IP)
+        mine, other = _flow("p1"), _flow("p2")
+        mine.client_conn.peername = (PHONE_IP, 41000)
+        other.client_conn.peername = ("192.168.1.250", 41000)
+        _run(a, mine)
+        _run(a, other)
+        assert _mocked_by(mine) == "only_phone" and _mocked_by(other) is None
+
+    def test_a_simulator_is_not_an_emulator(self):
+        a = IOSDebugAddon()
+        a._running = True
+        _android_rule(a, "only_emu", EMU)
+        flow = _flow("alpha")
+        lookup, resolve = _attributed_to({"alpha": ALPHA})
+        with lookup, resolve:
+            _run(a, flow)
+        assert _mocked_by(flow) is None
+
+    def test_an_unknown_emulator_is_resolved_off_the_loop_then_answered(self):
+        """The serial needs an lsof the cache does not hold: the request is
+        held, not waited on in the hook, and answered once it is known."""
+        a = IOSDebugAddon()
+        a._running = True
+        _android_rule(a, "only_emu", EMU)
+        flow = _flow("c-emu")
+        flow.intercepted = False
+        flow.intercept.side_effect = lambda: setattr(flow, "intercepted", True)
+        flow.resume.side_effect = lambda: setattr(flow, "intercepted", False)
+        lsof = MagicMock(side_effect=lambda pid: (time.sleep(0.2), EMU)[1])
+        with patch.dict(addon_mod._client_process_info,
+                        {"c-emu": {"pid": 4242, "process_name": "qemu"}}), \
+             patch.object(addon_mod, "_emulator_serial_for_pid", lsof), \
+             patch("server.proxy.addon.http.Response.make", return_value=MagicMock()):
+            started = time.monotonic()
+            a.request(flow)
+            assert time.monotonic() - started < 0.1, "the hook waited"
+            assert flow.intercepted and _mocked_by(flow) is None
+            deadline = time.monotonic() + 3
+            while flow.intercepted and time.monotonic() < deadline:
+                time.sleep(0.02)
+        assert _mocked_by(flow) == "only_emu" and not flow.intercepted
+
+    def test_a_held_request_that_is_not_its_emulators_goes_on(self):
+        a = IOSDebugAddon()
+        a._running = True
+        _android_rule(a, "only_emu", EMU)
+        flow = _flow("c-x")
+        flow.intercepted = False
+        flow.intercept.side_effect = lambda: setattr(flow, "intercepted", True)
+        flow.resume.side_effect = lambda: setattr(flow, "intercepted", False)
+        with patch.dict(addon_mod._client_process_info,
+                        {"c-x": {"pid": 4243, "process_name": "qemu"}}), \
+             patch.object(addon_mod, "_emulator_serial_for_pid", return_value="emulator-5556"):
+            a.request(flow)
+            deadline = time.monotonic() + 3
+            while flow.intercepted and time.monotonic() < deadline:
+                time.sleep(0.02)
+        assert not flow.intercepted and _mocked_by(flow) is None and flow.response is None
+
+
+class TestScopingAMockToAnAndroidDevice:
+    @pytest.fixture
+    def android(self, client):
+        kinds = {EMU: DeviceType.ANDROID_EMULATOR, PHONE: DeviceType.ANDROID_DEVICE,
+                 "00008030-000C59623A69802E": DeviceType.DEVICE}
+        adb = SimpleNamespace(
+            is_console_serial=lambda s: s.startswith("emulator-"),
+            get_lan_ip=AsyncMock(return_value=PHONE_IP),
+            get_http_proxy=AsyncMock(return_value="192.168.1.188:9101"),
+        )
+        ctrl = client.app.state.device_controller
+        ctrl._device_type = kinds.get
+        ctrl.list_devices = AsyncMock(return_value=[])
+        ctrl.adb = adb
+        client.app.state.proxy_adapter.listen_port = 9101
+        return adb
+
+    def test_an_emulator_scope_reaches_the_addon_as_spelt(self, client, adapter, android):
+        r = _set(client, simulator_udid=EMU)
+        assert r.status_code == 200, r.text
+        sent = adapter.send_command.await_args.args[0]
+        assert (sent["simulator_udid"], sent["client_ip"]) == (EMU, None)
+        assert "warning" not in r.json()
+
+    def test_a_phone_scope_carries_its_address(self, client, adapter, android):
+        r = _set(client, simulator_udid=PHONE)
+        assert r.status_code == 200, r.text
+        assert adapter.send_command.await_args.args[0]["client_ip"] == PHONE_IP
+
+    def test_a_phone_with_no_known_address_is_refused(self, client, adapter, android,
+                                                      monkeypatch):
+        android.get_lan_ip.return_value = None
+        monkeypatch.setattr("server.proxy.cert_state.read_cert_state_for_device",
+                            lambda udid: None)
+        r = _set(client, simulator_udid=PHONE)
+        assert r.status_code == 422 and "device-proxy-config" in r.json()["detail"]
+        adapter.send_command.assert_not_awaited()
+
+    def test_a_phone_falls_back_to_its_recorded_address(self, client, adapter, android,
+                                                        monkeypatch):
+        android.get_lan_ip.return_value = None
+        monkeypatch.setattr(
+            "server.proxy.cert_state.read_cert_state_for_device",
+            lambda udid: {"wifi_proxy_configs": {"home": {"client_ip": "192.168.1.77"}}})
+        assert _set(client, simulator_udid=PHONE).status_code == 200
+        assert adapter.send_command.await_args.args[0]["client_ip"] == "192.168.1.77"
+
+    @pytest.mark.parametrize("scope", ["emulator-5999", "00008030-000C59623A69802E"])
+    def test_an_unknown_or_ios_serial_is_refused(self, client, adapter, android, scope):
+        r = _set(client, simulator_udid=scope)
+        assert r.status_code == 422, r.text
+        adapter.send_command.assert_not_awaited()
+
+    def test_a_tcp_attached_emulator_is_pointed_at_its_console_serial(
+            self, client, adapter, android):
+        client.app.state.device_controller._device_type = (
+            lambda s: DeviceType.ANDROID_DEVICE if s == "localhost:5555" else None)
+        r = _set(client, simulator_udid="localhost:5555")
+        assert r.status_code == 422 and "emulator-<port>" in r.json()["detail"]
+
+    def test_an_emulator_not_routed_through_the_proxy_is_warned_about(
+            self, client, android):
+        android.get_http_proxy.return_value = None
+        r = _set(client, simulator_udid=EMU)
+        assert r.status_code == 200 and "not routed through this proxy" in r.json()["warning"]
+
+    def test_re_scoping_to_a_phone_brings_its_address(self, client, adapter, android):
+        rid = _set(client, simulator_udid=EMU).json()["rule_id"]
+        r = client.patch(f"/api/v1/proxy/mocks/{rid}", headers=AUTH,
+                         json={"simulator_udid": PHONE})
+        assert r.status_code == 200, r.text
+        assert adapter._mock_rules[0]["client_ip"] == PHONE_IP
+        assert adapter.send_command.await_args.args[0]["client_ip"] == PHONE_IP
+
+
+async def test_a_phones_address_is_sent_again_to_a_restarted_proxy(adapter):
+    """A restarted mitmdump is sent every rule the server holds. A phone's
+    rule without its address would match no request -- or, worse, be read as
+    an emulator's (#582)."""
+    adapter.leader = None
+    adapter._bypass_patterns = []
+    adapter._intercept_pattern = None
+    adapter._mock_rules = [{"rule_id": "r1", "pattern": "~d x", "response": {},
+                            "simulator_udid": PHONE, "client_ip": PHONE_IP}]
+    assert await adapter._send_rules()
+    sent = [c.args[0] for c in adapter.send_command.await_args_list
+            if c.args[0].get("action") == "set_mock"]
+    assert sent and sent[0]["client_ip"] == PHONE_IP

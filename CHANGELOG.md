@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Otherwise, ambiguity is refused.** A bare version both platforms have is a 409 `ambiguous_platform` listing each side and the `platform` that would choose. `list_devices` lists both.
   - **Answers say what was used**: `platform` and `platform_source`. This covers `resolve_device`, `ensure_devices`, `reserve_devices` and `list_devices`, and the hint pointing at paired servers keeps to the same platform.
   - **`init_app_knowledge` records the platform** for a project that builds for one.
+- **Mocks can be scoped to an Android emulator or phone (#582).** `set_mock`'s `simulator_udid` takes an Android serial as well as a simulator UDID.
+  - **Emulators** are matched by the emulator process that opened the connection, the attribution their flows already carry.
+  - **Phones** are matched by their Wi-Fi address, read over adb or from `device-proxy-config`'s record. A phone whose address can't be found is refused rather than given a mock that never fires.
+  - **The first request on an emulator's connection** is held briefly, off the event loop, while quern works out which emulator it is. One it can't tell goes through unmocked.
+  - **A client key** could not mock Android at all: an Android scope was refused and an unscoped mock is owner-only. It can now scope mocks to the Android devices it holds, and they end with its hold.
+  - **Mocks carried by `use_remote`** go to the same kind of device on the new server.
 - **Android devices carry `model`, and are found by it (#582).** An emulator's model is its AVD's hardware profile ("Pixel 7"), a phone's its product model. Names match with underscores as spaces, so "Pixel 7" finds the AVD `Pixel_7_API_34`. `list_devices` now matches models as well as names, as reservations do.
 - **`get_performance`: how hard one app is working (#245).** CPU (percent of one core, over a sample of 0.2–5 s), memory and thread count for a running app, on iOS simulators, physical iOS devices and Android.
   - **iOS simulators** are read from the Mac with `ps` and `footprint`.
