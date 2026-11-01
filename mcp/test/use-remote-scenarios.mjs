@@ -104,6 +104,16 @@ const plans = {
                               "PATCH /api/v1/proxy/mocks/mock_local2": json(200, { platform: "android" }) },
                             { "POST /api/v1/proxy/mocks": mockIds("romulus"),
                               "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // #582: an Android device routed through the proxy is routed again after a switch.
+  "carry-proxy": [{ "POST /api/v1/proxy/device-proxy-config": json(200, { applied: true }) },
+                  { "POST /api/v1/proxy/device-proxy-config": async (b) => [200, {
+                      applied: true, https: { ca_install: "manual", ca_trusted: null, note: "n" } }],
+                    "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  "carry-proxy-partial": [{ "POST /api/v1/proxy/device-proxy-config": json(200, { applied: true }) },
+                          { "POST /api/v1/proxy/device-proxy-config": async (b) =>
+                              b.udid === "emulator-5558" && !globalThis.fixed ? [502, { detail: "adb offline" }]
+                                : [200, { applied: true }],
+                            "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   "carry-retry": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
                   { "POST /api/v1/proxy/mocks": async (b) => globalThis.mocksDown
                       ? [503, { detail: "proxy is not running" }] : retryIds(b),
@@ -259,6 +269,8 @@ if (scenario === "window") {
 } else if (scenario === "carry-android") {
   await tools.set_mock({ pattern: "~u /emu", simulator_udid: "emulator-5554", status_code: 200, body: "E" });
   await tools.set_mock({ pattern: "~u /sim", simulator_udid: "SIM-L", status_code: 200, body: "S" });
+} else if (scenario === "carry-proxy") {
+  await tools.record_device_proxy_config({ udid: "emulator-5554", apply: true });
   result.switched = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);
   globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
   result.onSimulator = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text);
@@ -271,6 +283,15 @@ if (scenario === "window") {
   await tools.use_remote({ name: "romulus" });
   globalThis.reserved = [{ udid: "emulator-5556", device_type: "android_emulator" }];
   result.onEmulator = JSON.parse(text(await tools.reserve_devices({ udids: ["emulator-5556"] })).text);
+  result.again = JSON.parse(text(await tools.reserve_devices({ udids: ["emulator-5556"] })).text);
+} else if (scenario === "carry-proxy-partial") {
+  await tools.record_device_proxy_config({ udid: "emulator-5554", apply: true });
+  await tools.use_remote({ name: "romulus" });
+  globalThis.reserved = [{ udid: "emulator-5556", device_type: "android_emulator" },
+                         { udid: "emulator-5558", device_type: "android_emulator" }];
+  result.first = JSON.parse(text(await tools.reserve_devices({ count: 2 })).text);
+  globalThis.fixed = true;
+  result.retry = JSON.parse(text(await tools.reserve_devices({ count: 2 })).text);
 } else if (scenario === "carry-retry") {
   await tools.set_mock({ pattern: "~u /a", status_code: 200, body: "A" });
   result.switched = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);

@@ -317,4 +317,23 @@ test("a re-scoped mock and an unscoped one reach an Android device after a switc
   // rule for this device too, cannot shadow it (CodeRabbit).
   assert.deepEqual(posts.map((b) => [b.pattern, b.simulator_udid]),
                    [["~u /re", "emulator-5556"], ["~u /all", "emulator-5556"]]);
+
+test("an Android device routed through the proxy is routed again after a switch (#582)", async () => {
+  const r = await run("carry-proxy");
+  assert.equal(r.switched.carried.device_proxy, true);
+  assert.equal(r.onSimulator.carried.still_waiting.device_proxy, true, "a simulator is not routed");
+  const posts = r.bodies.romulus.filter((b) => b.path === "POST /api/v1/proxy/device-proxy-config");
+  assert.deepEqual(posts.map((b) => b.body), [{ udid: "emulator-5556", apply: true }], "once");
+  assert.deepEqual(r.onEmulator.carried.device_proxy_applied,
+                   [{ udid: "emulator-5556", https: { ca_install: "manual", ca_trusted: null, note: "n" } }]);
+  assert.equal(r.onEmulator.carried.still_waiting, undefined);
+});
+
+test("a device routed once is not routed again when another is retried (#582)", async () => {
+  const r = await run("carry-proxy-partial");
+  const posts = r.bodies.romulus.filter((b) => b.path === "POST /api/v1/proxy/device-proxy-config")
+    .map((b) => b.body.udid);
+  assert.deepEqual(posts, ["emulator-5556", "emulator-5558", "emulator-5558"]);
+  assert.match(JSON.stringify(r.first.carried.failed), /emulator-5558/);
+  assert.deepEqual(r.retry.carried.device_proxy_applied, [{ udid: "emulator-5558" }]);
 });

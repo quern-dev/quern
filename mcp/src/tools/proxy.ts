@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { discoverServer } from "../config.js";
 import { apiRequest } from "../http.js";
-import { forgetCapture, recordCapture } from "../carried.js";
+import { forgetCapture, recordCapture, recordDeviceProxy } from "../carried.js";
 // As mocks: never in the middle of a switch (CodeRabbit).
 import { betweenSwitches } from "./system.js";
 import { strictParams, errorText } from "./helpers.js";
@@ -886,7 +886,12 @@ the background and can be re-enabled with configure_system_proxy.`,
     `The proxy host is the Mac interface on the device's own subnet; the port comes from the running proxy. ` +
     `Check network_reattached and hint in the response: applied means the setting was written, ` +
     `not that traffic is flowing yet. ` +
-    `client_ip also enables per-device flow filtering on query_flows/get_flow_summary.`,
+    `client_ip also enables per-device flow filtering on query_flows/get_flow_summary. ` +
+    `An applied answer's https says whether HTTPS will work there: ca_install (automatic: a rootable ` +
+    `build, install_proxy_cert installs the CA; manual: a person installs it as a user certificate and ` +
+    `only apps that trust user certificates decrypt; unknown), ca_trusted, and a note. ` +
+    `A proxy applied by a session that holds the device is cleared when that hold ends, and after ` +
+    `use_remote the next reservation's Android devices are routed through the new server's proxy.`,
     inputSchema: strictParams({
       udid: z.string().describe("Device UDID"),
       ssid: z
@@ -919,7 +924,7 @@ the background and can be re-enabled with configure_system_proxy.`,
           "Use this to undo apply, and to rescue a device pointing at a proxy that is gone."
         ),
     }),
-  }, async ({ udid, ssid, client_ip, apply, clear }) => {
+  }, async ({ udid, ssid, client_ip, apply, clear }) => betweenSwitches(async () => {
     try {
       const body: Record<string, unknown> = { udid };
       if (ssid !== undefined) body.ssid = ssid;
@@ -931,7 +936,11 @@ the background and can be re-enabled with configure_system_proxy.`,
         "/api/v1/proxy/device-proxy-config",
         undefined,
         body
-      );
+      ) as { applied?: boolean; cleared?: boolean } | null;
+      // Kept, so a use_remote switch routes the next server's Android
+      // devices too (carried.ts, #582).
+      if (data?.applied) recordDeviceProxy(udid, true);
+      else if (data?.cleared) recordDeviceProxy(udid, false);
 
       return {
         content: [
@@ -949,7 +958,7 @@ the background and can be re-enabled with configure_system_proxy.`,
         isError: true,
       };
     }
-  });
+  }));
 
   server.registerTool("set_bypass", {
     description: `Add domain patterns to the proxy bypass allowlist. Traffic to bypassed domains gets true TLS passthrough — no certificate replacement, no interception, no capture. Uses glob/fnmatch patterns.

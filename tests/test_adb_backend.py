@@ -686,3 +686,59 @@ class TestAndroidModelAndVersion:
         assert devices["emulator-5554"].model == "Pixel 7"     # not the image's sdk model
         assert devices["R5CR10XXXXX"].model == "SM G960F"
         assert devices["avd:Tablet_API_35"].model == "Pixel 7"
+
+
+class TestCaInstall:
+    """#582: whether quern can install its CA on an Android device, said on
+    the device's row, before anyone routes it and finds HTTPS failing."""
+
+    @pytest.mark.parametrize("tag, expected", [
+        ("google_apis", "automatic"), ("default", "automatic"),
+        ("google_apis_playstore", "manual"), ("android-tv", "unknown"),
+    ])
+    def test_a_shut_down_avd_reads_it_from_its_image(self, tmp_path, tag, expected):
+        backend = AdbBackend()
+        config = tmp_path / "config.ini"
+        config.write_text(f"tag.id = {tag}\n")
+        backend._avd_config = lambda name: (config, tmp_path / "x.ini")
+        assert backend._read_avd_ca_install("Any_AVD") == expected
+
+    def test_an_avd_with_no_config_is_unknown(self, tmp_path):
+        backend = AdbBackend()
+        backend._avd_config = lambda name: (tmp_path / "absent.ini", tmp_path / "x.ini")
+        assert backend._read_avd_ca_install("Any_AVD") == "unknown"
+
+    @pytest.mark.parametrize("props, expected", [
+        ({"ro.build.tags": "dev-keys", "ro.debuggable": "0"}, "automatic"),
+        ({"ro.build.tags": "release-keys", "ro.debuggable": "1"}, "automatic"),
+        ({"ro.build.tags": "release-keys", "ro.debuggable": "0"}, "manual"),
+        ({"ro.build.tags": "release-keys"}, "unknown"),
+        ({}, "unknown"),
+    ])
+    def test_a_running_device_reads_it_from_its_build(self, props, expected):
+        assert AdbBackend._ca_install_from_props(props) == expected
+
+    async def test_listed_rows_carry_it(self, tmp_path):
+        backend = AdbBackend()
+        fixture_text = (FIXTURES_DIR / "adb_devices.txt").read_text()
+
+        async def mock_run_adb(*args):
+            if args == ("devices", "-l"):
+                return fixture_text, ""
+            raise DeviceError("unexpected call", tool="adb")
+
+        backend._run_adb = AsyncMock(side_effect=mock_run_adb)
+        backend._adb_path = "/usr/bin/adb"
+        backend._get_device_property = AsyncMock(return_value="")
+        backend._get_emulator_name = AsyncMock(return_value="Pixel_7_API_34")
+        backend.get_device_properties = AsyncMock(
+            return_value={"ro.build.tags": "release-keys", "ro.debuggable": "0"})
+        backend.list_avds = AsyncMock(return_value=["Play_API_35"])
+        config = tmp_path / "config.ini"
+        config.write_text("tag.id=google_apis_playstore\n")
+        backend._avd_config = lambda name: (config, tmp_path / "x.ini")
+
+        devices = {d.udid: d for d in await backend.list_devices()}
+        assert devices["R5CR10XXXXX"].ca_install == "manual"
+        assert devices["avd:Play_API_35"].ca_install == "manual"
+        assert devices["offline-device"].ca_install == "unknown"

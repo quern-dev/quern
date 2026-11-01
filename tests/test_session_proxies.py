@@ -1175,3 +1175,45 @@ async def test_a_clients_mock_on_its_emulator_ends_with_its_hold():
     assert removed == ["r-emu"]
     assert {"udid": "emulator-5554", "action": "mock_removed", "ok": True,
             "rule_id": "r-emu"} in actions
+
+
+@pytest.mark.parametrize("kind, says", [
+    ("android_emulator", "device-proxy-config"),
+    ("android_device", "device-proxy-config"),
+    ("device", "Wi-Fi proxy"),
+])
+async def test_a_device_that_is_not_a_simulator_is_refused_before_anything_starts(
+        tmp_path, as_client, kind, says):
+    """#582: on an emulator this was accepted -- host processes claimed,
+    iOS's web-view processes added, "started" reported -- and captured
+    nothing, since an Android device's traffic never reaches the redirector."""
+    from server.models import DeviceType
+
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    req.app.state.device_controller._device_type = lambda udid: DeviceType(kind)
+    with pytest.raises(HTTPException) as e:
+        await api.add_session_capture.__wrapped__(
+            req, SessionCaptureRequest(simulator_udid="emulator-5554", processes=["App"]))
+    assert e.value.status_code == 422 and says in e.value.detail
+    assert m.made == [] and m.claims() == []
+
+
+async def test_a_device_the_controller_has_not_listed_is_listed_once(tmp_path, as_client):
+    from server.models import DeviceType
+
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    known: dict = {}
+    req.app.state.device_controller._device_type = known.get
+
+    async def list_devices():
+        known["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+
+    req.app.state.device_controller.list_devices = list_devices
+    with pytest.raises(HTTPException) as e:
+        await api.add_session_capture.__wrapped__(
+            req, SessionCaptureRequest(simulator_udid="emulator-5554", processes=["App"]))
+    assert e.value.status_code == 422

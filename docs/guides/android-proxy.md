@@ -19,6 +19,24 @@ Then, for rootable emulators (Google APIs images):
 For non-rootable devices — including every physical phone — the certificate is
 the part that needs work, and you'll need to modify your app. Keep reading.
 
+## Which Path a Device Takes
+
+Every Android device in `list_devices`, `list_remotes` and a reservation's answer carries `ca_install`, so you can tell before routing it -- and pick a device that suits, if you need HTTPS:
+
+| `ca_install` | Which devices | HTTPS through quern |
+|---|---|---|
+| `automatic` | Rootable builds: Google APIs and AOSP emulator images | Your agent installs the certificate (`install_proxy_cert`) and every app's HTTPS is decrypted. On Android 14+ the install does not survive a reboot. |
+| `manual` | Google Play emulator images, and phones | quern cannot install it. Install it yourself as a user certificate in Settings (it needs a screen lock), and only apps that trust user certificates -- your own debug build, with the config below -- are decrypted. |
+| `unknown` | quern could not read the build (still booting, or an image it does not recognise) | Ask again once the device has settled. |
+
+A shut-down emulator's `ca_install` comes from the image its AVD names, so you can choose one without booting it.
+
+When you route a device (`record_device_proxy_config` with `apply=true`), the answer's `https` says whether HTTPS will work there now: `ca_install`, `ca_trusted` (`true`, `false`, or `null` when quern cannot see -- a user certificate is kept where adb cannot read it), and a `note` saying what to do. Routing is never refused for want of a certificate: plain HTTP is captured either way.
+
+**Routing ends with the hold.** A proxy applied by a session that holds the device is cleared when that hold ends -- a release, a closed agent, a `use_remote` switch -- and the device's network re-attached, so the next person to use it doesn't inherit a device pointing at a proxy that may be gone. The certificate stays installed. After `use_remote`, the MCP routes the Android devices of your next reservation on the new server.
+
+**Session capture is for simulators.** `add_session_capture` names processes on the Mac, which an Android device's apps are not, so it refuses an Android device and points here. Filter a routed device's flows by `device_serial` (emulators) or `client_ip` (phones).
+
 ## Why Android Is Different
 
 Android separates certificate trust into two stores:

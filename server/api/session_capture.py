@@ -10,6 +10,8 @@ A client's names are released with its hold on the device.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
@@ -73,6 +75,38 @@ def _refusal(processes: list[str], *, owner: bool) -> str | None:
     return None
 
 
+async def _not_a_simulator(request: Request, udid: str) -> str | None:
+    """Why `udid` cannot have session capture, when quern knows it is not a
+    simulator (#582). Session capture names processes on this Mac, which only
+    a simulator's apps are: an Android device's traffic never reaches the
+    redirector, so the call was accepted, claimed host processes, reported
+    "started", and captured nothing. Unknown devices are left to the checks
+    that follow, as before."""
+    from server.models import DeviceType
+
+    controller = getattr(request.app.state, "device_controller", None)
+    device_type = getattr(controller, "_device_type", None)
+    kind = device_type(udid) if device_type else None
+    if kind is None and device_type:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(controller.list_devices(), 5.0)
+        kind = device_type(udid)
+    if kind in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE):
+        return (
+            f"{udid} is an Android device, and session capture covers simulators: it "
+            "names processes on this Mac, which an Android device's apps are not. "
+            "Route the device through the proxy instead -- POST "
+            "/api/v1/proxy/device-proxy-config with apply=true "
+            "(record_device_proxy_config) -- and filter its flows by device_serial. "
+            "Its HTTPS is decrypted only if it trusts the CA: see its ca_install.")
+    if kind == DeviceType.DEVICE:
+        return (
+            f"{udid} is a physical iOS device, and session capture covers simulators. "
+            "A physical device is captured through its Wi-Fi proxy: see "
+            "proxy_setup_guide.")
+    return None
+
+
 @router.post("/session-capture", response_model=SessionCaptureResponse)
 @logged_action("add_session_capture", category="proxy")
 async def add_session_capture(
@@ -85,6 +119,8 @@ async def add_session_capture(
     processes = [p for p in body.processes if p]
     if reason := _refusal(processes, owner=caller.is_owner):
         raise HTTPException(status_code=400, detail=reason)
+    if reason := await _not_a_simulator(request, body.simulator_udid):
+        raise HTTPException(status_code=422, detail=reason)
     if reason := device_access.why_not(body.simulator_udid):
         raise HTTPException(status_code=403, detail=(
             f"{reason}. Reserve {body.simulator_udid} first (reserve_devices); its "

@@ -580,6 +580,23 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
             except Exception as e:  # noqa: BLE001 -- reported, never raised
                 actions.append({"udid": udid, "action": "profile_stopped", "ok": False,
                                 "profile": prof.id, "error": str(e)})
+        # The proxy it applied to this Android device (#582), whoever's session
+        # it was: left set, the next holder inherited a proxied device that
+        # loses its network when the proxy stops. The CA stays installed --
+        # removing it needs the device's Settings or root.
+        proxy_holds = getattr(app.state, "device_proxy_holds", None) or {}
+        if proxy_holds.get(udid) == (session.id, getattr(session, "opened_at", None)):
+            from server.api.proxy_certs import clear_device_proxy
+
+            try:
+                cleared = await clear_device_proxy(app.state.device_controller, udid)
+                proxy_holds.pop(udid, None)
+                actions.append({"udid": udid, "action": "device_proxy_cleared", "ok": True,
+                                "proxy_verified": cleared["proxy_verified"],
+                                "network_reattached": cleared["network_reattached"]})
+            except Exception as e:  # noqa: BLE001 -- reported, never raised
+                actions.append({"udid": udid, "action": "device_proxy_cleared", "ok": False,
+                                "error": str(e)})
         # Its session capture (#558): the names it asked for on this device,
         # and any session proxy nobody else's capture uses.
         session_proxies = getattr(app.state, "session_proxies", None)

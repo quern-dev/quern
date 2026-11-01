@@ -693,6 +693,93 @@ async def _read_device_proxy(controller, udid: str) -> tuple[str | None, bool]:
         return None, False
 
 
+async def clear_device_proxy(controller, udid: str) -> dict:
+    """Clear an Android device's proxy setting, forget the per-network records,
+    re-attach its network and read the setting back. Raises when the clear
+    itself fails; what follows it is reported, not raised. Shared by the
+    route's `clear` and by a session's release (#582)."""
+    from server.proxy.cert_state import forget_device_proxy_configs
+
+    await controller.adb.clear_http_proxy(udid)
+    forgotten = forget_device_proxy_configs(canonical_device_id(udid))
+    reattached = await controller.adb.reattach_network(udid)
+    cleared_proxy, cleared_ok = await _read_device_proxy(controller, udid)
+    return {"forgot_ssids": forgotten, "network_reattached": reattached,
+            "device_proxy": cleared_proxy,
+            "proxy_verified": (cleared_proxy is None) if cleared_ok else None}
+
+
+async def _https_readiness(controller, udid: str) -> dict:
+    """Whether an Android device routed through the proxy trusts its CA, and
+    what to do when it does not (#582). A routed device that does not trust
+    it fails every HTTPS request, which nothing else said -- the agent learned
+    from requests failing. Warned, not refused: plain HTTP is captured either
+    way, and routing is what a CA install needs first (mitm.it is served by
+    the proxy).
+
+    ``ca_trusted`` is None whenever quern cannot know: a build it cannot root
+    keeps a user-installed CA where adb cannot read it."""
+    try:
+        rootable = await controller.adb.is_rootable(udid)
+    except Exception:
+        # The apply succeeded; a check that could not run is "unknown".
+        _logger.debug("Could not tell whether %s is rootable", udid, exc_info=True)
+        rootable = None
+    ca_install = {True: "automatic", False: "manual"}.get(rootable, "unknown")
+    trusted: bool | None = None
+    if rootable:
+        try:
+            cert = cert_manager.get_cert_path()
+            name = f"{await controller.adb._get_cert_hash(cert)}.0"
+            trusted = await controller.adb.is_system_cert_installed(udid, name)
+        except Exception:
+            _logger.debug("Could not check the CA on %s", udid, exc_info=True)
+    if trusted:
+        note = None
+    elif ca_install == "automatic":
+        note = (
+            f"HTTPS from {udid} fails until it trusts quern's CA" if trusted is False
+            else f"Could not check whether {udid} trusts quern's CA") + (
+            ". Its build is rootable, so install_proxy_cert installs it. On API 34 "
+            "and later the install is held in memory and does not survive a reboot: "
+            "check again after one.")
+    elif ca_install == "manual":
+        note = (
+            f"{udid}'s build cannot be rooted, so quern cannot install its CA, and "
+            "HTTPS from apps that do not trust user certificates fails. For your own "
+            "app's debug build: install the CA as a user certificate in the device's "
+            "Settings (it needs a screen lock), and give the app a network security "
+            "config that trusts user certificates. Other apps' HTTPS cannot be "
+            "decrypted on this device; a Google APIs emulator image can be rooted. "
+            "Plain HTTP is captured either way.")
+    else:
+        note = (
+            f"Could not read {udid}'s build properties, so whether it can trust "
+            "quern's CA is unknown. It may still be booting: check again.")
+    return {"ca_install": ca_install, "ca_trusted": trusted, "note": note}
+
+
+def _track_device_proxy(request: Request, udid: str, applied: bool) -> None:
+    """Who applied a device's proxy, so it is cleared when their hold on the
+    device ends (#582): left behind, the next holder inherited a proxied
+    device, which loses its network if the proxy stops. Recorded only for a
+    session that holds the device -- one applied without a hold (an owner's
+    script) is left alone, as it always was. A clear, or an apply by anyone
+    else, ends the record."""
+    holds = getattr(request.app.state, "device_proxy_holds", None)
+    if holds is None:
+        holds = request.app.state.device_proxy_holds = {}
+    key = canonical_device_id(udid)
+    holds.pop(key, None)
+    if not applied:
+        return
+    caller = visibility.current_caller()
+    registry = getattr(request.app.state, "sessions", None)
+    held = registry.holder_of(key) if registry is not None and caller.session else None
+    if held is not None and held.session.id == caller.session:
+        holds[key] = (held.session.id, getattr(held.session, "opened_at", None))
+
+
 @router.post("/device-proxy-config")
 @logged_action("record_device_proxy_config_endpoint", category="proxy")
 async def record_device_proxy_config_endpoint(
@@ -706,10 +793,7 @@ async def record_device_proxy_config_endpoint(
     provided. Call this after completing Wi-Fi proxy setup in device Settings.
     """
     from server.lifecycle.state import detect_host_ip_for_subnet, detect_local_ip
-    from server.proxy.cert_state import (
-        forget_device_proxy_configs,
-        record_device_proxy_config,
-    )
+    from server.proxy.cert_state import record_device_proxy_config
 
     controller = request.app.state.device_controller
     is_android = controller._is_android(body.udid)
@@ -734,15 +818,15 @@ async def record_device_proxy_config_endpoint(
         # demanding one would make a device that has dropped off Wi-Fi --
         # exactly what a bad proxy causes -- impossible to put right.
         try:
-            await controller.adb.clear_http_proxy(body.udid)
+            cleared = await clear_device_proxy(controller, body.udid)
         except Exception as e:
             raise HTTPException(
                 status_code=502,
                 detail=f"Could not clear the proxy on {body.udid}: {e}",
             ) from e
-        forgotten = forget_device_proxy_configs(canonical_device_id(body.udid))
-        reattached = await controller.adb.reattach_network(body.udid)
-        cleared_proxy, cleared_ok = await _read_device_proxy(controller, body.udid)
+        _track_device_proxy(request, body.udid, applied=False)
+        forgotten, reattached = cleared["forgot_ssids"], cleared["network_reattached"]
+        cleared_proxy = cleared["device_proxy"]
         return {
             "udid": body.udid,
             "cleared": True,
@@ -773,7 +857,8 @@ async def record_device_proxy_config_endpoint(
             #: True only when the device was actually asked and answered that
             #: it holds nothing. A read that failed returns None here rather
             #: than borrowing the success value.
-            "proxy_verified": (cleared_proxy is None) if cleared_ok else None,
+            "proxy_verified": cleared["proxy_verified"],
+            "https": None,
         }
 
     if body.apply and not is_android:
@@ -889,6 +974,7 @@ async def record_device_proxy_config_endpoint(
         # after. Reporting success without it would be reporting the request
         # rather than the outcome.
         reattached = await controller.adb.reattach_network(body.udid)
+        _track_device_proxy(request, body.udid, applied=True)
 
     device_proxy, read_ok = (
         await _read_device_proxy(controller, body.udid) if applied else (None, False)
@@ -950,6 +1036,10 @@ async def record_device_proxy_config_endpoint(
         "proxy_verified": (
             (device_proxy == f"{proxy_host}:{port}") if read_ok else None
         ),
+        #: Whether HTTPS through the proxy will work on this device (#582):
+        #: routed but not trusting the CA, every HTTPS request fails. None
+        #: when nothing was applied.
+        "https": await _https_readiness(controller, body.udid) if applied else None,
     }
 
 

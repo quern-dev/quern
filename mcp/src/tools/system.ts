@@ -238,7 +238,7 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
     knowledge = { kind: "failed", reason: errorText(e) };
   }
   const there = await proxyThere();
-  const waiting = carried.mocks + carried.session_capture;
+  const waiting = carried.mocks + carried.session_capture + (carried.device_proxy ? 1 : 0);
   return reply({
     current: target, server_url: url, version, ...(released.length ? { released } : {}),
     ...(waiting || carried.still_on_old ? { carried } : {}),
@@ -246,9 +246,12 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
     ...(knowledge !== undefined ? { knowledge } : {}),
     proxy: there,
     note: `Every tool call now goes to ${target}. Reserve a device there with reserve_devices.` +
-      (waiting ? ` Your ${carried.mocks} mock(s) and ${carried.session_capture} session ` +
-        "capture(s) moved with you: they are set up on the simulators of your next " +
-        "reservation here, and its answer lists their new rule ids." : "") +
+      (carried.mocks + carried.session_capture ? ` Your ${carried.mocks} mock(s) and ` +
+        `${carried.session_capture} session capture(s) moved with you: they are set up on the ` +
+        "simulators of your next reservation here, and its answer lists their new rule ids."
+        : "") +
+      (carried.device_proxy ? " The Android devices of your next reservation here are routed " +
+        "through this server's proxy, as you routed devices on the last one." : "") +
       (carried.still_on_old ? ` Could not remove ${carried.still_on_old.join(", ")} from ` +
         `${from}: they still answer traffic there. Switching back there tries again to remove ` +
         "them (see left_here_earlier then)." : "") +
