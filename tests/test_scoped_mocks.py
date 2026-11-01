@@ -18,7 +18,7 @@ import json
 import sys
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -703,7 +703,11 @@ class TestAnAndroidScopedRule:
             assert flow.intercepted and _mocked_by(flow) is None
             _until_resumed(flow)
         assert _mocked_by(flow) == "only_emu" and not flow.intercepted
-        assert lsof.call_args.kwargs == {"use_cache": False}, "decided fresh, not from a pid cache"
+        # The decision's lookup, among any later ones: serialising the flow
+        # after it resumes asks again, with the cache, and on a slow runner
+        # that call can be the last (found on Linux CI).
+        assert call(4242, use_cache=False) in lsof.call_args_list, \
+            "decided fresh, not from a pid cache"
 
     def test_a_held_request_that_is_not_its_emulators_goes_on_and_is_reported(self):
         a = _emu_addon()
