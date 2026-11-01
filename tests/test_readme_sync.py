@@ -1,6 +1,11 @@
-"""Guard tests that keep README.md in sync with the code it documents.
+"""Guard tests that keep the user docs in sync with the code they document.
 
-The README's MCP tool table and API endpoint tables are hand-maintained, so
+The README links out to the reference pages these tests read: the MCP tool
+table in docs/mcp-tools.md, the CLI command block in docs/cli.md, and the
+endpoint tables in docs/api-reference.md. They moved out of the README itself,
+which had grown to 600 lines, and the guards moved with them.
+
+The MCP tool table and API endpoint tables are hand-maintained, so
 they drift silently every time a feature lands without a matching doc edit.
 By v0.13.4 the tool table had fallen 37 tools behind the source and the prose
 count ("78 tools") matched neither the table nor the code. These tests make
@@ -25,6 +30,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README = REPO_ROOT / "README.md"
 API_REFERENCE = REPO_ROOT / "docs" / "api-reference.md"
+MCP_TOOLS_DOC = REPO_ROOT / "docs" / "mcp-tools.md"
+CLI_DOC = REPO_ROOT / "docs" / "cli.md"
+# Every page a person reads to learn the CLI. A flag shown with its command on
+# any of them is documented; the command block itself is in CLI_DOC.
+USER_DOCS = [README, CLI_DOC, REPO_ROOT / "docs" / "installation.md",
+             REPO_ROOT / "docs" / "features.md", REPO_ROOT / "docs" / "updates.md"]
 MCP_TOOLS_DIR = REPO_ROOT / "mcp" / "src" / "tools"
 SERVER_DIR = REPO_ROOT / "server"
 # The CLI surface is split across two files: argparse subparsers are built in
@@ -47,7 +58,7 @@ CLI_SOURCES = (REPO_ROOT / "server" / "__main__.py", REPO_ROOT / "server" / "mai
 # rather than being silently dropped from the check.
 UNDOCUMENTED_ROUTES_ALLOWLIST: set[tuple[str, str]] = set()
 
-# CLI subcommands intentionally absent from the README command block.
+# CLI subcommands intentionally absent from the docs/cli.md command block.
 UNDOCUMENTED_CLI_ALLOWLIST = {
     "--version",  # flag spelling of `version`, which is listed
     "-V",         # ditto
@@ -93,20 +104,13 @@ def registered_routes() -> set[tuple[str, str]]:
 
 
 # --------------------------------------------------------------------------
-# What the README claims
+# What the docs claim
 # --------------------------------------------------------------------------
-
-
-def _readme_section(start_heading: str, end_heading: str) -> str:
-    text = README.read_text()
-    start = text.index(start_heading)
-    end = text.index(end_heading, start)
-    return text[start:end]
 
 
 def documented_tools() -> set[str]:
     """Tool names in the second column of the MCP Tools table."""
-    section = _readme_section("## MCP Tools", "## API Endpoints")
+    section = MCP_TOOLS_DOC.read_text()
     names: set[str] = set()
     for line in section.splitlines():
         if not line.startswith("|") or line.startswith("|--"):
@@ -120,9 +124,9 @@ def documented_tools() -> set[str]:
 
 def documented_tool_count() -> int:
     """The count asserted in the prose above the table ('107 tools ...')."""
-    section = _readme_section("## MCP Tools", "## API Endpoints")
+    section = MCP_TOOLS_DOC.read_text()
     match = re.search(r"\b(\d+) tools available via MCP\b", section)
-    assert match, "Could not find the 'N tools available via MCP' claim in README.md"
+    assert match, "Could not find the 'N tools available via MCP' claim in docs/mcp-tools.md"
     return int(match.group(1))
 
 
@@ -180,11 +184,11 @@ def test_readme_tool_table_matches_registered_tools():
     if missing:
         problems.append(
             f"{len(missing)} tool(s) registered in mcp/src/tools/ but absent "
-            f"from the README MCP Tools table:\n{_format(missing)}"
+            f"from the MCP tool table in docs/mcp-tools.md:\n{_format(missing)}"
         )
     if stale:
         problems.append(
-            f"{len(stale)} tool(s) listed in the README MCP Tools table but no "
+            f"{len(stale)} tool(s) listed in the docs/mcp-tools.md table but no "
             f"longer registered in mcp/src/tools/:\n{_format(stale)}"
         )
     assert not problems, "\n\n".join(problems)
@@ -194,7 +198,7 @@ def test_readme_tool_count_matches_table():
     claimed = documented_tool_count()
     actual = len(registered_tools())
     assert claimed == actual, (
-        f"README says '{claimed} tools available via MCP' but "
+        f"docs/mcp-tools.md says '{claimed} tools available via MCP' but "
         f"{actual} tools are registered in mcp/src/tools/. "
         f"Update the sentence above the MCP Tools table."
     )
@@ -255,7 +259,8 @@ def test_api_reference_covers_every_registered_tool():
     assert not problems, "\n\n".join(problems)
 
 
-@pytest.mark.parametrize("path", [README, API_REFERENCE, MCP_TOOLS_DIR, SERVER_DIR])
+@pytest.mark.parametrize("path", [*USER_DOCS, MCP_TOOLS_DOC, API_REFERENCE, MCP_TOOLS_DIR,
+                                  SERVER_DIR])
 def test_documentation_sources_exist(path: Path):
     """Fail loudly rather than silently passing on an empty scan."""
     assert path.exists(), f"{path} is missing — these guard tests cannot run."
@@ -283,8 +288,8 @@ def cli_commands() -> set[str]:
 
 
 def documented_cli_commands() -> set[str]:
-    """Commands listed in the README's `quern ...` shell block."""
-    section = _readme_section("### Process Lifecycle", "## MCP Tools")
+    """Commands listed in docs/cli.md's `quern ...` shell block."""
+    section = CLI_DOC.read_text()
     return set(re.findall(r"^quern ([a-z0-9-]+)", section, re.MULTILINE))
 
 
@@ -300,11 +305,11 @@ def test_readme_cli_block_matches_dispatched_commands():
         problems.append(
             f"{len(missing)} CLI command(s) dispatched by server/main.py or "
             f"server/__main__.py but "
-            f"absent from the README command block:\n{_format(missing)}"
+            f"absent from the command block in docs/cli.md:\n{_format(missing)}"
         )
     if stale:
         problems.append(
-            f"{len(stale)} command(s) listed in the README command block that "
+            f"{len(stale)} command(s) listed in the docs/cli.md command block that "
             f"`quern` does not dispatch:\n{_format(stale)}"
         )
     assert not problems, "\n\n".join(problems)
@@ -399,8 +404,8 @@ def flags_in_prose(text: str) -> set[str]:
 
 
 def documented_cli_flags() -> set[str]:
-    """Every flag README shows attached to a command."""
-    return flags_in_prose(README.read_text())
+    """Every flag the user docs show attached to a command."""
+    return set().union(*(flags_in_prose(page.read_text()) for page in USER_DOCS))
 
 
 def test_every_flag_on_a_line_is_read_not_just_the_first():
@@ -420,7 +425,7 @@ def test_prose_without_a_command_contributes_nothing():
 def test_new_cli_flags_are_documented_or_allowlisted():
     undocumented = cli_flags() - documented_cli_flags() - UNDOCUMENTED_CLI_FLAG_ALLOWLIST
     assert not undocumented, (
-        f"{len(undocumented)} CLI flag(s) neither documented in README.md nor "
+        f"{len(undocumented)} CLI flag(s) neither documented in the user docs nor "
         f"allowlisted:\n{_format(sorted(undocumented))}\n"
         f"Document it, or add it to UNDOCUMENTED_CLI_FLAG_ALLOWLIST with a reason."
     )
@@ -436,10 +441,10 @@ def test_the_cli_flag_allowlist_is_not_stale():
 
 
 def test_documented_flags_are_really_accepted():
-    """Catches the other direction: a flag README promises but the CLI dropped."""
+    """Catches the other direction: a flag the docs promise but the CLI dropped."""
     phantom = documented_cli_flags() - cli_flags()
     assert not phantom, (
-        f"README.md documents flag(s) the CLI does not accept:\n"
+        f"The user docs document flag(s) the CLI does not accept:\n"
         f"{_format(sorted(phantom))}"
     )
 

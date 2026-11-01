@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="690" viewBox="0 0 1200 690" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect width="1200" height="690" rx="16" fill="#ffffff"/>
+<text x="600.0" y="52" font-size="26" font-weight="700" fill="#0f172a" text-anchor="middle" xml:space="preserve">How the app knowledge base works</text>
+<text x="600.0" y="80" font-size="15" font-weight="400" fill="#475569" text-anchor="middle" xml:space="preserve">A map of your app, written once with your agent, that quern checks against the live screen on every step</text>
+<rect x="40" y="112" width="352" height="486" rx="16" fill="#f5f3ff" stroke="#f5f3ff" stroke-width="1.5"/>
+<circle cx="70" cy="144" r="15" fill="#7c3aed"/>
+<text x="70" y="149.5" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle" xml:space="preserve">1</text>
+<text x="94" y="150" font-size="19" font-weight="700" fill="#0f172a" text-anchor="start" xml:space="preserve">Built once, with you</text>
+<rect x="424" y="112" width="352" height="486" rx="16" fill="#ecfeff" stroke="#ecfeff" stroke-width="1.5"/>
+<circle cx="454" cy="144" r="15" fill="#0891b2"/>
+<text x="454" y="149.5" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle" xml:space="preserve">2</text>
+<text x="478" y="150" font-size="19" font-weight="700" fill="#0f172a" text-anchor="start" xml:space="preserve">Loaded every session</text>
+<rect x="808" y="112" width="352" height="486" rx="16" fill="#fff7ed" stroke="#fff7ed" stroke-width="1.5"/>
+<circle cx="838" cy="144" r="15" fill="#ea580c"/>
+<text x="838" y="149.5" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle" xml:space="preserve">3</text>
+<text x="862" y="150" font-size="19" font-weight="700" fill="#0f172a" text-anchor="start" xml:space="preserve">Checked on every step</text>
+<line x1="396" y1="355.0" x2="410" y2="355.0" stroke="#94a3b8" stroke-width="2.5"/>
+<path d="M408,348.0 L420,355.0 L408,362.0 Z" fill="#94a3b8"/>
+<line x1="780" y1="355.0" x2="794" y2="355.0" stroke="#94a3b8" stroke-width="2.5"/>
+<path d="M792,348.0 L804,355.0 L792,362.0 Z" fill="#94a3b8"/>
+<text x="62" y="184" font-size="14" font-weight="400" fill="#334155" text-anchor="start" xml:space="preserve">You and your agent tour the app together.</text>
+<text x="62" y="204" font-size="14" font-weight="400" fill="#334155" text-anchor="start" xml:space="preserve">The agent reads each screen; you add what</text>
+<text x="62" y="224" font-size="14" font-weight="400" fill="#334155" text-anchor="start" xml:space="preserve">it can't see: domain terms, hidden states,</text>
+<text x="62" y="244" font-size="14" font-weight="400" fill="#334155" text-anchor="start" xml:space="preserve">pop-ups, shortcuts.</text>
+<rect x="62" y="268" width="308" height="256" rx="12" fill="#ffffff" stroke="#ddd6fe" stroke-width="1.5"/>
+<text x="78" y="298.0" font-size="12.5" font-weight="700" fill="#4c1d95" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">.quern/</text>
+<text x="96" y="320.5" font-size="12.5" font-weight="400" fill="#1e293b" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">config.json</text>
+<text x="96" y="343.0" font-size="12.5" font-weight="700" fill="#4c1d95" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">knowledge/</text>
+<text x="114" y="365.5" font-size="12.5" font-weight="400" fill="#1e293b" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">app.md</text>
+<text x="114" y="388.0" font-size="12.5" font-weight="400" fill="#1e293b" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">screens/   one file per screen</text>
+<text x="114" y="410.5" font-size="12.5" font-weight="400" fill="#1e293b" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">flows/     login, checkout</text>
+<text x="114" y="433.0" font-size="12.5" font-weight="400" fill="#1e293b" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">alerts/    pop-ups to get past</text>
+<text x="114" y="455.5" font-size="12.5" font-weight="400" fill="#1e293b" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">quirks/    workarounds</text>
+<text x="114" y="478.0" font-size="12.5" font-weight="400" fill="#1e293b" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">states.md  logged in, onboarding</text>
+<text x="114" y="500.5" font-size="12.5" font-weight="400" fill="#1e293b" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">deep-links/</text>
+<text x="62" y="552" font-size="13.5" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">init_app_knowledge scaffolds it;</text>
+<text x="62" y="572" font-size="13.5" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">it lives in your repo with the code.</text>
+<text x="446" y="184" font-size="14" font-weight="400" fill="#334155" text-anchor="start" xml:space="preserve">The MCP finds .quern/knowledge in your</text>
+<text x="446" y="204" font-size="14" font-weight="400" fill="#334155" text-anchor="start" xml:space="preserve">project and loads it into the server</text>
+<text x="446" y="224" font-size="14" font-weight="400" fill="#334155" text-anchor="start" xml:space="preserve">(load_landmarks). Each screen file says:</text>
+<rect x="446" y="248" width="308" height="236" rx="12" fill="#0f172a" stroke="#0f172a" stroke-width="1.5"/>
+<text x="462" y="276.0" font-size="12.5" font-weight="400" fill="#64748b" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">---</text>
+<text x="462" y="296.5" font-size="12.5" font-weight="400" fill="#e2e8f0" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">screen: Settings</text>
+<text x="462" y="317.0" font-size="12.5" font-weight="400" fill="#fde68a" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">scrollable: true</text>
+<text x="462" y="337.5" font-size="12.5" font-weight="400" fill="#67e8f9" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">landmarks:</text>
+<text x="462" y="358.0" font-size="12.5" font-weight="400" fill="#e2e8f0" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">  - element: Heading</text>
+<text x="462" y="378.5" font-size="12.5" font-weight="400" fill="#e2e8f0" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">    label: "Settings"</text>
+<text x="462" y="399.0" font-size="12.5" font-weight="400" fill="#fdba74" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">leads_to:</text>
+<text x="462" y="419.5" font-size="12.5" font-weight="400" fill="#e2e8f0" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">  - screen: "[[screens/account]]"</text>
+<text x="462" y="440.0" font-size="12.5" font-weight="400" fill="#e2e8f0" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">    action: 'tap_element</text>
+<text x="462" y="460.5" font-size="12.5" font-weight="400" fill="#e2e8f0" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">            label="Account"'</text>
+<rect x="446" y="499" width="12" height="12" rx="3" fill="#0891b2"/>
+<text x="466" y="510" font-size="13" font-weight="700" fill="#0f172a" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">landmarks</text>
+<text x="547.8" y="510" font-size="13.5" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">how to recognise the screen</text>
+<rect x="446" y="523" width="12" height="12" rx="3" fill="#ea580c"/>
+<text x="466" y="534" font-size="13" font-weight="700" fill="#0f172a" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">leads_to</text>
+<text x="539.6" y="534" font-size="13.5" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">where each tap goes</text>
+<rect x="446" y="547" width="12" height="12" rx="3" fill="#ca8a04"/>
+<text x="466" y="558" font-size="13" font-weight="700" fill="#0f172a" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">scrollable</text>
+<text x="556.0" y="558" font-size="13.5" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">whether a swipe can help</text>
+<rect x="830" y="166" width="308" height="120" rx="12" fill="#ffffff" stroke="#fed7aa" stroke-width="1.5"/>
+<text x="846" y="194" font-size="16" font-weight="700" fill="#0f172a" text-anchor="start" xml:space="preserve">Where am I?</text>
+<text x="846" y="215" font-size="12.5" font-weight="600" fill="#c2410c" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">identify_screen</text>
+<text x="846" y="236" font-size="13" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">matches landmarks against the live</text>
+<text x="846" y="254" font-size="13" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">UI tree: “Settings”, or which screens</text>
+<text x="846" y="272" font-size="13" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">are ambiguous</text>
+<rect x="830" y="298" width="308" height="120" rx="12" fill="#ffffff" stroke="#fed7aa" stroke-width="1.5"/>
+<text x="846" y="326" font-size="16" font-weight="700" fill="#0f172a" text-anchor="start" xml:space="preserve">Did that tap land?</text>
+<text x="846" y="347" font-size="12.5" font-weight="600" fill="#c2410c" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">tap_element</text>
+<text x="846" y="368" font-size="13" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">with verify_navigation: waits for the</text>
+<text x="846" y="386" font-size="13" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">screen the edge leads to; without it, a</text>
+<text x="846" y="404" font-size="13" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">later miss says the tap didn't register</text>
+<rect x="830" y="430" width="308" height="120" rx="12" fill="#ffffff" stroke="#fed7aa" stroke-width="1.5"/>
+<text x="846" y="458" font-size="16" font-weight="700" fill="#0f172a" text-anchor="start" xml:space="preserve">Worth scrolling?</text>
+<text x="846" y="479" font-size="12.5" font-weight="600" fill="#c2410c" text-anchor="start" font-family="SFMono-Regular, Menlo, Consolas, monospace" xml:space="preserve">a miss on scrollable: false</text>
+<text x="846" y="500" font-size="13" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">reports screen_not_scrollable instead</text>
+<text x="846" y="518" font-size="13" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">of sweeping a screen that cannot</text>
+<text x="846" y="536" font-size="13" font-weight="400" fill="#475569" text-anchor="start" xml:space="preserve">hide the element</text>
+<text x="600.0" y="640" font-size="14" font-weight="400" fill="#475569" text-anchor="middle" xml:space="preserve">The agent also reads the files directly: how to reach any screen, what interrupts a flow, and how to get past it.</text>
+<text x="600.0" y="662" font-size="14" font-weight="600" fill="#334155" text-anchor="middle" xml:space="preserve">Without one, every session spends its first minutes finding its way around the app, then forgets.</text>
+</svg>

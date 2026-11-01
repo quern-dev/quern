@@ -120,9 +120,12 @@ tag and whatever is stale at that moment ships.
 For each item, ask "did this release change what this file asserts?" — not
 "did this release touch this file".
 
-- [ ] **`README.md`** — the feature bullets, the CLI command block, and the
-      `~/.quern/` state table. `tests/test_readme_sync.py` catches a *missing*
-      command; it cannot catch a description that is now wrong.
+- [ ] **`README.md`** and the pages it links to — the feature overview and
+      `docs/features.md`, the CLI command block and `~/.quern/` state table in
+      `docs/cli.md`, the tool table in `docs/mcp-tools.md`, and
+      `docs/installation.md` and `docs/updates.md`. `tests/test_readme_sync.py`
+      catches a *missing* command, flag or tool; it cannot catch a description
+      that is now wrong.
 - [ ] **`CONTRIBUTING.md`** — the design-decision and behaviour sections. A
       release that establishes a rule should say so here, or the next person
       re-derives it.

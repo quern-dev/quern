@@ -92,9 +92,29 @@ shell keeps running what it hashed earlier. `rehash` after setup, or read a
 stale wrapper as the answer.
 
 State lives at `~/.quern/state.json`, the API key at `~/.quern/api-key`, logs at
-`~/.quern/server.log`. The full command list is in [`README.md`](README.md), which
+`~/.quern/server.log`. The full command list is in [`docs/cli.md`](docs/cli.md), which
 `tests/test_readme_sync.py` checks against the actual CLI dispatch — so that is
 the copy to trust, and the one to update.
+
+### Git hooks
+
+`scripts/git-hooks/` is versioned, so the hooks travel with the repo — but git
+does not pick them up automatically. Point your clone at them once:
+
+```bash
+git config core.hooksPath scripts/git-hooks
+```
+
+| Hook | Does |
+|------|------|
+| `pre-commit` | Runs `ruff check` on staged Python files |
+| `commit-msg` | Rejects `Co-Authored-By:` trailers and AI-attribution lines, per the Code Conventions in `CLAUDE.md` |
+
+The message rule lives in `commit-msg` rather than `pre-commit` because
+`pre-commit` runs before the commit message exists and cannot see trailers at
+all. Both hooks are bypassable with `git commit --no-verify` when you genuinely
+need to — that is intentional, but it means the hooks are a guardrail rather
+than a guarantee.
 
 ## Code conventions
 
