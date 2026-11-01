@@ -936,10 +936,12 @@ the background and can be re-enabled with configure_system_proxy.`,
         "/api/v1/proxy/device-proxy-config",
         undefined,
         body
-      ) as { applied?: boolean; cleared?: boolean } | null;
+      ) as { applied?: boolean; cleared?: boolean; ends_with_hold?: boolean } | null;
       // Kept, so a use_remote switch routes the next server's Android
-      // devices too (carried.ts, #582).
-      if (data?.applied) recordDeviceProxy(udid, true);
+      // devices too (carried.ts, #582) -- only one that ends with this hold,
+      // which the old server then clears; one applied without a hold stays
+      // where it is, and is not copied (review).
+      if (data?.applied && data.ends_with_hold === true) recordDeviceProxy(udid, true);
       else if (data?.cleared) recordDeviceProxy(udid, false);
 
       return {

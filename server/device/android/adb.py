@@ -1296,6 +1296,24 @@ rm -rf /data/local/tmp/tmp-ca-copy
 """
         await self._run_adb_for_device(serial, "shell", script)
 
+    async def system_cert_state(self, serial: str, cert_filename: str) -> bool | None:
+        """Whether a cert file is in the system store: True, False, or None
+        when the device could not be asked. `is_system_cert_installed` reads
+        a failed adb call as False, which said "does not trust the CA" about
+        a device quern never reached (#582 review)."""
+        try:
+            stdout, _ = await self._run_adb_for_device(
+                serial, "shell",
+                f"if test -f /system/etc/security/cacerts/{cert_filename} || "
+                f"test -f /apex/com.android.conscrypt/cacerts/{cert_filename}; "
+                "then echo quern-present; else echo quern-absent; fi",
+            )
+        except (DeviceError, OSError):
+            return None
+        if "quern-present" in stdout:
+            return True
+        return False if "quern-absent" in stdout else None
+
     async def is_system_cert_installed(self, serial: str, cert_filename: str) -> bool:
         """Check if a cert file exists in the system cert store."""
         try:

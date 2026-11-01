@@ -731,14 +731,15 @@ async def _https_readiness(controller, udid: str) -> dict:
         try:
             cert = cert_manager.get_cert_path()
             name = f"{await controller.adb._get_cert_hash(cert)}.0"
-            trusted = await controller.adb.is_system_cert_installed(udid, name)
+            trusted = await controller.adb.system_cert_state(udid, name)
         except Exception:
             _logger.debug("Could not check the CA on %s", udid, exc_info=True)
     if trusted:
         note = None
     elif ca_install == "automatic":
         note = (
-            f"HTTPS from {udid} fails until it trusts quern's CA" if trusted is False
+            f"quern's CA is not in {udid}'s system store, so HTTPS fails for apps that "
+            "do not trust user certificates" if trusted is False
             else f"Could not check whether {udid} trusts quern's CA") + (
             ". Its build is rootable, so install_proxy_cert installs it. On API 34 "
             "and later the install is held in memory and does not survive a reboot: "
@@ -759,7 +760,7 @@ async def _https_readiness(controller, udid: str) -> dict:
     return {"ca_install": ca_install, "ca_trusted": trusted, "note": note}
 
 
-def _track_device_proxy(request: Request, udid: str, applied: bool) -> None:
+def _track_device_proxy(request: Request, udid: str, applied: bool) -> bool:
     """Who applied a device's proxy, so it is cleared when their hold on the
     device ends (#582): left behind, the next holder inherited a proxied
     device, which loses its network if the proxy stops. Recorded only for a
@@ -772,12 +773,15 @@ def _track_device_proxy(request: Request, udid: str, applied: bool) -> None:
     key = canonical_device_id(udid)
     holds.pop(key, None)
     if not applied:
-        return
+        return False
     caller = visibility.current_caller()
     registry = getattr(request.app.state, "sessions", None)
     held = registry.holder_of(key) if registry is not None and caller.session else None
     if held is not None and held.session.id == caller.session:
-        holds[key] = (held.session.id, getattr(held.session, "opened_at", None))
+        # The session, its opening, and failed clear attempts at its release.
+        holds[key] = (held.session.id, getattr(held.session, "opened_at", None), 0)
+        return True
+    return False
 
 
 @router.post("/device-proxy-config")
@@ -859,6 +863,7 @@ async def record_device_proxy_config_endpoint(
             #: than borrowing the success value.
             "proxy_verified": cleared["proxy_verified"],
             "https": None,
+            "ends_with_hold": False,
         }
 
     if body.apply and not is_android:
@@ -958,6 +963,7 @@ async def record_device_proxy_config_endpoint(
     # Canonicalising here as well is belt and braces: it costs nothing when the
     # map is warm, which it is on any server that has listed devices.
     applied = False
+    tracked = False
     reattached: bool | None = None
     if body.apply:
         try:
@@ -974,7 +980,7 @@ async def record_device_proxy_config_endpoint(
         # after. Reporting success without it would be reporting the request
         # rather than the outcome.
         reattached = await controller.adb.reattach_network(body.udid)
-        _track_device_proxy(request, body.udid, applied=True)
+        tracked = _track_device_proxy(request, body.udid, applied=True)
 
     device_proxy, read_ok = (
         await _read_device_proxy(controller, body.udid) if applied else (None, False)
@@ -1040,6 +1046,10 @@ async def record_device_proxy_config_endpoint(
         #: routed but not trusting the CA, every HTTPS request fails. None
         #: when nothing was applied.
         "https": await _https_readiness(controller, body.udid) if applied else None,
+        #: Whether this proxy ends with the caller's hold on the device: true
+        #: when a session that holds it applied it, and then its release
+        #: clears it. False for one applied without a hold, left as it is.
+        "ends_with_hold": tracked,
     }
 
 

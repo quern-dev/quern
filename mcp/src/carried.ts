@@ -197,9 +197,13 @@ export function recordDeviceProxy(udid: string, applied: boolean): void {
     return;
   }
   if (!deviceProxy) return;
+  // Cleared by the agent: this device is not routed again. A routing still
+  // waiting for the next reservation is kept (review: a clear right after
+  // a switch dropped it).
   deviceProxy.on.delete(udid);
   deviceProxy.failed.delete(udid);
-  if (!deviceProxy.on.size && !deviceProxy.failed.size) deviceProxy = null;
+  deviceProxy.removed.add(udid);
+  if (!deviceProxy.on.size && !deviceProxy.failed.size && !deviceProxy.waiting) deviceProxy = null;
 }
 
 /** remove_session_capture: one simulator's, some processes, or all. */

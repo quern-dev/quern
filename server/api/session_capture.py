@@ -86,6 +86,7 @@ async def _not_a_simulator(request: Request, udid: str) -> str | None:
 
     controller = getattr(request.app.state, "device_controller", None)
     device_type = getattr(controller, "_device_type", None)
+    udid = device_access._canonical(udid)
     kind = device_type(udid) if device_type else None
     if kind is None and device_type:
         with contextlib.suppress(Exception):

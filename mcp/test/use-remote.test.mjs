@@ -317,6 +317,7 @@ test("a re-scoped mock and an unscoped one reach an Android device after a switc
   // rule for this device too, cannot shadow it (CodeRabbit).
   assert.deepEqual(posts.map((b) => [b.pattern, b.simulator_udid]),
                    [["~u /re", "emulator-5556"], ["~u /all", "emulator-5556"]]);
+});
 
 test("an Android device routed through the proxy is routed again after a switch (#582)", async () => {
   const r = await run("carry-proxy");
@@ -336,4 +337,15 @@ test("a device routed once is not routed again when another is retried (#582)", 
   assert.deepEqual(posts, ["emulator-5556", "emulator-5558", "emulator-5558"]);
   assert.match(JSON.stringify(r.first.carried.failed), /emulator-5558/);
   assert.deepEqual(r.retry.carried.device_proxy_applied, [{ udid: "emulator-5558" }]);
+});
+
+test("only a proxy that ends with the hold is carried, and a clear after the switch keeps it (#582 review)", async () => {
+  const r = await run("carry-proxy-edges");
+  assert.equal(r.nothing.carried?.device_proxy, undefined,
+               "applied without a hold, cleared, or released: nothing to carry");
+  assert.equal(r.carried.carried.device_proxy, true);
+  assert.match(JSON.stringify(r.notApplied.carried.failed), /emulator-5556/,
+               "a 200 that did not apply is a failure");
+  assert.equal(r.notApplied.carried.still_waiting.device_proxy, true,
+               "still waiting after a clear of another device on the new server");
 });

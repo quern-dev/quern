@@ -507,3 +507,13 @@ def test_with_local_devices_and_no_remotes_lists_this_macs_devices(monkeypatch, 
     remote_cli._remote(["list", "--with-local", "--devices"])
     out = capsys.readouterr().out
     assert "L1" in out and "Not paired with any remote" in out
+
+
+def test_an_android_devices_ca_install_is_listed_when_the_remote_says():
+    # #582: how an Android device comes to trust the CA, before choosing it.
+    out = status._devices({"devices": [
+        {"udid": "emulator-5554", "name": "Pixel_9", "device_type": "android_emulator",
+         "ca_install": "automatic"},
+        {"udid": "SIM", "name": "iPhone", "device_type": "simulator"}]})
+    assert out[0]["ca_install"] == "automatic"
+    assert "ca_install" not in out[1]
