@@ -187,10 +187,14 @@ def _tail(path: Path, lines: int = 6) -> str:
 
 
 def _command_of(pid: int) -> str | None:
-    """`ps`'s command line for `pid`, or None if it has none (gone, or ps failed)."""
+    """`ps`'s command line for `pid`, or None if it has none (gone, or ps failed).
+
+    `-ww`, for the whole line: procps cuts it to 80 columns when its output is
+    not a terminal, which drops the --output path the match depends on (the
+    Linux CI job caught it; macOS ps does not cut)."""
     try:
-        r = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True,
-                           text=True, timeout=5)
+        r = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="],
+                           capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout.strip() or None if r.returncode == 0 else None
