@@ -131,6 +131,18 @@ class TestParsers:
         assert performance.parse_gfxinfo("No process found for: com.x\n") is None
 
 
+class TestEveryNullHasAReason:
+    def test_a_measured_metric_left_empty_is_still_explained(self):
+        # A backstop for paths that forget to say why: none do today.
+        snap = PerformanceSnapshot(udid="U", bundle_id="b", platform="android",
+                                   running=True, sample_seconds=1.0, cpu_percent=1.0)
+        performance._finish(snap)
+        every_null_has_a_reason(snap)
+        assert snap.unavailable["threads"] == "not read"
+        assert snap.unavailable["display_fps"] == "iOS devices only"
+        assert "cpu_percent" not in snap.unavailable
+
+
 # -- iOS simulator -----------------------------------------------------------
 
 class FakeHost:

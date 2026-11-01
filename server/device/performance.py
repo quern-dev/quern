@@ -172,12 +172,10 @@ def parse_meminfo_total_pss_kb(text: str) -> int | None:
     """Total PSS in KB from `dumpsys meminfo <pid>`'s App Summary.
 
     Android 10 ends the summary with `TOTAL:  90665  TOTAL SWAP PSS: ...`;
-    Android 12+ spells it `TOTAL PSS:  ...  TOTAL RSS: ...`.
+    Android 12+ spells it `TOTAL PSS:  ...  TOTAL RSS: ...`. The colon is what
+    tells it from the table's own `TOTAL` row above, which has none.
     """
-    summary = text.find("App Summary")
-    if summary < 0:
-        return None
-    m = re.search(r"^\s*TOTAL(?: PSS)?:\s+(\d+)", text[summary:], re.MULTILINE)
+    m = re.search(r"^\s*TOTAL(?: PSS)?:\s+(\d+)", text, re.MULTILINE)
     return int(m.group(1)) if m else None
 
 
