@@ -548,7 +548,10 @@ class AdbBackend:
                     running_avd_names.add(avd_name)
                 elif serial in self._serial_to_avd:
                     # Offline/shutting down — use cached AVD name
-                    name = avd = self._serial_to_avd[serial]
+                    # Shown, not trusted as identity: another emulator may
+                    # have taken the serial since the cache was filled, so
+                    # avd_name stays unknown (review).
+                    name = self._serial_to_avd[serial]
                     running_avd_names.add(name)
 
             if is_available:

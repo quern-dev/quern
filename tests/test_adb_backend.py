@@ -116,6 +116,29 @@ class TestListDevices:
         assert offline.state == DeviceState.SHUTDOWN
         assert offline.is_available is False
 
+    async def test_a_cached_avd_name_is_shown_but_not_reported_as_its_avd(self):
+        """#582 review: the serial may belong to another emulator since the
+        cache was filled, so a failed console lookup leaves avd_name empty --
+        an `avd:` group entry must not find the wrong emulator by it."""
+        backend = AdbBackend()
+        fixture_text = (FIXTURES_DIR / "adb_devices.txt").read_text()
+
+        async def mock_run_adb(*args):
+            if args == ("devices", "-l"):
+                return fixture_text, ""
+            raise DeviceError("unexpected call", tool="adb")
+
+        backend._run_adb = AsyncMock(side_effect=mock_run_adb)
+        backend._adb_path = "/usr/bin/adb"
+        backend._get_device_property = AsyncMock(return_value="")
+        backend._get_emulator_name = AsyncMock(return_value=None)
+        backend.list_avds = AsyncMock(return_value=[])
+        backend._serial_to_avd["emulator-5554"] = "Pixel_7_API_34"
+
+        emu = (await backend.list_devices())[0]
+        assert emu.name == "Pixel_7_API_34"
+        assert emu.avd_name == ""
+
     async def test_empty_when_no_adb(self):
         backend = AdbBackend()
         backend._adb_path = None
