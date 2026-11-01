@@ -91,6 +91,9 @@ async def _not_a_simulator(request: Request, udid: str) -> str | None:
     if kind is None and device_type:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(controller.list_devices(), 5.0)
+        # Again: the listing may have just learned this spelling's canonical
+        # id, which is where it filed the type (CodeRabbit).
+        udid = device_access._canonical(udid)
         kind = device_type(udid)
     if kind in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE):
         return (

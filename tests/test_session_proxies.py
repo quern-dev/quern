@@ -1217,3 +1217,29 @@ async def test_a_device_the_controller_has_not_listed_is_listed_once(tmp_path, a
         await api.add_session_capture.__wrapped__(
             req, SessionCaptureRequest(simulator_udid="emulator-5554", processes=["App"]))
     assert e.value.status_code == 422
+
+
+async def test_an_alias_the_listing_learns_is_looked_up_by_its_canonical_id(
+        tmp_path, as_client, monkeypatch):
+    """A physical iPhone named by its hardware UDID before anything listed
+    it: the listing files its type under the canonical id, which is where it
+    must be looked up (CodeRabbit)."""
+    from server.models import DeviceType
+
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    known: dict = {}
+    aliases: dict = {}
+    req.app.state.device_controller._device_type = known.get
+
+    async def list_devices():
+        known["CANON-UUID"] = DeviceType.DEVICE
+        aliases["00008030-HW"] = "CANON-UUID"
+
+    req.app.state.device_controller.list_devices = list_devices
+    monkeypatch.setattr(api.device_access, "_canonical", lambda u: aliases.get(u, u))
+    with pytest.raises(HTTPException) as e:
+        await api.add_session_capture.__wrapped__(
+            req, SessionCaptureRequest(simulator_udid="00008030-HW", processes=["App"]))
+    assert e.value.status_code == 422 and m.made == []

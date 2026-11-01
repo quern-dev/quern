@@ -1062,3 +1062,20 @@ async def test_a_pool_entry_takes_the_ca_install_its_device_reports_now(tmp_path
     ctrl.list_devices = AsyncMock(return_value=[row("automatic")])
     await pool.refresh(force=True)
     assert pool._read_state().devices["emulator-5554"].ca_install == "automatic"
+
+
+@pytest.mark.parametrize("read_back", [("10.0.0.1:9101", True), (None, False)],
+                         ids=["still-set", "unreadable"])
+async def test_a_clear_that_is_not_confirmed_keeps_the_record(read_back):
+    """Ended only once the device says it holds nothing: otherwise the
+    release, which retries, would find no record (CodeRabbit)."""
+    ctrl = _android()
+    value, readable = read_back
+    ctrl.adb.get_http_proxy = (AsyncMock(return_value=value) if readable
+                               else AsyncMock(side_effect=RuntimeError("offline")))
+    request = _request(ctrl)
+    request.app.state.device_proxy_holds = {"PHONE1": ("client:a/s1", "o1", 0)}
+    out = await record_device_proxy_config_endpoint(
+        RecordDeviceProxyRequest(udid="PHONE1", clear=True), request)
+    assert out["proxy_verified"] is not True
+    assert request.app.state.device_proxy_holds == {"PHONE1": ("client:a/s1", "o1", 0)}

@@ -349,3 +349,9 @@ test("only a proxy that ends with the hold is carried, and a clear after the swi
   assert.equal(r.notApplied.carried.still_waiting.device_proxy, true,
                "still waiting after a clear of another device on the new server");
 });
+
+test("a device cleared on one server is not skipped on the next (#582, CodeRabbit)", async () => {
+  const r = await run("carry-proxy-hops");
+  assert.deepEqual(r.back.carried.device_proxy_applied, [{ udid: "emulator-5554" }],
+                   "serials repeat across servers: removed there is nothing here");
+});

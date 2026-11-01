@@ -331,7 +331,9 @@ export async function moveOut(old: Server, oldName: string, { unreachable = fals
     c.waiting = true;
   }
   // Routed devices: the old server clears them as the switch releases them.
-  if (deviceProxy?.on.size) {
+  // A new server: its devices are all new, the ones removed or failed on the
+  // last included -- serials repeat across servers (CodeRabbit).
+  if (deviceProxy) {
     deviceProxy = { on: new Set(), removed: new Set(), failed: new Set(), waiting: true };
   }
   if (left.length) stranded.set(oldName, [...(stranded.get(oldName) ?? []), ...left]);

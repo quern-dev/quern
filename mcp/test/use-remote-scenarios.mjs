@@ -123,6 +123,11 @@ const plans = {
                         { "POST /api/v1/proxy/device-proxy-config": async (b) => [200,
                             b.clear ? { cleared: true } : globalThis.notApplied ? {} : { applied: true }],
                           "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  "carry-proxy-hops": [{ "POST /api/v1/proxy/device-proxy-config": async (b) => [200,
+                           b.clear ? { cleared: true } : { applied: true, ends_with_hold: true }],
+                         "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] },
+                       { "POST /api/v1/proxy/device-proxy-config": async (b) => [200,
+                           b.clear ? { cleared: true } : { applied: true, ends_with_hold: true }] }],
   "carry-retry": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
                   { "POST /api/v1/proxy/mocks": async (b) => globalThis.mocksDown
                       ? [503, { detail: "proxy is not running" }] : retryIds(b),
@@ -326,6 +331,15 @@ if (scenario === "window") {
   globalThis.notApplied = true;
   globalThis.reserved = [{ udid: "emulator-5556", device_type: "android_emulator" }];
   result.notApplied = JSON.parse(text(await tools.reserve_devices({ udids: ["emulator-5556"] })).text);
+} else if (scenario === "carry-proxy-hops") {
+  // Routed here, switch; cleared there by hand while waiting; back again:
+  // emulator-5554 here is a different device from the one cleared there.
+  await tools.record_device_proxy_config({ udid: "emulator-5554", apply: true });
+  await tools.use_remote({ name: "romulus" });
+  await tools.record_device_proxy_config({ udid: "emulator-5554", clear: true });
+  await tools.use_remote({ name: "local" });
+  globalThis.reserved = [{ udid: "emulator-5554", device_type: "android_emulator" }];
+  result.back = JSON.parse(text(await tools.reserve_devices({ udids: ["emulator-5554"] })).text);
 } else if (scenario === "carry-retry") {
   await tools.set_mock({ pattern: "~u /a", status_code: 200, body: "A" });
   result.switched = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);

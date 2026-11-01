@@ -828,7 +828,10 @@ async def record_device_proxy_config_endpoint(
                 status_code=502,
                 detail=f"Could not clear the proxy on {body.udid}: {e}",
             ) from e
-        _track_device_proxy(request, body.udid, applied=False)
+        # Ended only once the device says it holds nothing: a clear that did
+        # not take, or could not be read back, stays for the release to retry.
+        if cleared["proxy_verified"] is True:
+            _track_device_proxy(request, body.udid, applied=False)
         forgotten, reattached = cleared["forgot_ssids"], cleared["network_reattached"]
         cleared_proxy = cleared["device_proxy"]
         return {
