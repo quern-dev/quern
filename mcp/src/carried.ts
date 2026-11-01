@@ -380,7 +380,13 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
     return onServer.find((r) => !taken.has(r.rule_id) && r.pattern === mock.pattern &&
       (r.simulator_udid ?? null) === scope && canonical(r.response) === want)?.rule_id;
   };
-  for (const mock of moved) {
+  // Scoped mocks first. For a key that may not mock every device, an
+  // unscoped mock becomes one scoped rule per device, and the proxy answers
+  // with the first rule set for that device -- so one recreated ahead of a
+  // device's own mock would shadow it (CodeRabbit).
+  const ordered = everyDevice ? moved
+    : [...moved.filter((m) => m.scoped), ...moved.filter((m) => !m.scoped)];
+  for (const mock of ordered) {
     // Unscoped where it was, and this key may mock every device: unscoped.
     // Unscoped, for a key that may not: one rule per device just reserved.
     // Scoped: one per device of the kind it was scoped to.

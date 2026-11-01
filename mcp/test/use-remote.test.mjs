@@ -313,6 +313,8 @@ test("a re-scoped mock and an unscoped one reach an Android device after a switc
   // A client key there may not mock every device: the unscoped mock goes to
   // each device reserved, Android ones included; the one re-scoped to an
   // emulator is Android's now, by the server's word.
-  assert.deepEqual(posts.map((b) => [b.pattern, b.simulator_udid]).sort(),
-                   [["~u /all", "emulator-5556"], ["~u /re", "emulator-5556"]]);
+  // In this order: the device's own mock first, so the unscoped one, made a
+  // rule for this device too, cannot shadow it (CodeRabbit).
+  assert.deepEqual(posts.map((b) => [b.pattern, b.simulator_udid]),
+                   [["~u /re", "emulator-5556"], ["~u /all", "emulator-5556"]]);
 });
