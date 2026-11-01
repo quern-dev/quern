@@ -114,8 +114,11 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 
 ### Connect via MCP
 
+The installer registers Quern's MCP server with Claude Code for you, so if that is your agent there is nothing to do. For another agent, register it with `quern mcp-install` and the agent's name: `claude-desktop`, `cursor`, `codex` or `opencode`, or `all` for every one of them.
+
 ```bash
-quern mcp-install           # adds quern-debug to ~/.claude.json
+quern mcp-install cursor    # one agent
+quern mcp-install all       # Claude Code, Claude Desktop, Cursor, Codex and opencode
 ```
 
 The MCP server auto-discovers the running server via `state.json` — no URL or API key configuration needed.
