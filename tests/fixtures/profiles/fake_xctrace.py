@@ -1,12 +1,19 @@
 """A stand-in for `xcrun xctrace`, run as a real subprocess by tests/test_profiles.py.
 
-record: prints what xctrace prints, makes the --output bundle, and records
-until SIGINT or --time-limit (scaled by FAKE_XCTRACE_SCALE so tests are quick).
-export: prints the fixture for the table asked for.
+It behaves the way real xctrace was measured to (Xcode 27.2), because a fake
+kinder than the tool hides exactly the bugs worth finding:
+- the --output bundle exists from the moment recording starts, not only once saved;
+- stopping (SIGINT or --time-limit) is followed by a save that takes time,
+  and only then "Output file saved as: ...";
+- SIGINT during the save is noted in <bundle's parent>/signals, one line each,
+  so a test can tell whether quern signalled a process that was saving.
 
-FAKE_XCTRACE_MODE picks the behaviour: ok, offline, no-trace, exit-early,
-stubborn (ignores SIGINT), toc=<name> (which TOC fixture), fail=<schema>,
-sim-launch (the simulator's empty launch table rather than the device's).
+record runs for --time-limit seconds scaled by FAKE_XCTRACE_SCALE, and saves
+for FAKE_XCTRACE_SAVE_S. FAKE_XCTRACE_MODE picks the behaviour: ok, offline,
+exit-early, error-stays (reports a failure and keeps running), stubborn
+(ignores SIGINT and never saves), crash (dies mid-recording, never saving),
+toc=<name> (which TOC fixture), fail=<schema>, empty=<schema> (the export
+prints no table), sim-launch (the simulator's empty launch table).
 """
 
 import os
@@ -18,6 +25,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 MODE = os.environ.get("FAKE_XCTRACE_MODE", "ok")
 SCALE = float(os.environ.get("FAKE_XCTRACE_SCALE", "0.02"))
+SAVE_S = float(os.environ.get("FAKE_XCTRACE_SAVE_S", "0.2"))
 
 
 def arg(name):
@@ -35,26 +43,40 @@ def record():
         return 0
     if "exit-early" in MODE:
         return 3
+    if "error-stays" in MODE:
+        signal.signal(signal.SIGINT, lambda *_: sys.exit(0))   # as xctrace exits on ^C
+        print("Recording failed with errors. Saving output file...", flush=True)
+        time.sleep(60)
+        return 0
+    out.mkdir(parents=True)
+    (out / "data").write_bytes(b"x" * int(os.environ.get("FAKE_XCTRACE_BYTES", "1000")))
     print("Ctrl-C to stop the recording", flush=True)
     stopped = []
     if "stubborn" in MODE:
         signal.signal(signal.SIGINT, signal.SIG_IGN)
-    else:
-        signal.signal(signal.SIGINT, lambda *_: stopped.append(1))
-    if "no-trace" not in MODE:
-        out.mkdir(parents=True)
-        (out / "data").write_bytes(b"x" * int(os.environ.get("FAKE_XCTRACE_BYTES", "1000")))
-    deadline = time.monotonic() + limit
-    while not stopped and time.monotonic() < deadline:
+        while True:
+            time.sleep(0.05)
+    signal.signal(signal.SIGINT, lambda *_: stopped.append(1))
+    started = time.monotonic()
+    while not stopped and time.monotonic() - started < limit:
         time.sleep(0.01)
+        if "crash" in MODE and time.monotonic() - started > min(limit / 2, 0.1):
+            os._exit(1)
+    if not stopped:
+        print("Reached specified time limit, ending recording...", flush=True)
+    signals = out.parent / "signals"
+    signal.signal(signal.SIGINT, lambda *_: signals.open("a").write("SIGINT while saving\n"))
     print("Recording completed. Saving output file...", flush=True)
+    time.sleep(SAVE_S)
+    print(f"Output file saved as: {out}", flush=True)
     return 0
 
 
 def export():
     toc = next((m.split("=", 1)[1] for m in MODE.split(",") if m.startswith("toc=")),
-               "sim-hangs-toc")
+               "device-hangs-toc")
     failing = [m.split("=", 1)[1] for m in MODE.split(",") if m.startswith("fail=")]
+    empty = [m.split("=", 1)[1] for m in MODE.split(",") if m.startswith("empty=")]
     if "--toc" in sys.argv:
         name = toc
     else:
@@ -63,6 +85,9 @@ def export():
         if schema in failing:
             print(f"Error: table {schema} is damaged", file=sys.stderr)
             return 4
+        if schema in empty:
+            print('<?xml version="1.0"?>\n<trace-query-result>\n</trace-query-result>')
+            return 0
         launch = "sim-launch" if "sim-launch" in MODE else "device-launch"
         name = {"potential-hangs": "sim-hangs-potential-hangs", "hitches": "device-hitches",
                 "time-profile": "device-time-profile",

@@ -998,7 +998,8 @@ def test_a_clients_profile_ends_with_its_hold(world):
     done = SimpleNamespace(id="prof-alice-done", udid=SIM_A, principal="client:alice",
                            state="finished")
     owners = SimpleNamespace(id="prof-owner", udid=SIM_A, principal="owner", state="recording")
-    world.app.state.profiles = SimpleNamespace(list=lambda: [mine, done, owners], stop=stop)
+    world.app.state.profiles = SimpleNamespace(list=lambda: [mine, done, owners],
+                                               request_stop=stop)
     world.registry.release("alice:s1")
     actions = asyncio.run(run_release_policies(world.app))
     assert stopped == [("prof-alice", "session_ended")]

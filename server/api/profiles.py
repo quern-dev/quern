@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import re
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -15,18 +14,19 @@ from starlette.background import BackgroundTask
 from server import device_access, visibility
 from server.api.actions import logged_action
 from server.api.device import _get_controller, _handle_device_error
+from server.config import profile_settings
 from server.device.ios.devicectl import spellings_of
 from server.logging_ext import current_action
 from server.models import DeviceError, DeviceType, StartProfileRequest
 from server.profiling import xctrace as xt
-from server.profiling.manager import ProfileError, ProfileManager
+from server.profiling.manager import ID, ProfileError, ProfileManager
 
 router = APIRouter(prefix="/api/v1/profiles", tags=["profiles"])
 
 #: What a profile serves. The trace is a bundle (a directory), so it is
 #: zipped on request rather than kept twice.
 FILES = ("summary.json", "xctrace.log", "profile.trace.zip")
-_ID = re.compile(r"^prof_[0-9a-f]{12}$")
+_ID = ID
 
 RELAUNCH_NOTE = (
     "xctrace launched {app} for this profile and terminates it when the profile stops: "
@@ -111,12 +111,21 @@ async def start_profile(request: Request, body: StartProfileRequest) -> dict:
         raise _error(e) from e
     view = await asyncio.to_thread(profile.view)
     notes = [RELAUNCH_NOTE.format(app=body.bundle_id), LAUNCHING_NOTE.format(app=body.bundle_id)]
+    # The budget is the server's, so a start can remove anyone's oldest. Only
+    # the caller's own are named: another principal's ids are not its to see.
+    mine = [e["id"] for e in room["evicted"] if e["principal"] == caller.principal]
+    others = len(room["evicted"]) - len(mine)
     if room["evicted"]:
-        notes.append(f"removed {len(room['evicted'])} older profile(s) to stay within "
-                     f"{room['budget_bytes'] // 2**20} MB: {', '.join(room['evicted'])}")
-    return {**view, "purpose": xt.PRESETS[body.preset].purpose,
-            "stops_at": f"after {body.time_limit_s}s, or on stop_profile", "notes": notes,
-            "disk": {"used_bytes": room["used_bytes"], "budget_bytes": room["budget_bytes"]}}
+        removed = ", ".join(mine + ([f"{others} of other keys'"] if others else []))
+        notes.append(f"removed older profiles to stay within the "
+                     f"{room['budget_bytes'] // 2**20} MB kept for profiles: {removed}")
+    if note := profile_settings()["note"]:
+        notes.append(note)
+    answer = {**view, "purpose": xt.PRESETS[body.preset].purpose,
+              "stops_at": f"after {body.time_limit_s}s, or on stop_profile", "notes": notes}
+    if caller.is_owner:
+        answer["disk"] = {"used_bytes": room["used_bytes"], "budget_bytes": room["budget_bytes"]}
+    return answer
 
 
 @router.post("/{profile_id}/stop")

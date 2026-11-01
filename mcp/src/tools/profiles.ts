@@ -71,7 +71,7 @@ summary.hangs lists main-thread hangs: start_s (seconds into the recording), dur
   });
 
   server.registerTool("get_profile", {
-    description: "A profile's state (recording, finalizing, finished, failed) and, once finished, its summary -- the same as stop_profile returns. Without profile_id, lists the kept profiles, oldest first, without summaries. A profile ended by its time limit is finished on its own; read it here.",
+    description: "A profile's state and, once finished, its summary -- the same as stop_profile returns. state is recording, finalizing (xctrace is saving the trace, then quern reads it; stopping it again does nothing), finished, or failed (xctrace did not save a whole trace, or it could not be read: error says which). Without profile_id, lists the kept profiles, oldest first, without summaries. A profile ended by its time limit finishes on its own; read it here.",
     inputSchema: strictParams({
       profile_id: z.string().optional().describe("A profile's id; omit to list them all"),
     }),
@@ -85,7 +85,7 @@ summary.hangs lists main-thread hangs: start_s (seconds into the recording), dur
   });
 
   server.registerTool("download_profile", {
-    description: "Copy a finished profile to a directory on this machine: summary.json, xctrace.log, and the trace as profile.trace.zip (unzip it and open profile.trace in Instruments). For when the server is another machine. A client key downloads only its own profiles.",
+    description: "Copy a profile to a directory on this machine: summary.json, xctrace.log and, once finished, the trace as profile.trace.zip (unzip it and open profile.trace in Instruments). A failed profile has no trace to download, only its log. For when the server is another machine. A client key downloads only its own profiles.",
     inputSchema: strictParams({
       profile_id: z.string().describe("The profile's id, from start_profile or get_profile"),
       dest: z.string().optional().describe("Directory to write into, on this machine (default ./quern-profiles/<id>); made if missing"),

@@ -1,25 +1,33 @@
 """Profiles: one xctrace recording per device, summarised and kept on disk (#245).
 
 A profile's life: started (xctrace launches the app and records), then either
-its time limit ends it or `stop` sends SIGINT, then xctrace finalises the
-trace, then quern exports the tables it summarises. The trace stays for
-download until the disk budget needs its room.
+its time limit ends it or `stop` sends SIGINT, then xctrace saves the trace,
+then quern exports the tables it summarises. The trace stays for download
+until the disk budget needs its room.
 
-**xctrace outlives the server on purpose.** It finalises for 13 s or more,
-and `quern stop` kills the server about 5 s after asking, so a shutdown that
+**xctrace outlives the server on purpose.** It saves for 13 s or more, and
+`quern stop` kills the server about 5 s after asking, so a shutdown that
 waited for it would lose the trace instead. xctrace runs in its own session
 with its own time limit; the server only stops watching it, and the next
 server re-adopts it by pid -- confirmed by its command line, never the pid
 alone -- or, if it has finished meanwhile, summarises what it left.
+
+**What xctrace says decides the state, not what is on disk.** Its bundle
+exists from the moment recording starts, so a trace directory proves
+nothing; "Output file saved as" in its output is what says the trace is
+whole. And "Saving output file" means it is no longer recording, so it is
+not signalled again: a second SIGINT into a save is a risk nobody measured.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -41,16 +49,23 @@ TIME_LIMIT_MAX_S = 300
 #: Until xctrace says it is recording. Launching on a device measured about
 #: 4 s, and a device xctrace thinks is offline takes 30 s to say so.
 START_TIMEOUT_S = 90.0
-#: From the end of recording to a finished trace. Measured 13 s for 30 s of
-#: Time Profiler on an iPhone 11; Animation Hitches traces are ten times larger.
+#: For the CoreDevice warm-up before a physical device. It is one devicectl
+#: call, measured 0.35-0.8 s from cold; one that does not answer must not hold
+#: the device's profile slot with it.
+WARM_UP_TIMEOUT_S = 20.0
+#: From the end of recording to a saved trace. Measured 13 s for 30 s of Time
+#: Profiler on an iPhone 11; Animation Hitches traces are ten times larger.
 FINALIZE_TIMEOUT_S = 180.0
 #: One table's export. Measured 26 s for a table of a 192 MB trace.
 EXPORT_TIMEOUT_S = 120.0
+#: Exports a summary can run: the table of contents and four tables.
+EXPORTS_MAX = 5
 #: Hangs and hitches listed in a summary; the count says how many there were.
 LIST_LIMIT = 50
 
 ACTIVE = ("recording", "finalizing")
 STATE_FILE = "profiles.json"
+ID = re.compile(r"^prof_[0-9a-f]{12}$")
 
 
 class ProfileError(Exception):
@@ -94,6 +109,8 @@ class Profile:
     proc: asyncio.subprocess.Process | None = field(default=None, repr=False)
     done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     task: asyncio.Task | None = field(default=None, repr=False)
+    #: Downloads in progress: eviction leaves the profile alone meanwhile.
+    readers: int = field(default=0, repr=False)
 
     @property
     def dir(self) -> Path:
@@ -116,6 +133,16 @@ class Profile:
             "id", "udid", "device", "platform", "bundle_id", "preset", "time_limit_s",
             "started_at", "principal", "state", "pid", "ended_at", "stop_reason", "error")}
 
+    def log_text(self) -> str:
+        try:
+            return self.log.read_text(errors="replace")
+        except OSError:
+            return ""
+
+    def saving(self) -> bool:
+        """xctrace has stopped recording and is writing the trace."""
+        return any(m in self.log_text() for m in xt.SAVING_MARKERS)
+
     def summary(self) -> dict | None:
         try:
             return json.loads(self.summary_file.read_text())
@@ -124,17 +151,21 @@ class Profile:
 
     def view(self) -> dict:
         preset = xt.PRESETS.get(self.preset)
+        state = self.state
+        if state == "recording" and self.saving():
+            state = "finalizing"          # xctrace said so; the watch has not seen it exit yet
         return {
             **{k: v for k, v in self.record().items() if k not in ("principal", "pid", "device")},
+            "state": state,
             "template": preset.template if preset else None,
             "bytes": _size(self.dir),
             "summary": self.summary() if self.state not in ACTIVE else None,
-            # The trace is served only once xctrace has finished writing it.
+            # The trace is offered only once it is known whole.
             "files": [name for name, path in (("summary.json", self.summary_file),
                                               ("xctrace.log", self.log),
                                               ("profile.trace.zip", self.trace))
-                      if path.exists() and not (name.endswith(".zip")
-                                                and self.state in ACTIVE)],
+                      if path.exists() and (not name.endswith(".zip")
+                                            or self.state == "finished")],
         }
 
 
@@ -226,18 +257,22 @@ class ProfileManager:
             warm_up = warm_up or self.warm_up
             if platform == "device" and warm_up is not None:
                 try:
-                    await warm_up(udid)
+                    await asyncio.wait_for(warm_up(udid), WARM_UP_TIMEOUT_S)
                 except Exception as e:  # noqa: BLE001 -- xctrace's own answer says more
-                    logger.info("Warming up %s before profiling failed: %s", udid[:8], e)
+                    logger.info("Warming up %s before profiling failed: %r", udid[:8], e)
             await self._spawn(profile, chosen)
+            profile.task = asyncio.create_task(self._watch(profile))
         except BaseException:
+            # Cancelled or failed before it was watched: end what was spawned,
+            # or it records on, into a directory removed under it.
+            if profile.proc is not None:
+                await asyncio.shield(_end(profile.proc))
             self._active.pop(udid, None)
+            self._profiles.pop(profile.id, None)
             if profile.dir.exists():
-                shutil.rmtree(profile.dir, ignore_errors=True)
+                await asyncio.shield(asyncio.to_thread(shutil.rmtree, profile.dir, True))
+            await asyncio.shield(self._save())
             raise
-        self._profiles[profile.id] = profile
-        await self._save()
-        profile.task = asyncio.create_task(self._watch(profile))
         return profile, room
 
     async def _spawn(self, profile: Profile, preset: xt.Preset) -> None:
@@ -253,17 +288,28 @@ class ProfileManager:
             except OSError as e:
                 raise ProfileError(f"xctrace could not be run: {e}", 500) from e
         profile.proc, profile.pid = proc, proc.pid
+        # Recorded at once: a server killed while xctrace starts would leave a
+        # recording nothing knows about, with a directory the budget never counts.
+        self._profiles[profile.id] = profile
+        await self._save()
         deadline = time.monotonic() + START_TIMEOUT_S
         while True:
-            text = profile.log.read_text(errors="replace") if profile.log.exists() else ""
+            text = profile.log_text()
             if xt.STARTED_MARKER in text:
                 return
             failed = next((m for m in xt.FAILURE_MARKERS if m in text), None)
             if failed or proc.returncode is not None or time.monotonic() > deadline:
                 if proc.returncode is None:
                     await _end(proc)
-                why = _tail(profile.log) or (
-                    f"no answer within {START_TIMEOUT_S:g}s" if not failed else failed)
+                # The line that said it failed comes first: what follows it
+                # (xctrace saving, or exiting) can push it out of the tail.
+                said = next((ln.strip() for ln in text.splitlines() if failed and failed in ln),
+                            None)
+                tail = _tail(profile.log)
+                parts = [said] if said else []
+                if tail and not (said and said in tail):
+                    parts.append(tail)
+                why = " / ".join(parts) or f"no answer within {START_TIMEOUT_S:g}s"
                 hint = ""
                 if profile.platform == "device" and "Waiting for device to boot" in text:
                     hint = (" (xctrace saw the device as offline: its CoreDevice tunnel was "
@@ -273,16 +319,24 @@ class ProfileManager:
 
     # -- stopping --------------------------------------------------------------
 
-    async def stop(self, profile_id: str, reason: str = "stopped") -> Profile:
-        """Stop recording early and wait for the summary."""
+    async def request_stop(self, profile_id: str, reason: str = "stopped") -> Profile:
+        """Ask xctrace to stop, without waiting for it: for callers that must
+        not be held while a trace saves (a session ending)."""
         profile = self.get(profile_id)
-        if profile.state == "recording":
+        if profile.state == "recording" and profile.stop_reason is None \
+                and not profile.saving():
+            # Once, and never into a save: the reason is the first one given.
             profile.stop_reason = reason
             await self._signal(profile, signal.SIGINT)
+        return profile
+
+    async def stop(self, profile_id: str, reason: str = "stopped") -> Profile:
+        """Stop recording early and wait for the summary."""
+        profile = await self.request_stop(profile_id, reason)
         if profile.state in ACTIVE:
             try:
-                await asyncio.wait_for(profile.done.wait(),
-                                       FINALIZE_TIMEOUT_S + 3 * EXPORT_TIMEOUT_S)
+                await asyncio.wait_for(asyncio.shield(profile.done.wait()),
+                                       FINALIZE_TIMEOUT_S + EXPORTS_MAX * EXPORT_TIMEOUT_S)
             except TimeoutError:
                 raise ProfileError(
                     f"{profile_id} has not finished; it is {profile.state}. Ask again later.",
@@ -311,17 +365,19 @@ class ProfileManager:
             await self._close(profile)
 
     async def _wait_out(self, profile: Profile) -> None:
-        # Past its time limit plus finalising, it is stuck: ask, then insist.
+        # Past its time limit plus saving, it is stuck: ask, then insist.
         budget = profile.time_limit_s + FINALIZE_TIMEOUT_S
         started = time.monotonic()
         while await self._alive(profile):
             if time.monotonic() - started > budget:
                 logger.warning("xctrace for %s overran %gs; stopping it", profile.id, budget)
-                profile.stop_reason = profile.stop_reason or "killed"
+                profile.stop_reason = "killed"
                 await self._signal(profile, signal.SIGINT)
                 await asyncio.sleep(10)
                 await self._signal(profile, signal.SIGKILL)
-                profile.stop_reason = "killed"
+                if profile.proc is not None:              # reaped, not left a zombie
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(profile.proc.wait(), 5.0)
                 break
             if profile.proc is not None:
                 with contextlib.suppress(TimeoutError):
@@ -338,15 +394,27 @@ class ProfileManager:
             await asyncio.to_thread(_command_of, profile.pid), profile.trace)
 
     async def _finalize(self, profile: Profile) -> None:
-        if not profile.trace.exists():
+        text = profile.log_text()
+        if xt.SAVED_MARKER not in text:
+            # Killed, crashed, or stopped before saving: a bundle may exist,
+            # but nothing says it is whole, so it is not offered as a result.
             profile.state = "failed"
-            profile.error = f"xctrace left no trace: {_tail(profile.log) or 'no output'}"
+            profile.error = ("xctrace did not finish saving the trace"
+                             + (" (quern stopped it after it overran)"
+                                if profile.stop_reason == "killed" else "")
+                             + f": {_tail(profile.log) or 'no output'}")
         else:
             summary = await self.summarize(profile)
             _write_json_atomic(profile.summary_file, summary)
-            profile.state = "finished"
-        await self._close(profile)
+            if "trace" in summary["unavailable"]:
+                profile.state = "failed"
+                profile.error = summary["unavailable"]["trace"]
+            else:
+                profile.state = "finished"
+        # Trimmed before it is announced done, so whoever was waiting on it
+        # sees the store within its budget.
         await self._make_room(keep=profile.id)
+        await self._close(profile)
 
     async def _close(self, profile: Profile) -> None:
         profile.ended_at = profile.ended_at or _now()
@@ -367,7 +435,7 @@ class ProfileManager:
         try:
             out, err = await asyncio.wait_for(proc.communicate(), EXPORT_TIMEOUT_S)
         except BaseException:
-            await _end(proc)
+            await asyncio.shield(_end(proc))
             raise
         if proc.returncode != 0:
             raise ProfileError(f"xctrace export failed: {err.decode(errors='replace').strip()}"
@@ -380,7 +448,9 @@ class ProfileManager:
         hangs found and hangs not read are different answers."""
         preset = xt.PRESETS.get(profile.preset)
         summary: dict = {"preset": profile.preset, "hangs": None, "hitches": None,
-                         "time_profile": None, "launch": None, "unavailable": {}}
+                         "time_profile": None, "unavailable": {}}
+        if profile.preset == "launch":
+            summary["launch"] = None
         try:
             toc = xt.parse_toc(await self._export(profile.trace, None))
         except asyncio.CancelledError:
@@ -421,51 +491,85 @@ class ProfileManager:
                         " (simulators record none, measured)"
                         if profile.platform == "simulator" else ""))
                 continue
+            if section == "time_profile" and not value["samples"]:
+                value["note"] = (f"no CPU samples from {process or 'the app'}: Time Profiler "
+                                 "samples running threads only, so an idle or blocked app has none")
             summary[section] = value
         return summary
 
     # -- disk ------------------------------------------------------------------
 
+    def _orphans(self) -> list[Path]:
+        """Profile directories no record knows: a server killed before it
+        could save one, or a profiles.json that was lost. Counted against the
+        budget, and the first to go."""
+        root = _root()
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            return []
+        return [p for p in entries if ID.fullmatch(p.name) and p.is_dir()
+                and not p.is_symlink() and p.name not in self._profiles]
+
     async def usage(self) -> int:
-        dirs = [p.dir for p in self._profiles.values()]
+        dirs = [p.dir for p in self._profiles.values()] + self._orphans()
         return await asyncio.to_thread(lambda: sum(_size(d) for d in dirs))
 
     async def _make_room(self, keep: str | None = None) -> dict:
         """Remove the oldest finished profiles until the kept ones fit the
-        budget. Profiles still recording are never removed; when they alone
-        are over it, a new one is refused. Sizes and removals run off the
-        event loop: a trace bundle can be hundreds of files."""
+        budget. Nothing is removed unless that is enough: a start refused
+        because profiles still recording fill the budget removes nothing.
+        Sizes and removals run off the event loop: a trace bundle can be
+        hundreds of files."""
         limit = self.settings()["max_bytes"]
-        profiles = self.list()
-        dirs = {p.id: p.dir for p in profiles}
+        orphans = self._orphans()
+        removable = [p for p in self.list()
+                     if p.state not in ACTIVE and p.id != keep and p.readers == 0]
+        dirs = {p.id: p.dir for p in self._profiles.values()} | {o.name: o for o in orphans}
         sizes = await asyncio.to_thread(lambda: {i: _size(d) for i, d in dirs.items()})
         used = sum(sizes.values())
-        evicted = []
-        for profile in profiles:
+        if keep is None and used >= limit:
+            freeable = sum(sizes[o.name] for o in orphans) + sum(sizes[p.id] for p in removable)
+            if used - freeable >= limit:
+                raise ProfileError(
+                    f"the kept profiles take {used // 2**20} MB of the {limit // 2**20} MB "
+                    "allowed (config.json profiles.max_mb), and those still recording or being "
+                    "downloaded cannot be removed", 507)
+        evicted: list[dict] = []
+        candidates = [(o.name, o, None) for o in sorted(orphans, key=_mtime)] + \
+                     [(p.id, p.dir, p.principal) for p in removable]
+        for name, directory, owner in candidates:
             if used < limit:
                 break
-            if profile.state in ACTIVE or profile.id == keep:
-                continue
-            self._profiles.pop(profile.id, None)
-            await asyncio.to_thread(shutil.rmtree, profile.dir, True)
-            used -= sizes[profile.id]
-            evicted.append(profile.id)
-        if keep is None and used >= limit:
-            raise ProfileError(
-                f"the kept profiles take {used // 2**20} MB of the {limit // 2**20} MB allowed "
-                "(config.json profiles.max_mb), and none can be removed while recording", 507)
+            self._profiles.pop(name, None)
+            await asyncio.to_thread(shutil.rmtree, directory, True)
+            used -= sizes[name]
+            evicted.append({"id": name, "principal": owner})
+        if evicted:
+            await self._save()
         return {"evicted": evicted, "used_bytes": used, "budget_bytes": limit}
 
     # -- files -----------------------------------------------------------------
 
     async def zip_trace(self, profile: Profile) -> Path:
         """A temporary zip of the trace bundle; the caller removes it."""
-        if profile.state in ACTIVE:
-            raise ProfileError(f"{profile.id} is still {profile.state}", 409)
-        if not profile.trace.is_dir():
+        if profile.state != "finished":
+            raise ProfileError(
+                f"{profile.id} is {profile.state}: its trace is offered once finished", 409)
+        if not profile.trace.is_dir() or profile.trace.is_symlink():
             raise ProfileError(f"{profile.id} has no trace", 404)
         tmp = _root() / f".{profile.id}.{uuid.uuid4().hex[:8]}.zip"
-        await asyncio.to_thread(_zip_dir, profile.trace, tmp)
+        profile.readers += 1
+        try:
+            await asyncio.to_thread(_zip_dir, profile.trace, tmp)
+        except FileNotFoundError as e:
+            raise ProfileError(f"{profile.id}'s trace was removed while zipping it", 409) from e
+        except OSError as e:
+            full = e.errno in (errno.ENOSPC, errno.EDQUOT)
+            raise ProfileError(f"could not zip {profile.id}'s trace: {e}",
+                               507 if full else 500) from e
+        finally:
+            profile.readers -= 1
         return tmp
 
     # -- persistence -----------------------------------------------------------
@@ -484,15 +588,31 @@ class ProfileManager:
     async def resume(self) -> list[str]:
         """Pick up the profiles a previous server left: re-adopt an xctrace
         still recording, and summarise any that finished unwatched."""
+        root = _root()
+        for stale in root.glob(".prof_*.zip") if root.is_dir() else []:
+            with contextlib.suppress(OSError):
+                stale.unlink()           # a download's temporary zip, cut off by the restart
+        state = root / STATE_FILE
         try:
-            raw = json.loads((_root() / STATE_FILE).read_text())
-        except (OSError, ValueError):
+            raw = json.loads(state.read_text())
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError) as e:
+            # Kept aside rather than overwritten by the next save; the
+            # directories it named are still counted and evicted as orphans.
+            aside = state.with_name(f"{STATE_FILE}.unreadable-{int(time.time())}")
+            with contextlib.suppress(OSError):
+                state.rename(aside)
+            logger.warning("Could not read %s (%s); kept it as %s", state, e, aside.name)
             return []
         adopted = []
         for entry in raw.get("profiles", []) if isinstance(raw, dict) else []:
+            if not isinstance(entry, dict) or not ID.fullmatch(str(entry.get("id", ""))):
+                continue
             try:
                 profile = Profile(**{k: entry[k] for k in Profile.__dataclass_fields__
-                                     if k in entry and k not in ("proc", "done", "task")})
+                                     if k in entry and k not in ("proc", "done", "task",
+                                                                 "readers")})
             except TypeError:
                 continue
             if not profile.dir.is_dir() or profile.dir.is_symlink():
@@ -516,6 +636,13 @@ class ProfileManager:
             with contextlib.suppress(BaseException):
                 await task
         await self._save()
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 async def _end(proc: asyncio.subprocess.Process) -> None:

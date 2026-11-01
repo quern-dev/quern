@@ -571,7 +571,10 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
                     or prof.state != "recording":
                 continue
             try:
-                await profiles.stop(prof.id, reason="session_ended")
+                # Asked to stop, not waited on: saving and summarising take
+                # a minute or more, and this runs in the sweep every
+                # session's expiry waits on.
+                await profiles.request_stop(prof.id, reason="session_ended")
                 actions.append({"udid": udid, "action": "profile_stopped", "ok": True,
                                 "profile": prof.id})
             except Exception as e:  # noqa: BLE001 -- reported, never raised

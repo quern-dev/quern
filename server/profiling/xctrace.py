@@ -31,6 +31,12 @@ FAILURE_MARKERS = (
     "Failed to launch",
 )
 
+#: xctrace has stopped recording and is writing the trace, then has written
+#: it. The bundle exists from the start of recording, so only this line says
+#: a trace is whole. Measured on Xcode 27.2, after a time limit and a ^C.
+SAVING_MARKERS = ("Reached specified time limit", "Saving output file")
+SAVED_MARKER = "Output file saved as"
+
 #: How a launch path tells an app's own code from the system's: an app's
 #: binary sits in its container on both platforms -- `.../data/Containers/...`
 #: on a simulator, `/private/var/containers/...` on a device -- so the match
@@ -149,7 +155,11 @@ class _Row(dict):
 def _rows(text: str) -> tuple[list[_Row], _Refs]:
     root = ET.fromstring(text)
     schema = root.find(".//schema")
-    columns = [c.findtext("mnemonic") for c in schema.findall("col")] if schema is not None else []
+    if schema is None:
+        # An export that matched no table prints an empty result. Read as
+        # rows, that is "none found", which it does not say.
+        raise ValueError("the export returned no table")
+    columns = [c.findtext("mnemonic") for c in schema.findall("col")]
     rows = [_Row(zip(columns, list(row), strict=False)) for row in root.iter("row")]
     return rows, _Refs(root)
 
