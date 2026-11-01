@@ -240,6 +240,20 @@ class TestTheSampler:
         assert fake.calls == [] and "gauge" not in rec.counts
         assert rec_mod.load(tmp_path / "r").gauge_app is None
 
+    async def test_a_sample_with_no_length_covers_the_interval(self, tmp_path):
+        src, fake = Sources(), FakeGauges()
+        m = _manager(src, fake)
+        rec = await m.start(SIM, str(tmp_path / "r"), Filters(gauges="com.x",
+                                                              gauge_interval_s=3.0))
+        fake.push(cpu_percent=1.0, sample_seconds=0)
+        fake.push(cpu_percent=1.0, sample_seconds=None)
+        await _until(lambda: rec.counts.get("gauge") == 2)
+        await m.stop(rec.id)
+        for line in _gauge_lines(tmp_path / "r"):
+            d = line["data"]
+            assert (datetime.fromisoformat(d["to"]) - datetime.fromisoformat(d["from"])
+                    ) == timedelta(seconds=3)
+
     async def test_no_line_after_stopped(self, tmp_path):
         src, fake = Sources(), FakeGauges()
         m = _manager(src, fake)
@@ -462,6 +476,23 @@ class TestTheTrace:
                                   ).json()["actions"]
             assert action["gauges"]["samples"] == 0
             assert "no gauge sample yet" in action["gauges"]["unavailable"]["cpu_percent"]
+            client.post(f"/api/v1/recordings/{rid}/stop")
+
+    def test_live_an_action_older_than_the_samples_kept_points_at_the_file(self, tmp_path):
+        src, fake = Sources(), FakeGauges()
+        with TestClient(_gauged_app(src, fake)) as client:
+            rid = client.post("/api/v1/recordings", json={
+                "udid": SIM, "output_dir": str(tmp_path / "r"), "gauges": "com.x"}).json()["id"]
+            rec = client.app.state.recordings.get(rid)
+
+            async def feed():
+                await src.server.append(_action("tap", at=_now(-60), duration_ms=500))
+                fake.push(cpu_percent=1.0)
+                await _until(lambda: rec.counts.get("gauge") == 1)
+            client.portal.call(feed)
+            [action] = client.get("/api/v1/trace", params={"since": _now(-120).isoformat()},
+                                  ).json()["actions"]
+            assert "recording=" in action["gauges"]["unavailable"]["cpu_percent"]
             client.post(f"/api/v1/recordings/{rid}/stop")
 
     def test_over_the_recording_after_it_stopped(self, tmp_path):
@@ -702,12 +733,15 @@ class TestThePhoneStream:
 
     async def test_an_app_not_running_is_polled_until_it_starts(self, monkeypatch):
         ns = 10**9
+        monkeypatch.setattr(performance, "_NOT_RUNNING_POLL_S", 0.05)    # paced, not spun
         lib, rsd, _ = _fake_lib(pids=[0, 0, 42],
                                 ticks=[_tick(42, 0, 0, ns), _tick(42, ns, 0, 2 * ns)])
         monkeypatch.setattr(performance, "_pmd3", lambda: lib)
         stream = performance.device_stream("UUID", "com.x", 1.0)
+        began = asyncio.get_running_loop().time()
         async with contextlib.aclosing(stream):
             got = [await anext(stream) for _ in range(3)]
+        assert asyncio.get_running_loop().time() - began >= 0.1
         assert [s.running for s in got] == [False, False, True]
         assert got[0].unavailable["cpu_percent"] == performance.NOT_RUNNING
         assert got[2].cpu_percent == 100.0
