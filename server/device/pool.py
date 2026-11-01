@@ -27,7 +27,7 @@ class NotEnoughDevices(DeviceError):
     route can tell "none exist" from "some exist, too few or not usable". It
     was answered as a 500, reading to the caller like a crash."""
 
-    def __init__(self, message: str, *, matched: int):
+    def __init__(self, message: str, *, matched: int) -> None:
         super().__init__(message, tool="pool")
         self.matched = matched
 
@@ -45,6 +45,10 @@ class DevicePool:
         self._pool_file = POOL_FILE
         self._pool_file.parent.mkdir(parents=True, exist_ok=True)
         self._last_refresh_at: datetime | None = None
+        #: The controller's listing failures as of the refresh this state
+        #: came from, so an answer drawn from the cached state reads the
+        #: failures of the same listing, not of whichever ran since (review).
+        self.listing_failures: dict[str, str] = {}
 
     # ----------------------------------------------------------------
     # Public API
@@ -93,6 +97,7 @@ class DevicePool:
 
         # Get current devices from simctl (~200-500ms, expensive)
         simctl_devices = await self.controller.list_devices()
+        self.listing_failures = dict(getattr(self.controller, "listing_failures", None) or {})
 
         with self._lock_pool_file():
             state = self._read_state()

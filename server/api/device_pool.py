@@ -45,7 +45,7 @@ _LISTED_PLATFORM = {"simctl": "ios", "devicectl": "ios", "usbmux": "ios", "adb":
 def _listing_failed(pool, on_platform: str | None) -> str:
     """The listing failures that bear on a pick on ``on_platform`` (any, when
     None), as "tool: why; ...", or "" when there were none."""
-    failures = getattr(pool.controller, "listing_failures", None) or {}
+    failures = getattr(pool, "listing_failures", None) or {}
     return "; ".join(f"{tool}: {why}" for tool, why in failures.items()
                      if on_platform is None or _LISTED_PLATFORM.get(tool) == on_platform)
 

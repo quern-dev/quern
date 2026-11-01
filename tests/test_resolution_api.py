@@ -262,6 +262,19 @@ class TestEnsureEndpoint:
                                   platform="android")
         assert resp.status_code == 404
 
+    async def test_ensure_reads_the_failures_of_the_listing_it_used(self, app, auth_headers,
+                                                                    mock_device_pool):
+        """A listing elsewhere, inside the pool's cache window, must not
+        change the answer drawn from the cached state (review)."""
+        from server.models import DeviceError
+
+        self._real_listing(mock_device_pool, AsyncMock(
+            side_effect=DeviceError("CoreSimulatorService connection invalid", tool="simctl")))
+        await mock_device_pool.refresh()
+        mock_device_pool.controller.listing_failures = {}    # an unrelated listing since
+        resp = await self._ensure(app, auth_headers, count=1, name="No Such Phone")
+        assert resp.status_code == 503
+
     async def test_ensure_without_xcode_is_still_404(self, app, auth_headers, mock_device_pool):
         """A tool that is not installed is absent, not failed."""
         self._real_listing(mock_device_pool, AsyncMock(side_effect=FileNotFoundError("xcrun")))
