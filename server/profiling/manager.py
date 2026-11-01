@@ -293,7 +293,11 @@ class ProfileManager:
                                 profile.trace, profile.bundle_id)
         # Output to a file, never a pipe: a pipe would tie xctrace's life to
         # this process's, and it must outlive a server restart.
-        with open(profile.log, "wb") as log:
+        try:
+            log = open(profile.log, "wb")
+        except OSError as e:
+            raise ProfileError(f"could not write {profile.id}'s log: {e}", 500) from e
+        with log:
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd, stdin=asyncio.subprocess.DEVNULL, stdout=log,
@@ -536,14 +540,17 @@ class ProfileManager:
     def _orphans(self) -> list[Path]:
         """Profile directories no record knows: a server killed before it
         could save one, or a profiles.json that was lost. Counted against the
-        budget, and the first to go."""
+        budget, and the first to go. A start still warming up has a directory
+        and no record yet, and is not one."""
         root = _root()
         try:
             entries = list(root.iterdir())
         except OSError:
             return []
+        starting = set(self._active.values())
         return [p for p in entries if ID.fullmatch(p.name) and p.is_dir()
-                and not p.is_symlink() and p.name not in self._profiles]
+                and not p.is_symlink() and p.name not in self._profiles
+                and p.name not in starting]
 
     async def usage(self) -> int:
         dirs = [p.dir for p in self._profiles.values()] + self._orphans()
@@ -575,6 +582,12 @@ class ProfileManager:
         for name, directory, owner in candidates:
             if used < limit:
                 break
+            # Asked again here, not from the list above: a download can begin
+            # while the sizes are read. With no await between this check and
+            # the pop, zip_trace either sees the record gone or is seen here.
+            current = self._profiles.get(name)
+            if current is not None and current.readers:
+                continue
             self._profiles.pop(name, None)
             await asyncio.to_thread(shutil.rmtree, directory, True)
             used -= sizes[name]
@@ -587,6 +600,8 @@ class ProfileManager:
 
     async def zip_trace(self, profile: Profile) -> Path:
         """A temporary zip of the trace bundle; the caller removes it."""
+        if self._profiles.get(profile.id) is not profile:
+            raise ProfileError(f"{profile.id} was removed to make room", 404)
         if profile.state != "finished":
             raise ProfileError(
                 f"{profile.id} is {profile.state}: its trace is offered once finished", 409)
@@ -694,10 +709,16 @@ async def _end(proc: asyncio.subprocess.Process) -> None:
             await asyncio.shield(proc.wait())
 
 
+def _raise(e: OSError) -> None:
+    raise e
+
+
 def _zip_dir(source: Path, dest: Path) -> None:
     try:
         with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:
-            for root, _dirs, files in os.walk(source):
+            # A directory that vanishes mid-walk is an error, not a smaller
+            # zip: os.walk skips what it cannot list unless told otherwise.
+            for root, _dirs, files in os.walk(source, onerror=_raise):
                 for name in files:
                     path = Path(root) / name
                     if not path.is_symlink():

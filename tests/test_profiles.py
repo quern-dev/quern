@@ -737,6 +737,96 @@ class TestFiles:
             await m.stop(profile.id)
 
 
+class TestRacesWithEviction:
+    """Review on #593: a start warming up, and a download beginning, while
+    _make_room reads sizes."""
+
+    @staticmethod
+    def _shrinkable():
+        """A manager whose budget can drop to nothing once a start is past it."""
+        budget = {"max_bytes": 2048 * 2**20}
+        return ProfileManager(xctrace=FAKE, settings=lambda: budget), budget
+
+    async def test_a_start_still_warming_up_is_not_an_orphan(self, state):
+        m, budget = self._shrinkable()
+        warming, release = asyncio.Event(), asyncio.Event()
+
+        async def warm(_udid):
+            warming.set()
+            await release.wait()
+
+        task = asyncio.create_task(_start(m, udid=PHONE, platform="device", limit=10,
+                                          warm_up=warm))
+        async with asyncio.timeout(20):
+            await warming.wait()
+        budget["max_bytes"] = 0                 # every byte is over budget now
+        starting = next(d for d in (state / "profiles").iterdir() if d.is_dir())
+        (starting / "data").write_bytes(b"x" * 1000)
+        assert starting not in m._orphans()
+        await m._make_room(keep="another")      # as a finishing profile would
+        assert starting.is_dir()
+        release.set()
+        async with asyncio.timeout(20):
+            profile, _ = await task
+        await _finished(profile)
+        assert profile.state == "finished"
+
+    async def test_a_download_that_begins_while_sizes_are_read_keeps_its_profile(
+            self, state, monkeypatch):
+        m, budget = self._shrinkable()
+        profile, _ = await _start(m, limit=10)
+        await _finished(profile)
+        budget["max_bytes"] = 0
+        real = manager_mod._size
+
+        def size_then_a_download_begins(path):
+            profile.readers = 1                 # zip_trace registers mid-scan
+            return real(path)
+
+        monkeypatch.setattr(manager_mod, "_size", size_then_a_download_begins)
+        room = await m._make_room(keep="another")
+        assert room["evicted"] == [] and profile.dir.is_dir() and m.get(profile.id)
+
+    async def test_a_download_of_a_profile_just_removed_is_refused(self, state):
+        m, budget = self._shrinkable()
+        profile, _ = await _start(m, limit=10)
+        await _finished(profile)
+        budget["max_bytes"] = 0
+        assert (await m._make_room(keep="another"))["evicted"] == [
+            {"id": profile.id, "principal": "owner"}]
+        with pytest.raises(ProfileError) as e:
+            await m.zip_trace(profile)          # the record the route already held
+        assert e.value.status == 404 and "removed" in str(e.value)
+        assert list((state / "profiles").glob(".*.zip")) == []
+
+    def test_a_directory_that_cannot_be_read_is_an_error_not_a_smaller_zip(self, tmp_path):
+        source = tmp_path / "profile.trace"
+        (source / "sub").mkdir(parents=True)
+        (source / "data").write_text("x")
+        (source / "sub" / "more").write_text("y")
+        dest = tmp_path / "out.zip"
+        (source / "sub").chmod(0)
+        if os.access(source / "sub", os.R_OK):          # root reads it anyway
+            (source / "sub").chmod(0o755)
+            pytest.skip("this user can read a mode-0 directory")
+        try:
+            with pytest.raises(OSError):
+                manager_mod._zip_dir(source, dest)
+        finally:
+            (source / "sub").chmod(0o755)
+        assert not dest.exists()
+
+    async def test_a_log_that_cannot_be_written_is_a_profile_error(self, state):
+        async def block_the_log(_udid):
+            for d in (state / "profiles").iterdir():
+                (d / "xctrace.log").mkdir()
+
+        with pytest.raises(ProfileError) as e:
+            await _start(_manager(), udid=PHONE, platform="device", warm_up=block_the_log)
+        assert e.value.status == 500 and "log" in str(e.value)
+        assert [d for d in (state / "profiles").iterdir() if d.is_dir()] == []
+
+
 # -- routes ------------------------------------------------------------------
 
 @pytest.fixture
@@ -770,7 +860,8 @@ class TestRoutes:
             assert any("terminates it" in n for n in body["notes"])
             assert any("still launching" in n for n in body["notes"])
             assert body["disk"]["budget_bytes"] == 2048 * 2**20     # the owner is told
-            stopped = await http.post(f"/api/v1/profiles/{body['id']}/stop")
+            async with asyncio.timeout(20):
+                stopped = await http.post(f"/api/v1/profiles/{body['id']}/stop")
             assert stopped.status_code == 200 and stopped.json()["stop_reason"] == "stopped"
             got = (await http.get(f"/api/v1/profiles/{body['id']}")).json()
             assert got["state"] == "finished" and got["summary"]["hangs_count"] == 2
