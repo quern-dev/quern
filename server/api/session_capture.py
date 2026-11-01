@@ -11,7 +11,6 @@ A client's names are released with its hold on the device.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
@@ -89,8 +88,15 @@ async def _not_a_simulator(request: Request, udid: str) -> str | None:
     udid = device_access._canonical(udid)
     kind = device_type(udid) if device_type else None
     if kind is None and device_type:
-        with contextlib.suppress(Exception):
+        # A listing that did not finish is "could not tell": letting it
+        # through left a later discovery to find an Android device after the
+        # claim was made (review).
+        try:
             await asyncio.wait_for(controller.list_devices(), 5.0)
+        except Exception:
+            raise HTTPException(status_code=503, detail=(
+                f"Could not list devices to check that {udid} is a simulator. "
+                "Try again.")) from None
         # Again: the listing may have just learned this spelling's canonical
         # id, which is where it filed the type (CodeRabbit).
         udid = device_access._canonical(udid)
@@ -123,6 +129,12 @@ async def add_session_capture(
     processes = [p for p in body.processes if p]
     if reason := _refusal(processes, owner=caller.is_owner):
         raise HTTPException(status_code=400, detail=reason)
+    # The asking session, and which opening of it, read before the device
+    # check may wait on a listing: one that ends meanwhile must not be read
+    # afterwards as no session, whose claim nothing ends (review).
+    registry = getattr(request.app.state, "sessions", None)
+    asking = registry.get(caller.session) if registry is not None and caller.session else None
+    opened = asking.opened_at if asking is not None else None
     if reason := await _not_a_simulator(request, body.simulator_udid):
         raise HTTPException(status_code=422, detail=reason)
     if reason := device_access.why_not(body.simulator_udid):
@@ -144,9 +156,6 @@ async def add_session_capture(
     # key does not hold ends with it, and must not be committed after it ended
     # (CodeRabbit). Reservations hold canonical ids; so do claims.
     udid = device_access._canonical(body.simulator_udid)
-    registry = getattr(request.app.state, "sessions", None)
-    asking = registry.get(caller.session) if registry is not None and caller.session else None
-    opened = asking.opened_at if asking is not None else None
     # A session id the registry does not hold -- the CLI and scripts send one
     # without holding a session -- is no session to end with: recorded as
     # none, as a caller without one is, not under an id nothing will end.

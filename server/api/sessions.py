@@ -639,6 +639,10 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
 #: that was shut down or unplugged cannot be cleared, and retrying it every
 #: second kept it unreservable for good (review).
 _PROXY_CLEAR_ATTEMPTS = 3
+#: How long one clear may take at release, the network bounce included: it
+#: runs in the sweep every session's expiry waits on, so a stalled adb must
+#: not hold it (CodeRabbit). Above a healthy bounce.
+_PROXY_CLEAR_TIMEOUT_S = 45.0
 
 
 async def _end_device_proxy(app: Any, registry: Any, session: Any, udid: str,
@@ -670,7 +674,12 @@ async def _end_device_proxy(app: Any, registry: Any, session: Any, udid: str,
     from server.api.proxy_certs import clear_device_proxy
 
     try:
-        cleared = await clear_device_proxy(app.state.device_controller, udid)
+        try:
+            cleared = await asyncio.wait_for(
+                clear_device_proxy(app.state.device_controller, udid), _PROXY_CLEAR_TIMEOUT_S)
+        except TimeoutError:
+            raise RuntimeError(
+                f"the device did not answer within {_PROXY_CLEAR_TIMEOUT_S:g}s") from None
         if cleared["proxy_verified"] is False:
             raise RuntimeError(f"its proxy still reads {cleared['device_proxy']} after the clear")
         holds.pop(udid, None)

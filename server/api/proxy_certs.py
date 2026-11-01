@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import subprocess
 from datetime import UTC, datetime
@@ -760,6 +761,19 @@ async def _https_readiness(controller, udid: str) -> dict:
     return {"ca_install": ca_install, "ca_trusted": trusted, "note": note}
 
 
+def _hold_still_current(request: Request, udid: str) -> bool:
+    """Whether the session recorded for `udid` still holds it, in the same
+    opening."""
+    holds = getattr(request.app.state, "device_proxy_holds", None) or {}
+    record = holds.get(canonical_device_id(udid))
+    registry = getattr(request.app.state, "sessions", None)
+    if record is None or registry is None:
+        return False
+    held = registry.holder_of(canonical_device_id(udid))
+    return held is not None and (held.session.id, getattr(held.session, "opened_at", None)) \
+        == tuple(record[:2])
+
+
 def _track_device_proxy(request: Request, udid: str, applied: bool) -> bool:
     """Who applied a device's proxy, so it is cleared when their hold on the
     device ends (#582): left behind, the next holder inherited a proxied
@@ -968,11 +982,18 @@ async def record_device_proxy_config_endpoint(
     applied = False
     tracked = False
     reattached: bool | None = None
+    hold_ended = False
     if body.apply:
+        # Recorded before the device is written, not after: a release while
+        # the write or the network bounce runs finds the record and clears it,
+        # and the check after them catches one that ended in between (review).
+        tracked = _track_device_proxy(request, body.udid, applied=True)
         try:
             await controller.adb.set_http_proxy(body.udid, proxy_host, port)
             applied = True
         except Exception as e:
+            if tracked:
+                _track_device_proxy(request, body.udid, applied=False)
             raise HTTPException(
                 status_code=502,
                 detail=f"Could not set the proxy on {body.udid}: {e}",
@@ -983,7 +1004,16 @@ async def record_device_proxy_config_endpoint(
         # after. Reporting success without it would be reporting the request
         # rather than the outcome.
         reattached = await controller.adb.reattach_network(body.udid)
-        tracked = _track_device_proxy(request, body.udid, applied=True)
+        if tracked and not _hold_still_current(request, body.udid):
+            # The hold that applied it ended while it was being applied: its
+            # release may have cleared before the write landed, so it is
+            # cleared here, and the device is left as the release meant.
+            hold_ended = True
+            tracked = False
+            with contextlib.suppress(Exception):
+                await clear_device_proxy(controller, body.udid)
+            holds = getattr(request.app.state, "device_proxy_holds", None) or {}
+            holds.pop(canonical_device_id(body.udid), None)
 
     device_proxy, read_ok = (
         await _read_device_proxy(controller, body.udid) if applied else (None, False)
@@ -1053,6 +1083,9 @@ async def record_device_proxy_config_endpoint(
         #: when a session that holds it applied it, and then its release
         #: clears it. False for one applied without a hold, left as it is.
         "ends_with_hold": tracked,
+        #: The hold that applied it ended while it was applied, so it was
+        #: cleared again rather than left on a device nobody holds.
+        **({"hold_ended": True} if hold_ended else {}),
     }
 
 

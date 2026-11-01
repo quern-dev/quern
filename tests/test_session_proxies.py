@@ -1243,3 +1243,48 @@ async def test_an_alias_the_listing_learns_is_looked_up_by_its_canonical_id(
         await api.add_session_capture.__wrapped__(
             req, SessionCaptureRequest(simulator_udid="00008030-HW", processes=["App"]))
     assert e.value.status_code == 422 and m.made == []
+
+
+async def test_a_listing_that_does_not_finish_is_could_not_tell(tmp_path, as_client):
+    """Let through, a later discovery found the Android device only after the
+    claim was made (CodeRabbit)."""
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    req.app.state.device_controller._device_type = lambda udid: None
+
+    async def hangs():
+        raise TimeoutError
+
+    req.app.state.device_controller.list_devices = hangs
+    with pytest.raises(HTTPException) as e:
+        await api.add_session_capture.__wrapped__(
+            req, SessionCaptureRequest(simulator_udid="emulator-5554", processes=["App"]))
+    assert e.value.status_code == 503 and m.made == [] and m.claims() == []
+
+
+async def test_the_asking_session_is_read_before_the_device_check_waits(tmp_path, as_client):
+    """A session that ends while the listing runs is still the claim's: read
+    afterwards as no session, the claim had nothing to end it (CodeRabbit)."""
+    from server.models import DeviceType
+
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    opened = object()
+    live = {"client:a/s1": SimpleNamespace(opened_at=opened)}
+    req.app.state.sessions = SimpleNamespace(get=lambda sid: live.get(sid))
+    known: dict = {}
+    req.app.state.device_controller._device_type = known.get
+
+    async def list_devices():
+        known[ALPHA] = DeviceType.SIMULATOR
+        live.clear()                          # the session ends meanwhile
+
+    req.app.state.device_controller.list_devices = list_devices
+    try:
+        await api.add_session_capture.__wrapped__(
+            req, SessionCaptureRequest(simulator_udid=ALPHA, processes=["Metatext"]))
+    except HTTPException:
+        pass                                  # ended: refused is fine; a session-less claim is not
+    assert all(c.session == "client:a/s1" for c in m.claims()), m.claims()

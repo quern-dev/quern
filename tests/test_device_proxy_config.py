@@ -1079,3 +1079,68 @@ async def test_a_clear_that_is_not_confirmed_keeps_the_record(read_back):
         RecordDeviceProxyRequest(udid="PHONE1", clear=True), request)
     assert out["proxy_verified"] is not True
     assert request.app.state.device_proxy_holds == {"PHONE1": ("client:a/s1", "o1", 0)}
+
+
+async def test_a_hold_that_ends_while_the_proxy_is_applied_gets_it_cleared():
+    """The release ran while the write and the network bounce did, and found
+    no record yet: the proxy stayed on a device nobody held (CodeRabbit)."""
+    ctrl = _android()
+    request = _request(ctrl)
+    session = SimpleNamespace(id="client:a/s1", opened_at="o1")
+    holding = {"now": True}
+    request.app.state.sessions = SimpleNamespace(
+        holder_of=lambda u: SimpleNamespace(session=session) if holding["now"] else None)
+
+    async def bounce(udid):
+        holding["now"] = False                # the session is released meanwhile
+        return True
+
+    ctrl.adb.reattach_network = AsyncMock(side_effect=bounce)
+    a, b = _hosts()
+    caller = SimpleNamespace(session="client:a/s1", principal="client:a", is_owner=False)
+    with a, b, patch("server.api.proxy_certs.visibility.current_caller", return_value=caller):
+        out = await record_device_proxy_config_endpoint(
+            RecordDeviceProxyRequest(udid="PHONE1", apply=True), request)
+    ctrl.adb.clear_http_proxy.assert_awaited_once_with("PHONE1")
+    assert out["hold_ended"] is True and out["ends_with_hold"] is False
+    assert request.app.state.device_proxy_holds == {}
+
+
+async def test_a_failed_write_leaves_no_record():
+    ctrl = _android()
+    ctrl.adb.set_http_proxy = AsyncMock(side_effect=RuntimeError("adb offline"))
+    request = _request(ctrl)
+    session = SimpleNamespace(id="client:a/s1", opened_at="o1")
+    request.app.state.sessions = SimpleNamespace(
+        holder_of=lambda u: SimpleNamespace(session=session))
+    a, b = _hosts()
+    caller = SimpleNamespace(session="client:a/s1", principal="client:a", is_owner=False)
+    with a, b, patch("server.api.proxy_certs.visibility.current_caller", return_value=caller), \
+         pytest.raises(HTTPException):
+        await record_device_proxy_config_endpoint(
+            RecordDeviceProxyRequest(udid="PHONE1", apply=True), request)
+    assert request.app.state.device_proxy_holds == {}
+
+
+async def test_a_stalled_clear_at_release_is_bounded(monkeypatch):
+    """It runs in the sweep every session's expiry waits on (CodeRabbit)."""
+    import asyncio
+
+    from server.api import sessions as sessions_api
+
+    ctrl = _android()
+
+    async def hangs(udid):
+        await asyncio.sleep(10)
+
+    ctrl.adb.clear_http_proxy = AsyncMock(side_effect=hangs)
+    monkeypatch.setattr(sessions_api, "_PROXY_CLEAR_TIMEOUT_S", 0.05)
+    app = SimpleNamespace(state=SimpleNamespace(
+        device_controller=ctrl, session_proxies=None, proxy_adapter=None, recordings=None,
+        mock_owners={}, device_proxy_holds={"PHONE1": ("ci", None, 0)}))
+    session = SimpleNamespace(id="ci", principal="owner", opened_at=None,
+                              reservations=["PHONE1"])
+    actions = await asyncio.wait_for(sessions_api._end_client_work(
+        app, SimpleNamespace(holder_of=lambda udid: None), session), 2)
+    [act] = [x for x in actions if x["action"] == "device_proxy_cleared"]
+    assert act["ok"] is False and "did not answer" in act["error"]
