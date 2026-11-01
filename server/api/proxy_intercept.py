@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from pathlib import Path
 
@@ -228,9 +227,14 @@ async def _android_mock_scope(request: Request, scope: str | None) -> str | None
     device_type = getattr(controller, "_device_type", None)
     kind = device_type(scope) if device_type else None
     if kind is None and device_type:
-        # A cold cache is not "unknown device": list once, bounded.
-        with contextlib.suppress(Exception):
+        # A cold cache is not "unknown device": list once, bounded. A listing
+        # that did not finish is "could not tell", never "no such device".
+        try:
             await asyncio.wait_for(controller.list_devices(), _SCOPE_LISTING_TIMEOUT_S)
+        except Exception:
+            raise HTTPException(503, (
+                f"Could not list devices to check {scope} within "
+                f"{_SCOPE_LISTING_TIMEOUT_S:.0f}s. Try again.")) from None
         kind = device_type(scope)
     if kind not in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE):
         raise HTTPException(422, (
@@ -239,17 +243,24 @@ async def _android_mock_scope(request: Request, scope: str | None) -> str | None
     if controller.adb.is_console_serial(scope):
         return None
     host = scope.rsplit(":", 1)[0] if ":" in scope else ""
-    if host in ("localhost", "127.0.0.1", "::1"):
+    if kind == DeviceType.ANDROID_EMULATOR or host in ("localhost", "127.0.0.1", "::1", "[::1]"):
+        # Its traffic is QEMU's, attributed to the console serial; its own
+        # address is the emulator's NAT one, which no request carries (review).
         raise HTTPException(422, (
             f"{scope} is an emulator reached over TCP. Its traffic is attributed "
-            "to its console serial, emulator-<port>: scope the mock to that."))
+            "to its console serial, emulator-<port>, on the Mac running it: scope "
+            "the mock to that."))
     ip = await controller.adb.get_lan_ip(scope)
     if not ip:
         from server.proxy.cert_state import read_cert_state_for_device
 
         record = read_cert_state_for_device(scope) or {}
-        ip = next((c.get("client_ip") for c in (record.get("wifi_proxy_configs") or {}).values()
-                   if c.get("client_ip")), None)
+        # The newest record's: an older network's address may belong to
+        # another device by now, and would be mocked as this phone (review).
+        recorded = [c for c in (record.get("wifi_proxy_configs") or {}).values()
+                    if isinstance(c, dict) and c.get("client_ip")]
+        recorded.sort(key=lambda c: str(c.get("set_at") or ""), reverse=True)
+        ip = recorded[0]["client_ip"] if recorded else None
     if not ip:
         raise HTTPException(422, (
             f"Could not find {scope}'s network address, which is how its requests "
@@ -406,6 +417,7 @@ async def list_mocks(request: Request) -> MockListResponse:
             pattern=r["pattern"],
             response=MockResponseSpec(**r["response"]) if r.get("response") else MockResponseSpec(),
             simulator_udid=r.get("simulator_udid"),
+            client_ip=r.get("client_ip"),
         )
         for r in adapter._mock_rules
     ]
@@ -433,6 +445,8 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
             detail="Must provide at least one of 'pattern', 'response' or 'simulator_udid'",
         )
     _check_mock_scope(adapter, rule_id)
+    if not any(r.get("rule_id") == rule_id for r in getattr(adapter, "_mock_rules", []) or []):
+        raise HTTPException(status_code=404, detail=f"Mock rule not found: {rule_id}")
     if scope_given and not body.simulator_udid:
         # A new scope that names a simulator reaches the access middleware as
         # a device; removing the scope names none, and makes the rule answer

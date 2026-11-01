@@ -1845,7 +1845,13 @@ class MockRuleInfo(BaseModel):
     pattern: str
     response: MockResponseSpec
     simulator_udid: str | None = None
-    """The one simulator this rule applies to, or None for every device."""
+    """The one device this rule applies to -- a simulator's UDID or an
+    Android serial -- or None for every device."""
+    client_ip: str | None = None
+    """For a rule scoped to a physical Android phone: the Wi-Fi address its
+    requests are matched by, as it was when the rule was set (#582). A phone
+    that moves to another address needs the rule re-scoped (update_mock
+    naming its serial again), which reads the address afresh."""
 
 
 class MockListResponse(BaseModel):

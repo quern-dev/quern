@@ -100,6 +100,10 @@ const plans = {
                         ...(b.simulator_udid === "emulator-5554" ? { platform: "android" } : {}) }] },
                     { "POST /api/v1/proxy/mocks": mockIds("romulus"),
                       "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  "carry-android-rescope": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+                              "PATCH /api/v1/proxy/mocks/mock_local2": json(200, { platform: "android" }) },
+                            { "POST /api/v1/proxy/mocks": mockIds("romulus"),
+                              "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   "carry-retry": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
                   { "POST /api/v1/proxy/mocks": async (b) => globalThis.mocksDown
                       ? [503, { detail: "proxy is not running" }] : retryIds(b),
@@ -258,6 +262,13 @@ if (scenario === "window") {
   result.switched = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);
   globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
   result.onSimulator = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text);
+  globalThis.reserved = [{ udid: "emulator-5556", device_type: "android_emulator" }];
+  result.onEmulator = JSON.parse(text(await tools.reserve_devices({ udids: ["emulator-5556"] })).text);
+} else if (scenario === "carry-android-rescope") {
+  await tools.set_mock({ pattern: "~u /all", status_code: 200, body: "ALL" });
+  await tools.set_mock({ pattern: "~u /re", simulator_udid: "SIM-L", status_code: 200, body: "RE" });
+  await tools.update_mock({ rule_id: "mock_local2", simulator_udid: "emulator-5554" });
+  await tools.use_remote({ name: "romulus" });
   globalThis.reserved = [{ udid: "emulator-5556", device_type: "android_emulator" }];
   result.onEmulator = JSON.parse(text(await tools.reserve_devices({ udids: ["emulator-5556"] })).text);
 } else if (scenario === "carry-retry") {

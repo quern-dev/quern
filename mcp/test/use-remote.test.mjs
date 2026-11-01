@@ -306,3 +306,13 @@ test("a mock scoped to an Android device moves to an Android device, not a simul
   assert.deepEqual(r.onSimulator.carried.still_waiting, { mocks: 1, session_capture: 0 });
   assert.equal(r.onEmulator.carried.still_waiting, undefined);
 });
+
+test("a re-scoped mock and an unscoped one reach an Android device after a switch (#582)", async () => {
+  const r = await run("carry-android-rescope");
+  const posts = r.bodies.romulus.filter((b) => b.path === "POST /api/v1/proxy/mocks").map((b) => b.body);
+  // A client key there may not mock every device: the unscoped mock goes to
+  // each device reserved, Android ones included; the one re-scoped to an
+  // emulator is Android's now, by the server's word.
+  assert.deepEqual(posts.map((b) => [b.pattern, b.simulator_udid]).sort(),
+                   [["~u /all", "emulator-5556"], ["~u /re", "emulator-5556"]]);
+});

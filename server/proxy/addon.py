@@ -319,7 +319,14 @@ def _is_emulator_process(pid: int) -> bool:
     return "qemu" in command.lower() and "-avd" in command
 
 
-def _emulator_serial_for_pid(pid: int) -> str | None:
+#: Which emulator a process is, for mock scopes (#582), by (pid, start time):
+#: a reused pid is a different key, so nothing a later process gets can be
+#: decided from what an earlier one was -- the rule the simulator path keeps,
+#: now that this decides which requests are mocked, not only attribution.
+_scope_serials: OrderedDict[tuple[int, tuple[int, int]], str] = OrderedDict()
+
+
+def _emulator_serial_for_pid(pid: int, *, use_cache: bool = True) -> str | None:
     """`emulator-5554` for the QEMU process serving that emulator.
 
     An emulator's serial *is* its console port, and the process listens on it,
@@ -332,7 +339,7 @@ def _emulator_serial_for_pid(pid: int) -> str | None:
     """
     now = time.monotonic()
     with _cache_lock:
-        hit = _emulator_serial_cache.get(pid)
+        hit = _emulator_serial_cache.get(pid) if use_cache else None
         if hit is not None and now - hit[1] < _SERIAL_CACHE_TTL:
             return hit[0]
     try:
@@ -507,9 +514,14 @@ def _scope_matches(rule: dict, flow: Any, requester: dict) -> Any:
 
 def _flow_emulator_serial_now(flow: Any) -> Any:
     """The emulator serial a request came from, if it can be told without
-    waiting: `_UNDECIDED` while the connection's lookup runs, or when the
-    serial would need an lsof the cache does not hold. None when it is not
-    an emulator's."""
+    waiting; None when it is not an emulator's; `_UNDECIDED` while the
+    connection's lookup runs, or when the serial needs an lsof not yet run
+    for this process.
+
+    A process that libproc names, and not as QEMU, is decided here: no
+    simulator or Mac process is held, or pays an lsof, for an emulator's
+    rule (review). Remote peers -- phones -- never reach the lookup at all,
+    so they settle as no process, and so not an emulator."""
     try:
         client = getattr(flow, "client_conn", None)
         client_id = getattr(client, "id", None) if client else None
@@ -519,10 +531,15 @@ def _flow_emulator_serial_now(flow: Any) -> Any:
         pid = info.get("pid") if info else None
         if pid is None:
             return None
-        with _cache_lock:
-            hit = _emulator_serial_cache.get(pid)
-        if hit is not None and time.monotonic() - hit[1] < _SERIAL_CACHE_TTL:
-            return hit[0]
+        name = _proc_name_fast(pid)
+        if name is not None and "qemu" not in name.lower():
+            return None
+        start = _proc_start_fast(pid)
+        if start is not None:
+            with _cache_lock:
+                serial = _scope_serials.get((pid, start))
+            if serial is not None:
+                return serial
         return _UNDECIDED
     except Exception:
         return None
@@ -530,12 +547,25 @@ def _flow_emulator_serial_now(flow: Any) -> Any:
 
 def _flow_emulator_serial_waiting(flow: Any) -> str | None:
     """The emulator serial a request came from, waiting for the lookup.
-    Worker threads only."""
+    Worker threads only. Looked up fresh -- not from the pid-only cache --
+    and remembered by (pid, start time) for this process's later requests."""
     try:
         client = getattr(flow, "client_conn", None)
         pid, _name = _peek_process_info(getattr(client, "id", None) if client else None,
                                         wait=_SCOPE_WAIT_S)
-        return _emulator_serial_for_pid(pid) if pid is not None else None
+        if pid is None:
+            return None
+        name = _proc_name_fast(pid)
+        if name is not None and "qemu" not in name.lower():
+            return None
+        start = _proc_start_fast(pid)
+        serial = _emulator_serial_for_pid(pid, use_cache=False)
+        if serial is not None and start is not None:
+            with _cache_lock:
+                _scope_serials[(pid, start)] = serial
+                while len(_scope_serials) > _SERIAL_CACHE_MAX:
+                    _scope_serials.popitem(last=False)
+        return serial
     except Exception:
         return None
 
@@ -1452,14 +1482,20 @@ class IOSDebugAddon:
             loop = None
 
         def finish(serial: str | None) -> None:
+            requester["emulator"] = serial
             try:
-                requester["emulator"] = serial
                 outcome = self._answer(flow, requester)
-                if outcome in ("passed", "held"):
-                    self._report_start(flow)
-                if outcome in ("passed", "mocked"):
-                    flow.resume()
             except Exception:
+                # Through unmocked, as promised: not with a response half-set.
+                outcome = "passed"
+                flow.response = None
+                if isinstance(getattr(flow, "metadata", None), dict):
+                    flow.metadata.pop(_MOCK_METADATA_KEY, None)
+            if outcome in ("passed", "held"):
+                with contextlib.suppress(Exception):
+                    self._report_start(flow)
+            # A held flow stays held, for release_flow; the rest go on.
+            if outcome in ("passed", "mocked"):
                 flow.resume()
 
         def resolve() -> None:
