@@ -74,72 +74,11 @@ Other things you can ask:
 curl -fsSL https://quern.dev/install.sh | bash
 ```
 
-This downloads the latest release to `~/.local/share/quern`, creates a virtualenv, installs dependencies, checks system tools, registers the MCP server with Claude Code, installs a Claude Code pre-commit checklist hook (see below), and adds `quern` to `~/.local/bin` on your PATH.
+This downloads the latest release to `~/.local/share/quern`, creates a virtualenv, installs dependencies, checks system tools, registers the MCP server with Claude Code, installs a Claude Code pre-commit checklist hook, and adds `quern` to `~/.local/bin` on your PATH.
 
 **After this, run `quern` from anywhere** — you do not need to be in the install directory, and you do not need to know where it is. Everything below is written that way. If your shell reports `command not found: quern` in the session you installed from, run `rehash` (zsh) or open a new terminal: the shell caches where commands live and does not notice a new one appearing.
 
-#### Pre-commit checklist hook
-
-Setup also installs a Claude Code `PreToolUse` hook into `~/.claude/settings.json` that surfaces a short checklist whenever an agent runs `git commit` in a project that uses Quern (signaled by a `.quern/knowledge/` directory at the project root). The reminder covers KB drift, landmark verification, and other discipline that's easy to forget when committing app or KB changes. It stays silent in projects that don't use Quern.
-
-To re-install or refresh the hook (for example after updating Quern), run `quern install-precommit-hook`. To disable it, remove the matching entry from `~/.claude/settings.json` under `hooks.PreToolUse`.
-
-<details>
-<summary>Manual install</summary>
-
-Download the latest release tarball from [GitHub Releases](https://github.com/quern-dev/quern/releases/latest), then:
-
-```bash
-mkdir -p ~/.local/share
-tar -xzf quern-*.tar.gz -C ~/.local/share
-mv ~/.local/share/quern-* ~/.local/share/quern
-cd ~/.local/share/quern
-./quern setup
-./quern mcp-install
-```
-
-`./quern` here because you are standing in the extracted directory and there is
-nothing on your PATH yet. Setup is what puts `quern` there; afterwards, run it
-from anywhere as `quern`.
-
-</details>
-
-### Unattended setup
-
-```bash
-quern setup -y
-quern setup --yes          # the same thing, spelled out
-```
-
-`-y` (or `--yes`) answers setup's prompts with their default instead of asking,
-for a provisioning script, a Dockerfile, or anything else with no terminal.
-
-Without it and with no terminal to ask on, setup still completes the install
-itself — the virtualenv, the dependencies, the MCP wrapper and the `quern`
-command — and declines the optional extras it would otherwise have asked about,
-listing them at the end.
-
-Five prompts are not covered by `-y`, and are listed at the end of the run:
-
-| Prompt | Why `-y` leaves it |
-|---|---|
-| Install the capture CA into booted simulators | A certificate authority outlives the session that wanted it and has to be removed deliberately. Answer it once with `quern set-auto-install-cert`. |
-| Install the tunneld LaunchDaemon | Runs as root at boot and survives reboots. Needs sudo. |
-| `sudo pipx install --global pymobiledevice3` | Writes outside your home directory. Needs sudo. |
-| Disable the macOS crash reporter dialog | A user-wide setting that `quern uninstall` does not put back. |
-| Open the Xcode Command Line Tools installer | Hands off to a macOS dialog someone has to click. |
-
-Three of those need a sudo password or a click that no flag can supply, so
-answering yes on your behalf would leave the run waiting on something that
-never comes. The other two outlive Quern itself.
-
-### Uninstall
-
-```bash
-quern uninstall
-```
-
-Removes Homebrew packages, pipx packages, MCP registrations, the wrapper script, and the virtualenv. Only removes packages that were installed by `quern setup` — pre-existing tools (like Node.js) are left untouched. The source code directory is preserved; the command prints instructions to remove it if desired.
+To install by hand, provision a machine with no terminal (`quern setup -y`), or uninstall, see [Installing Quern](docs/installation.md). It also covers the pre-commit checklist hook, and how to turn it off.
 
 ### Run
 
@@ -156,48 +95,11 @@ quern mcp-install --remote NAME   # ...pointed at a paired remote quern instead 
 quern uninstall            # remove Quern and its dependencies
 ```
 
-The server prints connection info on startup — URL, API key, and proxy port. All state is stored in `~/.quern/`:
-
-| File | Purpose |
-|------|---------|
-| `state.json` | Running instance info (port, PID, API key) — deleted on stop |
-| `active-device.json` | The active device set via `resolve_device` — its UDID, name and type — persists across stop/start so you don't have to re-resolve after every restart, and is what the Quern app reads. Each agent session's own active device is kept here too, under `sessions`, for a day of inactivity (#254) |
-| `cert-state.json` | Per-device certificate installation state, including per-SSID Wi-Fi proxy configs — persists across restarts |
-| `device-pool.json` | Device pool state (simctl cache) — persists across restarts |
-| `config.json` | Local capture processes, update channel, the automatic-update-check and certificate-install settings, and the sessions, remote listener, viewer and upload settings |
-| `remotes.json` | The remote quern servers this machine is paired with (0600): read by `quern remote list`, `QUERN_REMOTE` and `use_remote` |
-| `session-proxies.json` | Running session proxies' pids (`add_session_capture`), so a crashed server's leftovers are stopped at the next start |
-| `session-hold-<id>.log` | The log of a `quern session hold --background` |
-| `update-info.json` | The last update check's result — what the menu bar reads to offer an update |
-| `last-update-check` | When the automatic check last ran, so it runs at most once a day |
-| `last-update.json` | What `quern update` last did — updated, nothing to do, or failed |
-| `installed-by-setup.json` | Packages installed by `quern setup` — used by `quern uninstall` |
-| `tool-sites.json` | Where `quern setup` found each external tool, so a later run can tell a moved install from a missing one |
-| `build-records/` | One directory per build (`<build id>/record.json`), plus a device build's dSYMs, so a crash can be symbolised against the binary that produced it |
-| `crashes/` | Crash reports the watcher collects; a phone's own pulls go in `crashes/devices/<device id>/` so two devices' reports cannot be confused |
-| `api-key` | Persistent API key |
-| `server.log` | Daemon log output |
+The server prints connection info on startup — URL, API key, and proxy port. All state is stored in `~/.quern/`. The full list of commands, and what each file there is for, is in the [command reference](docs/cli.md).
 
 ### The Quern app (menu bar)
 
-On macOS, Quern installs an app in your menu bar so you can see whether the
-server is up without opening a terminal. It appears automatically after `quern setup`, and
-`quern update` keeps it current. It lives at `~/Applications/Quern.app` — quit
-it from its own menu, and `open ~/Applications/Quern.app` to bring it back.
-
-It shows the daemon's state and uptime, the active device, the proxy's port,
-and an update notice when one is available. From its menu you can start, stop
-and restart the server, open a live screen mirror of a connected device, and
-reach Settings — which carries the update channel picker and a launch-at-login
-toggle.
-
-It does not own the daemon. Starting Quern from the app and starting it from
-the CLI do the same thing, and quitting the app leaves the server running;
-"Quit and Stop Server" is a separate item for when you mean both.
-
-The app is signed and notarized, and ships inside the release asset rather than
-the source tarball. If you installed before v0.15.0 and have never run
-`quern update`, you will not have it — updating brings it in.
+On macOS, Quern installs an app in your menu bar so you can see whether the server is up without opening a terminal. It shows the daemon's state, the active device and the proxy's port; from it you can start and stop the server, open a live screen mirror of a device, and pick the update channel. Quitting the app leaves the server running. See [the Quern app guide](docs/guides/menu-bar-app.md).
 
 ### Connect via MCP
 
@@ -228,339 +130,42 @@ curl -H "Authorization: Bearer $API_KEY" \
      "http://localhost:9110/api/v1/logs/summary?window=5m"
 ```
 
-## Update Checks
-
-When started as a daemon, Quern makes a single HTTPS request to `quern.dev/api/check-update` to check if a newer version is available. This request includes only your current version number (and commit SHA for git-based installs) — no device info, no IP logging, no telemetry. Cloudflare's edge analytics count daily requests, giving us a rough sense of how many people use Quern. No data is stored.
-
-To turn the automatic check off, untick **Check for updates automatically** in the Quern app's Settings, or run `quern set-update-check off`. That governs the automatic check alone — `quern check-updates` and the menu bar's **Check for Updates** keep working, so turning it off means "do not call home unprompted" rather than "never check". The underlying setting is `"update_check": false` in `~/.quern/config.json`.
-
-### Update channels
-
-Quern ships on two channels. `stable` (the default) tracks tagged releases; `beta` is opt-in early access to the next release's content.
-
-```bash
-quern set-channel beta     # opt in
-quern set-channel          # print the current channel
-quern set-channel stable   # switch back
-```
-
-`quern update` brings its own venv forward eagerly: pip's default strategy leaves
-any version that already satisfies a constraint alone, so a venv drifts arbitrarily
-far behind while every declared floor stays satisfied. Every dependency floor quern
-declares is a `>=` and none is near what currently ships — `pymobiledevice3` sits
-three majors above its own — so "satisfies the constraint" says very little about how
-current the venv is.
-
-Starting the server stays non-eager: it compares two mtimes, and invokes pip only when
-the venv is actually stale or a previous install failed — never the eager transitive
-upgrade `quern update` performs. `quern doctor --fix` is also non-eager, because it
-repairs a broken venv and pulling every transitive dependency forward mid-repair
-changes more than the fault being fixed.
-
-External tools are a separate matter. `pymobiledevice3` is installed twice on a
-typical machine — a library in the venv and a `pipx` binary — and they drift apart.
-Every update run reports external tools that have fallen behind, with the exact
-command to move each one; `--tools` runs those commands for you.
-
-Reporting is the default because a `pipx` or `brew` upgrade changes state for every
-other consumer on the machine, not just quern. Tools that arrived as a dependency of
-something else are reported but not offered — upgrading those directly can be undone
-by whatever pulled them in. Tools quern does not manage (node under `fnm`, `adb`
-inside Android Studio's SDK) are named along with who does manage them, decided by
-where the tool came from rather than by its name.
-
-`quern doctor` shows the same analysis for *every* install site, not just the stale
-ones, including which other brew formulae depend on each — the thing that turns a
-later upgrade into a decision rather than a command. Use it when two machines
-disagree about behaviour: a boolean "is pymobiledevice3 installed" reads identical on
-both while one runs a 9.15.1 binary and the other an 11.3.1 one.
-
-`quern doctor --fix` reconciles the venv and stops there. It does not upgrade external
-tools, and says so when it finds some it cannot help with, rather than printing
-"nothing to do" above a tool it just flagged as behind.
-
-**Reporting an environment problem.** `quern capture-env` writes the
-facts these checks read — where each `pymobiledevice3` lives and what it resolves to,
-the order of `PATH`, and what the tunneld daemon has baked in. Attach it to an issue
-and the configuration can be replayed as a test rather than guessed at from a
-description; `tests/fixtures/envs/` holds the ones that have already found bugs.
-
-It is read-only and deliberately narrow. It never opens `~/.quern/api-key`,
-`state.json`, the certificate state or the device pool. The output is meant for a
-public issue, so what it may contain is pinned by a test rather than remembered:
-`tests/test_capture_env.py` watches every read through an interpreter audit hook,
-below any particular way of opening a file, and fails if the capture ever reaches
-for one of those.
-
-`PATH` is filtered to the entries that matter: anything recognisably a toolchain
-quern cares about, plus any directory that actually holds a tool it uses. That second
-clause is what keeps the filter honest — a whitelist alone would hide an unexpected
-directory a tool is genuinely resolved from, which is the one surprise worth
-reporting. Each survivor keeps its original index, so the order that decides which
-copy wins is still reconstructible without publishing the rest of your `PATH`.
-
-It is a filter, not a redactor. A kept entry is published in full, so a directory
-matching on a toolchain name carries whatever else is in its path. Read it before
-attaching it if that matters to you.
-
-If quern is broken enough that the command will not run, `python3
-scripts/capture-env.py` does the same thing. Both record what `which` resolves
-once setup has prepended its venv, as well as the plain answer. Those differ, and
-the first is the one the checks act on. It is stdlib-only and works on the
-Python that ships with Xcode's Command Line Tools, so it does not need the venv
-that may be the problem.
-
-**Doctor does not need a running server.** Only the device-tool section does, and when
-that cannot be reached doctor names the reason and reports everything else anyway —
-the venv, the external tools, service health. That matters because a stale venv is a
-good way to stop the server coming up, so the check most likely to explain the failure
-used to be withheld by the failure. The exit status still reflects the gap: a section
-that could not be checked is not one that passed.
-
-Doctor also reports **service health**, which is a different question from whether a
-tool is installed:
-
-- **tunneld** — a failed device pairing can leave the daemon alive but not serving. It
-  holds no listener and never exits, so `KeepAlive` never fires and launchd reports it
-  healthy indefinitely. Doctor separates that *wedged* state from a merely *stopped*
-  one by pairing the HTTP probe with the launchd job state.
-
-  Since v0.15.0 Quern can also recover it. Getting the stuck process to exit is the
-  entire fix, because the plist sets `KeepAlive` and launchd respawns it against clean
-  state in about a second. That needs root, so the authorisation is taken once and
-  explicitly with `quern tunneld grant-recovery` — a single `NOPASSWD` rule for one
-  signal to one job, nothing else. Without the grant the behaviour is unchanged: the
-  wedge is reported, not healed.
-- **local capture extension** — the mitmproxy macOS system extension is approved once
-  by a human and then upgraded underneath that approval by ordinary dependency updates.
-  When the version macOS runs falls behind the version the installed wheel ships, local
-  capture reports itself enabled while capturing nothing. Doctor compares the two, and
-  `--fix` re-runs the shipped app so macOS can activate the newer one (you still have
-  to approve it in System Settings).
-
-Neither check needs a password: `launchctl print` on a system job and
-`systemextensionsctl list` are both readable unprivileged.
-
-Setting the channel only writes `~/.quern/config.json` — nothing changes until the next `quern update`. Git-clone installs follow the `release/stable` / `release/beta` pointer branches; tarball installs follow GitHub Releases, filtered on the prerelease flag. Full details, including the maintainer release procedure, are in [`docs/release-channels.md`](docs/release-channels.md).
-
-## What Quern Does
-
-### Log Capture
-
-Captures from multiple sources simultaneously, deduplicates, and stores in a ring buffer (10,000 entries).
-
-| Source | Tool | What it captures | Mode |
-|--------|------|-------------------|------|
-| Physical device logs | `pymobiledevice3 syslog` | os_log, Logger, NSLog from physical devices | On-demand (`start_device_logging`) |
-| Android device / emulator logs | `adb logcat` | App and system logs from Android devices and emulators, tagged `source="logcat"` | On-demand (`start_device_logging`) |
-| Simulator logs | `simctl log stream` | os_log, Logger, NSLog from simulators | On-demand (`start_simulator_logging`) |
-| Crash reports | `pymobiledevice3 crash` (iPhone), `dumpsys dropbox` (Android) | Parsed crash reports with stack traces | Always on |
-| Build output | `xcodebuild` | Errors, warnings, test results | Always on |
-| Device syslog (legacy) | `idevicesyslog` | Unfiltered system + app log messages | Opt-in (`--syslog`) |
-| macOS unified log | `log stream` | os_log from any host Mac process | On-demand (`start_oslog_streaming`) |
-
-### Network Proxy
-
-Spawns `mitmdump` as a subprocess to capture HTTP/HTTPS traffic (port 9101 by default).
-
-- **Query flows** — filter by host, method, status code, path, or simulator UDID
-- **Inspect details** — full headers and bodies for any captured request
-- **Intercept** — pause matching requests, inspect, modify, release
-- **Mock** — return synthetic responses without hitting the real server; rules can be updated in place without tearing down and re-adding them
-- **Replay** — re-send a previously captured request
-- **Capture sessions** — bracket a single UI action and get back only the flows it produced, instead of filtering them out of everything else
-- **Bypass** — exclude domains from capture with an allowlist, so analytics and telemetry noise never enters the flow store
-- **Local capture** — transparently capture simulator traffic per-process via mitmproxy's macOS System Extension, without configuring a system proxy. Each flow is tagged with the originating simulator's UDID for per-simulator filtering
-- **Session capture** — capture one app on a simulator you hold through a separate session proxy, without changing the Mac-wide list or restarting anything (`add_session_capture`). It's how a client key, or an agent on another Mac, captures its own traffic
-- **System proxy** — auto-configures macOS network settings to route traffic through the proxy (for physical devices or non-simulator traffic)
-- **Certificate management** — check, install, and verify mitmproxy CA certificates. Trust is read from the device every time rather than from a record, so an erased simulator is noticed rather than reported as still trusting the CA. Quern asks before installing one: capturing through a device that does not trust the CA fails every HTTPS request with nothing pointing at the proxy, so enabling capture refuses in that state rather than creating it. `quern set-auto-install-cert on` answers the question once
-- **Refused handshakes are recorded** — a client that rejects the certificate never becomes a flow, so it used to leave no trace anywhere. `proxy_status` now reports each rejection with the host, the process and simulator that refused, and the TLS alert verbatim — which is what separates "this device does not trust the CA" from "this app pins its certificate", two causes with identical symptoms and different fixes
-- **LLM summaries** — traffic digests grouped by host with error highlights
-
-**Proxy setup for simulators:**
-
-| Mode | Setup | Pros | Cons |
-|------|-------|------|------|
-| Local capture (recommended) | `quern enable-local-capture` + approve macOS System Extension | Zero config per-simulator, per-simulator flow tagging, no system proxy needed | Requires [mitmproxy-macos](https://github.com/mitmproxy/mitmproxy-macos) and one-time macOS permission approval |
-| System proxy | `configure_system_proxy` / `unconfigure_system_proxy` | No extra software | Affects all Mac traffic, must remember to unconfigure when done |
-
-Local capture requires approving the **Mitmproxy Redirector** system extension in **System Settings > Privacy & Security** on first use.
-
-With no arguments, `enable-local-capture` captures web traffic — `MobileSafari` and `com.apple.WebKit.Networking`. Naming processes **keeps that minimum and adds yours**, because a webview's requests leave through WebKit and an OAuth hand-off goes through Safari:
-
-```bash
-quern enable-local-capture MyApp                                # your app, plus the web-view minimum
-quern enable-local-capture MyApp com.apple.WebKit.Networking    # your app and web views
-```
-
-The process name is usually the target name in Xcode. Name the process that actually makes the requests: Safari's traffic and every in-app web view's leave through `com.apple.WebKit.Networking`, so `MobileSafari` on its own captures nothing. The command prints what a change drops, since removing a process otherwise looks exactly like adding one.
-
-Entries are mitmproxy's local-mode syntax, not only names: a name matches any part of the process's executable path, a bare number is a PID, and `!` excludes. Put exclusions *after* an include (`MyApp '!12345'`, quoted so the shell leaves the `!` alone). A list that *starts* with an exclusion captures every process on the Mac except those excluded, so it is refused unless you pass `--whole-mac`.
-
-You can also change the list at runtime with the `set_local_capture` MCP tool. That restarts the proxy, not the server: mocks, bypass patterns and the intercept are kept, but open connections reset and held flows are released. To capture one app on one simulator you hold without any restart, use `add_session_capture`.
-
-**Proxy setup for physical devices:** Configure the device's Wi-Fi proxy in Settings, then call `record_device_proxy_config` with the SSID and device IP. Quern automatically finds the correct Mac interface IP by subnet-matching, so it works correctly even when multiple interfaces are active. Configs are stored per SSID — switching between home and work networks just works. `proxy_status` shows `wifi_proxy_stale` per device if the stored config no longer matches the current network, and `network_state` (refreshed by a ~15s background poll) reports the current SSID/IP plus a `last_changed_at` timestamp so the response surfaces *when* the network shifted, not just that it's currently mismatched. When the laptop and physical devices travel together between locations, this lets agents notice the change and prompt for proxy reconfiguration without anyone having to remember to ask.
-
-### Device Control
-
-Manage iOS simulators and physical devices, and interact with running apps.
-
-- **Device management** — list, boot, shutdown, and erase simulators and Android emulators; discover physical devices
-- **App management** — install, launch, terminate, uninstall, list apps; build an Xcode scheme and install it across several devices in one call
-- **Screenshots** — capture with configurable scale and format, annotated screenshots with accessibility overlays, and screenshot timelines that auto-capture after every UI action so a whole run can be reviewed frame by frame
-- **Live preview** — real-time video windows for USB-connected physical devices and booted simulators, independently per-device
-<!-- TODO: Annotated screenshot example — show a real app with the accessibility overlay
-     ![Annotated screenshot](docs/images/annotated-screenshot.png)
--->
-- **UI inspection** — accessibility tree, element state queries, wait-for-element polling, screen summaries
-- **Interaction** — tap (by element label or coordinates), long press, swipe (including edge swipes: back, home, Control Centre), pinch, rotate, two-finger pan, double tap and two-finger tap (iOS, and Android through scrcpy), scroll a container until a target is in view, type text, clear text, press hardware buttons
-- **Configuration** — set GPS location, grant permissions, open URLs and deep links, attach or detach the simulated hardware keyboard (iOS), and set locale, font scale, and display density (Android)
-- **App state checkpoints** — save and restore a named snapshot of an app's data container and app groups, so a test can start from a seeded state instead of driving the UI there every time. Auth tokens live in the simulator keychain, *outside* every app container, so a checkpoint restores logged-out unless you pass `include_keychain` — which additionally requires the device to be shut down, since the keychain is a WAL-mode SQLite database held open by `securityd`
-- **Plist inspection** — read, diff, set, and delete defaults inside a simulator app's container, or watch a plist and have per-key changes land in the log pipeline alongside app logs and proxy flows
-- **Device pool** — smart device resolution with active device tracking for multi-device workflows
-- **Shared and remote servers** — reserve devices so agents sharing a server don't collide, pair another Mac (`quern pair` / `quern connect`), see each paired Mac's free devices (`quern remote list`, `list_remotes`), and switch an agent to one (`use_remote`) with its mocks, session capture and knowledge base following. See the [remote server guides](docs/guides/remote-setup.md)
-
-**Simulator UI automation** uses a native Swift helper, `sim-bridge`, that talks to `CoreSimulator` / `SimulatorKit` / `AccessibilityPlatformTranslation` directly — no daemon, no subprocess per call. It's built automatically on first use and requires Xcode 26+ on Apple Silicon. On Intel Macs or older Xcode, Quern falls back to [idb](https://fbidb.io/) (`brew install idb-companion` + `pip install fb-idb`); `quern setup` handles the install in that case. Device management and screenshots use `xcrun simctl` (always available with Xcode).
-
-**Physical device UI automation** uses [WebDriverAgent](https://github.com/appium/appium-ios/tree/main/packages/webdriveragent) (WDA), which Quern builds and deploys automatically via `setup_wda`, at the version it pins. WDA requires a valid Apple Developer signing identity. Once set up, the WDA driver auto-starts on first interaction and idles out after 15 minutes of inactivity. The app appears on the device as **Quern Driver**.
-
-### Process Lifecycle
-
-Startup is idempotent — running `start` when a server is already running is a no-op. Port conflicts are handled automatically by scanning upward. The MCP server is auto-rebuilt on start when the TypeScript source is newer than the compiled output.
-
-```bash
-quern setup                  # Check environment, install deps
-quern start                  # Daemonize
-quern start -f               # Foreground
-quern stop                   # Graceful shutdown
-quern restart                # Stop + start
-quern status                 # Show PID, URL, uptime, tool availability
-quern url                    # Print the server's base URL, for scripts
-quern env                    # Print shell exports: eval "$(quern env)"
-quern doctor                 # Diagnostics: device tools, venv, tool versions, service health, MCP clients
-quern doctor --fix           # ...and reconcile the venv with pyproject.toml (venv only)
-quern capture-env            # Write an environment report to attach to a bug report
-quern help                   # Show the command list
-quern version                # Print the installed version
-quern check-updates          # Ask now, ignoring the once-a-day rate limit
-quern update                 # Update to the latest release on your channel and rebuild
-quern update --tools         # Also upgrade external tools quern installed (pipx, brew)
-quern set-channel [name]     # Show or set the update channel (stable / beta)
-quern record start --udid UDID [--out DIR]   # Record a device's actions, flows and logs to disk
-quern record start --udid UDID --kinds flows,logs --host H --exclude-host H --include-unattributed --video
-quern record start --udid UDID --allow-passthrough   # Record even if the simulator lacks quern's CA (no HTTPS captured)
-quern record start --udid UDID --kinds flows --bodies errors --max-body-bytes 4096 --exclude-content-type image/
-                             # A small recording of a long run: every flow, few bodies
-quern record start --udid UDID --video --viewer   # Also print a LAN viewer link to post (needs viewer.enabled)
-quern record stop ID [--require-complete]    # ...until stopped; exit 3 if anything was lost
-quern record keyframe ID [--label TEXT]   # Make this moment a seek point, and mark it in the recording
-quern record start --udid UDID --video --keyframes requests   # Seek points at requests only (default: actions and requests)
-quern record start --udid UDID --requested-by NAME   # Name who asked, so runs on a shared server tell apart
-quern record list [--requested-by NAME]   # Recordings running on this server (only NAME's)
-quern record download ID [--dest DIR]   # Copy a recording's files here, from a remote quern too (QUERN_REMOTE)
-quern session run --reserve N [--device-type simulator] -- CMD ...   # Hold a session, reserve devices for CMD, release on exit
-quern session run --udid UDID [--on-release shutdown_booted] -- CMD   # ...exactly these; shut down what it booted afterwards
-quern session run --group GROUP [--reserve N] [--name NAME] -- CMD   # A config.json device group; name the session
-quern session run --reserve N --os-version 18 --device-name "iPhone 16" --no-boot -- CMD   # Criteria; only already-booted devices
-quern session hold NAME [--background] [--remote REMOTE]   # Hold session NAME's socket for raw REST calls; prints its id
-quern session list           # Held sessions, their state (live / grace) and devices
-quern session release ID     # End a session and free its devices
-quern clients add LABEL      # Issue a client key for another caller (printed once)
-quern clients list           # Issued client keys: created, last used, revoked
-quern clients revoke LABEL   # Revoke one; its sessions end and its devices are freed
-quern pair LABEL             # A one-time code for another machine to pair with (remote listener)
-quern connect URL --code CODE   # On that machine: pair, and remember the server for QUERN_REMOTE
-quern connect URL --key KEY --fingerprint SHA256   # ...or remember one whose key was issued by hand
-quern remote status          # The remote listener here: its address and certificate
-quern remote rotate-cert     # A new certificate for it; every client pairs again
-quern remote list [--json] [--no-check] [--devices] [--with-local]   # The remote querns this machine is paired with, each asked now: up or down, version, free devices; --devices lists each one (OS, model, state, who holds it); --with-local lists this Mac's server first
-quern remote forget NAME     # Forget one
-quern set-update-check [on|off]
-                             # Show or set the automatic daily update check
-                             #   (default: on). check-updates works either way.
-quern set-auto-install-cert [on|off]
-                             # Show or set whether the capture certificate is installed
-                             #   automatically, or Quern asks first (default: ask)
-quern uninstall              # Remove Quern and dependencies installed by setup
-quern regenerate-key         # New API key
-quern mcp-install            # Register MCP server with Claude Code
-quern grant-full-perms       # Allow all Quern MCP tools in Claude Code without prompting
-quern install-precommit-hook # Install the pre-commit checklist hook
-quern menubar [status]       # The Quern app's version, and whether it is running
-quern menubar open           # Start the Quern app in the menu bar (a running one is left alone)
-quern menubar install [--force]
-                             # Install the signed app matching this quern and start it;
-                             #   how a git install gets a newer app
-quern enable-local-capture [--skip-cert-check] [--whole-mac] [process ...]
-                             # Enable transparent simulator traffic capture. A booted
-                             #   simulator that does not trust the capture certificate
-                             #   has its TLS passed through, not decrypted;
-                             #   --skip-cert-check is deprecated
-quern disable-local-capture  # Disable local capture (never refused)
-quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstall/status/restart,
-                             #   grant-recovery/revoke-recovery for password-free wedge recovery)
-```
-
-`~/.quern/state.json` is the single source of truth for discovering a running instance.
-
-## MCP Tools
-
-138 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
-
-| Category | Tools |
-|----------|-------|
-| Server | `ensure_server`, `list_remotes`, `use_remote` |
-| Updates | `update_quern`, `set_update_channel` |
-| Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `parse_build_output`, `get_latest_crash`, `clear_crashes`, `clear_device_crashes`, `set_log_filter`, `get_log_filter`, `list_log_sources`, `get_trace`, `start_recording`, `stop_recording`, `recording_keyframe`, `get_recording`, `list_recordings`, `download_recording`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging`, `start_oslog_streaming`, `stop_oslog_streaming` |
-| Network | `query_flows`, `list_pending_requests`, `wait_for_flow`, `get_flow_detail`, `get_flow_summary`, `start_capture_session`, `stop_capture_session`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup`, `install_proxy_cert`, `record_device_proxy_config`, `set_local_capture`, `add_session_capture`, `remove_session_capture`, `set_bypass`, `clear_bypass` |
-| System Proxy | `configure_system_proxy`, `unconfigure_system_proxy` |
-| Intercept & Mock | `set_intercept`, `clear_intercept`, `list_held_flows`, `release_flow`, `replay_flow`, `set_mock`, `list_mocks`, `update_mock`, `clear_mocks` |
-| Device | `list_devices`, `boot_device`, `shutdown_device`, `erase_device`, `install_app`, `launch_app`, `terminate_app`, `uninstall_app`, `list_apps`, `get_performance`, `start_profile`, `stop_profile`, `get_profile`, `download_profile`, `build_and_install`, `record_android_build` |
-| UI | `get_ui_tree`, `get_element_state`, `wait_for_element`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `gesture`, `scroll_to_element`, `type_text`, `clear_text`, `press_button`, `get_web_content`, `wait_for_settle`, `restore_simulator_input`, `set_hinge`, `get_hinge` |
-| Screenshots | `take_screenshot`, `take_annotated_screenshot`, `start_screenshot_timeline`, `stop_screenshot_timeline`, `get_screenshot_timeline` |
-| Device Config | `set_location`, `open_url`, `grant_permission`, `set_locale`, `set_hardware_keyboard`, `get_simulator_settings`, `set_simulator_setting`, `set_font_scale`, `set_display_density` |
-| App State | `save_app_state`, `restore_app_state`, `list_app_states`, `delete_app_state` |
-| Plist | `read_app_plist`, `set_app_plist_value`, `set_app_plist_values`, `diff_app_plist`, `delete_app_plist_key`, `start_plist_watch`, `stop_plist_watch`, `configure_plist_watch`, `get_plist_watch_config`, `unconfigure_plist_watch` |
-| Device Pool | `resolve_device`, `ensure_devices` |
-| Sessions | `reserve_devices`, `release_devices`, `session_status` |
-| App Knowledge | `init_app_knowledge` |
-| Landmarks | `load_landmarks`, `identify_screen`, `list_landmarks`, `unload_landmarks`, `validate_landmarks` |
-| Preview | `preview_device`, `stop_preview`, `preview_status` |
-| Physical Device | `setup_wda`, `start_driver`, `stop_driver` |
-
-## API Endpoints
-
-Everything the MCP tools do is also reachable over plain HTTP. The complete
-reference — every tool, the endpoint behind it, and the endpoints that have no
-tool — lives in **[`docs/api-reference.md`](docs/api-reference.md)**.
-
 All endpoints require `Authorization: Bearer <key>` except `/`, `/health`,
 `/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`,
 and `/api/v1/proxy/cert`. The key is at `~/.quern/api-key`; the server's URL and
 port are in `~/.quern/state.json`.
 
-```bash
-KEY=$(cat ~/.quern/api-key)
-curl -s localhost:9110/health                                    # public
-curl -s -H "Authorization: Bearer $KEY" localhost:9110/api/v1/logs/summary
-```
+Everything the MCP tools do is also reachable over plain HTTP. The complete reference — every tool, the endpoint behind it, and the endpoints that have no tool — is in the **[API reference](docs/api-reference.md)**.
 
-## Architecture
+## What Quern Does
 
-```
-server/
-  main.py              Entry point, CLI, FastAPI app
-  config.py            API key management
-  lifecycle/           Daemon, state.json, port scanning, watchdog, setup, updater
-  sources/             Log source adapters (device, simulator, syslog, oslog, crash, build, proxy)
-  processing/          Deduplicator, classifier, summarizer
-  storage/             Ring buffer
-  proxy/               mitmproxy addon, flow store, system proxy, cert management
-  device/              Simulator control (simctl, sim-bridge, idb fallback) + physical device control (WDA, pymobiledevice3), device pool
-  api/                 HTTP route handlers
-mcp/                   MCP server (TypeScript)
-tests/                 pytest suite (~2,000 tests)
-```
+- **Log capture** — device, simulator, Android and macOS logs, crash reports and build output, deduplicated into one queryable buffer with LLM-ready summaries.
+- **Network proxy** — capture HTTP/HTTPS traffic with mitmproxy, then query, inspect, intercept, mock and replay it. Simulators can be captured per app with no system proxy; physical devices through their Wi-Fi proxy setting.
+- **Device control** — boot and manage simulators and emulators, install and launch apps, take screenshots, read the accessibility tree, and tap, swipe and type. Physical iPhones are driven through WebDriverAgent.
+- **Shared and remote servers** — reserve devices so several agents can share one server, and pair another Mac to use its devices.
+
+How each of those works, with every log source and proxy option, is in [What Quern does](docs/features.md).
+
+## Documentation
+
+| Page | What's in it |
+|---|---|
+| [User guides](docs/guides/index.md) | Task-by-task guides for the person working with the agent: setup, proxying, physical devices, workflows |
+| [Agent guide](docs/agent-guide.md) | What an agent should reach for, and what each refusal means |
+| [What Quern does](docs/features.md) | Log sources, proxy features and setup, device control and automation backends |
+| [MCP tools](docs/mcp-tools.md) | Every MCP tool, by category |
+| [API reference](docs/api-reference.md) | Every tool, the HTTP endpoint behind it, and the endpoints with no tool |
+| [Command reference](docs/cli.md) | Every `quern` command and the files in `~/.quern/` |
+| [Installing Quern](docs/installation.md) | Manual and unattended install, the pre-commit hook, uninstalling |
+| [Updates and diagnostics](docs/updates.md) | Update checks and channels, keeping tools current, `quern doctor`, `quern capture-env` |
+| [Remote servers](docs/guides/remote-setup.md) | Pairing another Mac and sharing devices between agents |
+| [Troubleshooting](docs/troubleshooting.md) | Common problems and their fixes |
+
+## Update Checks
+
+When started as a daemon, Quern makes a single HTTPS request to `quern.dev/api/check-update` to check if a newer version is available. This request includes only your current version number (and commit SHA for git-based installs) — no device info, no IP logging, no telemetry. Cloudflare's edge analytics count daily requests, giving us a rough sense of how many people use Quern. No data is stored.
+
+To turn it off, untick **Check for updates automatically** in the Quern app's Settings, or run `quern set-update-check off`. Channels, how updates handle dependencies and external tools, and `quern doctor` are covered in [Updates and diagnostics](docs/updates.md).
 
 ## Development
 
@@ -588,25 +193,7 @@ cd mcp && npm run build
 quern start -f --verbose
 ```
 
-### Git hooks
-
-`scripts/git-hooks/` is versioned, so the hooks travel with the repo — but git
-does not pick them up automatically. Point your clone at them once:
-
-```bash
-git config core.hooksPath scripts/git-hooks
-```
-
-| Hook | Does |
-|------|------|
-| `pre-commit` | Runs `ruff check` on staged Python files |
-| `commit-msg` | Rejects `Co-Authored-By:` trailers and AI-attribution lines, per the Code Conventions in `CLAUDE.md` |
-
-The message rule lives in `commit-msg` rather than `pre-commit` because
-`pre-commit` runs before the commit message exists and cannot see trailers at
-all. Both hooks are bypassable with `git commit --no-verify` when you genuinely
-need to — that is intentional, but it means the hooks are a guardrail rather
-than a guarantee.
+Before changing anything, read [CONTRIBUTING.md](CONTRIBUTING.md): the architecture, conventions and review process, including the repo's git hooks.
 
 ## License
 
