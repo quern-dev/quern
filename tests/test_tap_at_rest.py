@@ -43,7 +43,36 @@ def _reads(*frames):
     return read
 
 
+class FakeClock:
+    """The clock `_wait_for_rest` reads, moving only when it sleeps.
+
+    Each sleep also costs `read_s`, the read that follows it, so every read
+    takes a known time. On the real clock these tests asserted how fast the
+    machine was: a 1ms sleep that took 25ms on a busy CI runner made three
+    agreeing reads span the 50ms window, the check rightly called the target
+    settled, and the test that expects otherwise failed (#587's CI)."""
+
+    def __init__(self, read_s: float = 0.001) -> None:
+        self.now = 0.0
+        self.read_s = read_s
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds + self.read_s
+
+
 class TestWaitForRest:
+    @pytest.fixture(autouse=True)
+    def clock(self, monkeypatch):
+        clock = FakeClock()
+        # u2_client's own name for the module, so nothing else sees the fake.
+        monkeypatch.setattr(u2_client, "time", clock)
+        return clock
+
     def test_agreement_must_span_the_whole_window(self, monkeypatch):
         """Three agreeing reads taken faster than REST_SPAN_S are not enough:
         a target jumping every 120ms reads the same three times in 60ms."""
@@ -65,14 +94,12 @@ class TestWaitForRest:
         rest = _wait_for_rest(_reads(*[A] * 5000), A)
         assert rest["settled"] is False
 
-    def test_reads_are_back_to_back(self, monkeypatch):
+    def test_reads_are_back_to_back(self, monkeypatch, clock):
         """Spacing decides it: reads one round trip apart, not 100ms plus."""
-        slept = []
-        monkeypatch.setattr(u2_client.time, "sleep", slept.append)
         monkeypatch.setattr(u2_client, "REST_GAP_S", 0.02)
         monkeypatch.setattr(u2_client, "REST_BUDGET_S", 0.01)
         _wait_for_rest(_reads(*[A] * 5000), A)
-        assert slept and all(t <= 0.03 for t in slept), slept
+        assert clock.slept and all(t <= 0.03 for t in clock.slept), clock.slept
 
     def test_three_agreeing_reads_are_at_rest(self):
         read = _reads(*[A] * 5000)
@@ -84,18 +111,21 @@ class TestWaitForRest:
         rest = _wait_for_rest(_reads(*[B] * 5000), A)
         assert rest["settled"] is True and rest["bounds"] == B
 
-    def test_two_agreeing_reads_are_not_enough(self):
+    def test_two_agreeing_reads_are_not_enough(self, clock):
         """A target jumping every 120ms reads the same twice 100ms apart."""
+        # Reads 10ms apart, so each agreeing pair does span the 10ms window:
+        # only the count of agreeing reads can keep this unsettled.
+        clock.read_s = 0.009
         frames = [A, B, B, A, A, B, B] * 200
         rest = _wait_for_rest(_reads(*frames), A)
         assert rest["settled"] is False
 
-    def test_a_target_that_never_stops_is_given_up_on(self):
+    def test_a_target_that_never_stops_is_given_up_on(self, clock):
         frames = [B, A] * 1000
-        started = time.monotonic()
         rest = _wait_for_rest(_reads(*frames), A)
         assert rest["settled"] is False and rest["gone"] is False
-        assert time.monotonic() - started < 1.0
+        # Given up at the budget, not after the frames ran out.
+        assert u2_client.REST_BUDGET_S <= clock.now < u2_client.REST_BUDGET_S + 0.01
 
     def test_a_target_that_vanishes_is_gone(self):
         def read():
