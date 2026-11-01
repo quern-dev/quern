@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 import time
 from collections.abc import Callable, Iterable
@@ -58,6 +59,10 @@ def clamp_grace(value: object) -> int:
 def _digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8", "replace")).hexdigest()
 
+
+#: A simulator's or iPhone's id; anything else here is an Android serial or `avd:`.
+_UUID = re.compile(r"[0-9A-Fa-f]{8}(-?[0-9A-Fa-f]{4}){3}-?[0-9A-Fa-f]{12}"
+                   r"|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}")
 
 @dataclass
 class Reservation:
@@ -141,6 +146,12 @@ class SessionRegistry:
         #: whoever drains them (`take_released`): grace that ran out in a
         #: sweep has nobody waiting on it to act.
         self._released: list[HeldSession] = []
+        #: AVD boots in progress (#582): `avd:<name>` -> the session booting it
+        #: and the device ids already present when the boot began. Until the
+        #: hold moves to the serial the emulator comes up as, any new Android
+        #: serial is that session's -- by when it appeared, not by its name,
+        #: which a failed console query can leave as the model (review).
+        self._avd_boots: dict[str, tuple[str, frozenset[str]]] = {}
         #: Devices a client key released whose clean-up -- its mock rules,
         #: its recordings -- has not run yet, by the releasing principal. Not
         #: reservable by anyone else until it has: in the gap the previous
@@ -299,6 +310,21 @@ class SessionRegistry:
                 udid, Reservation(udid=udid, on_release=on_release, booted_here=udid in booted))
         return [session.reservations[u] for u in udids]
 
+    def rekey(self, session_id: str, old: str, new: str) -> None:
+        """Move a reservation to the id its device came up as: an AVD reserved
+        as ``avd:<name>`` is ``emulator-5554`` once booted, and a hold on the
+        old id would cover nothing (#582). Refused, changing nothing, if
+        another session holds the new id."""
+        session = self._get(session_id)
+        if old == new or old not in session.reservations:
+            return
+        held = self.holder_of(new)
+        if held is not None and held.session.id != session_id:
+            raise SessionConflict(f"{new} is held by {held.session.id}")
+        reservation = session.reservations.pop(old)
+        reservation.udid = new
+        session.reservations[new] = reservation
+
     def withdraw(self, session_id: str, udids: Iterable[str]) -> None:
         """Take back reservations this request just made, as if never made:
         no release policies queued, nothing else touched. For a reservation
@@ -324,12 +350,27 @@ class SessionRegistry:
         return freed
 
     def holder_of(self, udid: str) -> Held | None:
-        """The session holding `udid`, after expiring stale grace."""
+        """The session holding `udid`, after expiring stale grace -- or, for
+        an Android serial that appeared while an AVD boot was in progress,
+        the session booting it."""
         self.expire_due()
         for session in self._sessions.values():
             if udid in session.reservations:
                 return Held(udid=udid, session=session)
+        if not _UUID.fullmatch(udid) and not udid.startswith("avd:"):
+            for avd, (session_id, before) in self._avd_boots.items():
+                session = self._sessions.get(session_id)
+                if session is not None and avd in session.reservations and udid not in before:
+                    return Held(udid=udid, session=session)
         return None
+
+    def begin_avd_boot(self, session_id: str, avd: str, present: Iterable[str]) -> None:
+        """`session_id` is booting the AVD it holds as `avd`; `present` is
+        every device id there before the boot began."""
+        self._avd_boots[avd] = (session_id, frozenset(present))
+
+    def end_avd_boot(self, avd: str) -> None:
+        self._avd_boots.pop(avd, None)
 
     def held_udids(self, *, except_session: str = "") -> set[str]:
         """Every device some *other* session holds."""

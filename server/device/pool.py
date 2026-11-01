@@ -99,6 +99,7 @@ class DevicePool:
                     entry.is_available = device_info.is_available
                     entry.device_family = device_info.device_family
                     entry.model = device_info.model
+                    entry.avd_name = device_info.avd_name
                 else:
                     # New device discovered
                     entry = DevicePoolEntry(
@@ -110,6 +111,7 @@ class DevicePool:
                         runtime=device_info.runtime,
                         device_family=device_info.device_family,
                         model=device_info.model,
+                        avd_name=device_info.avd_name,
                         last_used=now,
                         is_available=device_info.is_available,
                     )
@@ -303,11 +305,16 @@ class DevicePool:
         udid: str,
         timeout: float = 30.0,
         poll_interval: float = 0.5,
-    ) -> None:
-        """Boot a device and wait for it to reach 'booted' state.
+    ) -> str:
+        """Boot a device and wait for it to reach 'booted' state. Returns the
+        udid it is booted as: a simulator keeps its own, but a shut-down AVD,
+        listed as ``avd:<name>``, comes up as its adb serial (``emulator-5554``)
+        and is never listed under ``avd:`` again -- waiting for that id never
+        succeeded, so every reservation of one failed (#582).
 
         Raises DeviceError if boot fails or times out.
         """
+        target = udid
         is_android = self.controller._is_android(udid)
         if is_android:
             # Android emulators need the AVD name to boot; look it up from pool state
@@ -315,7 +322,8 @@ class DevicePool:
             entry = pool_state.devices.get(udid)
             avds = await self.controller.adb.list_avds()
             if entry and entry.name and entry.name in avds:
-                await self.controller.adb.boot_emulator(entry.name)
+                serial = await self.controller.adb.boot_emulator(entry.name)
+                target = serial or udid
             elif entry and entry.name:
                 # The name is not an AVD. Since #299 an emulator attached over
                 # TCP classifies as `ANDROID_EMULATOR` and so reaches this
@@ -348,10 +356,10 @@ class DevicePool:
             else:
                 devices = await self.controller.simctl.list_devices()
             for d in devices:
-                if d.udid == udid and d.state == DeviceState.BOOTED:
+                if d.udid == target and d.state == DeviceState.BOOTED:
                     await self.refresh(force=True)
-                    logger.info("Device %s booted in %.1fs", udid[:8], time.time() - start)
-                    return
+                    logger.info("Device %s booted in %.1fs", target[:12], time.time() - start)
+                    return target
 
         tool = "adb" if is_android else "simctl"
         raise DeviceError(
@@ -515,9 +523,9 @@ class DevicePool:
         shutdown = [d for d in candidates if d.state == DeviceState.SHUTDOWN]
         if shutdown and auto_boot:
             chosen = shutdown[0]
-            await self._boot_and_wait(chosen.udid)
-            self.controller._active_udid = chosen.udid
-            return chosen.udid
+            booted_as = await self._boot_and_wait(chosen.udid)
+            self.controller._active_udid = booted_as
+            return booted_as
 
         # Priority 4: nothing viable
         raise self._build_resolution_error(
@@ -589,8 +597,7 @@ class DevicePool:
         for d in shutdown_available:
             if len(selected_udids) >= count:
                 break
-            await self._boot_and_wait(d.udid)
-            selected_udids.append(d.udid)
+            selected_udids.append(await self._boot_and_wait(d.udid))
 
         # Set first device as active
         if selected_udids:

@@ -1044,3 +1044,35 @@ class TestConfigReading:
         config_file.write_text("not json")
         monkeypatch.setattr(server.config, "USER_CONFIG_FILE", config_file)
         assert server.config.get_default_device_family() == "iPhone"
+
+
+class TestBootingAShutDownAvd:
+    """#582: an AVD listed as avd:<name> comes up as its adb serial."""
+
+    @pytest.fixture
+    def avd_pool(self, pool):
+        from server.models import DevicePoolEntry
+
+        ctrl = pool.controller
+        ctrl._is_android = lambda udid: udid.startswith(("avd:", "emulator-"))
+        ctrl.adb.list_avds = AsyncMock(return_value=["Pixel_8_API35"])
+        ctrl.adb.boot_emulator = AsyncMock(return_value="emulator-5554")
+        ctrl.adb.list_devices = AsyncMock(return_value=[DeviceInfo(
+            udid="emulator-5554", name="Pixel_8_API35", state=DeviceState.BOOTED,
+            device_type=DeviceType.ANDROID_EMULATOR, os_version="15",
+            is_available=True, device_family="Android")])
+        entry = DevicePoolEntry(udid="avd:Pixel_8_API35", name="Pixel_8_API35",
+                                state=DeviceState.SHUTDOWN,
+                                device_type=DeviceType.ANDROID_EMULATOR,
+                                os_version="15", runtime="", last_used=datetime.now(UTC),
+                                is_available=True, device_family="Android")
+        state = pool._read_state()
+        state.devices = {"avd:Pixel_8_API35": entry}
+        pool._read_state = lambda: state
+        pool.refresh = AsyncMock()
+        return pool
+
+    async def test_boot_and_wait_returns_the_serial(self, avd_pool):
+        assert await avd_pool._boot_and_wait("avd:Pixel_8_API35", timeout=2,
+                                             poll_interval=0.05) == "emulator-5554"
+        avd_pool.controller.adb.boot_emulator.assert_awaited_once_with("Pixel_8_API35")
