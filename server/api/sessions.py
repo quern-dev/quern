@@ -28,6 +28,8 @@ from pydantic import BaseModel, Field
 
 from server import principal, visibility
 from server.api.actions import logged_action
+from server.device import platform
+from server.models import Platform
 from server.session import current_session, parse_session
 from server.session_registry import (
     ON_RELEASE,
@@ -131,6 +133,10 @@ class ReserveRequest(BaseModel):
     device_family: str | None = None
     auto_boot: bool = True
     on_release: str = Field(default="none", description=" or ".join(ON_RELEASE))
+    #: iOS or Android, for a count with criteria (#582): see
+    #: `server/device/platform.py`. With a source it is a default.
+    platform: Platform | None = None
+    platform_source: str | None = None
 
 
 @router.post("")
@@ -225,7 +231,7 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
     if chosen != 1:
         raise HTTPException(400, "give exactly one of udids, count (with criteria), or group "
                                  "(optionally with count)")
-    udids, to_boot = await _choose(request, registry, session_id, body)
+    udids, to_boot, picked_by = await _choose(request, registry, session_id, body)
     if not udids:
         # Nothing more to reserve: the session already holds the whole group.
         return {"session": session_id, "reserved": [], "holding": list(session.reservations)}
@@ -309,7 +315,8 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
             "reserved": [{"udid": r.udid, **_what(known.get(r.udid)),
                           "on_release": r.on_release, "booted_here": r.booted_here}
                          for r in reservations],
-            "holding": list(session.reservations)}
+            "holding": list(session.reservations),
+            **picked_by}
 
 
 #: One AVD boot at a time: a serial that appears during it can only be its own.
@@ -375,9 +382,10 @@ async def unreserve(request: Request, session_id: str, udid: str | None = None) 
 
 
 async def _choose(request: Request, registry: SessionRegistry, session_id: str,
-                  body: ReserveRequest) -> tuple[list[str], list[str]]:
-    """The udids a reservation asks for, and which of them need booting --
-    not booted here: the caller claims them first."""
+                  body: ReserveRequest) -> tuple[list[str], list[str], dict]:
+    """The udids a reservation asks for, which of them need booting -- not
+    booted here: the caller claims them first -- and, for a pick by
+    criteria, the platform it was made on and why (#582)."""
     controller = getattr(request.app.state, "device_controller", None)
     pool = getattr(controller, "_pool", None)
     if body.udids is not None:
@@ -392,7 +400,7 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
             unknown = [u for u in udids if u not in known]
             if unknown:
                 raise HTTPException(404, f"no such device: {', '.join(unknown)}")
-        return udids, []
+        return udids, [], {}
     if pool is None:
         raise HTTPException(503, "the device pool is not available")
     from server.models import DeviceState, DeviceType
@@ -401,6 +409,7 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
     devices = list(pool._read_state().devices.values())
     held = registry.held_udids(except_session=session_id)
     mine = registry.held_udids() - held
+    picked_by: dict = {}
     if body.group is not None:
         devices = _group_members(body.group, devices, pool)
         # No count means "the whole group": only the members this session does
@@ -408,12 +417,32 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
         # shortage that does not exist (CodeRabbit). A count means that many more.
         wanted = body.count or len([d for d in devices if d.udid not in mine])
         if wanted == 0:
-            return [], []
+            return [], [], {}
     else:
-        devices = pool._find_candidates(
-            devices, name=body.name, os_version=body.os_version,
-            device_type=DeviceType(body.device_type) if body.device_type else None,
-            device_family=body.device_family)
+        dtype = DeviceType(body.device_type) if body.device_type else None
+        try:
+            hard = platform.requested_platform(
+                platform=body.platform, source=body.platform_source,
+                device_type=dtype, os_version=body.os_version)
+        except platform.PlatformConflict as e:
+            raise HTTPException(400, str(e)) from None
+        everything = devices
+
+        def find(on: str | None) -> list:
+            return pool._find_candidates(
+                everything, name=body.name, os_version=body.os_version,
+                device_type=dtype, device_family=body.device_family, on_platform=on)
+
+        try:
+            choice = platform.choose(
+                find, requested=hard,
+                default=body.platform if body.platform and not hard else None,
+                default_source=body.platform_source,
+                has_criteria=any([body.name, body.os_version, body.device_family]))
+        except platform.PlatformRefusal as e:
+            raise HTTPException(409, e.detail) from None
+        devices = choice.devices
+        picked_by = choice.report()
         wanted = body.count or 1
     # `count` is how many *more* devices: not ones another session holds, and
     # not ones this session already holds (CodeRabbit: they ranked first, so
@@ -442,7 +471,7 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
             + ("" if body.auto_boot else " and booted (auto_boot is off)")
             # Blind: how many others hold is not this caller's to know.
             + ("" if visibility.blind_for() else f"; {len(held)} held by other sessions")))
-    return [d.udid for d in picked], to_boot
+    return [d.udid for d in picked], to_boot, picked_by
 
 
 def _group_members(group: str, devices: list, pool) -> list:

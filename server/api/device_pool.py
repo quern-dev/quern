@@ -5,6 +5,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 
 from server.api.actions import logged_action
+from server.device import platform
 from server.models import DeviceError, DeviceType, EnsureDevicesRequest, ResolveDeviceRequest
 
 router = APIRouter(prefix="/api/v1/devices", tags=["device-pool"])
@@ -26,6 +27,14 @@ def _handle_pool_error(e: DeviceError) -> HTTPException:
     if "did not boot" in msg.lower():
         return HTTPException(status_code=503, detail=msg)
     return HTTPException(status_code=500, detail=f"[{e.tool}] {msg}")
+
+
+def _platform_error(e: Exception) -> HTTPException:
+    """A pick that needs the caller to choose a platform (409, with what
+    matched on each side), or a request naming two (400). #582."""
+    if isinstance(e, platform.PlatformRefusal):
+        return HTTPException(status_code=409, detail=e.detail)
+    return HTTPException(status_code=400, detail=str(e))
 
 
 def _parse_device_type(value: str | None) -> DeviceType | None:
@@ -67,6 +76,7 @@ async def resolve_device(request: Request, body: ResolveDeviceRequest):
     """
     pool = _get_pool(request)
     start = time.time()
+    report: dict = {}
     try:
         udid = await pool.resolve_device(
             udid=body.udid,
@@ -75,6 +85,12 @@ async def resolve_device(request: Request, body: ResolveDeviceRequest):
             device_type=_parse_device_type(body.device_type),
             device_family=body.device_family,
             auto_boot=body.auto_boot,
+            requested_platform=body.platform,
+            platform_source=body.platform_source,
+            report=report,
+            # The documented default when no type is given: a simulator,
+            # within iOS (#582: an Android pick ignores it).
+            default_device_type=DeviceType.SIMULATOR,
         )
         waited = round(time.time() - start, 2)
         device = await pool.get_device_state(udid)
@@ -85,7 +101,10 @@ async def resolve_device(request: Request, body: ResolveDeviceRequest):
             "os_version": device.os_version if device else "",
             "waited_seconds": waited,
             "active": True,
+            **report,
         }
+    except (platform.PlatformRefusal, platform.PlatformConflict) as e:
+        raise _platform_error(e)
     except DeviceError as e:
         raise _handle_pool_error(e)
 
@@ -101,6 +120,7 @@ async def ensure_devices(request: Request, body: EnsureDevicesRequest):
     Returns 503 if boot failed for one or more devices.
     """
     pool = _get_pool(request)
+    report: dict = {}
     try:
         udids = await pool.ensure_devices(
             count=body.count,
@@ -109,6 +129,12 @@ async def ensure_devices(request: Request, body: EnsureDevicesRequest):
             device_type=_parse_device_type(body.device_type),
             device_family=body.device_family,
             auto_boot=body.auto_boot,
+            requested_platform=body.platform,
+            platform_source=body.platform_source,
+            report=report,
+            # The documented default when no type is given: a simulator,
+            # within iOS (#582: an Android pick ignores it).
+            default_device_type=DeviceType.SIMULATOR,
         )
         devices = []
         for udid in udids:
@@ -122,6 +148,9 @@ async def ensure_devices(request: Request, body: EnsureDevicesRequest):
             "devices": devices,
             "total_available": len(udids),
             "active_udid": udids[0] if udids else None,
+            **report,
         }
+    except (platform.PlatformRefusal, platform.PlatformConflict) as e:
+        raise _platform_error(e)
     except DeviceError as e:
         raise _handle_pool_error(e)

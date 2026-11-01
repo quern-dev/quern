@@ -1285,3 +1285,66 @@ def test_a_group_entry_naming_an_avd_finds_its_running_emulator(monkeypatch):
     members = sessions_api._group_members("pixels", devices, None)
     assert [d.udid for d in members] == ["emulator-5554"]
 
+
+
+class TestReservingByPlatform:
+    """#582: a count with criteria picks on one platform. A bare version both
+    platforms have is refused with each side listed; the project's platform,
+    sent by the MCP with its source, settles it."""
+
+    @pytest.fixture
+    def pool(self, client, tmp_path):
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock
+
+        from server.device.pool import DevicePool
+        from server.models import DevicePoolEntry, DevicePoolState, DeviceState, DeviceType
+
+        def entry(udid, name, os_version, kind):
+            return DevicePoolEntry(udid=udid, name=name, state=DeviceState.BOOTED,
+                                   device_type=kind, os_version=os_version, runtime="",
+                                   last_used=datetime.now(UTC), is_available=True)
+
+        state = DevicePoolState(updated_at=datetime.now(UTC), devices={
+            "SIM-16": entry("SIM-16", "iPhone 14", "iOS 16.4", DeviceType.SIMULATOR),
+            "emulator-5554": entry("emulator-5554", "Pixel_8_API_36", "16",
+                                   DeviceType.ANDROID_EMULATOR)})
+        pool = DevicePool(client.app.state.device_controller)
+        pool.refresh = AsyncMock()
+        pool._read_state = lambda: state
+        client.app.state.device_controller._pool = pool
+        return pool
+
+    def test_a_bare_version_on_both_platforms_is_refused_with_both_listed(self, client, pool):
+        a = Held(client, "claude-a")
+        r = _reserve(client, "claude-a", count=1, os_version="16")
+        assert r.status_code == 409, r.text
+        detail = r.json()["detail"]
+        assert detail["error"] == "ambiguous_platform"
+        assert {m["udid"] for side in detail["matches"].values() for m in side} == {
+            "SIM-16", "emulator-5554"}
+        a.close()
+
+    def test_the_projects_platform_picks_and_is_reported(self, client, pool):
+        a = Held(client, "claude-a")
+        r = _reserve(client, "claude-a", count=1, os_version="16", platform="android",
+                     platform_source="knowledge_base")
+        assert r.status_code == 200, r.text
+        assert [x["udid"] for x in r.json()["reserved"]] == ["emulator-5554"]
+        assert r.json()["platform"] == "android"
+        assert r.json()["platform_source"] == "knowledge_base"
+        a.close()
+
+    def test_a_prefixed_version_needs_no_platform(self, client, pool):
+        a = Held(client, "claude-a")
+        r = _reserve(client, "claude-a", count=1, os_version="iOS 16")
+        assert r.status_code == 200, r.text
+        assert [x["udid"] for x in r.json()["reserved"]] == ["SIM-16"]
+        a.close()
+
+    def test_two_named_platforms_are_a_400(self, client, pool):
+        a = Held(client, "claude-a")
+        r = _reserve(client, "claude-a", count=1, os_version="Android 16",
+                     device_type="simulator")
+        assert r.status_code == 400, r.text
+        a.close()

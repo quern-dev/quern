@@ -2866,6 +2866,13 @@ class DevicePoolState(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+#: iOS or Android (#582). With no ``platform_source`` (or "request") it
+#: restricts the pick; with one -- "knowledge_base", "project", what the MCP
+#: read it from -- it is a default the request's own matches can override.
+#: See `server/device/platform.py`.
+Platform = Literal["ios", "android"]
+
+
 class ResolveDeviceRequest(BaseModel):
     """Request body for POST /api/v1/devices/resolve."""
 
@@ -2873,8 +2880,11 @@ class ResolveDeviceRequest(BaseModel):
     name: str | None = None
     os_version: str | None = None
     device_family: str | None = None
-    device_type: str | None = "simulator"
+    #: None: a simulator, unless a platform says Android -- see PlatformChoice.
+    device_type: str | None = None
     auto_boot: bool = True
+    platform: Platform | None = None
+    platform_source: str | None = None
 
 
 class EnsureDevicesRequest(BaseModel):
@@ -2884,8 +2894,10 @@ class EnsureDevicesRequest(BaseModel):
     name: str | None = None
     os_version: str | None = None
     device_family: str | None = None
-    device_type: str | None = "simulator"
+    device_type: str | None = None
     auto_boot: bool = True
+    platform: Platform | None = None
+    platform_source: str | None = None
 
 
 # ---------------------------------------------------------------------------
