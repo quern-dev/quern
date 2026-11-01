@@ -982,6 +982,30 @@ def test_a_clients_rules_and_recordings_end_with_its_hold(world):
     assert {a["action"] for a in actions} == {"mock_removed", "recording_stopped"}
 
 
+def test_a_clients_profile_ends_with_its_hold(world):
+    """A client's profile is stopped with its hold, as its recording is: left
+    running it recorded the next holder's use of the app (#245). The owner's
+    is left, and so is one already finished."""
+    from server.api.sessions import run_release_policies
+
+    stopped = []
+
+    async def stop(profile_id, reason="stopped"):
+        stopped.append((profile_id, reason))
+
+    mine = SimpleNamespace(id="prof-alice", udid=SIM_A, principal="client:alice",
+                           state="recording")
+    done = SimpleNamespace(id="prof-alice-done", udid=SIM_A, principal="client:alice",
+                           state="finished")
+    owners = SimpleNamespace(id="prof-owner", udid=SIM_A, principal="owner", state="recording")
+    world.app.state.profiles = SimpleNamespace(list=lambda: [mine, done, owners], stop=stop)
+    world.registry.release("alice:s1")
+    actions = asyncio.run(run_release_policies(world.app))
+    assert stopped == [("prof-alice", "session_ended")]
+    [entry] = [a for a in actions if a["action"] == "profile_stopped"]
+    assert (entry["ok"], entry["udid"], entry["profile"]) == (True, SIM_A, "prof-alice")
+
+
 class TestReleasingADevice:
     """A client's device is not another key's until its clean-up has run
     (CodeRabbit): in the gap its recording filmed, and its rules answered,

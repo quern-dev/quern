@@ -491,6 +491,30 @@ def upload_settings() -> dict:
             "note": "; ".join(notes) or None}
 
 
+#: What every kept profile may take together, by default (#245). An Animation
+#: Hitches trace measured 192 MB for 35 s, so this holds about ten of those.
+PROFILES_DEFAULT_MB = 2048
+
+
+def profile_settings() -> dict:
+    """The profile store's limit from config.json's `profiles` object:
+
+        {"profiles": {"max_mb": 2048}}
+
+    `max_mb` is what the kept profiles may take together; the oldest finished
+    ones are removed to make room before a new one starts. A value that is
+    not a whole number of megabytes above 0 reads as the default, with a note."""
+    raw = read_user_config().get("profiles")
+    raw = raw if isinstance(raw, dict) else {}
+    value = raw.get("max_mb", PROFILES_DEFAULT_MB)
+    note = None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        note = (f"config.json's profiles.max_mb is {value!r}, not a whole number of megabytes "
+                f"above 0: using {PROFILES_DEFAULT_MB}")
+        value = PROFILES_DEFAULT_MB
+    return {"max_bytes": value * 1024 * 1024, "note": note}
+
+
 def get_auto_install_cert() -> bool:
     """Whether to install the mitmproxy CA automatically when capture needs it.
 

@@ -41,6 +41,7 @@ import {
 import { registerLandmarkTools } from "./tools/landmarks.js";
 import { registerSystemTools, whenSwitched } from "./tools/system.js";
 import { registerRecordingTools } from "./tools/recordings.js";
+import { registerProfileTools } from "./tools/profiles.js";
 import { discoverServer } from "./config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -126,6 +127,7 @@ function buildServer(instructions: string): McpServer {
   registerLogTools(server);
   registerProxyTools(server);
   registerRecordingTools(server);
+  registerProfileTools(server);
   registerInterceptTools(server);
   registerDeviceTools(server);
   registerDeviceUITools(server);
