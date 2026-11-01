@@ -89,7 +89,13 @@ This downloads the latest release to `~/.local/share/quern`, creates a virtualen
 
 To install by hand, provision a machine with no terminal (`quern setup -y`), or uninstall, see [Installing Quern](docs/installation.md). It also covers the pre-commit checklist hook, and how to turn it off.
 
+### The Quern app (menu bar)
+
+Setup installs a Quern app in your menu bar, and for most people it is all they need after installing: start, stop and restart the server from it, with no terminal. It also shows the server's state, the active device and the proxy's port, opens a live screen mirror of a device, and picks the update channel. Quitting the app leaves the server running. See [the Quern app guide](docs/guides/menu-bar-app.md).
+
 ### Run
+
+From the terminal, or in a script:
 
 ```bash
 quern start                # start as a background daemon
@@ -105,10 +111,6 @@ quern uninstall            # remove Quern and its dependencies
 ```
 
 The server prints connection info on startup — URL, API key, and proxy port. All state is stored in `~/.quern/`. The full list of commands, and what each file there is for, is in the [command reference](docs/cli.md).
-
-### The Quern app (menu bar)
-
-On macOS, Quern installs an app in your menu bar so you can see whether the server is up without opening a terminal. It shows the daemon's state, the active device and the proxy's port; from it you can start and stop the server, open a live screen mirror of a device, and pick the update channel. Quitting the app leaves the server running. See [the Quern app guide](docs/guides/menu-bar-app.md).
 
 ### Connect via MCP
 
