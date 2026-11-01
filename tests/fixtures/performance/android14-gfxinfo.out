@@ -1,0 +1,64 @@
+Applications Graphics Acceleration Info:
+Uptime: 22053 Realtime: 22053
+
+** Graphics info for pid 1751 [com.quern.probe] **
+
+Stats since: 11781439796ns
+Total frames rendered: 157
+Janky frames: 12 (7.64%)
+Janky frames (legacy): 33 (21.02%)
+50th percentile: 16ms
+90th percentile: 26ms
+95th percentile: 40ms
+99th percentile: 1700ms
+Number Missed Vsync: 6
+Number High input latency: 234
+Number Slow UI thread: 9
+Number Slow bitmap uploads: 0
+Number Slow issue draw commands: 7
+Number Frame deadline missed: 12
+Number Frame deadline missed (legacy): 11
+HISTOGRAM: 5ms=0 6ms=0 7ms=0 8ms=0 9ms=0 10ms=0 11ms=0 12ms=0 13ms=0 14ms=1 15ms=1 16ms=83 17ms=22 18ms=7 19ms=8 20ms=13 21ms=3 22ms=2 23ms=0 24ms=0 25ms=0 26ms=2 27ms=0 28ms=0 29ms=1 30ms=0 31ms=1 32ms=4 34ms=0 36ms=1 38ms=0 40ms=1 42ms=0 44ms=0 46ms=0 48ms=0 53ms=0 57ms=0 61ms=1 65ms=0 69ms=0 73ms=0 77ms=0 81ms=0 85ms=0 89ms=0 93ms=1 97ms=0 101ms=0 105ms=0 109ms=0 113ms=0 117ms=0 121ms=0 125ms=0 129ms=0 133ms=1 150ms=1 200ms=0 250ms=0 300ms=0 350ms=0 400ms=0 450ms=0 500ms=1 550ms=0 600ms=0 650ms=0 700ms=0 750ms=0 800ms=0 850ms=0 900ms=0 950ms=0 1000ms=0 1050ms=0 1100ms=0 1150ms=0 1200ms=0 1250ms=0 1300ms=0 1350ms=0 1400ms=0 1450ms=0 1500ms=0 1550ms=0 1600ms=0 1650ms=0 1700ms=1 1750ms=0 1800ms=0 1850ms=0 1900ms=1 1950ms=0 2000ms=0 2050ms=0 2100ms=0 2150ms=0 2200ms=0 2250ms=0 2300ms=0 2350ms=0 2400ms=0 2450ms=0 2500ms=0 2550ms=0 2600ms=0 2650ms=0 2700ms=0 2750ms=0 2800ms=0 2850ms=0 2900ms=0 2950ms=0 3000ms=0 3050ms=0 3100ms=0 3150ms=0 3200ms=0 3250ms=0 3300ms=0 3350ms=0 3400ms=0 3450ms=0 3500ms=0 3550ms=0 3600ms=0 3650ms=0 3700ms=0 3750ms=0 3800ms=0 3850ms=0 3900ms=0 3950ms=0 4000ms=0 4050ms=0 4100ms=0 4150ms=0 4200ms=0 4250ms=0 4300ms=0 4350ms=0 4400ms=0 4450ms=0 4500ms=0 4550ms=0 4600ms=0 4650ms=0 4700ms=0 4750ms=0 4800ms=0 4850ms=0 4900ms=0 4950ms=0
+50th gpu percentile: 13ms
+90th gpu percentile: 18ms
+95th gpu percentile: 19ms
+99th gpu percentile: 4950ms
+GPU HISTOGRAM: 1ms=0 2ms=1 3ms=0 4ms=1 5ms=2 6ms=4 7ms=2 8ms=1 9ms=2 10ms=7 11ms=6 12ms=19 13ms=54 14ms=22 15ms=1 16ms=1 17ms=13 18ms=8 19ms=6 20ms=1 21ms=1 22ms=0 23ms=1 24ms=0 25ms=0 4950ms=4
+
+Pipeline=Skia (OpenGL)
+Memory policy:
+  Max surface area: 2592000
+  Max resource usage: 124.42MB (x48)
+  Background retention: 50% (altUiHidden = true)
+  GPU Context timeout: 10
+Contexts: 1 (stopped = 0)
+CPU Caches:
+  Glyph Cache: 79.55 KB (1 entry)
+  Glyph Count: 16 
+Total CPU memory usage:
+  81463 bytes, 79.55 KB (0.00 bytes is purgeable)
+GPU Caches:
+  Other:
+    Other: 14.59 KB (1 entry)
+    Buffer Object: 2.05 KB (2 entries)
+  Image:
+    Texture: 71.62 KB (5 entries)
+  Scratch:
+    Texture: 2.00 MB (1 entry)
+    Buffer Object: 112.00 KB (3 entries)
+Total GPU memory usage:
+  2302220 bytes, 2.20 MB (137.67 KB is purgeable)
+
+Profile data in ms:
+
+	com.quern.probe/com.quern.probe.MainActivity/android.view.ViewRootImpl@d599323 (visibility=0)
+View hierarchy:
+
+  com.quern.probe/com.quern.probe.MainActivity/android.view.ViewRootImpl@d599323
+  156 views, 302.94 kB of render nodes
+
+
+Total ViewRootImpl   : 1
+Total attached Views : 156
+Total RenderNode     : 302.94 kB (used) / 972.07 kB (capacity)
+

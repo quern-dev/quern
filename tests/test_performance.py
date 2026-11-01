@@ -85,7 +85,7 @@ class TestParsers:
 
     def test_android_cpu_from_measured_output(self):
         # The probe idled through the measured sample: same ticks twice.
-        cpu, threads = performance.parse_android_cpu_sample(fixture("android10-stat.txt"), 6403)
+        cpu, threads = performance.parse_android_cpu_sample(fixture("android10-stat.out"), 6403)
         assert cpu == 0.0
         assert threads == 49
 
@@ -102,10 +102,10 @@ class TestParsers:
         assert performance.parse_android_cpu_sample(text, 7) is None
 
     def test_meminfo_android_10(self):
-        assert performance.parse_meminfo_total_pss_kb(fixture("android10-meminfo.txt")) == 90665
+        assert performance.parse_meminfo_total_pss_kb(fixture("android10-meminfo.out")) == 90665
 
     def test_meminfo_android_14_spelling(self):
-        assert performance.parse_meminfo_total_pss_kb(fixture("android14-meminfo.txt")) == 78690
+        assert performance.parse_meminfo_total_pss_kb(fixture("android14-meminfo.out")) == 78690
 
     def test_meminfo_reads_the_summary_not_the_table(self):
         text = ("        TOTAL    11111    0\n App Summary\n               TOTAL:    22222\n")
@@ -115,13 +115,13 @@ class TestParsers:
         assert performance.parse_meminfo_total_pss_kb("No process found for: 123\n") is None
 
     def test_gfxinfo_android_10_has_only_the_legacy_count(self):
-        stats = performance.parse_gfxinfo(fixture("android10-gfxinfo.txt"))
+        stats = performance.parse_gfxinfo(fixture("android10-gfxinfo.out"))
         assert stats.total_frames == 2637
         assert (stats.janky_frames, stats.janky_percent, stats.janky_method) == (15, 0.57, "legacy")
         assert (stats.p50_ms, stats.p90_ms, stats.p95_ms, stats.p99_ms) == (5, 5, 6, 8)
 
     def test_gfxinfo_android_14_reports_the_deadline_count(self):
-        stats = performance.parse_gfxinfo(fixture("android14-gfxinfo.txt"))
+        stats = performance.parse_gfxinfo(fixture("android14-gfxinfo.out"))
         assert (stats.janky_frames, stats.janky_percent) == (12, 7.64)  # not legacy's 33
         assert stats.janky_method == "deadline"
         # the frame percentiles, not the "gpu percentile" lines below them
@@ -225,9 +225,9 @@ class TestSimulator:
 class FakeAdb:
     def __init__(self, pidof=(0, "6403\n", ""), stat=None, meminfo=None, gfxinfo=None):
         self.pidof = pidof
-        self.stat = fixture("android10-stat.txt") if stat is None else stat
-        self.meminfo = fixture("android10-meminfo.txt") if meminfo is None else meminfo
-        self.gfxinfo = fixture("android10-gfxinfo.txt") if gfxinfo is None else gfxinfo
+        self.stat = fixture("android10-stat.out") if stat is None else stat
+        self.meminfo = fixture("android10-meminfo.out") if meminfo is None else meminfo
+        self.gfxinfo = fixture("android10-gfxinfo.out") if gfxinfo is None else gfxinfo
         self.calls: list[tuple] = []
 
     async def _run_unjudged(self, serial, *args, timeout):
