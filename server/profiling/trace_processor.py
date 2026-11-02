@@ -71,8 +71,10 @@ MANIFEST: dict[tuple[str, str], tuple[str, str, int]] = {
 
 #: The download: 15 MB from Google's storage. Generous, and bounded.
 DOWNLOAD_TIMEOUT_S = 300.0
-#: One query over one trace. Measured 1.7 s to load a 4.1 MB trace.
-QUERY_TIMEOUT_S = 120.0
+#: One query over one trace: a base, and the trace's load on top -- measured
+#: 1.7 s for 4.1 MB, so about 0.4 s a MB, allowed 1 s a MB.
+QUERY_TIMEOUT_S = 60.0
+QUERY_S_PER_MB = 1.0
 
 
 def _platform_key() -> tuple[str, str]:
@@ -152,6 +154,8 @@ class TraceProcessor:
     def ensure(self) -> Status:
         """Start the download if it is wanted and not under way; return the
         state either way. Never waits for it."""
+        if self._download is None:
+            self._sweep()
         status = self.status()
         if status.state in ("missing", "failed"):
             self._failed = None
@@ -165,6 +169,33 @@ class TraceProcessor:
         if task is not None and not task.done():
             await asyncio.wait({task}, timeout=timeout)
         return self.status()
+
+    @staticmethod
+    def _sweep() -> None:
+        """A download cut off by a server stopping leaves its temporary file."""
+        for stale in binary_path().parent.glob(".trace_processor-*") \
+                if binary_path().parent.is_dir() else []:
+            with contextlib.suppress(OSError):
+                stale.unlink()
+
+    async def _broken(self, said: str) -> bool:
+        """After a query failed: whether the binary itself is broken, not the
+        trace -- `--version` failing says so. A broken one is removed and
+        said, so the next profile fetches it again rather than every profile
+        failing on it for good (review)."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(binary_path()), "--version",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            ok = await asyncio.wait_for(proc.wait(), 15) == 0
+        except (OSError, TimeoutError):
+            ok = False
+        if not ok:
+            with contextlib.suppress(OSError):
+                binary_path().unlink()
+            self._failed = (f"trace_processor {VERSION} would not run ({said}); it was "
+                            "removed, and is fetched again on the next profile")
+        return not ok
 
     async def _fetch_and_verify(self) -> None:
         url, sha256, _size = MANIFEST[self._platform_key()]
@@ -201,6 +232,11 @@ class TraceProcessor:
         """Rows of `sql` over `trace`. Raises with trace_processor's own words."""
         if self.status().state != "installed":
             raise RuntimeError(f"trace_processor is {self.status().state}")
+        try:
+            megabytes = trace.stat().st_size / 2**20
+        except OSError:
+            megabytes = 0.0
+        timeout = QUERY_TIMEOUT_S + megabytes * QUERY_S_PER_MB
         fd, sql_name = tempfile.mkstemp(suffix=".sql")
         with os.fdopen(fd, "w") as f:
             f.write(sql)
@@ -209,7 +245,14 @@ class TraceProcessor:
                 str(binary_path()), "-q", sql_name, str(trace),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             try:
-                out, err = await asyncio.wait_for(proc.communicate(), QUERY_TIMEOUT_S)
+                out, err = await asyncio.wait_for(proc.communicate(), timeout)
+            except TimeoutError:
+                if proc.returncode is None:
+                    proc.kill()
+                    with contextlib.suppress(Exception):
+                        await asyncio.shield(proc.wait())
+                raise RuntimeError(f"trace_processor did not answer within {timeout:.0f}s "
+                                   f"for a {megabytes:.0f} MB trace") from None
             except BaseException:
                 if proc.returncode is None:
                     proc.kill()
@@ -221,8 +264,10 @@ class TraceProcessor:
                 os.unlink(sql_name)
         if proc.returncode != 0:
             said = err.decode(errors="replace").strip().splitlines()
-            raise RuntimeError(f"trace_processor failed (exit {proc.returncode}): "
-                               f"{said[-1] if said else 'no output'}")
+            words = said[-1] if said else "no output"
+            if proc.returncode < 0 or not said:
+                await self._broken(f"exit {proc.returncode}: {words}")
+            raise RuntimeError(f"trace_processor failed (exit {proc.returncode}): {words}")
         return parse_csv(out.decode(errors="replace"))
 
 

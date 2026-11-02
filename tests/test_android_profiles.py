@@ -57,6 +57,11 @@ class FakeAdb:
         self.pid = "4242"
         self.ticks = [100, 160]
         self.frames = [100, 190]
+        #: The trace files on the device: made by --detach, removed by rm, and
+        #: a pull of one not there fails -- as adb does. Not modelling it hid
+        #: two findings (review).
+        self.remote: set[str] = set()
+        self.clock_offset = 0.0
 
     async def __call__(self, serial, *args, stdin=None, timeout=30.0):
         if self.unreachable:
@@ -78,6 +83,7 @@ class FakeAdb:
             assert stdin and b"duration_ms" in stdin
             if self.start_rc == 0:
                 self.sessions[key] = self.confirm
+                self.remote.add(cmd.split(" -o ")[1].strip())
             return self.start_rc, self.start_said, ""
         if "--is_detached=" in cmd:
             key = cmd.split("--is_detached=")[1].split()[0]
@@ -92,9 +98,13 @@ class FakeAdb:
                 return 0, "Trace written into the output file", ""
             return 2, "", "Session re-attach failed"
         if args[0] == "pull":
-            if self.pull_rc == 0:
-                Path(args[2]).write_bytes(self.pull_bytes)
-            return self.pull_rc, "", "" if self.pull_rc == 0 else "adb: error: remote object"
+            if self.pull_rc != 0 or args[1] not in self.remote:
+                return 1, "", f"adb: error: failed to stat remote object '{args[1]}'"
+            Path(args[2]).write_bytes(self.pull_bytes)
+            return 0, "", ""
+        if cmd == "shell date +%s.%N":
+            import time
+            return 0, f"{time.time() + self.clock_offset:.9f}\n", ""
         if "pidof" in cmd:
             return (0, self.pid + "\n", "") if self.pid else (1, "", "")
         if "/proc/uptime" in cmd:
@@ -106,6 +116,7 @@ class FakeAdb:
             return 0, (f"** Graphics info for pid {self.pid} [com.quern.probe] **\n"
                        f"Total frames rendered: {total}\nJanky frames: 3 (3.00%)\n"), ""
         if cmd.startswith("shell rm"):
+            self.remote.discard(cmd.split("rm -f ")[1].strip())
             return 0, "", ""
         raise AssertionError(f"unexpected adb call: {cmd}")
 
@@ -129,13 +140,10 @@ class FakeTP:
         return self.status()
 
     async def query(self, trace, sql):
-        for name, marker in (("process", "count(*)"), ("hangs", "wq:"), ("frames", "doFrame"),
-                             ("cpu", "sum(s.dur)"), ("slices", "limit 10")):
-            if marker in sql:
-                if name in self.fail:
-                    raise RuntimeError(f"trace_processor failed: {name} broke")
-                return parse_csv(csv_fixture(name))
-        raise AssertionError(sql)
+        assert "json_group_array" in sql, sql          # one query, one load of the trace
+        if self.fail:
+            raise RuntimeError("trace_processor failed (exit -11): no output")
+        return parse_csv(csv_fixture("summary"))
 
 
 @pytest.fixture
@@ -238,17 +246,67 @@ class TestDevice:
 
     async def test_pull(self, tmp_path):
         adb = FakeAdb()
+        adb.remote.add(ad.remote_trace("a"))
         await ad.Device(adb, SERIAL).pull("a", tmp_path / "t.pftrace")
+        assert not (tmp_path / "t.pftrace.part").exists() and not adb.remote
         assert (tmp_path / "t.pftrace").stat().st_size > 0
         assert adb.calls[-1].startswith("shell rm -f /data/misc/perfetto-traces/quern-a")
 
     @pytest.mark.parametrize("rc,data", [(1, b"x"), (0, b"")])
     async def test_a_pull_that_brought_nothing_fails(self, tmp_path, rc, data):
         adb = FakeAdb()
+        adb.remote.add(ad.remote_trace("a"))
         adb.pull_rc, adb.pull_bytes = rc, data
-        with pytest.raises(ad.PullFailed):
+        with pytest.raises(ad.PullFailed, match="still on the device"):
             await ad.Device(adb, SERIAL).pull("a", tmp_path / "t.pftrace")
         assert not any(c.startswith("shell rm") for c in adb.calls)   # kept on the device
+        assert not (tmp_path / "t.pftrace").exists() and not (tmp_path / "t.pftrace.part").exists()
+
+    async def test_could_not_tell_after_an_exit_2_is_unknown_not_gone(self):
+        """A stop is "gone" only when the session is: one the device could not
+        say about is not (mutation survived, review)."""
+        adb = FakeAdb()
+        adb.sessions["quern_a"] = True
+        adb.busy_stops = 1
+        real = adb._answer
+
+        def answer(args, cmd, stdin):
+            if "--is_detached=" in cmd:
+                return 255, "", "error: device offline"
+            return real(args, cmd, stdin)
+        adb._answer = answer
+        assert await ad.Device(adb, SERIAL).stop("a") == "unknown"
+
+    async def test_a_start_that_could_not_be_confirmed_is_a_failure(self, tmp_path):
+        adb = FakeAdb()
+        real = adb._answer
+
+        def answer(args, cmd, stdin):
+            if "--is_detached=" in cmd:
+                return 255, "", "error: closed"
+            return real(args, cmd, stdin)
+        adb._answer = answer
+        with pytest.raises(ad.StartFailed, match="could not be told"):
+            await ad.Device(adb, SERIAL).start("p", PKG, ad.PRESETS["hangs"], 30,
+                                               tmp_path / "log")
+
+    async def test_pidof_failing_is_not_not_running(self):
+        adb = FakeAdb()
+        real = adb._answer
+
+        def answer(args, cmd, stdin):
+            if "pidof" in cmd:
+                return 127, "", "/system/bin/sh: pidof: not found"
+            return real(args, cmd, stdin)
+        adb._answer = answer
+        snap = await ad.Device(adb, SERIAL).snapshot(PKG)
+        assert "could not say whether the app was running" in snap["unavailable"]["cpu"]
+
+    async def test_the_device_clock_is_measured(self):
+        adb = FakeAdb()
+        adb.clock_offset = -20.0
+        snap = await ad.Device(adb, SERIAL).snapshot(PKG)
+        assert snap["clock_offset_s"] == pytest.approx(-20.0, abs=0.5)
 
     async def test_a_snapshot_of_an_app_not_running(self):
         adb = FakeAdb()
@@ -259,43 +317,60 @@ class TestDevice:
 
 # ── the summary ──────────────────────────────────────────────────────────────
 
+def _decoded():
+    [row] = parse_csv(csv_fixture("summary"))
+    return ad.decode_summary_row(row)
+
+
 class TestReducers:
     def test_the_hang_from_a_live_trace(self):
-        hangs = ad.hangs_from_counters(parse_csv(csv_fixture("hangs")), PKG)
-        [hang] = hangs
+        d = _decoded()
+        [hang] = ad.hangs_from_counters(d["wq"], PKG, d["start_ts"], d["end_ts"])
         assert hang["duration_ms"] == pytest.approx(10635.4, abs=0.1)
-        assert hang["window"].startswith("com.quern.probe/")
+        assert hang["window"].startswith("com.quern.probe/") and "note" not in hang
+
+    def test_a_hang_with_more_input_queued_is_still_one_hang(self):
+        """A busy window is sent more events, so its queue climbs during one
+        hang; judged a value at a time, a 600 ms hang vanished (review)."""
+        w = "wq:2 com.quern.probe/x.Main"
+        wq = [[w, 0, 1], [w, 200_000_000, 2], [w, 400_000_000, 3], [w, 600_000_000, 0]]
+        [hang] = ad.hangs_from_counters(wq, PKG, 0, 10**10)
+        assert hang["duration_ms"] == 600.0 and hang["start_s"] == 0.0
 
     def test_other_windows_and_short_waits_are_not_the_apps_hangs(self):
-        rows = [{"track": "wq:1 com.other/x.Main", "ts": 0, "value": 1, "until": 9e9,
-                 "open": 0, "start_ts": 0},
-                {"track": "wq:2 com.quern.probe/x.Main", "ts": 0, "value": 1, "until": 200e6,
-                 "open": 0, "start_ts": 0},
-                {"track": "wq:3 com.quern.probe/x.Main", "ts": 0, "value": 0, "until": 9e9,
-                 "open": 0, "start_ts": 0}]
-        assert ad.hangs_from_counters(rows, PKG) == []
+        wq = [["wq:1 com.other/x.Main", 0, 1], ["wq:1 com.other/x.Main", 9e9, 0],
+              ["wq:2 com.quern.probe/x.Main", 0, 1], ["wq:2 com.quern.probe/x.Main", 2e8, 0]]
+        assert ad.hangs_from_counters(wq, PKG, 0, 10**10) == []
 
-    def test_a_cut_window_name_still_matches_a_long_package(self):
+    def test_a_cut_window_name_matches_and_says_it_may_be_another(self):
+        """Cut, the name also fits a debug build beside the release one."""
         long_pkg = "com.example.averyverylongapplication"
-        # Cut as the measured name was: "wq:670dd51 com.quern.probe/com.quern.pr" is 39.
-        track = "wq:670dd51 com.example.averyverylongapp"
+        track = "wq:670dd51 com.example.averyverylongapp"     # cut, as the measured one: 39
         assert len(track) == 39
-        assert ad.window_matches(track, long_pkg)
-        assert not ad.window_matches("wq:1 com.example.a", long_pkg)    # too short to trust
+        assert ad.window_matches(track, long_pkg) == (True, True)
+        [hang] = ad.hangs_from_counters([[track, 0, 1], [track, 10**9, 0]], long_pkg, 0, 10**10)
+        assert "another app whose package begins" in hang["note"]
+
+    def test_a_short_cut_name_is_not_trusted(self):
+        # 39 characters and more, but too little of the package left to tell by.
+        track = "wq:670dd51f0a1b2c3d4e5f6a7b8c9d0e1 com.e"
+        assert len(track) >= 39
+        assert ad.window_matches(track, "com.example.app") == (False, False)
 
     def test_a_hang_still_open_at_the_end_says_so(self):
-        rows = [{"track": "wq:2 com.quern.probe/x", "ts": 1e9, "value": 1, "until": 3e9,
-                 "open": 1, "start_ts": 0}]
-        [hang] = ad.hangs_from_counters(rows, PKG)
-        assert hang["start_s"] == 1.0 and "still unanswered" in hang["note"]
+        w = "wq:2 com.quern.probe/x"
+        [hang] = ad.hangs_from_counters([[w, 1e9, 1]], PKG, 0, 3e9)
+        assert hang["start_s"] == 1.0 and hang["duration_ms"] == 2000.0
+        assert "still unanswered" in hang["note"]
 
     def test_frames(self):
-        f = ad.frames_from_durations([r["dur"] for r in parse_csv(csv_fixture("frames"))])
+        f = ad.frames_from_durations(_decoded()["frames"])
         assert f["count"] == 12 and f["source"] == "trace" and f["over_budget"] == 0
         assert ad.frames_from_durations([]) is None
 
     def test_cpu(self):
-        c = ad.cpu_from_threads(parse_csv(csv_fixture("cpu")))
+        d = _decoded()
+        c = ad.cpu_from_threads(d["cpu"], d["end_ts"] - d["start_ts"])
         assert c["threads"][0]["thread"] == "RenderThread" and c["cpu_ms"] > 0
 
     def test_snapshots(self):
@@ -311,6 +386,8 @@ class TestReducers:
         assert "restarted" in ad.frames_from_snapshots(first, restarted)[1]
         reset = {**last, "frames": {**last["frames"], "total_frames": 10}}
         assert "reset" in ad.frames_from_snapshots(first, reset)[1]
+        two_ways = {**last, "frames": {**last["frames"], "janky_method": "deadline"}}
+        assert ad.frames_from_snapshots(first, two_ways)[0]["janky"] is None
 
 
 async def _summary(tp, logged=(None, "logcat was not captured"), preset="hangs"):
@@ -344,15 +421,20 @@ class TestSummarize:
         s = await _summary(FakeTP("disabled"))
         assert s["hangs"] is None and s["unavailable"]["hangs"] == "logcat was not captured"
 
-    async def test_one_query_failing_does_not_sink_the_others(self):
-        s = await _summary(FakeTP(fail={"frames"}))
-        assert s["hangs_count"] == 1 and s["cpu"]["source"] == "trace"
-        # The trace could not say; gfxinfo could, and does.
-        assert s["frames"]["source"] == "gfxinfo"
+    async def test_trace_processor_failing_falls_back_and_says_so(self):
+        """Its failing is not the trace being bad: the device's readings stand
+        in, and the profile is still a result (review)."""
+        logged = ([{"start_s": 1.0, "duration_ms": 10649.0}], None)
+        s = await _summary(FakeTP(fail={"summary"}), logged)
+        assert "could not read the trace" in s["unavailable"]["trace_processor"]
+        assert "trace" not in s["unavailable"]
+        assert s["frames"]["source"] == "gfxinfo" and s["hangs_source"].startswith("logcat")
 
-    async def test_an_unreadable_trace_is_said_as_such(self):
-        s = await _summary(FakeTP(fail={"process"}))
-        assert "trace_processor could not read the trace" in s["unavailable"]["trace"]
+    async def test_a_limit_on_the_logged_hangs_is_said_beside_them(self):
+        logged = ([{"start_s": 9.0, "duration_ms": 3000.0}],
+                  "logcat capture began 5s into the profile; hangs before then are not known")
+        s = await _summary(FakeTP("disabled"), logged)
+        assert s["hangs_count"] == 1 and "5s into the profile" in s["hangs_note"]
 
     async def test_the_cpu_preset_has_no_input_so_hangs_come_from_logcat(self):
         logged = ([{"start_s": 1.0, "duration_ms": 3000.0}], None)
@@ -455,6 +537,68 @@ class TestDownload:
         with pytest.raises(RuntimeError, match="no such table"):
             await _tp(lambda *a: None).query(tmp_path / "t", "select 1")
 
+    async def test_a_binary_that_crashes_is_removed_and_fetched_again(self, pinned, tmp_path):
+        """A broken copy read as installed for good, failing every profile
+        (review): one that crashes and will not even say its version goes."""
+        tpm.binary_path().parent.mkdir(parents=True)
+        tpm.binary_path().write_text("#!/bin/sh\nkill -SEGV $$\n")
+        tpm.binary_path().chmod(0o755)
+        fetched = []
+
+        def fetch(url, dest, timeout):
+            fetched.append(url)
+            dest.write_bytes(BINARY)
+        tp = _tp(fetch)
+        with pytest.raises(RuntimeError, match="exit -11"):
+            await tp.query(tmp_path / "t", "select 1")
+        status = tp.status()
+        assert status.state == "failed" and "would not run" in status.detail
+        assert not tpm.binary_path().exists()
+        tp.ensure()
+        assert (await tp.wait(5)).state == "installed" and len(fetched) == 1
+
+    async def test_a_query_error_is_not_a_broken_binary(self, pinned, tmp_path):
+        tpm.binary_path().parent.mkdir(parents=True)
+        tpm.binary_path().write_text(
+            '#!/bin/sh\n[ "$1" = --version ] && exit 0\necho "no such table: wq" >&2\nexit 1\n')
+        tpm.binary_path().chmod(0o755)
+        tp = _tp(lambda *a: None)
+        with pytest.raises(RuntimeError, match="no such table"):
+            await tp.query(tmp_path / "t", "select 1")
+        assert tp.status().state == "installed"
+
+    async def test_a_query_that_does_not_answer_says_how_long_it_waited(self, pinned, tmp_path,
+                                                                        monkeypatch):
+        monkeypatch.setattr(tpm, "QUERY_TIMEOUT_S", 0.3)
+        tpm.binary_path().parent.mkdir(parents=True)
+        # exec: a sleep left as the shell's child would hold the pipes open.
+        tpm.binary_path().write_text("#!/bin/sh\nexec sleep 30\n")
+        tpm.binary_path().chmod(0o755)
+        with pytest.raises(RuntimeError, match="did not answer within 0s"):
+            await _tp(lambda *a: None).query(tmp_path / "t", "select 1")
+
+    async def test_a_query_leaves_no_sql_file(self, pinned, tmp_path, monkeypatch):
+        import tempfile
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
+        (tmp_path / "tmp").mkdir()
+        tpm.binary_path().parent.mkdir(parents=True)
+        tpm.binary_path().write_text("#!/bin/sh\nprintf '\"n\"\\n1\\n'\n")
+        tpm.binary_path().chmod(0o755)
+        await _tp(lambda *a: None).query(tmp_path / "t", "select 1")
+        assert list((tmp_path / "tmp").iterdir()) == []
+
+    async def test_a_download_cut_off_by_a_restart_is_swept(self, pinned):
+        tpm.binary_path().parent.mkdir(parents=True)
+        stale = tpm.binary_path().parent / ".trace_processor-abc123"
+        stale.write_bytes(b"half")
+
+        def fetch(url, dest, timeout):
+            dest.write_bytes(BINARY)
+        tp = _tp(fetch)
+        tp.ensure()
+        await tp.wait(5)
+        assert not stale.exists()
+
     def test_the_real_manifest_pins_every_platform(self):
         for (_system, _machine), (url, sha, size) in tpm.MANIFEST.items():
             assert url.startswith("https://commondatastorage.googleapis.com/perfetto-luci")
@@ -507,6 +651,33 @@ class TestManager:
             profile = await m.stop(profile.id)
         assert profile.stop_reason == "stopped"
 
+    async def test_a_restart_during_the_summary_keeps_the_pulled_trace(self, state):
+        """The trace was pulled and removed from the device, then quern
+        stopped mid-summary; the next one pulled again, failed, and withheld a
+        whole trace (review)."""
+        adb = FakeAdb()
+        m = _manager(adb)
+        profile, _ = await _start(m)
+        await m.shutdown()
+        device = m._device(profile) if profile.id in m._devices else ad.Device(adb, SERIAL)
+        adb.sessions[ad.session_key(profile.id)] = False
+        await device.pull(profile.id, profile.trace)          # as the first finish did
+        profile.state = "finalizing"
+        await m._save()
+        m2 = _manager(adb)
+        await m2.resume()
+        again = await _done(m2.get(profile.id))
+        assert again.state == "finished", again.error
+        assert "profile.pftrace" in again.view()["files"]
+
+    async def test_trace_processor_failing_still_finishes_with_the_trace(self, state):
+        m = _manager(FakeAdb(), FakeTP(fail={"summary"}))
+        profile, _ = await _start(m)
+        async with asyncio.timeout(10):
+            profile = await m.stop(profile.id)
+        assert profile.state == "finished" and "profile.pftrace" in profile.view()["files"]
+        assert "trace_processor" in profile.summary()["unavailable"]
+
     async def test_a_trace_that_could_not_be_copied_fails_the_profile(self, state):
         adb = FakeAdb()
         adb.pull_rc = 1
@@ -527,6 +698,69 @@ class TestManager:
         assert m.list() == [] and SERIAL not in m._active
         assert any("--attach=" in c for c in adb.calls)            # stopped, in case
         assert [p for p in (state / "profiles").iterdir() if p.is_dir()] == []
+        assert adb.remote == set() and m._devices == {}            # nothing left behind
+
+    async def test_a_start_is_recorded_before_perfetto_is_asked(self, state):
+        """As an xctrace is at spawn: killed in between, nothing would know
+        the session was there (review)."""
+        adb = FakeAdb()
+        m = _manager(adb)
+        seen = []
+        real = adb._answer
+
+        def answer(args, cmd, stdin):
+            if "--detach=" in cmd:
+                seen.append(json.loads((state / "profiles" / "profiles.json").read_text()))
+            return real(args, cmd, stdin)
+        adb._answer = answer
+        profile, _ = await _start(m)
+        assert [p["id"] for p in seen[0]["profiles"]] == [profile.id]
+        await m.stop(profile.id)
+
+    async def test_a_stop_that_cannot_reach_the_device_names_the_device(self, state):
+        adb = FakeAdb()
+        m = _manager(adb)
+        profile, _ = await _start(m, limit=60)
+        adb.unreachable = True
+        with pytest.raises(ProfileError) as e:
+            await m.request_stop(profile.id)
+        said = str(e.value)
+        assert e.value.status == 503 and "perfetto" in said and "xctrace" not in said
+        adb.unreachable = False
+        await m.stop(profile.id)
+
+    async def test_an_overrun_whose_stop_did_not_land_is_not_killed(self, state, monkeypatch):
+        monkeypatch.setattr(manager_mod, "FINALIZE_TIMEOUT_S", 0)
+        adb = FakeAdb()
+        adb.busy_stops = 99                            # a stop never lands
+        m = _manager(adb)
+        profile, _ = await _start(m, limit=1)
+        await _done(profile)
+        assert profile.stop_reason == "overran"
+
+    async def test_a_resumed_profile_fetches_trace_processor_too(self, state):
+        adb, tp = FakeAdb(), FakeTP()
+        m = _manager(adb, tp)
+        profile, _ = await _start(m, limit=60)
+        await m.shutdown()
+        tp2 = FakeTP()
+        m2 = _manager(adb, tp2)
+        await m2.resume()
+        assert tp2.ensured == 1
+        await m2.stop(profile.id)
+
+    async def test_a_hand_edited_record_does_not_reach_the_device(self, state):
+        adb = FakeAdb()
+        m = _manager(adb)
+        profile, _ = await _start(m, limit=60)
+        await m.shutdown()
+        raw = json.loads((state / "profiles" / "profiles.json").read_text())
+        raw["profiles"][0]["bundle_id"] = "x'; drop table slice; --"
+        (state / "profiles" / "profiles.json").write_text(json.dumps(raw))
+        calls_before = len(adb.calls)
+        m2 = _manager(adb)
+        await m2.resume()
+        assert m2.get(profile.id).state == "failed" and len(adb.calls) == calls_before
 
     async def test_a_server_without_adb_refuses(self, state):
         m = ProfileManager(settings=lambda: {"max_bytes": 2**31})
@@ -542,7 +776,7 @@ class TestManager:
     async def test_logged_hangs_reach_the_summary_without_trace_processor(self, state):
         seen = []
 
-        async def logged(serial, package, started, ended):
+        async def logged(serial, package, started, ended, clock_offset_s):
             seen.append((serial, package))
             return [{"start_s": 2.0, "duration_ms": 4000.0}], None
         m = _manager(FakeAdb(), FakeTP("disabled"), logged)
@@ -575,6 +809,22 @@ class TestManager:
         again = await _done(m2.get(profile.id))
         assert (again.state, again.stop_reason) == ("finished", "server_restart")
 
+    async def test_ended_while_the_device_could_not_be_asked_is_still_a_restart(self, state):
+        """At startup the controller -- and so adb -- comes after resume: the
+        first answer, later, is what says it ended unwatched (review)."""
+        adb = FakeAdb()
+        m = _manager(adb)
+        profile, _ = await _start(m, limit=60)
+        await m.shutdown()
+        adb.sessions[ad.session_key(profile.id)] = False
+        adb.unreachable = True
+        m2 = _manager(adb)
+        await m2.resume()
+        await asyncio.sleep(1.5)
+        adb.unreachable = False
+        again = await _done(m2.get(profile.id))
+        assert again.stop_reason == "server_restart"
+
     async def test_a_device_that_cannot_be_asked_is_not_read_as_over(self, state, monkeypatch):
         monkeypatch.setattr(manager_mod, "FINALIZE_TIMEOUT_S", 600)
         adb = FakeAdb()
@@ -591,41 +841,79 @@ class TestManager:
 # ── InputDispatcher's reports, from the crash buffer ─────────────────────────
 
 class TestLoggedHangs:
-    @staticmethod
-    def _app(entries, running=True):
+    T0 = datetime(2026, 11, 2, 9, tzinfo=UTC)
+
+    def _app(self, running=True, process_filter=None, started_at=None):
         from server.storage.ring_buffer import RingBuffer
         buf = RingBuffer(max_size=100)
-        state = SimpleNamespace(device_log_adapters={SERIAL: SimpleNamespace(is_running=running)},
-                                crash_buffer=buf)
+        adapter = SimpleNamespace(is_running=running, process_filter=process_filter,
+                                  started_at=started_at or self.T0 - timedelta(minutes=5))
+        state = SimpleNamespace(device_log_adapters={SERIAL: adapter}, crash_buffer=buf)
         return SimpleNamespace(state=state), buf
 
-    async def test_the_apps_hangs_in_the_window(self):
-        from server.main import _android_hangs
-        t0 = datetime(2026, 11, 2, 9, tzinfo=UTC)
-        app, buf = self._app([])
+    def _hang(self, at, device=SERIAL, process=PKG, ms=10649):
+        return LogEntry(id=f"android-hang-{at}-{device}-{process}",
+                        timestamp=self.T0 + timedelta(seconds=at), device_id=device,
+                        process=process, level=LogLevel.ERROR,
+                        message=f"{process} hung: its main thread took {ms} ms to handle a "
+                                f"MotionEvent", source=LogSource.CRASH)
 
-        def hang(at, device=SERIAL, process=PKG, ms=10649):
-            return LogEntry(id=f"android-hang-{at}", timestamp=t0 + timedelta(seconds=at),
-                            device_id=device, process=process, level=LogLevel.ERROR,
-                            message=f"{process} hung: its main thread took {ms} ms to handle "
-                                    f"a MotionEvent", source=LogSource.CRASH)
-        for e in (hang(5), hang(6, device="OTHER"), hang(7, process="com.other"), hang(99),
-                  LogEntry(id="android-crash-1", timestamp=t0 + timedelta(seconds=8),
+    async def _read(self, app, offset=0.0, seconds=30):
+        from server.main import _android_hangs
+        return await _android_hangs(app, SERIAL, PKG, self.T0.isoformat(),
+                                    (self.T0 + timedelta(seconds=seconds)).isoformat(), offset)
+
+    async def test_the_apps_hangs_in_the_window(self):
+        app, buf = self._app()
+        for e in (self._hang(5), self._hang(6, device="OTHER"), self._hang(7, process="com.other"),
+                  self._hang(99),
+                  LogEntry(id="android-crash-1", timestamp=self.T0 + timedelta(seconds=8),
                            device_id=SERIAL, process=PKG, level=LogLevel.FAULT,
                            message="crashed", source=LogSource.CRASH)):
             await buf.append(e)
-        hangs, why = await _android_hangs(app, SERIAL, PKG, t0.isoformat(),
-                                          (t0 + timedelta(seconds=30)).isoformat())
-        assert why is None and hangs == [{"start_s": 5.0, "duration_ms": 10649.0,
-                                          "message": hangs[0]["message"]}]
+        hangs, why = await self._read(app)
+        assert why is None and [(h["start_s"], h["duration_ms"]) for h in hangs] == [(5.0, 10649.0)]
 
     async def test_logcat_not_captured_is_said_not_empty(self):
-        from server.main import _android_hangs
-        app, _ = self._app([], running=False)
-        hangs, why = await _android_hangs(app, SERIAL, PKG, "2026-11-02T09:00:00+00:00",
-                                          "2026-11-02T09:01:00+00:00")
+        app, _ = self._app()
+        app.state.device_log_adapters = {}
+        hangs, why = await self._read(app)
         assert hangs is None and "start_device_logging" in why
 
+    async def test_logcat_filtered_to_another_app_is_not_zero_hangs(self):
+        """It drops this app's hang reports, so none found means nothing
+        (review)."""
+        app, _ = self._app(process_filter="com.other")
+        hangs, why = await self._read(app)
+        assert hangs is None and "filtered to 'com.other'" in why
+
+    async def test_logcat_filtered_to_this_app_is_fine(self):
+        app, buf = self._app(process_filter=PKG)
+        await buf.append(self._hang(5))
+        hangs, why = await self._read(app)
+        assert len(hangs) == 1 and why is None
+
+    async def test_capture_begun_late_says_what_it_missed(self):
+        app, buf = self._app(started_at=self.T0 + timedelta(seconds=10))
+        await buf.append(self._hang(15))
+        hangs, why = await self._read(app)
+        assert len(hangs) == 1 and "began 10s into the profile" in why
+
+    async def test_capture_stopped_says_so(self):
+        app, buf = self._app(running=False)
+        hangs, why = await self._read(app)
+        assert hangs is None and "has stopped" in why
+        await buf.append(self._hang(5))
+        hangs, why = await self._read(app)
+        assert len(hangs) == 1 and "stopped before the profile was read" in why
+
+    async def test_a_device_clock_behind_the_host_does_not_lose_hangs(self):
+        """logcat stamps the device's time; 20 s behind the host, a hang 5 s
+        in was stamped before the window and lost (review)."""
+        app, buf = self._app()
+        await buf.append(self._hang(5 - 20))                # device time: 20 s behind
+        hangs, _why = await self._read(app, offset=-20.0)
+        assert [h["start_s"] for h in hangs] == [5.0]
 
 
 # ── the routes ───────────────────────────────────────────────────────────────
@@ -681,15 +969,14 @@ class TestRoutes:
             assert zipped.status_code == 404                   # iOS's bundle, not Android's
 
     async def test_a_failed_profiles_trace_is_not_served_as_a_result(self, app):
-        """A trace on disk that trace_processor could not read: the profile is
-        failed, and its file is not offered as though it were whole."""
-        app.state.profiles = _manager(app.state.adb, FakeTP(fail={"process"}))
+        """A trace file on disk is offered only once the profile finished."""
         async with _client(app) as http:
             pid = (await http.post("/api/v1/profiles", json={"bundle_id": PKG,
                                                               "udid": SERIAL})).json()["id"]
-            stopped = (await http.post(f"/api/v1/profiles/{pid}/stop")).json()
-            assert stopped["state"] == "failed" and "profile.pftrace" not in stopped["files"]
-            assert app.state.profiles.get(pid).trace.is_file()       # it is on disk
+            await http.post(f"/api/v1/profiles/{pid}/stop")
+            profile = app.state.profiles.get(pid)
+            assert profile.trace.is_file()
+            profile.state = "failed"
             r = await http.get(f"/api/v1/profiles/{pid}/files/profile.pftrace")
             assert r.status_code == 409 and "failed" in r.json()["detail"]
 
@@ -722,3 +1009,38 @@ class TestToolVersions:
         tpm.binary_path().chmod(0o755)
         [site] = [s for s in await tv.collect_sites() if s.name == "trace_processor"]
         assert site.available and site.version == tpm.VERSION and site.source == "quern"
+
+
+class TestAdbRunner:
+    """The real runner, against a stand-in adb: stdin, colours, and a call
+    that does not answer (no test reached it before, review)."""
+
+    @pytest.fixture
+    def adb_script(self, tmp_path):
+        script = tmp_path / "adb"
+        script.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *slow*) exec sleep 30 ;;\n"
+            "  *echo-stdin*) cat ; exit 3 ;;\n"
+            "  *) printf '\\033[90mperfetto_cmd.cc:658\\033[0m Connected\\n' ;;\n"
+            "esac\n")
+        script.chmod(0o755)
+        return str(script)
+
+    async def test_stdin_reaches_it_and_its_exit_status_comes_back(self, adb_script):
+        run = ad.adb_runner(lambda: adb_script)
+        rc, out, _err = await run(SERIAL, "shell", "echo-stdin", stdin=b"config text")
+        assert (rc, out) == (3, "config text")
+
+    async def test_perfettos_colours_are_stripped(self, adb_script):
+        rc, out, _err = await ad.adb_runner(lambda: adb_script)(SERIAL, "shell", "x")
+        assert out.strip() == "perfetto_cmd.cc:658 Connected"
+
+    async def test_a_call_that_does_not_answer_is_ended(self, adb_script):
+        with pytest.raises(TimeoutError):
+            await ad.adb_runner(lambda: adb_script)(SERIAL, "shell", "slow", timeout=0.3)
+
+    async def test_no_adb_is_an_oserror(self):
+        with pytest.raises(OSError, match="adb was not found"):
+            await ad.adb_runner(lambda: None)(SERIAL, "shell", "x")

@@ -30,14 +30,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import re
 import statistics
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from server.device import performance
 
+#: A package name, as the API takes it: what reaches a device shell and SQL.
+PACKAGE_OK = re.compile(r"^[A-Za-z0-9_.-]+$")
 #: Where the shell may have perfetto write, and where it is read back from.
 REMOTE_DIR = "/data/misc/perfetto-traces"
 #: Unanswered input at least this long is a hang. Android's own thresholds are
@@ -96,7 +100,7 @@ def config_text(preset: Preset, package: str, time_limit_s: int) -> str:
         "buffers { size_kb: 32768 fill_policy: DISCARD }\n"
         "write_into_file: true\n"
         "file_write_period_ms: 1000\n"
-        "max_file_size_bytes: 536870912\n"
+        "max_file_size_bytes: 268435456\n"
         f"duration_ms: {time_limit_s * 1000}\n"
         'data_sources { config { name: "linux.ftrace" ftrace_config { '
         f'{events} {categories} atrace_apps: "{package}" }} }} }}\n'
@@ -214,28 +218,47 @@ class Device:
             return "unknown"
 
     async def pull(self, profile_id: str, dest: Path) -> None:
-        """Copy the trace off the device, then remove it there."""
+        """Copy the trace off the device, then remove it there. Into a
+        temporary name first: `dest` existing means the whole trace arrived,
+        so a finish cut off after this (a restart) does not pull again a file
+        already removed from the device (review)."""
         remote = remote_trace(profile_id)
-        rc, out, err = await self.run(self.serial, "pull", remote, str(dest),
+        part = dest.with_name(dest.name + ".part")
+        rc, out, err = await self.run(self.serial, "pull", remote, str(part),
                                       timeout=PULL_TIMEOUT_S)
-        if rc != 0 or not dest.is_file() or dest.stat().st_size == 0:
+        if rc != 0 or not part.is_file() or part.stat().st_size == 0:
+            with contextlib.suppress(OSError):
+                part.unlink()
             raise PullFailed(f"the trace could not be copied off the device: "
-                             f"{(err or out).strip() or f'adb pull exit {rc}'}")
+                             f"{(err or out).strip() or f'adb pull exit {rc}'}; it is still "
+                             f"on the device at {remote}")
+        part.replace(dest)
+        await self.remove(profile_id)
+
+    async def remove(self, profile_id: str) -> None:
+        """Remove the session's trace from the device; best effort."""
         with contextlib.suppress(OSError, TimeoutError):
-            await self.run(self.serial, "shell", f"rm -f {remote}")
+            await self.run(self.serial, "shell", f"rm -f {remote_trace(profile_id)}")
 
     async def snapshot(self, package: str) -> dict:
         """The app's pid, CPU ticks with the device's uptime, and gfxinfo's
         cumulative frame counts -- what a profile without trace_processor is
         measured from. Each part null, with why, when it could not be read."""
         snap: dict = {"pid": None, "ticks": None, "uptime": None, "frames": None,
-                      "unavailable": {}}
+                      "clock_offset_s": None, "unavailable": {}}
         try:
+            # The device's clock against the host's, for the logged hangs,
+            # which logcat stamps with the device's time.
+            before = time.time()
+            rc, out, _err = await self.run(self.serial, "shell", "date +%s.%N")
+            with contextlib.suppress(ValueError):
+                snap["clock_offset_s"] = round(float(out.strip()) - (before + time.time()) / 2, 3)
             rc, out, err = await self.run(self.serial, "shell", "pidof", package)
             pids = [int(p) for p in out.split() if p.isdigit()]
             if not pids:
                 why = ("the app was not running" if rc in (0, 1) and not err.strip()
-                       else f"pidof failed: {(err or out).strip()}")
+                       else f"the device could not say whether the app was running: pidof: "
+                            f"{(err or out).strip() or f'exit {rc}'}")
                 snap["unavailable"] = {"cpu": why, "frames": why}
                 return snap
             pid = snap["pid"] = pids[0]
@@ -275,65 +298,102 @@ def _rel(ns: int | float, start_ns: int | float) -> float:
     return round((ns - start_ns) / 1e9, 3)
 
 
-def window_matches(track: str, package: str) -> bool:
-    """Whether a `wq:<id> <window>` counter is one of the app's windows. The
-    name is cut at about 40 characters, so a long package can arrive cut."""
+def window_matches(track: str, package: str) -> tuple[bool, bool]:
+    """Whether a `wq:<id> <window>` counter is one of the app's windows, and
+    whether only by a cut name. The name is cut at about 40 characters, so a
+    long package can arrive cut -- and then the cut also fits any other
+    package that begins the same way (a debug build beside the release one),
+    which the caller says rather than hides."""
     window = track.split(" ", 1)[1] if " " in track else ""
     window = window.removesuffix(" (server)")
     if window.startswith(package + "/") or window == package:
-        return True
+        return True, False
     cut = len(track) >= 39 and "/" not in window and len(window) >= 8
-    return cut and package.startswith(window)
+    return (cut and package.startswith(window)), cut and package.startswith(window)
 
 
-HANGS_SQL = """
-select t.name as track, c.ts as ts, c.value as value,
-       coalesce(lead(c.ts) over (partition by c.track_id order by c.ts),
-                (select end_ts from trace_bounds)) as until,
-       lead(c.ts) over (partition by c.track_id order by c.ts) is null as open,
-       (select start_ts from trace_bounds) as start_ts
-from counter c join counter_track t on c.track_id = t.id
-where t.name like 'wq:%'
+#: The whole summary in one query, so trace_processor loads the trace once:
+#: each section was a load of its own, measured 1.7 s for 4.1 MB, so a 100 MB
+#: trace would have cost five loads of ~40 s. Each section is JSON, hex-encoded
+#: -- trace_processor prints values quoted but does not escape the quotes
+#: inside them, so raw JSON does not survive its CSV.
+SUMMARY_SQL = """
+select
+  (select start_ts from trace_bounds) as start_ts,
+  (select end_ts from trace_bounds) as end_ts,
+  (select count(*) from process where name = '{package}') as procs,
+  hex((select json_group_array(json_array(track, ts, value)) from (
+     select t.name as track, c.ts as ts, c.value as value
+     from counter c join counter_track t on c.track_id = t.id
+     where t.name like 'wq:%' order by t.name, c.ts))) as wq,
+  hex((select json_group_array(s.dur) from slice s
+     join thread_track tt on s.track_id = tt.id join thread t using (utid)
+     join process p using (upid)
+     where p.name = '{package}' and t.tid = p.pid and s.name = 'Choreographer#doFrame'))
+     as frames,
+  hex((select json_group_array(json_array(tid, thread, ns)) from (
+     select t.tid as tid, t.name as thread, sum(s.dur) as ns
+     from sched s join thread t using (utid) join process p using (upid)
+     where p.name = '{package}' group by utid order by ns desc))) as cpu,
+  hex((select json_group_array(json_array(name, thread, dur, ts)) from (
+     select s.name as name, t.name as thread, s.dur as dur, s.ts as ts
+     from slice s join thread_track tt on s.track_id = tt.id
+     join thread t using (utid) join process p using (upid)
+     where p.name = '{package}' order by s.dur desc limit 10))) as slices
 """
 
-FRAMES_SQL = """
-select s.dur as dur from slice s
-join thread_track tt on s.track_id = tt.id join thread t using (utid) join process p using (upid)
-where p.name = '{package}' and t.tid = p.pid and s.name = 'Choreographer#doFrame'
-"""
 
-CPU_SQL = """
-select t.tid as tid, t.name as thread, sum(s.dur) as ns,
-       (select end_ts - start_ts from trace_bounds) as span
-from sched s join thread t using (utid) join process p using (upid)
-where p.name = '{package}' group by utid order by ns desc
-"""
-
-SLICES_SQL = """
-select s.name as name, t.name as thread, s.dur as dur, s.ts as ts,
-       (select start_ts from trace_bounds) as start_ts
-from slice s join thread_track tt on s.track_id = tt.id
-join thread t using (utid) join process p using (upid)
-where p.name = '{package}' order by s.dur desc limit 10
-"""
-
-PROCESS_SQL = "select count(*) as n from process where name = '{package}'"
+def decode_summary_row(row: dict) -> dict:
+    """The one row SUMMARY_SQL gives, its hex sections decoded."""
+    out = {k: row.get(k) for k in ("start_ts", "end_ts", "procs")}
+    for key in ("wq", "frames", "cpu", "slices"):
+        raw = row.get(key)
+        out[key] = json.loads(bytes.fromhex(raw).decode()) if raw else []
+    return out
 
 
-def hangs_from_counters(rows: list[dict], package: str) -> list[dict]:
+def hangs_from_counters(wq: list, package: str, start_ns: int, end_ns: int) -> list[dict]:
+    """Stretches during which one of the app's windows had input waiting,
+    `HANG_MS` or longer.
+
+    A stretch runs from the queue leaving 0 to its return to 0, whatever it
+    does between: a busy window is sent more events until its oldest has
+    waited 500 ms, so its queue can climb 1, 2, 3 during one hang. Judging each
+    counter value alone split one hang into pieces too short to count
+    (review)."""
+    by_track: dict[str, list] = {}
+    for track, ts, value in wq:
+        by_track.setdefault(str(track), []).append((ts, value))
     out = []
-    for r in rows:
-        if not r.get("value") or not window_matches(str(r.get("track")), package):
+    for track, points in by_track.items():
+        mine, cut = window_matches(track, package)
+        if not mine:
             continue
-        dur_ms = (r["until"] - r["ts"]) / 1e6
-        if dur_ms < HANG_MS:
-            continue
-        hang = {"start_s": _rel(r["ts"], r["start_ts"]), "duration_ms": round(dur_ms, 1),
-                "window": str(r["track"]).split(" ", 1)[-1]}
-        if r.get("open"):
-            hang["note"] = "still unanswered when the profile ended"
-        out.append(hang)
-    return sorted(out, key=lambda h: h["start_s"])
+        began = None
+        for ts, value in sorted(points):
+            if value and began is None:
+                began = ts
+            elif not value and began is not None:
+                out.append(_hang(track, began, ts, start_ns, cut, open_=False))
+                began = None
+        if began is not None:
+            out.append(_hang(track, began, end_ns, start_ns, cut, open_=True))
+    return sorted((h for h in out if h["duration_ms"] >= HANG_MS),
+                  key=lambda h: h["start_s"])
+
+
+def _hang(track: str, began: int, until: int, start_ns: int, cut: bool, *, open_: bool) -> dict:
+    hang = {"start_s": _rel(began, start_ns), "duration_ms": round((until - began) / 1e6, 1),
+            "window": track.split(" ", 1)[-1]}
+    notes = []
+    if open_:
+        notes.append("still unanswered when the profile ended")
+    if cut:
+        notes.append("the window's name was cut short; another app whose package begins "
+                     "the same way would match it too")
+    if notes:
+        hang["note"] = "; ".join(notes)
+    return hang
 
 
 def frames_from_durations(durations_ns: list[int]) -> dict | None:
@@ -351,15 +411,19 @@ def frames_from_durations(durations_ns: list[int]) -> dict | None:
             "measures": "Choreographer#doFrame on the app's main thread"}
 
 
-def cpu_from_threads(rows: list[dict]) -> dict | None:
+def cpu_from_threads(rows: list, span_ns: int) -> dict | None:
     if not rows:
         return None
-    span = rows[0].get("span") or 0
-    total = sum(r["ns"] for r in rows)
-    return {"cpu_percent": round(total / span * 100, 1) if span else None,
+    total = sum(ns for _tid, _name, ns in rows)
+    return {"cpu_percent": round(total / span_ns * 100, 1) if span_ns else None,
             "cpu_ms": round(total / 1e6, 1), "source": "trace",
-            "threads": [{"tid": r["tid"], "thread": r["thread"],
-                         "cpu_ms": round(r["ns"] / 1e6, 1)} for r in rows[:10]]}
+            "threads": [{"tid": tid, "thread": name, "cpu_ms": round(ns / 1e6, 1)}
+                        for tid, name, ns in rows[:10]]}
+
+
+def slices_from_rows(rows: list, start_ns: int) -> list[dict] | None:
+    return [{"name": name, "thread": thread, "duration_ms": round(dur / 1e6, 1),
+             "start_s": _rel(ts, start_ns)} for name, thread, dur, ts in rows] or None
 
 
 def frames_from_snapshots(first: dict, last: dict) -> tuple[dict | None, str | None]:
@@ -396,44 +460,51 @@ def cpu_from_snapshots(first: dict, last: dict) -> tuple[dict | None, str | None
 
 
 async def summarize(*, preset: str, package: str, trace: Path, first: dict, last: dict,
-                    tp, tp_status: dict, logged_hangs: tuple[list[dict] | None, str | None],
+                    tp, tp_status: dict,
+                    logged_hangs: tuple[list[dict] | None, str | None],
                     ) -> dict:
-    """The profile, section by section; null with the reason when unread."""
+    """The profile, section by section; null with the reason when unread.
+
+    trace_processor failing is not the trace being bad: the summary falls
+    back to what the device reported, says why, and the profile is still a
+    result with its trace offered (review: it was failed, and the trace
+    withheld)."""
     summary: dict = {"preset": preset, "platform": "android", "hangs": None, "frames": None,
                      "cpu": None, "slowest_slices": None, "trace_processor": tp_status,
                      "unavailable": {}}
     unavailable = summary["unavailable"]
-    deep = tp_status.get("state") == "installed"
-    if deep:
+    read = None
+    if tp_status.get("state") == "installed":
         try:
-            if not (await tp.query(trace, PROCESS_SQL.format(package=package)))[0]["n"]:
-                unavailable["app"] = f"{package} did not run during the profile"
-        except Exception as e:  # noqa: BLE001 -- the trace itself could not be read
-            deep = False
-            unavailable["trace"] = f"trace_processor could not read the trace: {e}"
-    if not deep and "trace" not in unavailable:
+            [row] = await tp.query(trace, SUMMARY_SQL.format(package=package))
+            read = decode_summary_row(row)
+        except Exception as e:  # noqa: BLE001 -- said; the device's readings stand in
+            unavailable["trace_processor"] = (
+                f"trace_processor could not read the trace ({e!r}); this summary is what "
+                "the device reported. The trace is kept: download it, or open it at "
+                "ui.perfetto.dev")
+    else:
         unavailable["trace_processor"] = _why_not(tp_status)
 
-    if deep:
-        hangs = await _section(tp, trace, HANGS_SQL, package, unavailable, "hangs",
-                               lambda rows: hangs_from_counters(rows, package))
-        if hangs is not None and preset == "cpu":
-            hangs = None
+    if read is not None:
+        start_ns, end_ns = read["start_ts"] or 0, read["end_ts"] or 0
+        if not read["procs"]:
+            unavailable["app"] = f"{package} did not run during the profile"
+        if preset == "cpu":
             unavailable["hangs"] = "not recorded by the cpu preset (no input tracing)"
-        if hangs is not None:
-            summary["hangs_count"] = len(hangs)
-            summary["hangs"] = hangs[:LIST_LIMIT]
-            summary["hangs_source"] = "trace: input the app left unanswered"
-        summary["frames"] = await _section(tp, trace, FRAMES_SQL, package, unavailable, "frames",
-                                           lambda rows: frames_from_durations(
-                                               [r["dur"] for r in rows]))
-        summary["cpu"] = await _section(tp, trace, CPU_SQL, package, unavailable, "cpu",
-                                        cpu_from_threads)
-        summary["slowest_slices"] = await _section(
-            tp, trace, SLICES_SQL, package, unavailable, "slowest_slices",
-            lambda rows: [{"name": r["name"], "thread": r["thread"],
-                           "duration_ms": round(r["dur"] / 1e6, 1),
-                           "start_s": _rel(r["ts"], r["start_ts"])} for r in rows] or None)
+        else:
+            hangs = hangs_from_counters(read["wq"], package, start_ns, end_ns)
+            summary.update(hangs=hangs[:LIST_LIMIT], hangs_count=len(hangs),
+                           hangs_source="trace: input the app left unanswered")
+        summary["frames"] = frames_from_durations(read["frames"])
+        if summary["frames"] is None:
+            unavailable["frames"] = "the trace has no frames from the app's main thread"
+        summary["cpu"] = cpu_from_threads(read["cpu"], end_ns - start_ns)
+        if summary["cpu"] is None:
+            unavailable["cpu"] = "the trace has no CPU time for the app"
+        summary["slowest_slices"] = slices_from_rows(read["slices"], start_ns)
+        if summary["slowest_slices"] is None:
+            unavailable["slowest_slices"] = "the trace has no slices from the app"
     else:
         unavailable["slowest_slices"] = "read from the trace, which needs trace_processor"
 
@@ -442,10 +513,11 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
         hangs, why = logged_hangs
         if hangs is not None:
             unavailable.pop("hangs", None)
-            summary["hangs"] = hangs[:LIST_LIMIT]
-            summary["hangs_count"] = len(hangs)
-            summary["hangs_source"] = ("logcat: InputDispatcher's own reports, from 2 s; "
-                                       "shorter hangs need trace_processor")
+            summary.update(hangs=hangs[:LIST_LIMIT], hangs_count=len(hangs),
+                           hangs_source=("logcat: InputDispatcher's own reports, from 2 s; "
+                                         "shorter hangs need trace_processor"))
+            if why:
+                summary["hangs_note"] = why
         else:
             unavailable.setdefault("hangs", why or "no source for hangs")
     if summary["frames"] is None:
@@ -463,22 +535,6 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
         else:
             unavailable.setdefault("cpu", why)
     return summary
-
-
-async def _section(tp, trace: Path, sql: str, package: str, unavailable: dict, name: str,
-                   reduce: Callable[[list[dict]], object]) -> object:
-    try:
-        rows = await tp.query(trace, sql.format(package=package))
-    except Exception as e:  # noqa: BLE001 -- one section never sinks the others
-        unavailable[name] = f"trace_processor could not read {name}: {e}"
-        return None
-    value = reduce(rows)
-    if value is None:
-        unavailable[name] = {"frames": "the trace has no frames from the app's main thread",
-                             "cpu": "the trace has no CPU time for the app",
-                             "slowest_slices": "the trace has no slices from the app"}.get(
-            name, "nothing recorded")
-    return value
 
 
 def _why_not(status: dict) -> str:

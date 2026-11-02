@@ -244,7 +244,7 @@ class ProfileManager:
                  settings: Callable[[], dict] = config_mod.profile_settings,
                  adb: ad.Runner | None = None,
                  trace_processor: TraceProcessor | None = None,
-                 logged_hangs: Callable[[str, str, str, str],
+                 logged_hangs: Callable[[str, str, str, str, float],
                                         Awaitable[tuple[list[dict] | None, str | None]]]
                  | None = None) -> None:
         self.xctrace = xctrace
@@ -329,10 +329,15 @@ class ProfileManager:
                 await asyncio.shield(_end(profile.proc))
             if profile.android and self.adb is not None:
                 # Whether or not it was confirmed: a session may exist anyway,
-                # and stopping one that does not is a harmless "gone". Its own
-                # failure must not replace the reason the start failed (live).
+                # and stopping one that does not is a harmless "gone". Then its
+                # file, which nothing would ever remove (review). Their own
+                # failures must not replace the reason the start failed (live).
+                device = self._devices.pop(profile.id, None) or self._device(profile)
+                self._devices.pop(profile.id, None)
                 with contextlib.suppress(Exception):
-                    await asyncio.shield(self._device(profile).stop(profile.id))
+                    await asyncio.shield(device.stop(profile.id))
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(device.remove(profile.id))
             self._active.pop(udid, None)
             self._profiles.pop(profile.id, None)
             if profile.dir.exists():
@@ -356,6 +361,11 @@ class ProfileManager:
         first = await device.snapshot(profile.bundle_id)
         await asyncio.to_thread(_write_json_atomic, profile.start_file, first)
         self.trace_processor.ensure()
+        # Recorded before perfetto is asked, as an xctrace is at spawn: a
+        # server killed between the two would otherwise leave a session
+        # nothing knows about (review). A failed start removes the record.
+        self._profiles[profile.id] = profile
+        await self._save()
         try:
             await device.start(profile.id, profile.bundle_id, preset, profile.time_limit_s,
                                profile.log)
@@ -364,10 +374,6 @@ class ProfileManager:
         except (OSError, TimeoutError) as e:
             raise ProfileError(f"perfetto could not be started on {profile.device}: {e!r}",
                                502) from e
-        # Recorded at once, as an xctrace is: a server killed now would leave a
-        # session nothing knows about.
-        self._profiles[profile.id] = profile
-        await self._save()
 
     async def _spawn(self, profile: Profile, preset: xt.Preset) -> None:
         cmd = xt.record_command(self.xctrace, profile.device, preset, profile.time_limit_s,
@@ -421,7 +427,7 @@ class ProfileManager:
         """Ask xctrace to stop, without waiting for it: for callers that must
         not be held while a trace saves (a session ending)."""
         profile = self.get(profile_id)
-        if profile.state == "recording" and profile.stop_reason is None \
+        if profile.state == "recording" and profile.stop_reason in (None, "resumed") \
                 and not profile.saving():
             # Once, and never into a save: the reason is the first one given.
             sent = await self._signal(profile, signal.SIGINT)
@@ -429,8 +435,10 @@ class ProfileManager:
                 profile.stop_reason = reason
             elif sent == "unknown":
                 raise ProfileError(
-                    f"could not tell whether xctrace for {profile_id} is still running "
-                    "(ps did not answer); ask again", 503)
+                    f"could not tell whether perfetto on {profile.device} is still recording "
+                    f"{profile_id} (the device did not answer); ask again" if profile.android
+                    else f"could not tell whether xctrace for {profile_id} is still running "
+                         "(ps did not answer); ask again", 503)
             # "gone": it has ended by itself, and the watch is finishing it.
         return profile
 
@@ -487,13 +495,22 @@ class ProfileManager:
         # Past its time limit plus saving, it is stuck: ask, then insist.
         budget = profile.time_limit_s + FINALIZE_TIMEOUT_S
         started = time.monotonic()
-        while await self._alive(profile):
+        resumed = profile.stop_reason == "resumed"
+        if resumed:
+            profile.stop_reason = None
+        while (running := await self._alive_state(profile)) is not False:
+            if running:
+                resumed = False             # seen recording: it did not end unwatched
             if time.monotonic() - started > budget:
                 logger.warning("xctrace for %s overran %gs; stopping it", profile.id, budget)
                 profile.stop_reason = "killed"
-                await self._signal(profile, signal.SIGINT)
+                sent = await self._signal(profile, signal.SIGINT)
                 if profile.android:
-                    break                  # perfetto's stop is its only lever
+                    # perfetto's stop is its only lever; and "killed" only if
+                    # it landed (review).
+                    if sent != "sent":
+                        profile.stop_reason = "overran"
+                    break
                 await asyncio.sleep(10)
                 await self._signal(profile, signal.SIGKILL)
                 if profile.proc is not None:              # reaped, not left a zombie
@@ -506,7 +523,16 @@ class ProfileManager:
             else:
                 await asyncio.sleep(1.0)
         profile.state = "finalizing"
-        profile.stop_reason = profile.stop_reason or "time_limit"
+        # Over at the first answer after a restart: it ended while no server
+        # watched -- a device that could not be asked at resume, or a dead pid.
+        profile.stop_reason = profile.stop_reason or ("server_restart" if resumed
+                                                      else "time_limit")
+
+    async def _alive_state(self, profile: Profile) -> bool | None:
+        """True running, False over, None could not ask (Android only)."""
+        if profile.android:
+            return await self._device(profile).alive(profile.id)
+        return await self._alive(profile)
 
     async def _alive(self, profile: Profile) -> bool:
         if profile.android:
@@ -555,11 +581,14 @@ class ProfileManager:
         device = self._device(profile)
         profile.ended_at = profile.ended_at or _now()
         last = await device.snapshot(profile.bundle_id)
-        try:
-            await device.pull(profile.id, profile.trace)
-        except (ad.PullFailed, OSError, TimeoutError) as e:
-            profile.state, profile.error = "failed", str(e)
-            return
+        # Already here means a finish cut off after the pull (a restart): the
+        # device's copy is gone, and pulling again would fail a whole trace.
+        if not (profile.trace.is_file() and profile.trace.stat().st_size > 0):
+            try:
+                await device.pull(profile.id, profile.trace)
+            except (ad.PullFailed, OSError, TimeoutError) as e:
+                profile.state, profile.error = "failed", str(e)
+                return
         try:
             first = json.loads(profile.start_file.read_text())
         except (OSError, ValueError):
@@ -571,7 +600,8 @@ class ProfileManager:
         if self.logged_hangs is not None:
             try:
                 logged = await self.logged_hangs(profile.device, profile.bundle_id,
-                                                 profile.started_at, profile.ended_at)
+                                                 profile.started_at, profile.ended_at,
+                                                 first.get("clock_offset_s") or 0.0)
             except Exception as e:  # noqa: BLE001 -- said in the summary
                 logged = (None, f"the logged hangs could not be read: {e}")
         summary = await ad.summarize(
@@ -579,10 +609,7 @@ class ProfileManager:
             first=first, last=last, tp=self.trace_processor, tp_status=status.as_dict(),
             logged_hangs=logged)
         await asyncio.to_thread(_write_json_atomic, profile.summary_file, summary)
-        if "trace" in summary["unavailable"]:
-            profile.state, profile.error = "failed", summary["unavailable"]["trace"]
-        else:
-            profile.state = "finished"
+        profile.state = "finished"
 
     async def _close(self, profile: Profile) -> None:
         profile.ended_at = profile.ended_at or _now()
@@ -800,7 +827,19 @@ class ProfileManager:
             self._profiles[profile.id] = profile
             if profile.state in ACTIVE:
                 self._active[profile.udid] = profile.id
-                if profile.state == "recording" and not await self._alive(profile):
+                if profile.android:
+                    if not ad.PACKAGE_OK.fullmatch(profile.bundle_id):
+                        # A hand-edited record must not reach a device shell
+                        # or the summary's SQL (review).
+                        self._active.pop(profile.udid, None)
+                        profile.state, profile.error = "failed", "its record is not valid"
+                        continue
+                    self.trace_processor.ensure()
+                    if profile.state == "recording" and profile.stop_reason is None:
+                        # Asked by the watch, which can wait for a device the
+                        # server cannot reach yet (its controller comes later).
+                        profile.stop_reason = "resumed"
+                elif profile.state == "recording" and not await self._alive(profile):
                     profile.stop_reason = profile.stop_reason or "server_restart"
                 profile.task = asyncio.create_task(self._watch(profile))
                 adopted.append(profile.id)
