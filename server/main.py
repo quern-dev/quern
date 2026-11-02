@@ -740,6 +740,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     _sessions_cfg = sessions_settings()
     app.state.sessions = SessionRegistry(grace_seconds=_sessions_cfg["grace_seconds"])
+    # What a released device's session installed is done with (#581), read
+    # once, as the grace is.
+    app.state.release_policy = {"client": _sessions_cfg["client_release"],
+                                "owner": _sessions_cfg["owner_release"]}
+    for _note in _sessions_cfg["release_notes"]:
+        logger.warning(_note)
     device_access.install(app.state.sessions)
     # Shared or blind (#254, phase 2): read once, as the grace is. A server
     # that is blind says so in its log; a setting it could not read says

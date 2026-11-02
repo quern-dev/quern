@@ -962,6 +962,18 @@ class TestTheReleaseClearReviewFindings:
         assert {"udid": "PHONE1", "action": "device_proxy_handed_over", "ok": True,
                 "to": "client:a/s2"} in actions
 
+    async def test_the_same_name_opened_again_takes_the_record(self):
+        """Same id, a new opening: compared by id alone, the old opening's
+        release cleared the proxy the new one was using."""
+        ctrl = _android()
+        app = self._app(ctrl, {"PHONE1": ("client:a/s1", "o1", 0)})
+        again = SimpleNamespace(session=SimpleNamespace(id="client:a/s1", principal="client:a",
+                                                        opened_at="o2"))
+        actions = await self._end(app, holder=again)
+        ctrl.adb.clear_http_proxy.assert_not_awaited()
+        assert app.state.device_proxy_holds == {"PHONE1": ("client:a/s1", "o2", 0)}
+        assert any(a["action"] == "device_proxy_handed_over" for a in actions)
+
     async def test_another_keys_device_is_left_alone(self):
         ctrl = _android()
         app = self._app(ctrl, {"PHONE1": ("client:a/s1", "o1", 0)})

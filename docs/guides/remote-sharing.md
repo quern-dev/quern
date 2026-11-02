@@ -41,7 +41,7 @@ A client's reservations last as long as its connection. The MCP and `quern sessi
 
 - **A clean exit releases at once.**
 - **A dropped connection** -- a closed laptop, a lost network, a killed process -- gets a grace period to reconnect and keep its devices: 180 seconds by default, set with `{"sessions": {"grace_seconds": N}}` (120-300). After that its devices are freed.
-- **When a client's hold on a device ends**, the server also ends that client's capture on it, its mocks scoped to it, its recordings on it, and the knowledge base loaded for its session.
+- **When a client's hold on a device ends**, the server also ends that client's capture on it, its mocks scoped to it, its recordings on it, and the knowledge base loaded for its session, and removes the apps it installed there (see below).
 
 For scripts that call the REST API directly, `quern session hold NAME --background` holds a session's connection and prints its id, so reservations work without the MCP.
 
@@ -56,6 +56,20 @@ quern clients revoke laptop     # its sessions end and its devices are freed wit
 
 Revoking also closes the client's live streams, and its next request is refused.
 
+## What a client installed is removed when it lets go
+
+Apps a session installs on a device it holds (`install_app`, `build_and_install`), and their data, are cleaned up when its hold ends -- a release, a closed connection after its grace, a revoked key -- so a shared machine doesn't fill up with every client's apps, and one client's app doesn't reach the next. Set it in `~/.quern/config.json`, read at start:
+
+```json
+{"sessions": {"client_release": "uninstall", "owner_release": "none"}}
+```
+
+- **`uninstall`** (the default for client keys): each install notes the app it added, and those are removed -- nothing else, so an app installed at the machine meanwhile stays. quern's own drivers (WebDriverAgent, uiautomator2) and system apps are never touched. An install over an app already there adds nothing, so that app is left, and the release says so (`installs_adding_nothing`). A failed install is read all the same, since a backend can fail after it changed the device: what it left is removed, and one that left nothing is counted as `failed_installs`, not as a reinstall. Where the app's bundle id or package can be read (an `.app`, an `.ipa`, a Gradle build, or an APK on a machine with the Android SDK's build-tools, through `aapt2`), only that app counts as the install's; an APK on a machine without build-tools is held to "exactly one new app". An install that seemed to add several apps, or an app that isn't the one installed, or whose result couldn't be listed, can't be told apart from what was already there: its apps are left too, and said (`unclear_installs`).
+- **`erase`**, for a machine several people share (as `client_release`; as `owner_release` it applies to the owner's sessions too): every iOS simulator a session held is erased when it lets go, even if nothing was installed, and booted again if it was booted. Erasing also removes the proxy's certificate from it; `auto_install_cert` puts it back at the next capture. Android devices and physical iPhones fall back to `uninstall`.
+- **`none`** (the default for the owner's own sessions): left as the session left it.
+
+The release's answer lists what was done (`installs_removed`, `erased`). A device the same key still holds through another session, or the same session name opened again, is handed over (`installs_handed_over`) rather than cleaned under it. A clean-up that fails is tried again at the next sweep, up to three times, and then given up on and said. If the device's apps can't be listed before a client's install, the install is refused (503) rather than made, since its release couldn't tell what to remove. An install still running when the hold ends removes its app as it finishes, and its answer says so (`hold_ended`). If the device is held again by then, it isn't touched: the app goes on the new session's record if that session is the same key's, and is left if it is another key's.
+
 ## Planned
 
-- **Cleaning up what clients leave behind** -- apps they installed, and an option to erase simulators between users on a machine several people share -- is planned ([#581](https://github.com/quern-dev/quern/issues/581)).
+- **Bounding the build store and showing disk use** -- the rest of [#581](https://github.com/quern-dev/quern/issues/581).

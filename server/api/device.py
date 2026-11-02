@@ -655,16 +655,66 @@ async def install_app(request: Request, body: InstallAppRequest):
     with action("install_app", category="device.lifecycle") as act, (
             store.installing(upload.id) if upload else contextlib.nullcontext()):
         act.detail = upload.name if upload else body.app_path
+        # What is installed now, so its release can remove what this adds
+        # (#581). Refused rather than installed when it cannot be told.
+        from server import session_installs
+
+        caller = visibility.current_caller()
+        target, before = body.udid, None
         try:
-            udid = await controller.install_app(app_path=app_path, udid=body.udid)
+            if caller.session and session_installs.policy_for(
+                    request.app, caller.principal) != "none":
+                target = await controller.resolve_udid(body.udid)
+                before = await session_installs.before_install(request.app, target, caller)
+        except session_installs.BaselineUnavailable as e:
+            raise HTTPException(503, (
+                f"Nothing was installed: the apps on the device could not be listed "
+                f"first ({e}), and its release needs that list to remove what this "
+                "installs. Try again."
+            )) from None
+        except DeviceError as e:
+            raise _without_upload_path(_handle_device_error(e), upload) from None
+        async def install_and_record() -> tuple[str, dict]:
+            # Holds the upload itself: shielded, it outlives a cancelled
+            # request and that request's hold with it.
+            with store.installing(upload.id) if upload else contextlib.nullcontext():
+                expected = (await asyncio.to_thread(session_installs.bundle_id_of, app_path)
+                            if before is not None else None)
+                try:
+                    udid = await controller.install_app(app_path=app_path, udid=target)
+                except DeviceError:
+                    # Read anyway: a backend can fail after it changed the
+                    # device, and what it left is the session's to remove.
+                    await session_installs.after_install(request.app, before, expected,
+                                                         failed=True)
+                    raise
+                ended = await session_installs.after_install(request.app, before, expected)
+            if upload:
+                # Installed, so gone: kept on a failure, to try again within the hour.
+                store.discard(upload.id)
+            return udid, ended
+
+        try:
+            if before is None:
+                udid, ended = await install_and_record()
+            else:
+                # Cancelled mid-install, the install goes on and so must its
+                # record: dropped, its release would not know the app (#581).
+                task = asyncio.create_task(install_and_record())
+                _RECORDING.add(task)
+                task.add_done_callback(_RECORDING.discard)
+                udid, ended = await asyncio.shield(task)
         except DeviceError as e:
             raise _without_upload_path(_handle_device_error(e), upload) from None
         act.udid = udid
         if upload:
-            # Installed, so gone: kept on a failure, to try again within the hour.
-            request.app.state.uploads.discard(upload.id)
-            return {"status": "installed", "udid": udid, "upload": upload.name}
-        return {"status": "installed", "udid": udid, "app_path": body.app_path}
+            return {"status": "installed", "udid": udid, "upload": upload.name, **ended}
+        return {"status": "installed", "udid": udid, "app_path": body.app_path, **ended}
+
+
+#: Installs a session holds the device for, kept to completion if their
+#: request is cancelled (#581).
+_RECORDING: set[asyncio.Task] = set()
 
 
 @router.post("/app/launch")

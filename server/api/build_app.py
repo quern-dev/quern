@@ -13,6 +13,7 @@ import weakref
 from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
@@ -355,12 +356,51 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
         raise HTTPException(status_code=400,
                             detail="env applies to Gradle builds; it is not passed to xcodebuild")
     if _is_gradle(body.project_path):
+        from server import session_installs, visibility
         from server.api import build_android
 
-        response = BuildAndInstallResponse(
-            **await build_android.build_and_install(controller, body))
-        response.summary = _android_summary(response)
-        return response
+        # What is installed now on each device, so a release can remove what
+        # this build adds (#581). The build's own target choice, so a build
+        # naming no device is tracked on the one it installs on.
+        caller = visibility.current_caller()
+        installs = []
+        if caller.session and session_installs.policy_for(
+                request.app, caller.principal) != "none":
+            for target in await build_android._android_targets(controller, body):
+                try:
+                    installs.append(await session_installs.before_install(
+                        request.app, target, caller))
+                except session_installs.BaselineUnavailable as e:
+                    raise HTTPException(503, (
+                        f"Nothing was built or installed: the apps on {target} could not "
+                        f"be listed first ({e}), and its release needs that list to "
+                        "remove what this installs. Try again.")) from None
+        async def build_and_record() -> BuildAndInstallResponse:
+            response = BuildAndInstallResponse(
+                **await build_android.build_and_install(controller, body))
+            # The package the build made, so an app something else installed
+            # meanwhile is not taken for it. No record, no build: nothing installed.
+            if response.build_records:
+                expected = response.build_records[0].bundle_id or None
+                installed = {d.udid: d.installed for d in response.devices}
+                for install in installs:
+                    ended = await session_installs.after_install(
+                        request.app, install, expected,
+                        failed=install is not None and not installed.get(install.udid, True))
+                    if note := session_installs.hold_ended_note(ended):
+                        for device in response.devices:
+                            if device.udid == install.udid:
+                                device.note = f"{device.note}; {note}" if device.note else note
+            response.summary = _android_summary(response)
+            return response
+
+        if not any(installs):
+            return await build_and_record()
+        # Cancelled mid-build, the installs go on and so must their records.
+        task = asyncio.create_task(build_and_record())
+        _RECORDING.add(task)
+        task.add_done_callback(_RECORDING.discard)
+        return await asyncio.shield(task)
 
     build_adapter = request.app.state.build_adapter
     if build_adapter is None:
@@ -442,7 +482,7 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
     async with _holding(derived.values()) as waited_s:
         response = await _build_and_install_xcode(
             controller, body, build_adapter, proj_flag, proj_path,
-            physical_udids, simulator_udids, derived)
+            physical_udids, simulator_udids, derived, app=request.app)
     if waited_s >= WAIT_WORTH_SAYING_S:
         # On the response, not only in the log: a request that queued behind
         # another build's whole build and install reads as a hang otherwise.
@@ -461,8 +501,10 @@ async def _build_and_install_xcode(
     physical_udids: list[str],
     simulator_udids: list[str],
     derived: dict[str, Path],
+    app: Any = None,
 ) -> BuildAndInstallResponse:
-    """Steps 5-7 of build_and_install, run while `derived` is held."""
+    """Steps 5-7 of build_and_install, run while `derived` is held. `app`
+    notes each device's apps before its install, for its release (#581)."""
     for path in derived.values():
         path.mkdir(parents=True, exist_ok=True)
 
@@ -567,12 +609,44 @@ async def _build_and_install_xcode(
                         error=f"Boot failed: {err_str}",
                     )
 
+        from server import session_installs, visibility
+
         try:
-            await controller.install_app(str(app_path), udid)
+            before = (await session_installs.before_install(
+                app, udid, visibility.current_caller()) if app is not None else None)
+        except session_installs.BaselineUnavailable as e:
+            return DeviceInstallResult(udid=udid, installed=False, error=(
+                f"Nothing was installed: its apps could not be listed first ({e}), and "
+                "its release needs that list to remove what this installs. Try again."))
+        async def install_and_record() -> dict:
+            expected = (await asyncio.to_thread(session_installs.bundle_id_of, app_path)
+                        if app is not None else None)
+            try:
+                await controller.install_app(str(app_path), udid)
+            except DeviceError:
+                # Read anyway: a backend can fail after it changed the device.
+                if app is not None:
+                    await session_installs.after_install(app, before, expected, failed=True)
+                raise
+            if app is None:
+                return {}
+            return await session_installs.after_install(app, before, expected)
+
+        try:
+            if before is None:
+                ended = await install_and_record()
+            else:
+                # Cancelled mid-install, the install goes on and so must its
+                # record: dropped, its release would not know the app (#581).
+                task = asyncio.create_task(install_and_record())
+                _RECORDING.add(task)
+                task.add_done_callback(_RECORDING.discard)
+                ended = await asyncio.shield(task)
         except DeviceError as e:
             return DeviceInstallResult(udid=udid, installed=False, error=str(e))
 
-        return DeviceInstallResult(udid=udid, installed=True, app_path=str(app_path))
+        return DeviceInstallResult(udid=udid, installed=True, app_path=str(app_path),
+                                   note=session_installs.hold_ended_note(ended))
 
     install_tasks = (
         [_install_one(u, True) for u in physical_udids]
@@ -598,6 +672,11 @@ async def _build_and_install_xcode(
     )
     response.summary = _build_install_summary(response)
     return response
+
+
+#: Installs a session holds the device for, kept to completion if their
+#: request is cancelled.
+_RECORDING: set[asyncio.Task] = set()
 
 
 def _is_gradle(path: str) -> bool:
@@ -765,6 +844,9 @@ def _build_install_summary(resp: BuildAndInstallResponse) -> str:
     if installed:
         names = ", ".join(d.udid[:12] for d in installed)
         parts.append(f"Installed on: {names}.")
+    # The MCP tool returns only this summary, so a note -- an app its hold's
+    # release removed again (#581) -- is said here or not at all.
+    parts += [f"Note ({d.udid[:12]}): {d.note}." for d in installed if d.note]
     if failed:
         for d in failed:
             parts.append(f"Install failed ({d.udid[:12]}): {d.error}")

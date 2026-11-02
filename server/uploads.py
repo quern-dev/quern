@@ -22,6 +22,7 @@ import secrets
 import shutil
 import tarfile
 import time
+from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -108,7 +109,9 @@ class UploadStore:
         #: and together held several times the cap (review).
         self._inflight: dict[str, int] = {}
         #: Uploads being installed: not swept or deleted from under it.
-        self._busy: set[str] = set()
+        #: Holds per upload, counted: a tracked install's own task holds it
+        #: past its request, which may have let go of it (#581).
+        self._busy: Counter[str] = Counter()
         #: Swept but not yet gone from disk: still counted against their key,
         #: and tried again by the next sweep if deleting failed (CodeRabbit).
         self._deleting: dict[str, Upload] = {}
@@ -255,14 +258,16 @@ class UploadStore:
     @contextlib.contextmanager
     def installing(self, upload_id: str):
         """While installing: neither the sweep nor a DELETE removes it."""
-        self._busy.add(upload_id)
+        self._busy[upload_id] += 1
         try:
             yield
         finally:
-            self._busy.discard(upload_id)
+            self._busy[upload_id] -= 1
+            if self._busy[upload_id] <= 0:
+                del self._busy[upload_id]
 
     def busy(self, upload_id: str) -> bool:
-        return upload_id in self._busy
+        return self._busy[upload_id] > 0
 
     def discard(self, upload_id: str) -> None:
         upload = self._uploads.pop(upload_id, None)
@@ -277,7 +282,7 @@ class UploadStore:
         against their key until `deleted` says they are gone (CodeRabbit)."""
         now = self._clock()
         gone = [u for u in self._uploads.values()
-                if u.id not in self._busy
+                if self._busy[u.id] <= 0
                 and (now - u.created >= TTL_SECONDS or not still_valid(u.principal))]
         for upload in gone:
             del self._uploads[upload.id]
