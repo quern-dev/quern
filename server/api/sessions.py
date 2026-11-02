@@ -733,7 +733,8 @@ async def run_release_policies(app) -> list[dict]:
     return actions
 
 
-async def _release_session(app, registry, controller, session, actions: list[dict]) -> None:
+async def _release_session(app: Any, registry: SessionRegistry, controller: Any,
+                           session: HeldSession, actions: list[dict]) -> None:
     """One released session's policies: `run_release_policies`, per session."""
     start = len(actions)
     ended: list[dict] = []

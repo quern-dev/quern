@@ -8,6 +8,7 @@ narrowed that to a single command; the mark closes it."""
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -192,3 +193,99 @@ async def test_a_late_installs_removal_is_marked():
     apps.append("com.example.late")
     assert (await si.after_install(app, late))["removed"] == ["com.example.late"]
     assert attempts and "being cleaned up" in attempts[0]
+
+
+_SPAWN = asyncio.create_subprocess_exec                # before any test patches it
+
+
+async def _sleeper():
+    import asyncio
+    import sys
+
+    return await _SPAWN(
+        sys.executable, "-c", "import time; time.sleep(30)",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+
+
+@pytest.mark.parametrize("how", ["cancelled", "timed out"])
+async def test_a_device_command_whose_wait_ends_early_is_killed(how):
+    """A release's wait_for around simctl or adb gave up and freed the device
+    while the command ran on, under the next holder (review). The child is
+    killed and reaped before the wait returns."""
+    import asyncio
+
+    from server.device._subprocess import communicate
+
+    proc = await _sleeper()
+    if how == "cancelled":
+        task = asyncio.ensure_future(communicate(proc))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(communicate(proc), 0.2)
+    assert proc.returncode is not None, "killed and reaped, not left running"
+
+
+@pytest.mark.parametrize("runner", ["simctl", "devicectl", "adb"])
+async def test_each_device_tools_runner_kills_its_child_on_a_timeout(monkeypatch, runner):
+    """The runners a release's clean-up goes through, each with the helper."""
+    import asyncio
+
+    started = []
+
+    async def spawn(*args, **kw):
+        started.append(await _sleeper())
+        return started[-1]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    if runner == "simctl":
+        from server.device.ios.simctl import SimctlBackend
+        call = SimctlBackend()._run_simctl("shutdown", SIM)
+    elif runner == "devicectl":
+        from server.device.ios.devicectl import DevicectlBackend
+        call = DevicectlBackend()._run_devicectl("device", "info")
+    else:
+        from server.device.android.adb import AdbBackend
+        backend = AdbBackend()
+        backend._adb_path = "adb"
+        call = backend._run_adb("-s", "emulator-5554", "uninstall", "x")
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(call, 0.3)
+    assert started and started[0].returncode is not None
+
+
+async def test_a_late_installs_removal_is_bounded(monkeypatch):
+    """Inside the mark a stalled uninstall kept every reservation refused,
+    the owner's too, for as long as it lasted (review)."""
+    import asyncio
+
+    from server import session_installs as si
+
+    monkeypatch.setattr(si, "TIMEOUT_S", 0.2)
+    registry = _registry()
+    registry.reserve("s1", [SIM])
+    session = registry.get("s1")
+    apps = []
+    controller = MagicMock()
+
+    async def list_apps(udid, *, set_active=True):
+        return [SimpleNamespace(bundle_id=b, app_type="User") for b in apps], udid
+
+    async def stalls(bundle_id, udid, *, set_active=True):
+        await asyncio.sleep(30)
+
+    controller.list_apps = AsyncMock(side_effect=list_apps)
+    controller.uninstall_app = AsyncMock(side_effect=stalls)
+    app = _app(registry, controller)
+    late = await si.before_install(app, SIM, SimpleNamespace(session=session.id,
+                                                             principal=session.principal))
+    registry.unreserve("s1", [SIM])
+    app.state.session_installs.clear()
+    registry.drained([SIM])
+    apps.append("com.example.late")
+    ended = await asyncio.wait_for(si.after_install(app, late), 5)
+    assert ended["left"] == ["com.example.late"] and "did not finish" in ended["error"]
+    assert registry.reserve("s1", [SIM]), "free once the bounded uninstall gave up"

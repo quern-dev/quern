@@ -13,6 +13,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from server.device._subprocess import communicate
 from server.device.ios._xcode import xcode_available
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 from server.tooling.tool_probe import probe_command
@@ -72,7 +73,7 @@ class SimctlBackend:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await communicate(proc)
         if proc.returncode != 0:
             raise DeviceError(
                 f"simctl {args[0]} failed: {stderr.decode().strip()}",
@@ -91,7 +92,7 @@ class SimctlBackend:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await communicate(proc)
         if proc.returncode != 0:
             raise DeviceError(
                 f"shell command failed: {stderr.decode().strip()}",

@@ -328,9 +328,13 @@ async def after_install(app: Any, install: Install | None,
         cleaning = getattr(registry, "cleaning", None)
         try:
             with cleaning([install.udid]) if cleaning else contextlib.nullcontext():
-                await controller.uninstall_app(bundle_id, install.udid, set_active=False)
+                # Bounded: nobody can reserve the device until it returns.
+                await asyncio.wait_for(controller.uninstall_app(
+                    bundle_id, install.udid, set_active=False), TIMEOUT_S)
         except Exception as e:  # noqa: BLE001 -- reported on the answer
-            return {"hold_ended": True, "left": [bundle_id], "error": str(e) or type(e).__name__}
+            error = (f"did not finish within {TIMEOUT_S:g}s" if isinstance(e, TimeoutError)
+                     else str(e) or type(e).__name__)
+            return {"hold_ended": True, "left": [bundle_id], "error": error}
         return {"hold_ended": True, "removed": [bundle_id]}
     if added is not None and not added:
         if failed:
