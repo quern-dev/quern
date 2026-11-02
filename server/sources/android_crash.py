@@ -18,12 +18,20 @@ the raw lines rather than instead of them:
 - **ANR** -- `ActivityManager`: `ANR in <name> (...)`. Not a crash in the
   strict sense, but it is the app dying from the user's point of view and it
   is as rare and as valuable, which is what the crash buffer is for.
+- **Hang** -- `InputDispatcher`: `Window '<id> <package>/<activity> (server)'
+  spent <ms>ms processing the last input event: <type>` (#245). The main
+  thread held an input that long; measured on Android 10, where a 10.5 s
+  hang logged this and no ANR. It is logged when the hang *ends*, so the
+  entry is stamped when it began -- the line's time less its duration --
+  which is what attributes it to the tap that caused it rather than to
+  whatever ran ten seconds later. Other Android versions are unmeasured.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 from server.models import LogEntry, LogLevel, LogSource
 
@@ -33,6 +41,11 @@ _PROCESS_LINE = re.compile(r"^Process:\s*([^,\s]+),\s*PID:\s*(\d+)")
 #  4321 (RenderThread), pid 1234 (com.example.app)"
 _FATAL_SIGNAL = re.compile(r"^Fatal signal .*?\bpid (\d+) \(([^)]+)\)")
 _ANR = re.compile(r"^ANR in (\S+)")
+# "Window '44a30c2 com.quern.probe/com.quern.probe.MainActivity (server)' spent
+#  10562.6ms processing the last input event: MotionEvent" (Android 10)
+_SLOW_INPUT = re.compile(
+    r"^Window '(?:[0-9a-f]+ )?([A-Za-z0-9_.]+)(?:/[^']*)?' spent ([0-9]+(?:\.[0-9]+)?)ms "
+    r"processing the last input event: (\w+)")
 _ANR_PID = re.compile(r"^PID:\s*(\d+)")
 
 #: How many other ActivityManager lines from system_server may come between
@@ -51,7 +64,7 @@ COMM_LEN = 15
 #: `MyTag:D *:S` silences everything else at the device -- including the lines
 #: a crash is recognised from -- so a tag filter quietly turned crash
 #: detection off. See `crash_specs_for` for when they are added.
-CRASH_TAG_SPECS = ("AndroidRuntime:E", "libc:F", "ActivityManager:E")
+CRASH_TAG_SPECS = ("AndroidRuntime:E", "libc:F", "ActivityManager:E", "InputDispatcher:I")
 
 
 def crash_specs_for(tag_filter: str) -> list[str]:
@@ -148,7 +161,12 @@ class AndroidCrashDetector:
         if pid is not None and pid in self._pending:
             out.extend(self._flush(pid))
 
-        if tag == "libc":
+        if tag == "InputDispatcher":
+            slow = _SLOW_INPUT.match(message)
+            if slow:
+                out.append(self._hang(entry, slow.group(1), float(slow.group(2)),
+                                      slow.group(3)))
+        elif tag == "libc":
             signal = _FATAL_SIGNAL.match(message)
             if signal:
                 out.append(self._crash(entry, signal.group(2), int(signal.group(1)),
@@ -203,6 +221,23 @@ class AndroidCrashDetector:
         if detail:
             message += f" -- {detail}"
         return [self._crash(pending.header, process, pid, message, pending.lines)]
+
+    def _hang(self, at: LogEntry, package: str, ms: float, event: str) -> LogEntry:
+        """A main-thread hang, stamped when it began. `pid` is None: the line
+        is system_server's, and names the app's window, not its process."""
+        began = at.timestamp - timedelta(milliseconds=ms)
+        return LogEntry(
+            id=f"android-hang-{at.id}",
+            timestamp=began,
+            device_id=self.device_id or at.device_id,
+            process=package,
+            pid=None,
+            level=LogLevel.ERROR,
+            message=(f"{package} hung: its main thread took {ms:.0f} ms to handle a {event} "
+                     f"(InputDispatcher, logged when it ended at {at.timestamp.isoformat()})"),
+            source=LogSource.CRASH,
+            raw=at.message,
+        )
 
     def _crash(
         self, at: LogEntry, process: str, pid: int | None, message: str, lines: list[str],
