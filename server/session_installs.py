@@ -61,6 +61,10 @@ ATTEMPTS = 3
 #: expiry waits on. An erase and reboot is the slow case.
 TIMEOUT_S = 120.0
 
+#: The largest Info.plist read from an .ipa: an upload's cap bounds its
+#: compressed size, not what one member inflates to.
+_MAX_PLIST_BYTES = 8 * 1024 * 1024
+
 #: How many finished erases are remembered. A retry comes within a few sweeps
 #: of its release, so only the recent ones matter.
 _FINISHED_MAX = 512
@@ -161,6 +165,8 @@ def bundle_id_of(app_path: str | Path) -> str | None:
             with zipfile.ZipFile(path) as z:
                 name = next(n for n in z.namelist() if n.count("/") == 2
                             and n.startswith("Payload/") and n.endswith(".app/Info.plist"))
+                if z.getinfo(name).file_size > _MAX_PLIST_BYTES:
+                    return None
                 info = plistlib.loads(z.read(name))
         else:
             return None
@@ -274,6 +280,10 @@ async def end_for_release(app: Any, registry: Any, session: Any, udid: str,
     opening = _opening(session)
     mine = record is not None and (record.session, record.opened) == opening
     held = registry.holder_of(udid)
+    if held is not None and _opening(held.session) == opening:
+        # Released and reserved again by the same opening before the sweep
+        # ran: the hold goes on, and so does the record.
+        return
     if held is not None and _opening(held.session) != opening:
         if mine and held.session.principal == session.principal:
             # The key holds it still, through another session or the same
@@ -304,13 +314,21 @@ async def end_for_release(app: Any, registry: Any, session: Any, udid: str,
         record.ending = True
     try:
         if erase:
-            done = await asyncio.wait_for(_erase(app, controller, session, udid, key),
-                                          TIMEOUT_S)
+            done = await asyncio.wait_for(
+                _erase(app, controller, session, udid, key, registry), TIMEOUT_S)
             _finish(app, key)
         else:
-            done = await asyncio.wait_for(_uninstall(controller, record, udid), TIMEOUT_S)
+            done = await asyncio.wait_for(
+                _uninstall(controller, record, udid, registry), TIMEOUT_S)
         _drop(records, udid, record)
         actions.append({"udid": udid, "ok": True, **done})
+    except _Reserved:
+        # Reserved again mid-clean-up -- only its own key can reserve a device
+        # still draining: what is left is the new hold's, handed over below.
+        if record is not None:
+            record.ending = False
+        if registry.holder_of(udid) is not None:
+            await end_for_release(app, registry, session, udid, actions)
     except Exception as e:  # noqa: BLE001 -- reported, never raised
         error = (f"did not finish within {TIMEOUT_S:g}s" if isinstance(e, TimeoutError)
                  else str(e) or type(e).__name__)
@@ -335,9 +353,22 @@ async def end_for_release(app: Any, registry: Any, session: Any, udid: str,
                             "may still be on it.")} if gave_up else {})})
 
 
-async def _uninstall(controller: Any, record: InstallRecord, udid: str) -> dict:
+class _Reserved(Exception):
+    """The device was reserved again while its release cleaned up."""
+
+
+def _still_free(registry: Any, udid: str) -> None:
+    # Before each step: a reservation during the clean-up's awaits is a new
+    # hold, and nothing more is done under it.
+    if registry is not None and registry.holder_of(udid) is not None:
+        raise _Reserved()
+
+
+async def _uninstall(controller: Any, record: InstallRecord, udid: str,
+                     registry: Any = None) -> dict:
     present = await _apps(controller, udid)
     for bundle_id in sorted((record.added & present) - KEPT - set(record.removed)):
+        _still_free(registry, udid)
         await controller.uninstall_app(bundle_id, udid, set_active=False)
         record.removed.append(bundle_id)
     return {"action": "installs_removed", "removed": list(record.removed),
@@ -347,7 +378,8 @@ async def _uninstall(controller: Any, record: InstallRecord, udid: str) -> dict:
                         "there, so their apps were left"} if record.unclear else {})}
 
 
-async def _erase(app: Any, controller: Any, session: Any, udid: str, key: tuple) -> dict:
+async def _erase(app: Any, controller: Any, session: Any, udid: str, key: tuple,
+                 registry: Any = None) -> dict:
     reservation = (getattr(session, "reservations", None) or {}).get(udid)
     shutting_down = (getattr(reservation, "on_release", "") == "shutdown_booted"
                      and getattr(reservation, "booted_here", False))
@@ -357,10 +389,11 @@ async def _erase(app: Any, controller: Any, session: Any, udid: str, key: tuple)
     if key not in booted:
         booted[key] = await _is_booted(controller, udid)
     was_booted = booted[key]
+    _still_free(registry, udid)
     await controller.erase(udid)
     rebooted = False
     if was_booted and not shutting_down:
-        await controller.boot(udid)
+        await controller.boot(udid, set_active=False)
         rebooted = True
     return {"action": "erased", "rebooted": rebooted}
 

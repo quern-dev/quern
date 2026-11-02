@@ -58,7 +58,11 @@ def _app(*, client="uninstall", owner="none", holder=None, kind=DeviceType.SIMUL
     controller.list_apps = AsyncMock(side_effect=list_apps)
     controller.uninstall_app = AsyncMock(side_effect=uninstall)
     controller.erase = AsyncMock(side_effect=lambda udid: udid)
-    controller.boot = AsyncMock(side_effect=lambda udid: udid)
+    async def boot(udid, *, set_active=True):
+        assert set_active is False, "a release's reboot must not move the active device"
+        return udid
+
+    controller.boot = AsyncMock(side_effect=boot)
     controller._device_type = lambda udid: kind
     controller.list_devices = AsyncMock(return_value=[
         SimpleNamespace(udid=SIM, state=DeviceState.BOOTED)])
@@ -432,7 +436,7 @@ async def test_erase_erases_a_simulator_even_with_nothing_installed_and_reboots_
     app, ctrl, _ = _app(client="erase")
     actions = await _release(app, s)
     ctrl.erase.assert_awaited_once_with(SIM)
-    ctrl.boot.assert_awaited_once_with(SIM)
+    ctrl.boot.assert_awaited_once_with(SIM, set_active=False)
     assert actions == [{"udid": SIM, "ok": True, "action": "erased", "rebooted": True}]
 
 
@@ -476,7 +480,7 @@ async def test_an_erase_retried_after_a_failed_reboot_still_boots_it():
     async def erase(udid):
         booted[0] = False                            # simctl erase shuts it down
 
-    async def boot(udid):
+    async def boot(udid, *, set_active=True):
         if ctrl.boot.await_count == 1:
             raise RuntimeError("boot timed out")
         booted[0] = True
@@ -489,6 +493,78 @@ async def test_an_erase_retried_after_a_failed_reboot_still_boots_it():
     assert (await _release(app, s))[0] == {"udid": SIM, "ok": True, "action": "erased",
                                            "rebooted": True}
     assert booted[0] and not app.state.session_installs_was_booted
+
+
+async def test_the_same_opening_reserving_again_before_the_sweep_keeps_its_hold():
+    """release_devices for one device, then reserve it again, before the
+    sweep: the hold goes on, so nothing is erased or uninstalled under it."""
+    s = _session()
+    app, ctrl, state = _app(client="erase", holder=_held_by(s), installed=("com.example.new",))
+    _record(app, s)
+    assert await _release(app, s) == []
+    ctrl.erase.assert_not_awaited()
+    ctrl.uninstall_app.assert_not_awaited()
+    assert app.state.session_installs[SIM].added == {"com.example.new"}
+
+
+async def test_a_reservation_during_the_uninstall_stops_it_and_takes_the_rest():
+    s, s2 = _session(), _session("client:a/s2", opened="o2")
+    app, ctrl, state = _app(installed=("com.example.a", "com.example.b"))
+    _record(app, s, added=("com.example.a", "com.example.b"))
+    real = ctrl.uninstall_app.side_effect
+
+    async def reserved_after_first(bundle_id, udid, *, set_active=True):
+        app.state.sessions.held = _held_by(s2)
+        return await real(bundle_id, udid, set_active=set_active)
+
+    ctrl.uninstall_app = AsyncMock(side_effect=reserved_after_first)
+    actions = await _release(app, s)
+    assert state["apps"] == ["com.example.b"]
+    record = app.state.session_installs[SIM]
+    assert (record.session, record.ending, record.attempts) == (s2.id, False, 0)
+    assert [a["action"] for a in actions] == ["installs_handed_over"]
+
+
+async def test_a_reservation_before_the_erase_stops_it():
+    s, s2 = _session(), _session("client:a/s2", opened="o2")
+    app, ctrl, _ = _app(client="erase")
+
+    async def reserved_while_listing():
+        app.state.sessions.held = _held_by(s2)
+        return [SimpleNamespace(udid=SIM, state=DeviceState.BOOTED)]
+
+    ctrl.list_devices = AsyncMock(side_effect=reserved_while_listing)
+    actions = await _release(app, s)
+    ctrl.erase.assert_not_awaited()
+    assert not any(a.get("ok") is False for a in actions)
+
+
+async def test_a_controller_boot_for_a_release_leaves_the_active_device():
+    from server.device.controller import DeviceController
+
+    controller = DeviceController()
+    controller._is_android = lambda udid: False
+    controller._ensure_device_type_cached = AsyncMock()
+    controller._require_simulator = lambda udid, what: None
+    controller._restore_input_after_boot = AsyncMock()
+    controller.simctl.boot = AsyncMock()
+    controller._active_udid = "OWNERS"
+    await controller.boot(SIM, set_active=False)
+    assert controller._active_udid == "OWNERS"
+    await controller.boot(SIM)
+    assert controller._active_udid == SIM
+
+
+def test_an_ipa_with_an_inflated_info_plist_is_not_read(tmp_path, monkeypatch):
+    import plistlib
+    import zipfile
+
+    monkeypatch.setattr(si, "_MAX_PLIST_BYTES", 1024)
+    ipa = tmp_path / "Big.ipa"
+    with zipfile.ZipFile(ipa, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("Payload/My.app/Info.plist", plistlib.dumps(
+            {"CFBundleIdentifier": "com.x.big", "Pad": "x" * 4096}))
+    assert si.bundle_id_of(ipa) is None
 
 
 async def test_erase_on_an_android_device_falls_back_to_uninstall():
@@ -743,6 +819,7 @@ async def test_an_xcode_install_says_when_the_hold_ended_during_it(tmp_path):
             ctrl, build_api.BuildAndInstallRequest(project_path="/p", scheme="S"), MagicMock(),
             "-project", "/p", [], [SIM], {"iphonesimulator": tmp_path / "derived"}, app=app)
     assert "com.x.app was removed again" in resp.devices[0].note
+    assert "com.x.app was removed again" in resp.summary, "the MCP tool shows only this"
     assert state["apps"] == []
 
 

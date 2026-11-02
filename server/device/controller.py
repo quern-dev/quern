@@ -1099,11 +1099,14 @@ class DeviceController(DeviceControllerUI):
 
     async def boot(
         self, udid: str | None = None,
-        name: str | None = None, headless: bool = False,
+        name: str | None = None, headless: bool = False, *,
+        set_active: bool = True,
     ) -> str:
         """Boot a simulator or Android emulator by udid or name.
 
-        Returns the udid that was booted.
+        Returns the udid that was booted. `set_active=False` leaves the active
+        device where it was, for a boot that is not the caller's choice of
+        device (a release's erase, #581).
         """
         if udid:
             # Warm first. `boot` is the one device entry point that does not
@@ -1120,7 +1123,8 @@ class DeviceController(DeviceControllerUI):
                 )
             self._require_simulator(udid, "Boot")
             await self.simctl.boot(udid)
-            self._active_udid = udid
+            if set_active:
+                self._active_udid = udid
             await self._restore_input_after_boot(udid)
             return udid
 

@@ -809,6 +809,9 @@ def _build_install_summary(resp: BuildAndInstallResponse) -> str:
     if installed:
         names = ", ".join(d.udid[:12] for d in installed)
         parts.append(f"Installed on: {names}.")
+    # The MCP tool returns only this summary, so a note -- an app its hold's
+    # release removed again (#581) -- is said here or not at all.
+    parts += [f"Note ({d.udid[:12]}): {d.note}." for d in installed if d.note]
     if failed:
         for d in failed:
             parts.append(f"Install failed ({d.udid[:12]}): {d.error}")
