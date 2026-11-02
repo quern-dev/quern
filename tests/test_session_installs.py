@@ -391,11 +391,14 @@ async def test_a_late_install_on_a_device_another_key_holds_is_left():
     late = await si.before_install(app, SIM, _caller(s))
     app.state.sessions.held = None
     await _release(app, s)
-    app.state.sessions.held = _held_by(_session("client:b/x", principal="client:b"))
+    bob = _session("client:b/x", principal="client:b")
+    app.state.sessions.held = _held_by(bob)
+    await _install(app, state, bob)                    # bob's own record
     state["apps"].append("com.example.late")
     assert await si.after_install(app, late) == {"hold_ended": True,
                                                  "left": ["com.example.late"]}
     ctrl.uninstall_app.assert_not_awaited()
+    assert app.state.session_installs[SIM].added == set(), "not put on another key's record"
 
 
 async def test_a_cancelled_xcode_install_is_still_recorded(tmp_path):
@@ -608,6 +611,18 @@ async def test_a_reservation_before_the_erase_stops_it():
     actions = await _release(app, s)
     ctrl.erase.assert_not_awaited()
     assert not any(a.get("ok") is False for a in actions)
+
+
+async def test_a_controller_boot_of_an_avd_by_name_honours_set_active():
+    from server.device.controller import DeviceController
+
+    controller = DeviceController()
+    controller.adb.is_installed = lambda: True
+    controller.adb.list_avds = AsyncMock(return_value=["Pixel_9"])
+    controller.adb.boot_emulator = AsyncMock(return_value=EMU)
+    controller._active_udid = "OWNERS"
+    await controller.boot(name="Pixel_9", set_active=False)
+    assert controller._active_udid == "OWNERS"
 
 
 async def test_a_controller_boot_by_name_honours_set_active():
