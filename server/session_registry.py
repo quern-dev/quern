@@ -26,12 +26,14 @@ client's own sessions still see each other (see server/visibility.py).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import re
 import secrets
 import time
-from collections.abc import Callable, Iterable
+from collections import Counter
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -158,6 +160,12 @@ class SessionRegistry:
         #: holder's recording went on filming, and its rules on answering, the
         #: next holder's work (CodeRabbit).
         self._draining: dict[str, str] = {}
+        #: Devices whose release clean-up is running now, counted: two sweeps
+        #: can overlap. Reservable by nobody, the owner included, until it
+        #: has finished -- the clean-up awaits device commands, and a hold
+        #: taken during one had that command (an erase, an uninstall) finish
+        #: under it (#598). Bounded by the clean-up's own timeouts.
+        self._cleaning: Counter[str] = Counter()
         self._generations = 0
 
     # -- lifecycle ---------------------------------------------------------
@@ -262,6 +270,23 @@ class SessionRegistry:
         for udid in udids:
             self._draining.pop(udid, None)
 
+    @contextlib.contextmanager
+    def cleaning(self, udids: Iterable[str]) -> Iterator[None]:
+        """While a release's clean-up of these devices runs: nobody reserves
+        them. Entered before the clean-up's first await, which is what makes
+        it hold -- the registry is not awaited, so nothing reserves between
+        the mark and the command."""
+        udids = list(dict.fromkeys(udids))
+        for udid in udids:
+            self._cleaning[udid] += 1
+        try:
+            yield
+        finally:
+            for udid in udids:
+                self._cleaning[udid] -= 1
+                if self._cleaning[udid] <= 0:
+                    del self._cleaning[udid]
+
     def expire_due(self) -> list[HeldSession]:
         """Release every session whose grace has run out."""
         now = self._clock()
@@ -297,6 +322,9 @@ class SessionRegistry:
             held = self.holder_of(udid)
             if held is not None and held.session.id != session_id:
                 raise SessionConflict(f"{udid} is reserved by session {held.session.id}")
+            if self._cleaning[udid] > 0 and held is None:
+                raise SessionConflict(f"{udid} is being cleaned up after its last hold; "
+                                      "try again in a moment")
             # The owner is not held back: a clean-up that keeps failing must
             # not take a device out of service for good, and the owner can
             # see and end what the client left running.
@@ -377,7 +405,7 @@ class SessionRegistry:
         self.expire_due()
         held = {u for s in self._sessions.values() if s.id != except_session
                 for u in s.reservations}
-        return held | set(self._draining)
+        return held | set(self._draining) | {u for u, n in self._cleaning.items() if n > 0}
 
     # -- reading -----------------------------------------------------------
 
