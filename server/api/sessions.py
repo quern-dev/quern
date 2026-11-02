@@ -543,6 +543,10 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
         # First: the proxy record is the session's, not the key's, so it is
         # handed on rather than skipped with the rest (review).
         await _end_device_proxy(app, registry, session, udid, actions)
+        # What it installed there (#581), by the same rule: the session's.
+        from server import session_installs
+
+        await session_installs.end_for_release(app, registry, session, udid, actions)
         held = registry.holder_of(udid)
         if held is not None and held.session.principal == session.principal:
             continue                       # still the key's, through another session
@@ -657,10 +661,13 @@ async def _end_device_proxy(app: Any, registry: Any, session: Any, udid: str,
     if record is None or tuple(record[:2]) != (session.id, getattr(session, "opened_at", None)):
         return
     held = registry.holder_of(udid)
-    if held is not None and held.session.id != session.id:
+    # By opening, not id alone: the same name opened again holds the device
+    # under the same id, and its proxy was cleared under it.
+    if held is not None and (held.session.id, getattr(held.session, "opened_at", None)) \
+            != tuple(record[:2]):
         if held.session.principal == session.principal:
-            # The key holds it still, through another session: that session's
-            # release clears it.
+            # The key holds it still, through another session or the same name
+            # opened again: that one's release clears it.
             holds[udid] = (held.session.id, getattr(held.session, "opened_at", None), 0)
             actions.append({"udid": udid, "action": "device_proxy_handed_over", "ok": True,
                             "to": held.session.id})
@@ -744,8 +751,12 @@ async def run_release_policies(app) -> list[dict]:
             if failed:
                 registry.retry_release(session, failed)
         actions.extend(ended)
+        # An erase on release (#581) leaves a simulator it was to shut down
+        # shut down already.
+        erased = {a["udid"] for a in ended
+                  if a.get("action") == "erased" and a.get("ok") and not a.get("rebooted")}
         for r in session.reservations.values():
-            if r.on_release != "shutdown_booted" or not r.booted_here:
+            if r.on_release != "shutdown_booted" or not r.booted_here or r.udid in erased:
                 continue
             # Only if nobody reserved it again meanwhile.
             if registry.holder_of(r.udid) is not None or controller is None:

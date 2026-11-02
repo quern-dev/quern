@@ -1099,11 +1099,14 @@ class DeviceController(DeviceControllerUI):
 
     async def boot(
         self, udid: str | None = None,
-        name: str | None = None, headless: bool = False,
+        name: str | None = None, headless: bool = False, *,
+        set_active: bool = True,
     ) -> str:
         """Boot a simulator or Android emulator by udid or name.
 
-        Returns the udid that was booted.
+        Returns the udid that was booted. `set_active=False` leaves the active
+        device where it was, for a boot that is not the caller's choice of
+        device (a release's erase, #581).
         """
         if udid:
             # Warm first. `boot` is the one device entry point that does not
@@ -1120,7 +1123,8 @@ class DeviceController(DeviceControllerUI):
                 )
             self._require_simulator(udid, "Boot")
             await self.simctl.boot(udid)
-            self._active_udid = udid
+            if set_active:
+                self._active_udid = udid
             await self._restore_input_after_boot(udid)
             return udid
 
@@ -1131,7 +1135,8 @@ class DeviceController(DeviceControllerUI):
                 if name in avds:
                     serial = await self.adb.boot_emulator(name, headless=headless)
                     self._device_type_cache[serial] = DeviceType.ANDROID_EMULATOR
-                    self._active_udid = serial
+                    if set_active:
+                        self._active_udid = serial
                     return serial
 
             # Fall back to iOS simulator
@@ -1147,7 +1152,8 @@ class DeviceController(DeviceControllerUI):
 
             device_access.check(target.udid)
             await self.simctl.boot(target.udid)
-            self._active_udid = target.udid
+            if set_active:
+                self._active_udid = target.udid
             await self._restore_input_after_boot(target.udid)
             return target.udid
 
@@ -1710,9 +1716,11 @@ class DeviceController(DeviceControllerUI):
         self._invalidate_ui_cache(resolved)  # the app's screen is gone
         return resolved
 
-    async def uninstall_app(self, bundle_id: str, udid: str | None = None) -> str:
-        """Uninstall an app. Returns the resolved udid."""
-        resolved = await self.resolve_udid(udid)
+    async def uninstall_app(self, bundle_id: str, udid: str | None = None, *,
+                            set_active: bool = True) -> str:
+        """Uninstall an app. Returns the resolved udid. `set_active=False` for
+        housekeeping that must not change which device is active (#581)."""
+        resolved = await self.resolve_udid(udid, set_active=set_active)
         if self._is_android(resolved):
             await self.adb.uninstall_app(resolved, bundle_id)
         elif self._is_physical(resolved):
@@ -1721,9 +1729,11 @@ class DeviceController(DeviceControllerUI):
             await self.simctl.uninstall_app(resolved, bundle_id)
         return resolved
 
-    async def list_apps(self, udid: str | None = None) -> tuple[list[AppInfo], str]:
-        """List installed apps. Returns (apps, resolved_udid)."""
-        resolved = await self.resolve_udid(udid)
+    async def list_apps(self, udid: str | None = None, *,
+                        set_active: bool = True) -> tuple[list[AppInfo], str]:
+        """List installed apps. Returns (apps, resolved_udid). `set_active=False`
+        as for `uninstall_app`."""
+        resolved = await self.resolve_udid(udid, set_active=set_active)
         if self._is_android(resolved):
             apps = await self.adb.list_apps(resolved)
         elif self._is_physical(resolved):
