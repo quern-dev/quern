@@ -42,7 +42,7 @@ preset: hangs (default; main-thread hangs plus CPU samples), cpu (where CPU time
 
 One profile per device at a time; the device must be reserved by this session when the server is shared. Kept profiles share a disk budget (config.json profiles.max_mb, default 2048); starting one may remove the oldest finished ones, and the answer says which.`,
     inputSchema: strictParams({
-      bundle_id: z.string().min(1).describe("Bundle id of the app to launch and record"),
+      bundle_id: z.string().min(1).describe("Bundle id (iOS) or package (Android) of the app to record. On iOS xctrace launches it; on Android it is not launched -- it must be running, or be launched during the profile, for the trace to hold its work"),
       udid: z.string().optional().describe("Target device UDID (defaults to the active device)"),
       preset: z.enum(["hangs", "cpu", "hitches", "launch", "frames"]).optional().describe("What to record (default hangs). hitches and launch are iOS only, frames Android only"),
       time_limit_s: z.number().int().min(1).max(300).optional().describe("Stop by itself after this many seconds (default 30)"),
@@ -75,7 +75,7 @@ summary.hangs lists main-thread hangs: start_s (seconds into the recording), dur
   });
 
   server.registerTool("get_profile", {
-    description: "A profile's state and, once finished, its summary -- the same as stop_profile returns. state is recording, finalizing (xctrace is saving the trace, then quern reads it; stopping it again does nothing), finished, or failed (xctrace did not save a whole trace, or it could not be read: error says which). Without profile_id, lists the kept profiles, oldest first, without summaries. A profile ended by its time limit finishes on its own; read it here.",
+    description: "A profile's state and, once finished, its summary -- the same as stop_profile returns. state is recording, finalizing (the trace is being finished and read: on iOS xctrace saving it, on Android quern copying it off the device; stopping it again does nothing), finished, or failed (iOS: xctrace did not save a whole trace, or it could not be read; Android: the trace could not be copied off the device, and error names where it is still kept there). Without profile_id, lists the kept profiles, oldest first, without summaries. A profile ended by its time limit finishes on its own; read it here.",
     inputSchema: strictParams({
       profile_id: z.string().optional().describe("A profile's id; omit to list them all"),
     }),

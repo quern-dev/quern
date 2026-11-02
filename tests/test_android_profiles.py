@@ -430,6 +430,26 @@ class TestSummarize:
         assert "trace" not in s["unavailable"]
         assert s["frames"]["source"] == "gfxinfo" and s["hangs_source"].startswith("logcat")
 
+    async def test_a_trace_with_no_input_queues_is_not_no_hangs(self, monkeypatch):
+        """No wq: counter for any window means the trace did not record them
+        -- a later Android may name them otherwise -- not that there were no
+        hangs (CodeRabbit). The logcat reports stand in when there are some."""
+        real = ad.decode_summary_row
+        monkeypatch.setattr(ad, "decode_summary_row", lambda row: {**real(row), "wq": []})
+        s = await _summary(FakeTP())
+        assert s["hangs"] is None and "wait-queue counters" in s["unavailable"]["hangs"]
+        logged = ([{"start_s": 1.0, "duration_ms": 3000.0}], None)
+        s = await _summary(FakeTP(), logged)
+        assert s["hangs_source"].startswith("logcat") and "hangs" not in s["unavailable"]
+
+    async def test_input_queues_with_none_from_the_app_are_no_hangs(self, monkeypatch):
+        real = ad.decode_summary_row
+        other = "wq:1 StatusBar (server)"
+        monkeypatch.setattr(ad, "decode_summary_row", lambda row: {
+            **real(row), "wq": [[other, 0, 1], [other, 5, 0]]})
+        s = await _summary(FakeTP())
+        assert s["hangs"] == [] and s["hangs_count"] == 0       # recorded, and none
+
     async def test_a_limit_on_the_logged_hangs_is_said_beside_them(self):
         logged = ([{"start_s": 9.0, "duration_ms": 3000.0}],
                   "logcat capture began 5s into the profile; hangs before then are not known")

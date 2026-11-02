@@ -492,6 +492,14 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
             unavailable["app"] = f"{package} did not run during the profile"
         if preset == "cpu":
             unavailable["hangs"] = "not recorded by the cpu preset (no input tracing)"
+        elif not read["wq"]:
+            # No window's input queue at all, the app's or any other: the
+            # trace did not record them, which is not "no hangs" (CodeRabbit).
+            # Measured on Android 10; a later version may name them otherwise.
+            unavailable["hangs"] = (
+                "the trace has no InputDispatcher wait-queue counters (wq:) for any window, "
+                "so hangs could not be read from it; this Android version may not record "
+                "them under that name")
         else:
             hangs = hangs_from_counters(read["wq"], package, start_ns, end_ns)
             summary.update(hangs=hangs[:LIST_LIMIT], hangs_count=len(hangs),
