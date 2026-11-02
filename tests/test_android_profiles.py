@@ -306,6 +306,9 @@ class TestReducers:
         assert ad.cpu_from_snapshots(first, last)[0]["cpu_percent"] == 5.0
         assert ad.frames_from_snapshots(first, last)[0]["janky"] == 3
         assert "restarted" in ad.cpu_from_snapshots(first, {**last, "pid": 2})[1]
+        restarted = {**last, "pid": 2}
+        assert ad.frames_from_snapshots(first, restarted)[0] is None
+        assert "restarted" in ad.frames_from_snapshots(first, restarted)[1]
         reset = {**last, "frames": {**last["frames"], "total_frames": 10}}
         assert "reset" in ad.frames_from_snapshots(first, reset)[1]
 
@@ -676,6 +679,19 @@ class TestRoutes:
             assert log.status_code == 200 and "perfetto --detach" in log.text
             zipped = await http.get(f"/api/v1/profiles/{pid}/files/profile.trace.zip")
             assert zipped.status_code == 404                   # iOS's bundle, not Android's
+
+    async def test_a_failed_profiles_trace_is_not_served_as_a_result(self, app):
+        """A trace on disk that trace_processor could not read: the profile is
+        failed, and its file is not offered as though it were whole."""
+        app.state.profiles = _manager(app.state.adb, FakeTP(fail={"process"}))
+        async with _client(app) as http:
+            pid = (await http.post("/api/v1/profiles", json={"bundle_id": PKG,
+                                                              "udid": SERIAL})).json()["id"]
+            stopped = (await http.post(f"/api/v1/profiles/{pid}/stop")).json()
+            assert stopped["state"] == "failed" and "profile.pftrace" not in stopped["files"]
+            assert app.state.profiles.get(pid).trace.is_file()       # it is on disk
+            r = await http.get(f"/api/v1/profiles/{pid}/files/profile.pftrace")
+            assert r.status_code == 409 and "failed" in r.json()["detail"]
 
     async def test_an_ios_preset_on_android_is_refused(self, app):
         async with _client(app) as http:
