@@ -878,7 +878,8 @@ class TestRoutes:
         await _finished(profile)
 
     @pytest.mark.parametrize("body,status", [
-        ({"bundle_id": "com.x", "udid": "emulator-5554"}, 400),    # Android: not yet
+        ({"bundle_id": "com.x", "udid": "emulator-5554", "preset": "hitches"}, 400),  # iOS's
+        ({"bundle_id": "com.x", "udid": SIM, "preset": "frames"}, 400),              # Android's
         ({"bundle_id": "com.x;reboot", "udid": SIM}, 422),         # never reaches a shell
         ({"bundle_id": "com.x", "udid": SIM, "preset": "nope"}, 422),
         ({"bundle_id": "com.x", "udid": SIM, "time_limit_s": 301}, 422),

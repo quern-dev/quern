@@ -19,6 +19,7 @@ import contextlib
 import logging
 import math
 import os
+import re
 import signal
 import sys
 import time
@@ -82,7 +83,7 @@ from server.lifecycle.state import (
     write_state,
 )
 from server.lifecycle.watchdog import proxy_watchdog
-from server.models import LogEntry, LogSource
+from server.models import LogEntry, LogQueryParams, LogSource
 from server.processing.deduplicator import Deduplicator
 from server.processing.ingestion_filter import IngestionFilter
 from server.proxy.capture_session import CaptureSessionManager
@@ -234,6 +235,40 @@ def _log_keyboards(actions: list[dict], when: str) -> None:
                            "again", a["udid"], a.get("ime"), when, a.get("error"))
 
 
+def _adb_path(app: FastAPI) -> str | None:
+    controller = getattr(app.state, "device_controller", None)
+    adb = getattr(controller, "adb", None)
+    return adb.adb_path if adb is not None else None
+
+
+_HANG_MS = re.compile(r"took (\d+) ms")
+
+
+async def _android_hangs(app: FastAPI, serial: str, package: str, started: str,
+                         ended: str) -> tuple[list[dict] | None, str | None]:
+    """InputDispatcher's hang reports for one app over a profile, from the
+    crash buffer (#245): what an Android summary has without trace_processor.
+    None, with why, when logcat is not being captured for the device -- "no
+    hangs logged" and "nothing was listening" are not the same answer."""
+    adapter = (getattr(app.state, "device_log_adapters", None) or {}).get(serial)
+    if adapter is None or not getattr(adapter, "is_running", False):
+        return None, ("InputDispatcher's reports come from logcat, which was not being "
+                      "captured for this device (start_device_logging); trace_processor "
+                      "reads hangs from the trace itself")
+    since, until = datetime.fromisoformat(started), datetime.fromisoformat(ended)
+    entries = await app.state.crash_buffer.filter_entries(LogQueryParams(since=since))
+    hangs = []
+    for e in entries:
+        if not e.id.startswith("android-hang-") or e.device_id != serial \
+                or e.process != package or e.timestamp > until:
+            continue
+        took = _HANG_MS.search(e.message)
+        hangs.append({"start_s": round((e.timestamp - since).total_seconds(), 3),
+                      "duration_ms": float(took.group(1)) if took else None,
+                      "message": e.message})
+    return sorted(hangs, key=lambda h: h["start_s"]), None
+
+
 #: How long a recording's gauges wait for the device controller at startup.
 GAUGE_CONTROLLER_WAIT_S = 20.0
 
@@ -361,7 +396,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from server.profiling.manager import ProfileManager
     if note := profile_settings()["note"]:
         logger.warning(note)
-    app.state.profiles = ProfileManager()
+    from server.profiling import android as android_profiles
+    # adb is the controller's, looked up per call: the controller is made
+    # later in startup, and a profile resumed before then is still asked about.
+    app.state.profiles = ProfileManager(
+        adb=android_profiles.adb_runner(lambda: _adb_path(app)),
+        logged_hangs=lambda serial, package, started, ended: _android_hangs(
+            app, serial, package, started, ended))
     try:
         adopted = await app.state.profiles.resume()
     except Exception:  # noqa: BLE001 -- a profile must never stop the server starting

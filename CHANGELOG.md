@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Profile an Android app: `start_profile` and `stop_profile` record it with perfetto (#245).** The same four tools as iOS, on an emulator or phone, without relaunching the app.
+  - **Hangs are input the app left unanswered**, read from InputDispatcher's own per-window queue in the trace -- measured at 10,571.6 ms for a hang InputDispatcher put at 10,571.9 ms. An idle app's main thread also sleeps, so a sleeping thread is never read as a hang.
+  - **Frames, CPU by thread, and the slowest work**, from the trace.
+  - **trace_processor is downloaded on first use**, in the background while the first profile records: one pinned version, its SHA-256 checked, a mismatch deleted and never run. The answer says whether it is installed, downloading, failed or turned off (`profiles.trace_processor: false` in config.json), and without it the summary is what the device reported -- frames from gfxinfo, hangs InputDispatcher logged, CPU from `/proc` -- with the trace kept for ui.perfetto.dev.
+  - **Measured on a Pixel 3 XL:** the shell may not signal perfetto, so a profile is a detached session stopped through perfetto itself; and a stop that met perfetto busy answering the profile's own status check was retried rather than read as over.
 - **Per-action CPU, memory and frames in `get_trace`, from a recording's gauges (#245).** `start_recording(gauges=<bundle id or package>)` samples that app every `gauge_interval_s` (default 1 s) for the whole recording, and the trace gives each action the peaks over it: CPU peak and mean, memory peak with its first and last reading, peak threads, frames drawn and janky on Android, and display FPS on a physical iPhone.
   - **Live and afterwards.** While the recording runs, `get_trace` reads its recent samples; `get_trace(recording=...)` reads every one from the file, and `get_recording(kinds=["gauges"])` pages through them.
   - **How coarse it is, said.** A sample is a window -- CPU is a difference of two readings -- so each summary carries `sample_seconds`, and a 100 ms tap inside a one-second sample is given that second's figures.
