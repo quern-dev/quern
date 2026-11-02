@@ -497,6 +497,24 @@ async def test_a_failure_is_retried_then_given_up_on():
     assert actions[0]["gave_up"] is True and app.state.session_installs == {}
 
 
+async def test_a_failed_clean_up_handed_over_still_records_the_new_sessions_installs():
+    """The record a failed uninstall kept is no longer ending: handed to
+    another session of the key, that session's installs are recorded, not
+    removed as they finish."""
+    s, s2 = _session(), _session("client:a/s2", opened="o2")
+    app, ctrl, state = _app(installed=("com.example.first",))
+    _record(app, s, added=("com.example.first",))
+    real = ctrl.uninstall_app.side_effect
+    ctrl.uninstall_app = AsyncMock(side_effect=RuntimeError("busy"))
+    await _release(app, s)
+    ctrl.uninstall_app = AsyncMock(side_effect=real)
+    app.state.sessions.held = _held_by(s2)
+    await _release(app, s)                       # the retry hands it over
+    assert await _install(app, state, s2, "com.example.second") == {}
+    assert app.state.session_installs[SIM].added == {"com.example.first",
+                                                     "com.example.second"}
+
+
 async def test_a_failed_erase_never_turns_into_uninstalling_everything():
     """A failed erase is counted apart from the install records: none is made
     for it, so nothing can be uninstalled from one."""
