@@ -349,6 +349,9 @@ def test_the_bundle_id_is_read_from_an_app_and_an_ipa(tmp_path):
     (app_dir / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.x.app"}))
     ipa = tmp_path / "My.ipa"
     with zipfile.ZipFile(ipa, "w") as z:
+        # A watch app's bundle listed first: a nested .app, not the one installed.
+        z.writestr("Payload/My.app/Watch/W.app/Info.plist",
+                   plistlib.dumps({"CFBundleIdentifier": "com.x.ipa.watch"}))
         z.writestr("Payload/My.app/Info.plist", plistlib.dumps({"CFBundleIdentifier": "com.x.ipa"}))
         z.writestr("Payload/My.app/PlugIns/W.appex/Info.plist",
                    plistlib.dumps({"CFBundleIdentifier": "com.x.ipa.widget"}))
@@ -505,15 +508,18 @@ async def test_a_failed_erase_never_turns_into_uninstalling_everything():
     ctrl.uninstall_app.assert_not_awaited()
 
 
-async def test_a_failed_erase_does_not_replace_another_openings_record():
-    """The same name opened again and released while the old opening's erase
-    is still being retried: the new opening's record stays."""
+@pytest.mark.parametrize("erase_fails", [False, True])
+async def test_an_erase_leaves_another_openings_record(erase_fails):
+    """The same name opened again, and released too, while the old opening's
+    erase is still to run: the new opening's record is its own release's."""
     s, again = _session(), _session(opened="o2")
     app, ctrl, _ = _app(client="erase")
-    ctrl.erase = AsyncMock(side_effect=RuntimeError("busy"))
+    if erase_fails:
+        ctrl.erase = AsyncMock(side_effect=RuntimeError("busy"))
     _record(app, again)
     await _release(app, s)
-    assert app.state.session_installs[SIM].opened == "o2"
+    record = app.state.session_installs[SIM]
+    assert (record.opened, record.ending, record.attempts) == ("o2", False, 0)
 
 
 async def test_a_stalled_clean_up_is_bounded(monkeypatch):
