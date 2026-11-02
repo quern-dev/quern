@@ -17,6 +17,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -681,3 +682,27 @@ class TestRoutes:
             r = await http.post("/api/v1/profiles", json={"bundle_id": PKG, "udid": SERIAL,
                                                           "preset": "hitches"})
         assert r.status_code == 400 and "not available on Android" in r.json()["detail"]
+
+
+class TestToolVersions:
+    @pytest.mark.parametrize("available", [True, False])
+    async def test_quern_fetched_trace_processor_is_never_planned_for_upgrade(self, available):
+        from server.tooling.tool_updates import plan_updates
+        from server.tooling.tool_versions import ToolSite
+        site = ToolSite(name="trace_processor", role="cli", source="quern", available=available,
+                        version=tpm.VERSION if available else None)
+        [update] = await plan_updates([site], pypi=AsyncMock(), brew=AsyncMock())
+        assert update.action == "unmanaged" and "quern fetches" in update.reason
+        assert ("first use" in update.reason) is (not available)
+        assert "quern setup" not in update.reason            # setup does not install it
+
+    async def test_collect_sites_reports_it(self, state, monkeypatch):
+        from server.tooling import tool_versions as tv
+        monkeypatch.setattr(tv, "probe_version", AsyncMock(return_value=(None, None)))
+        monkeypatch.setattr(tv, "_attach_brew_provenance", AsyncMock())
+        monkeypatch.setattr(tpm.config_mod, "read_user_config", lambda: {})
+        tpm.binary_path().parent.mkdir(parents=True)
+        tpm.binary_path().write_bytes(BINARY)
+        tpm.binary_path().chmod(0o755)
+        [site] = [s for s in await tv.collect_sites() if s.name == "trace_processor"]
+        assert site.available and site.version == tpm.VERSION and site.source == "quern"

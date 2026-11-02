@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import re
 import shutil
 import sys
@@ -420,6 +421,22 @@ async def collect_sites() -> list[ToolSite]:
     ))
 
     await _attach_brew_provenance(sites)
+
+    # --- trace_processor (#245) -------------------------------------------
+    # Fetched by quern itself on the first Android profile, pinned and
+    # checksummed; quern's own release pins its version, so nothing upgrades it.
+    from server.profiling import trace_processor as tpm
+    tp_path = tpm.binary_path()
+    tp_installed = tp_path.is_file() and os.access(tp_path, os.X_OK)
+    sites.append(ToolSite(
+        name="trace_processor", role="cli", package=None,
+        available=tp_installed, version=tpm.VERSION if tp_installed else None,
+        path=str(tp_path) if tp_installed else None, source="quern",
+        detail=("downloaded by quern on the first Android profile, pinned and SHA-256 "
+                "checked; reads perfetto traces"
+                + ("" if tpm.enabled()
+                   else "; turned off in config.json profiles.trace_processor")),
+    ))
     return sites
 
 
