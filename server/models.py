@@ -1927,6 +1927,12 @@ class DeviceInfo(BaseModel):
     #: its serial, so this is how `avd:<name>` still finds it (#582). "" when
     #: unknown, and for every other kind of device.
     avd_name: str = ""
+    #: How an Android device comes to trust quern's CA (#582): "automatic" on
+    #: a rootable build, which install_proxy_cert can do; "manual" on one that
+    #: cannot be rooted (a Google Play image, a phone), where only apps that
+    #: trust user certificates can be decrypted, after a person installs it;
+    #: "unknown" when quern could not tell. "" for every other device.
+    ca_install: str = ""
     # True for simulators; physical devices: True when
     # reachable (tunnel not "unavailable")
     is_connected: bool = True
@@ -2945,6 +2951,7 @@ class DevicePoolEntry(BaseModel):
     device_family: str = ""  # "iPhone", "iPad", "Apple Watch", "Apple TV", or ""
     model: str = ""  # as DeviceInfo.model: what the device is, whatever it is called
     avd_name: str = ""  # as DeviceInfo.avd_name
+    ca_install: str = ""  # as DeviceInfo.ca_install
 
     last_used: datetime
     is_available: bool

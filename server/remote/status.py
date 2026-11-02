@@ -112,6 +112,8 @@ def _devices(answer: Any, label: str = "") -> list[dict]:
             # What the remote says when it knows the model (newer servers);
             # None otherwise -- a simulator's name is only its default.
             "model": d.get("model"),
+            # An Android device's CA path (#582), from servers that say.
+            **({"ca_install": d["ca_install"]} if d.get("ca_install") else {}),
             "state": d.get("state"), "is_available": d.get("is_available"),
             "held_by": held.get("held_by") if held else None,
             # Free: nobody holds it. "Yours": held by this key, through any of

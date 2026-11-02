@@ -15,7 +15,7 @@ The key decides who is calling, not the network address: a client key used on th
 
 - **Watch what the server shows:** devices, screenshots, UI trees, logs, network flows, crashes, recordings.
 - **Reserve devices and change only the ones it holds.** Tapping, typing, installing apps, setting locations and the like are refused on a device the client hasn't reserved, and on one someone else holds.
-- **Capture its own app's traffic** on a simulator it holds (`add_session_capture`), without changing the server's capture settings or restarting its proxy. A small number of capture proxies per client keeps one caller from crowding the machine.
+- **Capture its own app's traffic** on a simulator it holds (`add_session_capture`), without changing the server's capture settings or restarting its proxy. A small number of capture proxies per client keeps one caller from crowding the machine. An Android device it holds is captured by routing it through the server's proxy (`record_device_proxy_config` with `apply=true`); the setting is cleared when its hold ends.
 - **Set mocks** scoped to a simulator or Android device it holds.
 - **Install its apps from its own machine.** The MCP uploads the app (`.ipa`, `.apk` or `.app.tar.gz`) and installs it.
 - **Load its project's knowledge base for its own session.** It's uploaded, used only by that session, and dropped when the session ends.

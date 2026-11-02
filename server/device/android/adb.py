@@ -280,6 +280,33 @@ class AdbBackend:
             pass
         return ""
 
+    #: Image tags whose builds are debuggable, so `adb root` works and quern
+    #: can install its CA itself. A Google Play image is a production build.
+    _ROOTABLE_TAGS = frozenset({"default", "google_apis", "google_atd", "aosp_atd"})
+
+    def _read_avd_ca_install(self, avd_name: str) -> str:
+        """`ca_install` for a shut-down AVD, from the image its config names,
+        without booting it (#582)."""
+        config_path, _ = self._avd_config(avd_name)
+        try:
+            for line in config_path.read_text().splitlines():
+                if (tag := self._ini_value(line, "tag.id")) is not None:
+                    if "playstore" in tag:
+                        return "manual"
+                    return "automatic" if tag in self._ROOTABLE_TAGS else "unknown"
+        except (OSError, UnicodeDecodeError):
+            pass
+        return "unknown"
+
+    @staticmethod
+    def _ca_install_from_props(props: dict) -> str:
+        """`ca_install` for a running device, from the properties
+        `is_rootable` reads: a dev-keys or debuggable build is rootable."""
+        tags, debuggable = props.get("ro.build.tags"), props.get("ro.debuggable")
+        if tags == "dev-keys" or debuggable == "1":
+            return "automatic"
+        return "manual" if tags is not None and debuggable is not None else "unknown"
+
     def _read_avd_version(self, avd_name: str) -> tuple[str, str]:
         """Read OS version from an AVD's config. Returns (os_version, runtime)."""
         config_path, ini_path = self._avd_config(avd_name)
@@ -630,6 +657,7 @@ class AdbBackend:
                 # What it is (#582): the AVD's hardware profile for an
                 # emulator, the product model for a phone.
                 model=(self._read_avd_model(avd) if avd else "") if is_emulator else model,
+                ca_install=self._ca_install_from_props(props) if props else "unknown",
             ))
 
         # Clean up cache for serials no longer in adb devices
@@ -654,6 +682,7 @@ class AdbBackend:
                     device_family="Android",
                     avd_name=avd_name,
                     model=self._read_avd_model(avd_name),
+                    ca_install=self._read_avd_ca_install(avd_name),
                 ))
 
         return devices
@@ -1081,11 +1110,15 @@ class AdbBackend:
         # arrived" defect this guard was added to remove, one level in.
         tags = await self._get_device_property(serial, "ro.build.tags")
         debuggable = await self._get_device_property(serial, "ro.debuggable")
-        if not tags and not debuggable:
-            # Nothing answered either way. None, not False: the caller must be
-            # able to tell "not rootable" from "could not ask".
+        if tags == "dev-keys" or debuggable == "1":
+            return True
+        if not tags or not debuggable:
+            # One unanswered is as unknown here as above: `release-keys` with
+            # no `ro.debuggable` may be a userdebug build. None, not False:
+            # the caller must be able to tell "not rootable" from "could not
+            # ask" (CodeRabbit on #594).
             return None
-        return tags == "dev-keys" or debuggable == "1"
+        return False
 
     async def get_api_level(self, serial: str) -> int:
         """Get the device API level as an integer."""
@@ -1266,6 +1299,24 @@ rm -f {tmp_cert}
 rm -rf /data/local/tmp/tmp-ca-copy
 """
         await self._run_adb_for_device(serial, "shell", script)
+
+    async def system_cert_state(self, serial: str, cert_filename: str) -> bool | None:
+        """Whether a cert file is in the system store: True, False, or None
+        when the device could not be asked. `is_system_cert_installed` reads
+        a failed adb call as False, which said "does not trust the CA" about
+        a device quern never reached (#582 review)."""
+        try:
+            stdout, _ = await self._run_adb_for_device(
+                serial, "shell",
+                f"if test -f /system/etc/security/cacerts/{cert_filename} || "
+                f"test -f /apex/com.android.conscrypt/cacerts/{cert_filename}; "
+                "then echo quern-present; else echo quern-absent; fi",
+            )
+        except (DeviceError, OSError):
+            return None
+        if "quern-present" in stdout:
+            return True
+        return False if "quern-absent" in stdout else None
 
     async def is_system_cert_installed(self, serial: str, cert_filename: str) -> bool:
         """Check if a cert file exists in the system cert store."""

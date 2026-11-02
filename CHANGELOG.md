@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **The first request on an emulator's connection** is held briefly, off the event loop, while quern works out which emulator it is. One it can't tell goes through unmocked.
   - **A client key** could not mock Android at all: an Android scope was refused and an unscoped mock is owner-only. It can now scope mocks to the Android devices it holds, and they end with its hold.
   - **Mocks carried by `use_remote`** go to the same kind of device on the new server.
+- **Android capture says what will work, and cleans up after itself (#582).**
+  - **`ca_install` on every Android device**: `automatic` (a rootable build; `install_proxy_cert` installs the CA), `manual` (not rootable: a user certificate, and only apps that trust them), or `unknown`. A shut-down AVD's comes from its image, without booting it.
+  - **Routing a device says whether HTTPS will work there.** `device-proxy-config` with `apply=true` answers with `https`: `ca_install`, `ca_trusted`, and a note on what to do. It warns rather than refuses, since plain HTTP is captured either way.
+  - **A routed device is unrouted when the hold that routed it ends**, its network re-attached. A client's proxy used to survive its release, and the next holder inherited a device that lost its network when the proxy stopped. The CA stays installed.
+  - **`use_remote` routes the next server's Android devices** when the agent had routed some on the last one.
 - **Android devices carry `model`, and are found by it (#582).** An emulator's model is its AVD's hardware profile ("Pixel 7"), a phone's its product model. Names match with underscores as spaces, so "Pixel 7" finds the AVD `Pixel_7_API_34`. `list_devices` now matches models as well as names, as reservations do.
 - **`get_performance`: how hard one app is working (#245).** CPU (percent of one core, over a sample of 0.2–5 s), memory and thread count for a running app, on iOS simulators, physical iOS devices and Android.
   - **iOS simulators** are read from the Mac with `ps` and `footprint`.
@@ -44,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **A metric that can't be read is null, with the reason in `unavailable`**, never a zero. An app that isn't running answers `running: false`; when quern can't tell, it answers with an error instead. `sample_seconds` in the answer is the window actually measured.
 
 ### Fixed
+- **`add_session_capture` refuses an Android or physical iOS device (#582).** On an emulator it was accepted, claimed host processes and iOS's web-view processes, reported "started", and captured nothing. It now answers 422 and points at routing the device through the proxy.
 - **Reserving a shut-down Android emulator works (#582).** A shut-down AVD is listed as `avd:<name>`, and once booted it comes up as its adb serial (`emulator-5554`). Reservations by count or criteria, `resolve_device` and `ensure_devices` waited for the `avd:` id, which never appears, so each failed after the boot ("did not boot within 30s") and left the emulator running, unreserved. The reservation now holds the emulator under the serial it booted as, and `shutdown_booted` shuts down that serial.
 - **`ensure_devices` asking for more devices than exist is a 404 or 409, not a 500.** "Need 3 devices ... but only 2 available" read to the caller like a server crash. None matching is a 404, as `resolve_device`; some matching but too few, booting, or shut down with `auto_boot` off (which the answer now says), is a 409, as a reservation's shortage. None matching because listing failed -- simctl ran and errored, which used to read as an empty list -- is a 503.
 - **A shut-down AVD newer than Android 16 reports its release (#582).** It reported its raw API level ("37") while the same image running reported its release ("17"), so a version request matched one and not the other.

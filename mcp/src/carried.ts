@@ -73,8 +73,25 @@ function captureWaiting(c: Capture): boolean {
   return c.failed.size > 0 || (c.on.size === 0 && c.removed.size === 0 && c.from.size > 0);
 }
 
+/** The Android devices this agent routed through the proxy
+ * (record_device_proxy_config apply=true, #582). The server clears each one
+ * when the hold on it ends, a switch's release included; after a switch the
+ * next reservation's Android devices are routed through the new server's
+ * proxy, as mocks and capture are set up again. */
+interface DeviceProxy {
+  on: Set<string>;
+  removed: Set<string>;
+  failed: Set<string>;
+  waiting: boolean;
+}
+
+function proxyWaiting(p: DeviceProxy): boolean {
+  return p.failed.size > 0 || (p.on.size === 0 && p.removed.size === 0);
+}
+
 let mocks: Mock[] = [];
 let captures: Capture[] = [];
+let deviceProxy: DeviceProxy | null = null;
 /** Rules a switch could not remove from the server it left, by that server's
  * name. A server that went on running unreached still answers with them; if
  * the agent comes back, they are removed before its mocks are set up again
@@ -170,6 +187,25 @@ function sameCapture(a: { processes: string[]; only?: boolean; allow_passthrough
     JSON.stringify([[...b.processes].sort(), !!b.only, !!b.allow_passthrough]);
 }
 
+/** record_device_proxy_config: a device routed (apply) or unrouted (clear). */
+export function recordDeviceProxy(udid: string, applied: boolean): void {
+  if (applied) {
+    deviceProxy ??= { on: new Set(), removed: new Set(), failed: new Set(), waiting: false };
+    deviceProxy.on.add(udid);
+    deviceProxy.removed.delete(udid);
+    deviceProxy.failed.delete(udid);
+    return;
+  }
+  if (!deviceProxy) return;
+  // Cleared by the agent: this device is not routed again. A routing still
+  // waiting for the next reservation is kept (review: a clear right after
+  // a switch dropped it).
+  deviceProxy.on.delete(udid);
+  deviceProxy.failed.delete(udid);
+  deviceProxy.removed.add(udid);
+  if (!deviceProxy.on.size && !deviceProxy.failed.size && !deviceProxy.waiting) deviceProxy = null;
+}
+
 /** remove_session_capture: one simulator's, some processes, or all. */
 export function forgetCapture(simulator?: string, processes?: string[]): void {
   // An empty list is the server's "all of them", as an omitted one is (CodeRabbit).
@@ -232,6 +268,13 @@ export function released(udids: string[]): void {
       if (c.failed.delete(udid)) c.removed.add(udid);
       if (c.on.delete(udid)) c.removed.add(udid);
     }
+    // The server cleared its proxy with the hold.
+    if (deviceProxy?.failed.delete(udid)) deviceProxy.removed.add(udid);
+    if (deviceProxy?.on.delete(udid)) deviceProxy.removed.add(udid);
+  }
+  if (deviceProxy) {
+    if (deviceProxy.waiting) deviceProxy.waiting = proxyWaiting(deviceProxy);
+    if (!deviceProxy.on.size && !deviceProxy.waiting) deviceProxy = null;
   }
   for (const m of mocks) if (m.waiting) m.waiting = mockWaiting(m);
   for (const c of captures) if (c.waiting) c.waiting = captureWaiting(c);
@@ -239,15 +282,16 @@ export function released(udids: string[]): void {
   captures = captures.filter((c) => c.on.size || c.waiting);
 }
 
-export function pending(): { mocks: number; session_capture: number } {
+export function pending(): { mocks: number; session_capture: number; device_proxy?: boolean } {
   return { mocks: mocks.filter((m) => m.waiting).length,
-           session_capture: captures.filter((c) => c.waiting).length };
+           session_capture: captures.filter((c) => c.waiting).length,
+           ...(deviceProxy?.waiting ? { device_proxy: true } : {}) };
 }
 
 /** At a switch: take this agent's mocks off `old` and keep them, with its
  * session capture, for the next reservation on the new server. Never throws. */
 export async function moveOut(old: Server, oldName: string, { unreachable = false } = {}): Promise<{
-  mocks: number; session_capture: number; still_on_old?: string[];
+  mocks: number; session_capture: number; device_proxy?: boolean; still_on_old?: string[];
 }> {
   const stillThere: string[] = [];
   // A server that timed out or cannot be reached is not asked again for each
@@ -285,6 +329,12 @@ export async function moveOut(old: Server, oldName: string, { unreachable = fals
     c.removed = new Set();        // a new server: its simulators are all new
     c.failed = new Set();
     c.waiting = true;
+  }
+  // Routed devices: the old server clears them as the switch releases them.
+  // A new server: its devices are all new, the ones removed or failed on the
+  // last included -- serials repeat across servers (CodeRabbit).
+  if (deviceProxy) {
+    deviceProxy = { on: new Set(), removed: new Set(), failed: new Set(), waiting: true };
   }
   if (left.length) stranded.set(oldName, [...(stranded.get(oldName) ?? []), ...left]);
   return { ...pending(), ...(stillThere.length ? { still_on_old: stillThere } : {}) };
@@ -353,7 +403,8 @@ const SETUP_TIMEOUT_MS = 15_000;
 export async function applyOnReserve(reserved: Reserved[]): Promise<Record<string, unknown> | undefined> {
   const moved = mocks.filter((m) => m.waiting);
   const movedCaptures = captures.filter((c) => c.waiting);
-  if (!moved.length && !movedCaptures.length) return undefined;
+  const proxy = deviceProxy?.waiting ? deviceProxy : null;
+  if (!moved.length && !movedCaptures.length && !proxy) return undefined;
   const simulators = reserved.filter((d) => d.device_type === "simulator" && d.udid)
     .map((d) => String(d.udid));
   const androids = reserved.filter((d) => (d.device_type === "android_emulator" ||
@@ -461,19 +512,40 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
     capture.waiting = captureWaiting(capture);
   }
 
+  // Routed through this server's proxy, each Android device just reserved;
+  // its answer says whether HTTPS will work there (ca_install, ca_trusted).
+  const routed: { udid: string; https?: unknown }[] = [];
+  for (const udid of proxy ? androids : []) {
+    if (proxy!.on.has(udid) || proxy!.removed.has(udid)) continue;
+    try {
+      const answer = (await apiRequest("POST", "/api/v1/proxy/device-proxy-config", undefined,
+        { udid, apply: true }, SETUP_TIMEOUT_MS)) as { applied?: boolean; https?: unknown } | null;
+      if (!answer?.applied) throw new Error("the server did not apply it");
+      proxy!.on.add(udid);
+      proxy!.failed.delete(udid);
+      routed.push({ udid, ...(answer.https !== undefined ? { https: answer.https } : {}) });
+    } catch (e) {
+      proxy!.failed.add(udid);
+      failed.push({ simulator_udid: udid, error: `routing it through the proxy: ${
+        e instanceof Error ? e.message : String(e)}` });
+    }
+  }
+  if (proxy) proxy.waiting = proxyWaiting(proxy);
+
   const out: Record<string, unknown> = {};
   if (created.length) out.mocks_recreated = created;
+  if (routed.length) out.device_proxy_applied = routed;
   if (captured.length) out.session_capture_restored = captured;
   if (failed.length) out.failed = failed;
   const left = pending();
-  if (left.mocks || left.session_capture) {
+  if (left.mocks || left.session_capture || left.device_proxy) {
     out.still_waiting = left;
     out.note = simulators.length || androids.length
       ? "Some could not be set up here (see failed), or wait for another kind of device: " +
         "they are tried again at your next reservation."
       : "Mocks attach to the kind of device they were scoped to -- simulators, or Android " +
-        "emulators and phones -- and session capture to simulators: they wait for a " +
-        "reservation that includes one.";
+        "emulators and phones -- session capture to simulators, and routing to Android " +
+        "devices: they wait for a reservation that includes one.";
   }
   return out;
 }
@@ -482,5 +554,6 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
 export function resetCarried(): void {
   mocks = [];
   captures = [];
+  deviceProxy = null;
   stranded.clear();
 }

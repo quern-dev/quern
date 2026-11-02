@@ -1175,3 +1175,116 @@ async def test_a_clients_mock_on_its_emulator_ends_with_its_hold():
     assert removed == ["r-emu"]
     assert {"udid": "emulator-5554", "action": "mock_removed", "ok": True,
             "rule_id": "r-emu"} in actions
+
+
+@pytest.mark.parametrize("kind, says", [
+    ("android_emulator", "device-proxy-config"),
+    ("android_device", "device-proxy-config"),
+    ("device", "Wi-Fi proxy"),
+])
+async def test_a_device_that_is_not_a_simulator_is_refused_before_anything_starts(
+        tmp_path, as_client, kind, says):
+    """#582: on an emulator this was accepted -- host processes claimed,
+    iOS's web-view processes added, "started" reported -- and captured
+    nothing, since an Android device's traffic never reaches the redirector."""
+    from server.models import DeviceType
+
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    req.app.state.device_controller._device_type = lambda udid: DeviceType(kind)
+    with pytest.raises(HTTPException) as e:
+        await api.add_session_capture.__wrapped__(
+            req, SessionCaptureRequest(simulator_udid="emulator-5554", processes=["App"]))
+    assert e.value.status_code == 422 and says in e.value.detail
+    assert m.made == [] and m.claims() == []
+
+
+async def test_a_device_the_controller_has_not_listed_is_listed_once(tmp_path, as_client):
+    from server.models import DeviceType
+
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    known: dict = {}
+    req.app.state.device_controller._device_type = known.get
+
+    async def list_devices():
+        known["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+
+    req.app.state.device_controller.list_devices = list_devices
+    with pytest.raises(HTTPException) as e:
+        await api.add_session_capture.__wrapped__(
+            req, SessionCaptureRequest(simulator_udid="emulator-5554", processes=["App"]))
+    assert e.value.status_code == 422
+
+
+async def test_an_alias_the_listing_learns_is_looked_up_by_its_canonical_id(
+        tmp_path, as_client, monkeypatch):
+    """A physical iPhone named by its hardware UDID before anything listed
+    it: the listing files its type under the canonical id, which is where it
+    must be looked up (CodeRabbit)."""
+    from server.models import DeviceType
+
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    known: dict = {}
+    aliases: dict = {}
+    req.app.state.device_controller._device_type = known.get
+
+    async def list_devices():
+        known["CANON-UUID"] = DeviceType.DEVICE
+        aliases["00008030-HW"] = "CANON-UUID"
+
+    req.app.state.device_controller.list_devices = list_devices
+    monkeypatch.setattr(api.device_access, "_canonical", lambda u: aliases.get(u, u))
+    with pytest.raises(HTTPException) as e:
+        await api.add_session_capture.__wrapped__(
+            req, SessionCaptureRequest(simulator_udid="00008030-HW", processes=["App"]))
+    assert e.value.status_code == 422 and m.made == []
+
+
+async def test_a_listing_that_does_not_finish_is_could_not_tell(tmp_path, as_client):
+    """Let through, a later discovery found the Android device only after the
+    claim was made (CodeRabbit)."""
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    req.app.state.device_controller._device_type = lambda udid: None
+
+    async def hangs():
+        raise TimeoutError
+
+    req.app.state.device_controller.list_devices = hangs
+    with pytest.raises(HTTPException) as e:
+        await api.add_session_capture.__wrapped__(
+            req, SessionCaptureRequest(simulator_udid="emulator-5554", processes=["App"]))
+    assert e.value.status_code == 503 and m.made == [] and m.claims() == []
+
+
+async def test_the_asking_session_is_read_before_the_device_check_waits(tmp_path, as_client):
+    """A session that ends while the listing runs is still the claim's: read
+    afterwards as no session, the claim had nothing to end it (CodeRabbit)."""
+    from server.models import DeviceType
+
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    opened = object()
+    live = {"client:a/s1": SimpleNamespace(opened_at=opened)}
+    req.app.state.sessions = SimpleNamespace(get=lambda sid: live.get(sid))
+    known: dict = {}
+    req.app.state.device_controller._device_type = known.get
+
+    async def list_devices():
+        known[ALPHA] = DeviceType.SIMULATOR
+        live.clear()                          # the session ends meanwhile
+
+    req.app.state.device_controller.list_devices = list_devices
+    try:
+        await api.add_session_capture.__wrapped__(
+            req, SessionCaptureRequest(simulator_udid=ALPHA, processes=["Metatext"]))
+    except HTTPException:
+        pass                                  # ended: refused is fine; a session-less claim is not
+    assert all(c.session == "client:a/s1" for c in m.claims()), m.claims()
