@@ -710,6 +710,7 @@ def test_an_apks_package_is_read_with_the_newest_aapt2(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("body", [
     "echo 'ERROR: not an APK' >&2; exit 1",
+    "echo com.half.read; exit 1",                  # a failure is not believed
     "echo 'W/ziparchive: something odd'",
     "exit 0",
 ])
