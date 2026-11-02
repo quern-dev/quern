@@ -1174,7 +1174,11 @@ extension in System Settings > Privacy & Security.`,
     description: `Capture an app's traffic on a simulator you hold, without changing the
 server's local capture list or restarting its proxy. Use this, not
 set_local_capture, from a remote client (a client key cannot change that list)
-or whenever you only need capture for your own work.
+or whenever you only need capture for your own work. Simulators only: an
+Android device is refused (422) -- route it through the proxy with
+record_device_proxy_config apply=true and filter its flows by device_serial --
+and so is a physical iPhone, which is captured through its Wi-Fi proxy
+(proxy_setup_guide).
 
 You must hold the simulator (reserve_devices). Names the main proxy already
 captures are served by it; names another session already asked for share its
@@ -1207,7 +1211,7 @@ the simulator's TLS state (simulator_tls): a simulator that does not trust the
 CA is refused with 428 unless allow_passthrough is set, or the CA is installed
 first when the server's auto_install_cert is on.`,
     inputSchema: strictParams({
-      simulator_udid: z.string().describe("The simulator to capture for. You must hold it."),
+      simulator_udid: z.string().describe("The simulator to capture for. You must hold it. Not an Android device or a physical iPhone (refused with 422; see the description)."),
       processes: z
         .array(z.string())
         .min(1)

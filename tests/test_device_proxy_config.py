@@ -1144,3 +1144,29 @@ async def test_a_stalled_clear_at_release_is_bounded(monkeypatch):
         app, SimpleNamespace(holder_of=lambda udid: None), session), 2)
     [act] = [x for x in actions if x["action"] == "device_proxy_cleared"]
     assert act["ok"] is False and "did not answer" in act["error"]
+
+
+async def test_a_failed_clear_after_the_hold_ended_is_reported_and_kept_for_a_retry():
+    """The clear the route makes itself when the hold ended mid-apply: one
+    that fails, or does not read back clear, is said and its record kept for
+    the release's retry, not dropped (CodeRabbit)."""
+    ctrl = _android()
+    ctrl.adb.clear_http_proxy = AsyncMock(side_effect=RuntimeError("device offline"))
+    request = _request(ctrl)
+    session = SimpleNamespace(id="client:a/s1", opened_at="o1")
+    holding = {"now": True}
+    request.app.state.sessions = SimpleNamespace(
+        holder_of=lambda u: SimpleNamespace(session=session) if holding["now"] else None)
+
+    async def bounce(udid):
+        holding["now"] = False
+        return True
+
+    ctrl.adb.reattach_network = AsyncMock(side_effect=bounce)
+    a, b = _hosts()
+    caller = SimpleNamespace(session="client:a/s1", principal="client:a", is_owner=False)
+    with a, b, patch("server.api.proxy_certs.visibility.current_caller", return_value=caller):
+        out = await record_device_proxy_config_endpoint(
+            RecordDeviceProxyRequest(udid="PHONE1", apply=True), request)
+    assert out["hold_ended"] is True and "device offline" in out["hold_ended_clear_error"]
+    assert "PHONE1" in request.app.state.device_proxy_holds

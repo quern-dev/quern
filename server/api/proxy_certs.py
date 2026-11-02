@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import subprocess
 from datetime import UTC, datetime
@@ -983,6 +982,7 @@ async def record_device_proxy_config_endpoint(
     tracked = False
     reattached: bool | None = None
     hold_ended = False
+    hold_ended_error: str | None = None
     if body.apply:
         # Recorded before the device is written, not after: a release while
         # the write or the network bounce runs finds the record and clears it,
@@ -1010,10 +1010,17 @@ async def record_device_proxy_config_endpoint(
             # cleared here, and the device is left as the release meant.
             hold_ended = True
             tracked = False
-            with contextlib.suppress(Exception):
-                await clear_device_proxy(controller, body.udid)
-            holds = getattr(request.app.state, "device_proxy_holds", None) or {}
-            holds.pop(canonical_device_id(body.udid), None)
+            try:
+                cleared = await clear_device_proxy(controller, body.udid)
+                hold_ended_error = None if cleared["proxy_verified"] is True else (
+                    f"its proxy reads {cleared['device_proxy']} after the clear"
+                    if cleared["proxy_verified"] is False else "the clear could not be read back")
+            except Exception as e:  # noqa: BLE001 -- reported below, never raised
+                hold_ended_error = str(e) or type(e).__name__
+            if hold_ended_error is None:
+                holds = getattr(request.app.state, "device_proxy_holds", None) or {}
+                holds.pop(canonical_device_id(body.udid), None)
+            # Otherwise the record stays, for the release's retry (CodeRabbit).
 
     device_proxy, read_ok = (
         await _read_device_proxy(controller, body.udid) if applied else (None, False)
@@ -1086,6 +1093,7 @@ async def record_device_proxy_config_endpoint(
         #: The hold that applied it ended while it was applied, so it was
         #: cleared again rather than left on a device nobody holds.
         **({"hold_ended": True} if hold_ended else {}),
+        **({"hold_ended_clear_error": hold_ended_error} if hold_ended_error else {}),
     }
 
 
