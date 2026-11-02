@@ -661,10 +661,13 @@ async def _end_device_proxy(app: Any, registry: Any, session: Any, udid: str,
     if record is None or tuple(record[:2]) != (session.id, getattr(session, "opened_at", None)):
         return
     held = registry.holder_of(udid)
-    if held is not None and held.session.id != session.id:
+    # By opening, not id alone: the same name opened again holds the device
+    # under the same id, and its proxy was cleared under it.
+    if held is not None and (held.session.id, getattr(held.session, "opened_at", None)) \
+            != tuple(record[:2]):
         if held.session.principal == session.principal:
-            # The key holds it still, through another session: that session's
-            # release clears it.
+            # The key holds it still, through another session or the same name
+            # opened again: that one's release clears it.
             holds[udid] = (held.session.id, getattr(held.session, "opened_at", None), 0)
             actions.append({"udid": udid, "action": "device_proxy_handed_over", "ok": True,
                             "to": held.session.id})
