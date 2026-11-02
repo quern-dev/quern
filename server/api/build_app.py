@@ -382,7 +382,11 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
         if response.build_records:
             expected = response.build_records[0].bundle_id or None
             for install in installs:
-                await session_installs.after_install(request.app, install, expected)
+                ended = await session_installs.after_install(request.app, install, expected)
+                if note := session_installs.hold_ended_note(ended):
+                    for device in response.devices:
+                        if device.udid == install.udid:
+                            device.note = f"{device.note}; {note}" if device.note else note
         response.summary = _android_summary(response)
         return response
 
@@ -606,11 +610,13 @@ async def _build_and_install_xcode(
             await controller.install_app(str(app_path), udid)
         except DeviceError as e:
             return DeviceInstallResult(udid=udid, installed=False, error=str(e))
+        ended = {}
         if app is not None:
-            await session_installs.after_install(
+            ended = await session_installs.after_install(
                 app, before, await asyncio.to_thread(session_installs.bundle_id_of, app_path))
 
-        return DeviceInstallResult(udid=udid, installed=True, app_path=str(app_path))
+        return DeviceInstallResult(udid=udid, installed=True, app_path=str(app_path),
+                                   note=session_installs.hold_ended_note(ended))
 
     install_tasks = (
         [_install_one(u, True) for u in physical_udids]

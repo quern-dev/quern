@@ -466,6 +466,31 @@ async def test_an_erase_given_up_on_is_not_tried_a_fourth_time():
     assert ctrl.erase.await_count == si.ATTEMPTS
 
 
+async def test_an_erase_retried_after_a_failed_reboot_still_boots_it():
+    """The first attempt erased it and failed to boot it: the retry finds it
+    shut down, and must boot it all the same."""
+    s = _session()
+    app, ctrl, _ = _app(client="erase")
+    booted = [True]
+
+    async def erase(udid):
+        booted[0] = False                            # simctl erase shuts it down
+
+    async def boot(udid):
+        if ctrl.boot.await_count == 1:
+            raise RuntimeError("boot timed out")
+        booted[0] = True
+
+    ctrl.erase = AsyncMock(side_effect=erase)
+    ctrl.boot = AsyncMock(side_effect=boot)
+    ctrl.list_devices = AsyncMock(side_effect=lambda: [SimpleNamespace(
+        udid=SIM, state=DeviceState.BOOTED if booted[0] else DeviceState.SHUTDOWN)])
+    assert (await _release(app, s))[0]["ok"] is False
+    assert (await _release(app, s))[0] == {"udid": SIM, "ok": True, "action": "erased",
+                                           "rebooted": True}
+    assert booted[0] and not app.state.session_installs_was_booted
+
+
 async def test_erase_on_an_android_device_falls_back_to_uninstall():
     s = _session()
     app, ctrl, _ = _app(client="erase", kind=DeviceType.ANDROID_EMULATOR,
@@ -660,6 +685,65 @@ async def test_an_xcode_install_unseen_is_refused_on_that_device(tmp_path):
     result = next(d for d in resp.devices if d.udid == SIM)
     assert result.installed is False and "Nothing was installed" in result.error
     ctrl.install_app.assert_not_awaited()
+
+
+async def test_a_gradle_build_says_when_the_hold_ended_during_its_install(monkeypatch):
+    """Released while the build ran: the app is removed as the install
+    finishes, and the device's result says so rather than only installed."""
+    from server.api import build_android
+    from server.api import build_app as build_api
+
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s), kind=DeviceType.ANDROID_EMULATOR)
+    monkeypatch.setattr(build_api, "_is_gradle", lambda p: True)
+    monkeypatch.setattr(build_android, "_android_targets", AsyncMock(return_value=[EMU]))
+
+    async def build(controller, body):
+        state["apps"].append("com.example.built")
+        app.state.session_installs.clear()           # the release ran meanwhile
+        return {"devices": [{"udid": EMU, "installed": True}], "all_installed": True,
+                "build_records": [{
+                    "build_id": "b", "created_at": "2026-11-01T00:00:00Z", "project_path": "/p",
+                    "scheme": "debug", "configuration": "debug", "platform": "android",
+                    "app_path": "/p/app.apk", "bundle_id": "com.example.built"}]}
+
+    monkeypatch.setattr(build_android, "build_and_install", build)
+    monkeypatch.setattr("server.visibility.current_caller", lambda: SimpleNamespace(
+        session=s.id, principal=s.principal, is_owner=False))
+    resp = await build_api.build_and_install(SimpleNamespace(app=app),
+                                             build_api.BuildAndInstallRequest(project_path="/p"))
+    assert "hold ended" in resp.devices[0].note and "com.example.built" in resp.devices[0].note
+    assert state["apps"] == []
+
+
+async def test_an_xcode_install_says_when_the_hold_ended_during_it(tmp_path):
+    import plistlib
+
+    from server.api import build_app as build_api
+    from server.models import BuildResult
+
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s))
+    built = tmp_path / "App.app"
+    built.mkdir()
+    (built / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.x.app"}))
+
+    async def install(app_path, udid):
+        state["apps"].append("com.x.app")
+        app.state.session_installs.clear()           # the release ran meanwhile
+
+    ctrl.install_app = AsyncMock(side_effect=install)
+    ctrl.simctl.boot = AsyncMock()
+    with patch.object(build_api, "_build", AsyncMock(return_value=BuildResult(succeeded=True))), \
+         patch.object(build_api, "_find_app", lambda *a: built), \
+         patch.object(build_api, "_record", AsyncMock(return_value=None)), \
+         patch.object(build_api, "_finish_records", AsyncMock(return_value=[])), \
+         patch("server.visibility.current_caller", lambda: _caller(s)):
+        resp = await build_api._build_and_install_xcode(
+            ctrl, build_api.BuildAndInstallRequest(project_path="/p", scheme="S"), MagicMock(),
+            "-project", "/p", [], [SIM], {"iphonesimulator": tmp_path / "derived"}, app=app)
+    assert "com.x.app was removed again" in resp.devices[0].note
+    assert state["apps"] == []
 
 
 async def test_the_release_loop_runs_the_policy():

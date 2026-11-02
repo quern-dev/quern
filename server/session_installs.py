@@ -133,8 +133,16 @@ def _erase_attempts(app: Any) -> dict:
     return tries
 
 
+def _was_booted(app: Any) -> dict:
+    booted = getattr(app.state, "session_installs_was_booted", None)
+    if booted is None:
+        booted = app.state.session_installs_was_booted = {}
+    return booted
+
+
 def _finish(app: Any, key: tuple) -> None:
     _erase_attempts(app).pop(key, None)
+    _was_booted(app).pop(key, None)
     finished = _finished(app)
     finished[key] = True
     while len(finished) > _FINISHED_MAX:
@@ -160,6 +168,19 @@ def bundle_id_of(app_path: str | Path) -> str | None:
         return None
     bundle_id = info.get("CFBundleIdentifier") if isinstance(info, dict) else None
     return bundle_id if isinstance(bundle_id, str) and bundle_id else None
+
+
+def hold_ended_note(ended: dict) -> str | None:
+    """`after_install`'s answer as a build's per-device note, or None."""
+    if not ended.get("hold_ended"):
+        return None
+    if ended.get("removed"):
+        return (f"the session's hold ended during this install, so {ended['removed'][0]} "
+                "was removed again")
+    left = ", ".join(ended.get("left") or []) or "nothing new"
+    why = f" (removing it failed: {ended['error']})" if ended.get("error") else ""
+    return (f"the session's hold ended during this install, and what it added was left on "
+            f"the device: {left}{why}")
 
 
 def _opening(session: Any) -> tuple:
@@ -283,7 +304,8 @@ async def end_for_release(app: Any, registry: Any, session: Any, udid: str,
         record.ending = True
     try:
         if erase:
-            done = await asyncio.wait_for(_erase(controller, session, udid), TIMEOUT_S)
+            done = await asyncio.wait_for(_erase(app, controller, session, udid, key),
+                                          TIMEOUT_S)
             _finish(app, key)
         else:
             done = await asyncio.wait_for(_uninstall(controller, record, udid), TIMEOUT_S)
@@ -325,11 +347,16 @@ async def _uninstall(controller: Any, record: InstallRecord, udid: str) -> dict:
                         "there, so their apps were left"} if record.unclear else {})}
 
 
-async def _erase(controller: Any, session: Any, udid: str) -> dict:
+async def _erase(app: Any, controller: Any, session: Any, udid: str, key: tuple) -> dict:
     reservation = (getattr(session, "reservations", None) or {}).get(udid)
     shutting_down = (getattr(reservation, "on_release", "") == "shutdown_booted"
                      and getattr(reservation, "booted_here", False))
-    was_booted = await _is_booted(controller, udid)
+    # Read before the first attempt only: a retry after an erase whose reboot
+    # failed finds it shut down, and would leave it so.
+    booted = _was_booted(app)
+    if key not in booted:
+        booted[key] = await _is_booted(controller, udid)
+    was_booted = booted[key]
     await controller.erase(udid)
     rebooted = False
     if was_booted and not shutting_down:
