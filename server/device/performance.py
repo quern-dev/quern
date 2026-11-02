@@ -572,12 +572,13 @@ async def device_stream(uuid: str, bundle_id: str, interval: float):
         except TimeoutError:
             raise DeviceError(f"{uuid[:8]} did not answer within {_ANSWER_SLACK_S:g}s",
                               tool="pymobiledevice3") from None
-        async with lib.DvtProvider(rsd) as dvt:
+        async with _exits_within(lib.DvtProvider(rsd), _CLOSE_S) as dvt:
             fps: dict = {"value": None, "why": "no FPS reading yet", "at": None}
             feed = asyncio.create_task(_fps_feed(lib.Graphics, dvt, fps))
             try:
                 while True:
-                    async with asyncio.timeout(_ANSWER_SLACK_S), lib.ProcessControl(dvt) as pc:
+                    async with asyncio.timeout(_ANSWER_SLACK_S), \
+                            _exits_within(lib.ProcessControl(dvt), _CLOSE_S) as pc:
                         pid = await pc.process_identifier_for_bundle_identifier(bundle_id)
                     if not pid:
                         # Said after the wait, so its window is the time it
@@ -598,8 +599,9 @@ async def device_stream(uuid: str, bundle_id: str, interval: float):
                     await asyncio.sleep(_NOT_RUNNING_POLL_S)
             finally:
                 feed.cancel()
-                with contextlib.suppress(BaseException):
-                    await feed
+                # Bounded, and without swallowing this stream's own
+                # cancellation, as a suppressed `await feed` would.
+                await asyncio.wait({feed}, timeout=_CLOSE_S)
     except (DeviceError, asyncio.CancelledError, GeneratorExit):
         raise
     except Exception as e:  # pymobiledevice3 raises its own hierarchy
@@ -613,8 +615,30 @@ async def device_stream(uuid: str, bundle_id: str, interval: float):
                 await rsd.close()
 
 
-#: How long closing a phone's Instruments connection may take.
+#: How long closing each part of a phone's Instruments connection may take:
+#: each channel's stop, then the connection. A recording gives its device back
+#: only once all of it has returned, so each is bounded (CodeRabbit).
 _CLOSE_S = 5.0
+
+
+@contextlib.asynccontextmanager
+async def _exits_within(cm, seconds: float):
+    """`async with cm`, its exit bounded: a channel's stop command can wait on
+    a stalled transport, and the stream's close must end. An exit that times
+    out or fails is given up on -- the connection is closed after it anyway --
+    and whatever was raised inside still propagates."""
+    value = await cm.__aenter__()
+    try:
+        yield value
+    except BaseException as e:
+        with contextlib.suppress(Exception):
+            async with asyncio.timeout(seconds):
+                await cm.__aexit__(type(e), e, e.__traceback__)
+        raise
+    else:
+        with contextlib.suppress(Exception):
+            async with asyncio.timeout(seconds):
+                await cm.__aexit__(None, None, None)
 
 
 async def _sysmon_stream(Sysmontap, dvt, uuid: str, bundle_id: str, pid: int,
@@ -629,7 +653,8 @@ async def _sysmon_stream(Sysmontap, dvt, uuid: str, bundle_id: str, pid: int,
     wrote nothing at all (live).
     """
     previous: dict | None = None
-    async with await Sysmontap.create(dvt, interval=max(100, int(interval * 1000))) as s:
+    sysmontap = await Sysmontap.create(dvt, interval=max(100, int(interval * 1000)))
+    async with _exits_within(sysmontap, _CLOSE_S) as s:
         async for procs in s.iter_processes():
             mine = next((p for p in procs if p.get("pid") == pid), None)
             if mine is None:
@@ -700,7 +725,7 @@ async def _fps_feed(Graphics, dvt, fps: dict) -> None:
     first (taken before any interval has elapsed). FPS is a bonus: a feed
     that fails says why in `fps`, and the samples carry on without it."""
     try:
-        async with Graphics(dvt) as g:
+        async with _exits_within(Graphics(dvt), _CLOSE_S) as g:
             n = 0
             async for ev in g:
                 n += 1

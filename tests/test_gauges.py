@@ -450,6 +450,32 @@ class TestOnePerDevice:
         async with asyncio.timeout(5):
             await stream.aclose()
 
+    @pytest.mark.parametrize("stalls", ["sysmontap", "graphics", "dvt", "process_control"])
+    async def test_every_channel_stop_is_bounded(self, monkeypatch, stalls):
+        """Each channel sends a stop as it closes, and any can wait on a stalled
+        transport; the stream's close must end anyway (CodeRabbit)."""
+        monkeypatch.setattr(performance, "_device_address", AsyncMock(return_value=("::1", 1)))
+        monkeypatch.setattr(performance, "_CLOSE_S", 0.2)
+        ns = 10**9
+        lib, rsd, _ = _fake_lib(pids=[42, 42], ticks=[_tick(42, i * ns, 0, (i + 1) * ns)
+                                                      for i in range(4)],
+                                fps_events=[{"CoreAnimationFramesPerSecond": 60.0}])
+
+        async def stall(*a):
+            await asyncio.Event().wait()
+        target = {"sysmontap": _FakeSysmontap, "graphics": lib.Graphics,
+                  "dvt": lib.DvtProvider, "process_control": lib.ProcessControl}[stalls]
+        monkeypatch.setattr(target, "__aexit__", stall)
+        monkeypatch.setattr(performance, "_pmd3", lambda: lib)
+        stream = performance.device_stream("UUID", "com.x", 1.0)
+        # A stalled exit is cut off, and the stream goes on (process control's
+        # runs before the first sample) or ends (the rest, on close).
+        snap = await asyncio.wait_for(anext(stream), 5)
+        assert snap.running is True
+        async with asyncio.timeout(5):
+            await stream.aclose()
+        rsd.close.assert_awaited_once()               # the connection is closed after it
+
     async def test_shutdown_waits_for_a_failed_recordings_stream(self, tmp_path):
         class SlowToClose(FakeGauges):
             async def _stream(self):
