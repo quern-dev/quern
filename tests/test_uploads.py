@@ -193,6 +193,13 @@ class FakeController:
         self.installed: list[tuple[str, str | None, bytes | None]] = []
         self.fail = fail
 
+    async def resolve_udid(self, udid=None):
+        return udid
+
+    async def list_apps(self, udid=None):
+        # What a release's clean-up notes before an install (#581).
+        return [], udid
+
     async def install_app(self, app_path, udid=None):
         from pathlib import Path
 

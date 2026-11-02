@@ -655,10 +655,29 @@ async def install_app(request: Request, body: InstallAppRequest):
     with action("install_app", category="device.lifecycle") as act, (
             store.installing(upload.id) if upload else contextlib.nullcontext()):
         act.detail = upload.name if upload else body.app_path
+        # What is installed now, so its release can remove what this adds
+        # (#581). Refused rather than installed when it cannot be told.
+        from server import session_installs
+
+        caller = visibility.current_caller()
+        target, before = body.udid, None
         try:
-            udid = await controller.install_app(app_path=app_path, udid=body.udid)
+            if caller.session and session_installs.policy_for(
+                    request.app, caller.principal) != "none":
+                target = await controller.resolve_udid(body.udid)
+                before = await session_installs.before_install(request.app, target, caller)
+        except session_installs.BaselineUnavailable as e:
+            raise HTTPException(503, (
+                f"Could not list the apps on the device before installing ({e}), and "
+                "its release needs that to remove what this installs. Try again."
+            )) from None
         except DeviceError as e:
             raise _without_upload_path(_handle_device_error(e), upload) from None
+        try:
+            udid = await controller.install_app(app_path=app_path, udid=target)
+        except DeviceError as e:
+            raise _without_upload_path(_handle_device_error(e), upload) from None
+        await session_installs.after_install(request.app, udid, before)
         act.udid = udid
         if upload:
             # Installed, so gone: kept on a failure, to try again within the hour.

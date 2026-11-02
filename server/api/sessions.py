@@ -543,6 +543,10 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
         # First: the proxy record is the session's, not the key's, so it is
         # handed on rather than skipped with the rest (review).
         await _end_device_proxy(app, registry, session, udid, actions)
+        # What it installed there (#581), by the same rule: the session's.
+        from server import session_installs
+
+        await session_installs.end_for_release(app, registry, session, udid, actions)
         held = registry.holder_of(udid)
         if held is not None and held.session.principal == session.principal:
             continue                       # still the key's, through another session

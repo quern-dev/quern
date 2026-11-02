@@ -287,8 +287,27 @@ def sessions_settings() -> dict:
         note = (f"sessions.visibility is {visibility!r}, which is neither \"shared\" nor "
                 "\"blind\": running shared, so every client sees every device's data")
         visibility = "shared"
+    client_release, client_note = _release_policy(
+        raw, "client_release", "uninstall", ("uninstall", "erase", "none"))
+    owner_release, owner_note = _release_policy(
+        raw, "owner_release", "none", ("none", "uninstall", "erase"))
     return {"grace_seconds": clamp_grace(raw.get("grace_seconds")),
-            "visibility": visibility, "visibility_note": note}
+            "visibility": visibility, "visibility_note": note,
+            "client_release": client_release, "owner_release": owner_release,
+            "release_notes": [n for n in (client_note, owner_note) if n]}
+
+
+def _release_policy(raw: dict, key: str, default: str,
+                    allowed: tuple[str, ...]) -> tuple[str, str | None]:
+    """`sessions.client_release` / `owner_release` (#581): what a released
+    device's session installed is done with. Anything not allowed is the
+    default, and the note says so -- a typo must not quietly keep every
+    client's apps on a shared machine, nor erase the owner's simulators."""
+    value = raw.get(key, default)
+    if isinstance(value, str) and value.strip().lower() in allowed:
+        return value.strip().lower(), None
+    return default, (f"sessions.{key} is {value!r}, which is not one of "
+                     f"{', '.join(allowed)}: using {default!r}")
 
 
 def viewer_settings() -> dict:
