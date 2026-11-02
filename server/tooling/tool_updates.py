@@ -46,6 +46,7 @@ UNMANAGED_REASONS = {
     "xcode": "ships inside Xcode; update Xcode instead",
     "system": "part of the OS image",
     "unknown": "quern cannot tell how this was installed",
+    "quern": "quern fetches this itself, at the version its own release pins",
 }
 
 # Floors for CLI sites. Deliberately empty, and that is the finding rather than
@@ -321,6 +322,14 @@ async def _plan_one(
         name=site.name, role=site.role, action="unknown", source=site.source,
         current=site.version, floor=floor, note=upgrade_note(site),
     )
+
+    if site.source == "quern":
+        # Not setup's to install: quern fetches it when it is first needed,
+        # so "run quern setup" would send the reader nowhere.
+        base.action = "unmanaged"
+        base.reason = UNMANAGED_REASONS["quern"] + (
+            "" if site.available else "; not downloaded yet: it is fetched on first use")
+        return base
 
     if not site.available:
         base.action = "unknown"

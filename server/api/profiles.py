@@ -18,19 +18,36 @@ from server.config import profile_settings
 from server.device.ios.devicectl import spellings_of
 from server.logging_ext import current_action
 from server.models import DeviceError, DeviceType, StartProfileRequest
+from server.profiling import android as ad
 from server.profiling import xctrace as xt
 from server.profiling.manager import ID, ProfileError, ProfileManager
 
 router = APIRouter(prefix="/api/v1/profiles", tags=["profiles"])
 
-#: What a profile serves. The trace is a bundle (a directory), so it is
-#: zipped on request rather than kept twice.
-FILES = ("summary.json", "xctrace.log", "profile.trace.zip")
+#: What a profile serves. An iOS trace is a bundle (a directory), so it is
+#: zipped on request rather than kept twice; an Android trace is one file.
+FILES = ("summary.json", "xctrace.log", "profile.trace.zip", "perfetto.log", "profile.pftrace")
 _ID = ID
 
 RELAUNCH_NOTE = (
     "xctrace launched {app} for this profile and terminates it when the profile stops: "
     "anything the agent had on screen in it is gone. Relaunch it to carry on.")
+ANDROID_NOTE = (
+    "perfetto is recording the whole device; {app} is not relaunched, so drive it as it is. "
+    "The app's own work is in the trace only while it runs.")
+#: Each trace_processor state, as the start's answer says it.
+TP_NOTES = {
+    "installed": "",
+    "downloading": ("trace_processor {version} is downloading ({detail}) while this records; "
+                    "the summary reads the trace with it if it is ready by the stop, and says "
+                    "what the device reported if not"),
+    "failed": ("trace_processor could not be fetched ({detail}); the summary will be what the "
+               "device reported: frames from gfxinfo, hangs InputDispatcher logged, CPU from "
+               "/proc. The trace is kept for ui.perfetto.dev"),
+    "disabled": ("trace_processor is turned off (config.json profiles.trace_processor); the "
+                 "summary will be what the device reported"),
+    "unsupported": "{detail}; the summary will be what the device reported",
+}
 #: Measured: taps right after start found nothing, and on an iPhone the
 #: first one answered after 12.7 s; the app launches slowly under Instruments.
 LAUNCHING_NOTE = (
@@ -90,9 +107,7 @@ async def start_profile(request: Request, body: StartProfileRequest) -> dict:
     elif kind == DeviceType.DEVICE:
         platform, device = "device", _hardware_udid(udid)
     elif kind in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE):
-        raise HTTPException(status_code=400, detail=(
-            "profiling Android is not available yet (#245 phase 4); get_performance reads "
-            "an Android app's CPU, memory and frames now"))
+        platform, device = "android", udid
     else:
         raise HTTPException(status_code=400, detail=f"could not tell what kind of device {udid} is")
 
@@ -110,7 +125,17 @@ async def start_profile(request: Request, body: StartProfileRequest) -> dict:
     except ProfileError as e:
         raise _error(e) from e
     view = await asyncio.to_thread(profile.view)
-    notes = [RELAUNCH_NOTE.format(app=body.bundle_id), LAUNCHING_NOTE.format(app=body.bundle_id)]
+    tp = None
+    if platform == "android":
+        notes = [ANDROID_NOTE.format(app=body.bundle_id)]
+        # Said here, before the stop: whether the summary will read the trace.
+        tp = manager.trace_processor.status().as_dict()
+        notes.append(TP_NOTES.get(tp["state"], "").format(**tp))
+        purpose = ad.PRESETS[body.preset].purpose
+    else:
+        notes = [RELAUNCH_NOTE.format(app=body.bundle_id),
+                 LAUNCHING_NOTE.format(app=body.bundle_id)]
+        purpose = xt.PRESETS[body.preset].purpose
     # The budget is the server's, so a start can remove anyone's oldest. Only
     # the caller's own are named: another principal's ids are not its to see.
     mine = [e["id"] for e in room["evicted"] if e["principal"] == caller.principal]
@@ -121,8 +146,11 @@ async def start_profile(request: Request, body: StartProfileRequest) -> dict:
                      f"{room['budget_bytes'] // 2**20} MB kept for profiles: {removed}")
     if note := profile_settings()["note"]:
         notes.append(note)
-    answer = {**view, "purpose": xt.PRESETS[body.preset].purpose,
-              "stops_at": f"after {body.time_limit_s}s, or on stop_profile", "notes": notes}
+    answer = {**view, "purpose": purpose,
+              "stops_at": f"after {body.time_limit_s}s, or on stop_profile",
+              "notes": [n for n in notes if n]}
+    if tp is not None:
+        answer["trace_processor"] = tp
     if caller.is_owner:
         answer["disk"] = {"used_bytes": room["used_bytes"], "budget_bytes": room["budget_bytes"]}
     return answer
@@ -177,8 +205,12 @@ async def get_profile_file(request: Request, profile_id: str, name: str):
     path = profile.dir / name
     if path.is_symlink() or not path.is_file():
         raise HTTPException(status_code=404, detail=f"{profile_id} has no {name} yet")
+    if name == "profile.pftrace" and profile.state != "finished":
+        raise HTTPException(status_code=409, detail=(
+            f"{profile_id} is {profile.state}: its trace is offered once finished"))
     return FileResponse(path, filename=name, media_type=(
-        "application/json" if name.endswith(".json") else "text/plain"))
+        "application/json" if name.endswith(".json") else
+        "application/octet-stream" if name.endswith(".pftrace") else "text/plain"))
 
 
 def _remove(path: Path) -> None:

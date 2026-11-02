@@ -2004,7 +2004,8 @@ class StartProfileRequest(BaseModel):
 
     bundle_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_.-]+$")
     udid: str | None = None
-    preset: Literal["hangs", "cpu", "hitches", "launch"] = "hangs"
+    #: hitches and launch are iOS's (Instruments templates), frames Android's.
+    preset: Literal["hangs", "cpu", "hitches", "launch", "frames"] = "hangs"
     time_limit_s: int = Field(default=30, ge=1, le=300)
 
 
