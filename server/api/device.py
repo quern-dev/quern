@@ -678,10 +678,17 @@ async def install_app(request: Request, body: InstallAppRequest):
             # Holds the upload itself: shielded, it outlives a cancelled
             # request and that request's hold with it.
             with store.installing(upload.id) if upload else contextlib.nullcontext():
-                udid = await controller.install_app(app_path=app_path, udid=target)
-                ended = await session_installs.after_install(request.app, before, (
-                    await asyncio.to_thread(session_installs.bundle_id_of, app_path)
-                    if before is not None else None))
+                expected = (await asyncio.to_thread(session_installs.bundle_id_of, app_path)
+                            if before is not None else None)
+                try:
+                    udid = await controller.install_app(app_path=app_path, udid=target)
+                except DeviceError:
+                    # Read anyway: a backend can fail after it changed the
+                    # device, and what it left is the session's to remove.
+                    await session_installs.after_install(request.app, before, expected,
+                                                         failed=True)
+                    raise
+                ended = await session_installs.after_install(request.app, before, expected)
             if upload:
                 # Installed, so gone: kept on a failure, to try again within the hour.
                 store.discard(upload.id)

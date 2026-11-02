@@ -382,8 +382,11 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
             # meanwhile is not taken for it. No record, no build: nothing installed.
             if response.build_records:
                 expected = response.build_records[0].bundle_id or None
+                installed = {d.udid: d.installed for d in response.devices}
                 for install in installs:
-                    ended = await session_installs.after_install(request.app, install, expected)
+                    ended = await session_installs.after_install(
+                        request.app, install, expected,
+                        failed=install is not None and not installed.get(install.udid, True))
                     if note := session_installs.hold_ended_note(ended):
                         for device in response.devices:
                             if device.udid == install.udid:
@@ -616,11 +619,18 @@ async def _build_and_install_xcode(
                 f"Nothing was installed: its apps could not be listed first ({e}), and "
                 "its release needs that list to remove what this installs. Try again."))
         async def install_and_record() -> dict:
-            await controller.install_app(str(app_path), udid)
+            expected = (await asyncio.to_thread(session_installs.bundle_id_of, app_path)
+                        if app is not None else None)
+            try:
+                await controller.install_app(str(app_path), udid)
+            except DeviceError:
+                # Read anyway: a backend can fail after it changed the device.
+                if app is not None:
+                    await session_installs.after_install(app, before, expected, failed=True)
+                raise
             if app is None:
                 return {}
-            return await session_installs.after_install(
-                app, before, await asyncio.to_thread(session_installs.bundle_id_of, app_path))
+            return await session_installs.after_install(app, before, expected)
 
         try:
             if before is None:

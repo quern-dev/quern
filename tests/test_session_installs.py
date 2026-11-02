@@ -1132,6 +1132,95 @@ async def test_a_cancelled_gradle_build_is_still_recorded(monkeypatch):
     assert app.state.session_installs[EMU].added == {"com.example.built"}
 
 
+@pytest.mark.parametrize("left_behind, added, failed", [
+    (("com.example.mine",), {"com.example.mine"}, 0),   # failed after installing
+    ((), set(), 1),                                       # failed, nothing changed
+])
+async def test_a_failed_direct_install_is_read_all_the_same(monkeypatch, left_behind, added,
+                                                           failed):
+    from fastapi import HTTPException
+
+    from server.api import device as device_api
+    from server.models import DeviceError, InstallAppRequest
+
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s))
+    ctrl.resolve_udid = AsyncMock(return_value=SIM)
+
+    async def fails(app_path, udid):
+        state["apps"].extend(left_behind)
+        raise DeviceError("install did not finish", tool="simctl")
+
+    ctrl.install_app = AsyncMock(side_effect=fails)
+    app.state.uploads = MagicMock()
+    monkeypatch.setattr(device_api, "_get_controller", lambda r: ctrl)
+    monkeypatch.setattr("server.visibility.current_caller", lambda: SimpleNamespace(
+        session=s.id, principal=s.principal, is_owner=False))
+    with pytest.raises(HTTPException):
+        await device_api.install_app(SimpleNamespace(app=app),
+                                     InstallAppRequest(app_path="/tmp/x.app", udid=SIM))
+    record = app.state.session_installs[SIM]
+    assert (record.added, record.failed, record.reinstalls) == (added, failed, 0)
+    if failed:
+        app.state.sessions.held = None
+        assert (await _release(app, s))[0]["failed_installs"] == 1
+
+
+async def test_a_gradle_device_that_failed_to_install_is_not_a_reinstall(monkeypatch):
+    from server.api import build_android
+    from server.api import build_app as build_api
+
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s), kind=DeviceType.ANDROID_EMULATOR)
+    monkeypatch.setattr(build_api, "_is_gradle", lambda p: True)
+    monkeypatch.setattr(build_android, "_android_targets", AsyncMock(return_value=[EMU]))
+
+    async def build(controller, body):
+        return {"devices": [{"udid": EMU, "installed": False, "error": "no APK fits"}],
+                "all_installed": False, "build_records": [{
+                    "build_id": "b", "created_at": "2026-11-01T00:00:00Z", "project_path": "/p",
+                    "scheme": "debug", "configuration": "debug", "platform": "android",
+                    "app_path": "/p/app.apk", "bundle_id": "com.example.built"}]}
+
+    monkeypatch.setattr(build_android, "build_and_install", build)
+    monkeypatch.setattr("server.visibility.current_caller", lambda: SimpleNamespace(
+        session=s.id, principal=s.principal, is_owner=False))
+    await build_api.build_and_install(SimpleNamespace(app=app),
+                                      build_api.BuildAndInstallRequest(project_path="/p"))
+    record = app.state.session_installs[EMU]
+    assert (record.failed, record.reinstalls) == (1, 0)
+
+
+async def test_a_failed_xcode_install_is_read_all_the_same(tmp_path):
+    import plistlib
+
+    from server.api import build_app as build_api
+    from server.models import BuildResult, DeviceError
+
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s))
+    built = tmp_path / "App.app"
+    built.mkdir()
+    (built / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.x.app"}))
+
+    async def fails(app_path, udid):
+        state["apps"].append("com.x.app")
+        raise DeviceError("devicectl lost the device", tool="devicectl")
+
+    ctrl.install_app = AsyncMock(side_effect=fails)
+    ctrl.simctl.boot = AsyncMock()
+    with patch.object(build_api, "_build", AsyncMock(return_value=BuildResult(succeeded=True))), \
+         patch.object(build_api, "_find_app", lambda *a: built), \
+         patch.object(build_api, "_record", AsyncMock(return_value=None)), \
+         patch.object(build_api, "_finish_records", AsyncMock(return_value=[])), \
+         patch("server.visibility.current_caller", lambda: _caller(s)):
+        resp = await build_api._build_and_install_xcode(
+            ctrl, build_api.BuildAndInstallRequest(project_path="/p", scheme="S"), MagicMock(),
+            "-project", "/p", [], [SIM], {"iphonesimulator": tmp_path / "derived"}, app=app)
+    assert resp.devices[0].installed is False
+    assert app.state.session_installs[SIM].added == {"com.x.app"}
+
+
 async def test_the_release_loop_runs_the_policy():
     """Through _end_client_work, which every release, expiry and revocation
     runs, not only the module on its own."""

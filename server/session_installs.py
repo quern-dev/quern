@@ -95,6 +95,8 @@ class InstallRecord:
     reinstalls: int = 0
     #: Installs whose effect could not be told; their apps are left.
     unclear: int = 0
+    #: Installs that failed and left nothing new: not reinstalls.
+    failed: int = 0
     attempts: int = 0
     #: Set while its release cleans up: an install finishing then is past the
     #: clean-up, and removes its own app as if the hold had ended.
@@ -279,10 +281,12 @@ async def before_install(app: Any, udid: str, caller: Any) -> Install | None:
 
 
 async def after_install(app: Any, install: Install | None,
-                        expected: str | None = None) -> dict:
+                        expected: str | None = None, *, failed: bool = False) -> dict:
     """Record what an install added. `expected` is the bundle id or package
     the artifact installs as, when it could be read: then only that app is
-    the install's. Returns fields for the install's answer: none normally;
+    the install's. `failed`: the install reported an error -- read all the
+    same, since a backend can fail after changing the device. Returns fields
+    for the install's answer: none normally;
     when the hold ended while the install ran, the release has cleaned up
     without this app, so it is removed here instead, and the answer says so.
     Never raises."""
@@ -324,7 +328,10 @@ async def after_install(app: Any, install: Install | None,
             return {"hold_ended": True, "left": [bundle_id], "error": str(e) or type(e).__name__}
         return {"hold_ended": True, "removed": [bundle_id]}
     if added is not None and not added:
-        record.reinstalls += 1
+        if failed:
+            record.failed += 1
+        else:
+            record.reinstalls += 1
     elif known:
         record.added |= added
     else:
@@ -436,6 +443,7 @@ async def _uninstall(controller: Any, record: InstallRecord, udid: str,
         record.removed.append(bundle_id)
     return {"action": "installs_removed", "removed": list(record.removed),
             **({"installs_adding_nothing": record.reinstalls} if record.reinstalls else {}),
+            **({"failed_installs": record.failed} if record.failed else {}),
             **({"unclear_installs": record.unclear,
                 "note": "some installs could not be told apart from what was already "
                         "there, so their apps were left"} if record.unclear else {})}
