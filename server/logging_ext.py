@@ -322,3 +322,10 @@ def reset_current_action(
 ) -> None:
     """Restore whatever was current before, so nesting cannot leak."""
     _CURRENT.reset(token)
+
+
+def clear_current_action() -> None:
+    """No action is current in this task from here on. For background work
+    an action started: a task copies its creator's context, so without this
+    it carries that action -- long finished -- for as long as it runs."""
+    _CURRENT.set(None)

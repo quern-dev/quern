@@ -1011,6 +1011,16 @@ class RecordingStartRequest(BaseModel):
         "`list_recordings` filters by it, so subsystems sharing a server can tell "
         "their runs apart. A label, not ownership: any caller can still stop any "
         "recording."))
+    gauges: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]+$", description=(
+        "Also sample this app's CPU, memory and threads -- and frames on Android, display "
+        "FPS on a physical iPhone -- every `gauge_interval_s`, by bundle id or package "
+        "(#245). Written as `gauge` lines; `get_trace` gives each action the peaks of "
+        "the samples over it. An app not running is sampled as not running until it "
+        "starts. One recording with gauges per device."))
+    gauge_interval_s: float = Field(default=1.0, ge=0.5, le=10.0, description=(
+        "Seconds per gauge sample. Each sample's CPU is an average over its whole "
+        "interval, so a shorter one resolves a short action better and asks more of "
+        "the device."))
 
 
 class RecordingKeyframeRequest(BaseModel):
@@ -1321,6 +1331,10 @@ class TracedAction(BaseModel):
     #: In a trace over a recording with video: `{path, offset_s}` -- the
     #: movie, and the offset to seek to for this action's start -- or null.
     video: dict | None = None
+    #: The app's CPU, memory and frames over this action, from a recording
+    #: sampling its device's gauges (#245): see `server/gauges.py`. Null when
+    #: nothing samples that device -- `gauges` on the response says what does.
+    gauges: dict | None = None
     flows: list[TraceFlow] = []
     logs: list[TraceLogLine] = []
     overlaps: list[str] = []
@@ -1360,6 +1374,10 @@ class TraceResponse(BaseModel):
     #: Set for a trace read from a recording (#364): where it was read from,
     #: whether it was stopped cleanly, and the spans it says it does not cover.
     recording: dict | None = None
+    #: What sampled gauges for the actions above (#245): per device, the app,
+    #: the interval and the recording. Empty when nothing did -- the reason
+    #: every action's `gauges` is null, said once rather than per action.
+    gauges: dict[str, dict] = {}
 
 
 class SimulatorTls(BaseModel):
@@ -1967,8 +1985,10 @@ class PerformanceSnapshot(BaseModel):
     cpu_percent: float | None = None
     memory_bytes: int | None = None
     #: What `memory_bytes` measures: `phys_footprint` on iOS (the number Xcode
-    #: and Activity Monitor show) or `pss` on Android (Android Studio's).
-    memory_kind: Literal["phys_footprint", "pss"] | None = None
+    #: and Activity Monitor show) or `pss` on Android (Android Studio's) --
+    #: `rss` in a recording's gauges, which read the kernel's figure rather
+    #: than ask the app every second.
+    memory_kind: Literal["phys_footprint", "pss", "rss"] | None = None
     threads: int | None = None
     #: Android only.
     frames: FrameStats | None = None

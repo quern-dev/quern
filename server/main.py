@@ -22,7 +22,7 @@ import os
 import signal
 import sys
 import time
-from collections.abc import AsyncGenerator, Iterable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -234,6 +234,28 @@ def _log_keyboards(actions: list[dict], when: str) -> None:
                            "again", a["udid"], a.get("ime"), when, a.get("error"))
 
 
+#: How long a recording's gauges wait for the device controller at startup.
+GAUGE_CONTROLLER_WAIT_S = 20.0
+
+
+async def _gauge_stream(app: FastAPI, udid: str, app_id: str,
+                        interval: float) -> AsyncIterator[object]:
+    """A recording's gauge stream, once the device controller exists.
+
+    A recording resumed at startup starts sampling before the lifespan has
+    made the controller, and asking then wrote a failure into every resumed
+    recording -- `gauges_lost`, with no device ever asked (CodeRabbit). So it
+    waits for the controller, and fails only if it never comes."""
+    deadline = time.monotonic() + GAUGE_CONTROLLER_WAIT_S
+    while (controller := getattr(app.state, "device_controller", None)) is None:
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"no device controller after {GAUGE_CONTROLLER_WAIT_S:g}s")
+        await asyncio.sleep(0.1)
+    async with contextlib.aclosing(controller.gauge_stream(udid, app_id, interval)) as stream:
+        async for snap in stream:
+            yield snap
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage server startup and shutdown."""
@@ -323,7 +345,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Resolved on first use, not at startup: `quern setup` normally built
         # it already (#285), but sources newer than the binary -- a pull --
         # rebuild here, and a recording without video never needs it.
-        video=VideoRecorder(binary=build_media_engine))
+        video=VideoRecorder(binary=build_media_engine),
+        # Looked up per stream, not now: the controller is the app's (#245).
+        gauges=lambda udid, app_id, interval: _gauge_stream(app, udid, app_id, interval))
     try:
         resumed = await app.state.recordings.resume_all()
     except Exception:  # noqa: BLE001 -- a recording must never stop the server starting

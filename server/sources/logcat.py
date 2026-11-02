@@ -31,7 +31,12 @@ from datetime import UTC, datetime
 
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
-from server.sources.android_crash import AndroidCrashDetector, crash_specs_for, process_matches
+from server.sources.android_crash import (
+    DETECTION_ONLY,
+    AndroidCrashDetector,
+    crash_specs_for,
+    process_matches,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +108,8 @@ class LogcatAdapter(BaseSourceAdapter):
         self._process: asyncio.subprocess.Process | None = None
         self._read_task: asyncio.Task | None = None
         self._crashes = AndroidCrashDetector(device_id=device_id)
+        #: Tags let through only for crash and hang detection (see start).
+        self._detection_only: set[str] = set()
         self.api_level: int | None = None
 
     async def start(self) -> None:
@@ -141,7 +148,11 @@ class LogcatAdapter(BaseSourceAdapter):
         # detection off with nothing to say so.
         if self.tag_filter:
             cmd.extend(self.tag_filter.split())
-            cmd.extend(crash_specs_for(self.tag_filter))
+            added = crash_specs_for(self.tag_filter)
+            cmd.extend(added)
+            # Let through to be recognised, not to be kept: InputDispatcher at
+            # info is chatty, and a caller's `*:S` silenced it (review).
+            self._detection_only = {spec.split(":", 1)[0] for spec in added} & DETECTION_ONLY
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -311,6 +322,8 @@ class LogcatAdapter(BaseSourceAdapter):
 
     def _wanted(self, entry: LogEntry) -> bool:
         """Logcat cannot filter by process, so the adapter does."""
+        if entry.process in self._detection_only:
+            return False
         return not self.process_filter or self.process_filter.lower() in entry.process.lower()
 
     def _wanted_crash(self, crash: LogEntry) -> bool:

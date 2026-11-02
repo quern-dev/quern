@@ -19,6 +19,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from server import gauges as gauges_mod
 from server import visibility
 from server.device.ios.devicectl import canonical_device_id
 from server.models import LogEntry, LogQueryParams, LogSource, TraceResponse, UtcDatetime
@@ -87,6 +88,65 @@ def _returned(attributions: list[Attribution], keep: list[LogEntry] | None) -> l
     if keep is None:
         return attributions
     return [a for a in attributions if any(a.action is k for k in keep)]
+
+
+def _interval_of(action: LogEntry) -> tuple[datetime, datetime]:
+    return action.timestamp - timedelta(milliseconds=action.duration_ms or 0), action.timestamp
+
+
+def _live_gauges(request: Request, attributions: list[Attribution],
+                 ) -> tuple[dict[str, tuple], dict[str, dict]]:
+    """Per device the actions name: the recording sampling its gauges and
+    its recent samples, and what to say on the response about each."""
+    manager = getattr(request.app.state, "recordings", None)
+    found: dict[str, tuple] = {}
+    if manager is None or not hasattr(manager, "live_gauges"):
+        return found, {}
+    caller = visibility.current_caller()
+    blind = visibility.blind_for(caller)
+    for udid in {a.action.udid for a in attributions if a.action.udid}:
+        live = manager.live_gauges(udid)
+        # Blind (#254): another principal's recording, its app and its
+        # samples are not this caller's to see (review).
+        if live is not None and (not blind or live[0].principal == caller.principal):
+            found[udid] = live
+    described = {udid: {"app": rec.filters.gauges, "interval_s": rec.filters.gauge_interval_s,
+                        "recording": rec.id, "live_samples": len(samples)}
+                 for udid, (rec, samples) in found.items()}
+    return found, described
+
+
+def _live_uncovered(rec, samples: list, started: datetime, finished: datetime) -> str:
+    if finished + CAUSAL_GRACE <= rec.started_at:
+        # Not in its file either: pointing there would send the reader to a
+        # recording that began after this action (live).
+        return (f"before recording {rec.id}, which samples this device, started at "
+                f"{rec.started_at.isoformat()}")
+    if not samples:
+        return "the recording sampling this device has no gauge sample yet"
+    # Only once the live window has let samples go: before that the file holds
+    # nothing more, and saying otherwise sent a reader to it for nothing (review).
+    if started < samples[0].start and len(samples) >= recording_mod.LIVE_GAUGE_SAMPLES:
+        return (f"before the earliest of the {len(samples)} samples a live trace keeps; the "
+                f"recording's file has them all: get_trace with recording=")
+    return "no gauge sample overlaps this action"
+
+
+def _gauges_by_action(attributions: list[Attribution], samples_of, uncovered_of,
+                      ) -> list[dict | None]:
+    """`server.gauges.summarise` for each action whose device was sampled.
+    Pure and CPU-bound, every action against every sample: run in a thread."""
+    out: list[dict | None] = []
+    for a in attributions:
+        samples = samples_of(a.action.udid)
+        if samples is None:
+            out.append(None)
+            continue
+        started, finished = _interval_of(a.action)
+        out.append(gauges_mod.summarise(samples, started, finished,
+                                        uncovered=uncovered_of(a.action.udid, started, finished,
+                                                               samples)))
+    return out
 
 
 def _serialise(attribution: Attribution, ip_map: dict[str, tuple[str, bool]]) -> dict:
@@ -392,6 +452,17 @@ async def get_trace(
     attributions = _returned(await asyncio.to_thread(
         build_trace, actions, flows, device_logs, ip_map=ip_map,
     ), keep)
+    # Gauges, while a recording samples the device (#245): its recent
+    # samples, held in memory, rather than a parse of its whole file.
+    gauged, gauges_described = _live_gauges(request, attributions)
+    per_action = await asyncio.to_thread(
+        _gauges_by_action, attributions,
+        lambda udid: gauged[udid][1] if udid in gauged else None,
+        lambda udid, started, finished, samples: _live_uncovered(
+            gauged[udid][0], samples, started, finished))
+    rows = [_serialise(a, ip_map) for a in attributions]
+    for row, gauges in zip(rows, per_action, strict=True):
+        row["gauges"] = gauges
 
     return {
         "since": window_start.isoformat(),
@@ -416,7 +487,8 @@ async def get_trace(
             "wall": datetime.now(UTC).isoformat(),
             "monotonic": time.monotonic(),
         },
-        "actions": [_serialise(a, ip_map) for a in attributions],
+        "actions": rows,
+        "gauges": gauges_described,
         # Said rather than left to be inferred. An incomplete trace that looks
         # complete is worse than one that admits it: the reader concludes the
         # app logged nothing, when the entries were evicted.
@@ -481,6 +553,20 @@ async def _trace_from_recording(request: Request, ref: str, since: datetime | No
     def holes(*kinds: str) -> list[str]:
         return recording_mod.holes_in(loaded, set(kinds), since, until)
 
+    def gauge_hole(started: datetime, finished: datetime) -> str | None:
+        inside = recording_mod.holes_in(loaded, {"gauge"}, started,
+                                        finished + CAUSAL_GRACE)
+        return inside[0] if inside else None
+
+    # Every action is the recording's device's, so one app and its samples.
+    sampled = loaded.gauges if loaded.gauge_app else None
+    per_action = await asyncio.to_thread(
+        _gauges_by_action, attributions, lambda _udid: sampled,
+        lambda _udid, started, finished, _samples: gauge_hole(started, finished))
+    rows = [_with_video(_serialise(a, ip_map), a, loaded) for a in attributions]
+    for row, gauges in zip(rows, per_action, strict=True):
+        row["gauges"] = gauges
+
     return {
         "since": (since or (min((a.timestamp for a in (actions if keep is None else keep)),
                                 default=None))
@@ -492,8 +578,12 @@ async def _trace_from_recording(request: Request, ref: str, since: datetime | No
         "clock_anchor": ({k: v for k, v in loaded.clock_anchors[0].items() if k != "segment"}
                          if loaded.clock_anchors else
                          {"wall": datetime.now(UTC).isoformat(), "monotonic": time.monotonic()}),
-        "actions": [_with_video(_serialise(a, ip_map), a, loaded) for a in attributions],
-        "log_window_truncated": bool(holes("log", "crash")),
+        "actions": rows,
+        "gauges": ({loaded.udid or udid or "": {
+            "app": loaded.gauge_app, "interval_s": loaded.gauge_interval_s,
+            "recording": str(directory), "samples": len(loaded.gauges)}}
+            if loaded.gauge_app else {}),
+        "log_window_truncated": bool(holes("log", "crash", "hang")),
         "logs_over_limit": False,
         "actions_over_limit": actions_over_limit,
         "action_window_truncated": bool(holes("action")),
@@ -505,7 +595,7 @@ async def _trace_from_recording(request: Request, ref: str, since: datetime | No
         "recording": {
             "directory": str(directory),
             "stopped": loaded.stopped,
-            "holes": holes("action", "flow", "request_started", "log", "crash"),
+            "holes": holes("action", "flow", "request_started", "log", "crash", "hang"),
             "unreadable_lines": loaded.unreadable_lines,
             "clock_anchors": loaded.clock_anchors,
             # A reboot during the run: `started_monotonic` values on either
