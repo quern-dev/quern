@@ -955,6 +955,28 @@ class TestReviewFindings:
             await task
         assert m._gauging == {}
 
+    async def test_a_cancelled_start_gives_the_screen_back_too(self, tmp_path, monkeypatch):
+        """Older than gauges: the screen a filmed start reserves leaked the
+        same way, and every later filmed start was refused."""
+        import time
+        video = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(return_value={"path": "x"}))
+        src = Sources()
+        m = RecordingManager(server_buffer=src.server, ring_buffer=src.ring,
+                             crash_buffer=src.crash, flow_store=src.flows, ip_map=lambda: {},
+                             video=video)
+        real = m._begin_files
+
+        def slow(rec):
+            time.sleep(0.3)
+            real(rec)
+        monkeypatch.setattr(m, "_begin_files", slow)
+        task = asyncio.ensure_future(m.start(SIM, str(tmp_path / "a"), Filters(video=True)))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert m._filming == {}
+
     @pytest.mark.parametrize("failure", ["reserve_screen", "begin_files_oserror", "video_start"])
     async def test_every_refused_start_gives_the_device_back(self, tmp_path, failure):
         """Each path a start can fail by, pinned: only two were (review)."""

@@ -839,9 +839,10 @@ class RecordingManager:
             self._release_gauges(rec)
             raise RecordingError(f"{out} could not be written: {e}") from e
         except BaseException:
-            # Cancelled mid-write: no recording was made, so the device is not
-            # held by one (review: held, every later gauged start was refused
-            # over a recording that did not exist).
+            # Cancelled mid-write: no recording was made, so neither the device
+            # nor its screen is held by one (review: held, every later gauged or
+            # filmed start was refused over a recording that did not exist).
+            self._release_screen(rec)
             self._release_gauges(rec)
             raise
         if filters.video:
