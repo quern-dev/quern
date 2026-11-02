@@ -1110,11 +1110,15 @@ class AdbBackend:
         # arrived" defect this guard was added to remove, one level in.
         tags = await self._get_device_property(serial, "ro.build.tags")
         debuggable = await self._get_device_property(serial, "ro.debuggable")
-        if not tags and not debuggable:
-            # Nothing answered either way. None, not False: the caller must be
-            # able to tell "not rootable" from "could not ask".
+        if tags == "dev-keys" or debuggable == "1":
+            return True
+        if not tags or not debuggable:
+            # One unanswered is as unknown here as above: `release-keys` with
+            # no `ro.debuggable` may be a userdebug build. None, not False:
+            # the caller must be able to tell "not rootable" from "could not
+            # ask" (CodeRabbit on #594).
             return None
-        return tags == "dev-keys" or debuggable == "1"
+        return False
 
     async def get_api_level(self, serial: str) -> int:
         """Get the device API level as an integer."""

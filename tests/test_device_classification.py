@@ -521,3 +521,19 @@ class TestANoNeedsBothKeys:
 
         assert await adb.is_rootable("X") is True
         single.assert_not_awaited()
+
+
+async def test_one_rootability_key_unanswered_is_unknown_not_unrootable(monkeypatch):
+    """`release-keys` with no `ro.debuggable` read may be a userdebug build,
+    which `adb root` allows: unknown, not a confident no, in the
+    single-property fallback as in the bulk read (CodeRabbit on #594)."""
+    adb = AdbBackend()
+    monkeypatch.setattr(adb, "get_device_properties", AsyncMock(return_value={}))
+    single = {"ro.build.tags": "release-keys", "ro.debuggable": ""}
+    monkeypatch.setattr(adb, "_get_device_property",
+                        AsyncMock(side_effect=lambda serial, key: single[key]))
+    assert await adb.is_rootable("X") is None
+    single["ro.debuggable"] = "1"
+    assert await adb.is_rootable("X") is True
+    single["ro.debuggable"] = "0"
+    assert await adb.is_rootable("X") is False
