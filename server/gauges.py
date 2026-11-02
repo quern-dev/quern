@@ -160,12 +160,16 @@ def summarise(samples: list[Sample], started: datetime, finished: datetime, *,
     """
     until = finished + grace
     covering = [s for s in samples if s.start < until and started < s.end]
+    # Readings only, for what is said about the samples: a failed or gap line
+    # can span a 300 s outage, which is not a 300 s sample (CodeRabbit). The
+    # reasons below still read every covering line.
+    readings = [s for s in covering if s.running is not None]
     summary: dict = {
         "window": {"from": started.isoformat(), "to": until.isoformat()},
-        "samples": len(covering),
-        "sample_seconds": round(max((s.seconds for s in covering), default=0.0), 3) or None,
-        "covered": ({"from": covering[0].start.isoformat(), "to": covering[-1].end.isoformat()}
-                    if covering else None),
+        "samples": len(readings),
+        "sample_seconds": round(max((s.seconds for s in readings), default=0.0), 3) or None,
+        "covered": ({"from": readings[0].start.isoformat(), "to": readings[-1].end.isoformat()}
+                    if readings else None),
         "cpu_percent": None, "memory_bytes": None, "threads_peak": None,
         "frames": None, "display_fps": None,
         "unavailable": {}, "caveats": [],
@@ -177,7 +181,7 @@ def summarise(samples: list[Sample], started: datetime, finished: datetime, *,
             unavailable[metric] = why
         return summary
 
-    if covering[0].start > started or covering[-1].end < until:
+    if readings and (readings[0].start > started or readings[-1].end < until):
         summary["caveats"].append(
             "the samples do not span the whole window; the peaks are of the part they cover")
     if any(s.running is False for s in covering) and any(s.running for s in covering):

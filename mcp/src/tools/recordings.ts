@@ -56,7 +56,7 @@ gauges=<bundle id or package> also samples that app's CPU, memory and threads --
   });
 
   server.registerTool("stop_recording", {
-    description: `Stop a recording started with start_recording: writes what is still queued, a final "stopped" line and the manifest. Returns counts by kind, what was dropped, the gaps, and "complete" -- true only when nothing was dropped, quern never stopped during it, and any video asked for was recorded and finished in full ("video_lost" says when a movie is why, and "warnings" which one).`,
+    description: `Stop a recording started with start_recording: writes what is still queued, a final "stopped" line and the manifest. Returns counts by kind, what was dropped, the gaps, and "complete" -- true only when nothing was dropped, quern never stopped during it, any video asked for was recorded and finished in full ("video_lost" says when a movie is why, and "warnings" which one), and every gauge sample asked for was read ("gauges_lost").`,
     inputSchema: strictParams({
       recording_id: z.string().describe("The id start_recording returned"),
     }),

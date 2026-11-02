@@ -42,10 +42,13 @@ _PROCESS_LINE = re.compile(r"^Process:\s*([^,\s]+),\s*PID:\s*(\d+)")
 _FATAL_SIGNAL = re.compile(r"^Fatal signal .*?\bpid (\d+) \(([^)]+)\)")
 _ANR = re.compile(r"^ANR in (\S+)")
 # "Window '44a30c2 com.quern.probe/com.quern.probe.MainActivity (server)' spent
-#  10562.6ms processing the last input event: MotionEvent" (Android 10)
+#  10562.6ms processing the last input event: MotionEvent" (Android 10), and
+# the older "Window 'Window{4b32796 u0 org.c0reteam.audiotest/...AudioTest}'"
+# form in AOSP's CTS logcat fixture. The duration is bounded -- any app can
+# log under this tag, and an absurd one must not stop the reader (CodeRabbit).
 _SLOW_INPUT = re.compile(
-    r"^Window '(?:[0-9a-f]+ )?([A-Za-z0-9_.]+)(?:/[^' ]*)?(?: \(server\))?' "
-    r"spent ([0-9]+(?:\.[0-9]+)?)ms "
+    r"^Window '(?:Window\{[0-9a-f]+ u[0-9]+ |[0-9a-f]+ )?([A-Za-z0-9_.]+)(?:/[^' }]*)?\}?"
+    r"(?: \(server\))?' spent ([0-9]{1,9}(?:\.[0-9]{1,6})?)ms "
     r"processing the last input event: (\w+)")
 _ANR_PID = re.compile(r"^PID:\s*(\d+)")
 

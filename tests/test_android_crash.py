@@ -227,6 +227,21 @@ class TestHang:
         [hang], _ = _feed([line])
         assert hang.process == "com.quern.probe"
 
+    def test_the_window_braces_form_from_aosp_cts(self):
+        line = SLOW_INPUT[1].replace(
+            "44a30c2 com.quern.probe/com.quern.probe.MainActivity (server)",
+            "Window{4b32796 u0 org.c0reteam.audiotest/org.c0reteam.audiotest.AudioTest}")
+        [hang], _ = _feed([line])
+        assert hang.process == "org.c0reteam.audiotest"
+
+    def test_an_absurd_duration_is_not_a_hang_and_does_not_raise(self):
+        """Any app can log under this tag; a duration timedelta cannot hold
+        raised out of the reader and ended capture (CodeRabbit)."""
+        line = SLOW_INPUT[1].replace("10562.6ms", "999999999999999999ms")
+        assert _feed([line])[0] == []
+        [days], _ = _feed([SLOW_INPUT[1].replace("10562.6ms", "999999999ms")])
+        assert days.process == "com.quern.probe"
+
     def test_it_is_anchored(self):
         line = SLOW_INPUT[1].replace("Window '", "Quoted: Window '")
         assert _feed([line])[0] == []

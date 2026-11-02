@@ -344,7 +344,8 @@ class TestTheSampler:
         real_sleep = asyncio.sleep
 
         async def sleep(seconds, *a):
-            sleeps.append(seconds)
+            if seconds >= 1:                      # the sampler's, not _until's (CodeRabbit)
+                sleeps.append(seconds)
             await real_sleep(0)
         monkeypatch.setattr(rec_mod.asyncio, "sleep", sleep)
 
@@ -1216,3 +1217,61 @@ class TestHangsInRecordings:
         ios = hang.model_copy(update={"id": "crash-ios"})
         [b] = build_trace([tap], [], [ios])
         assert not any("device's own clock" in c for c in b.caveats)
+
+
+# ── what CodeRabbit found on #596 ────────────────────────────────────────────
+
+class TestCodeRabbit596:
+    def test_a_failed_line_is_not_a_sample_or_its_length(self):
+        samples = [parse_sample(gauges_mod.failed_line("phone unplugged", _t(0), _t(300))),
+                   _line(300, 301, cpu_percent=5.0)]
+        g = summarise(samples, _t(299.5), _t(300.5), grace=timedelta(0))
+        assert g["samples"] == 1 and g["sample_seconds"] == 1.0
+        assert g["covered"]["from"] == _t(300).isoformat()
+        assert g["cpu_percent"]["peak"] == 5.0
+        only_failed = summarise(samples[:1], _t(10), _t(11))
+        assert only_failed["samples"] == 0 and only_failed["covered"] is None
+        assert only_failed["unavailable"]["cpu_percent"] == "phone unplugged"
+        assert only_failed["caveats"] == []
+
+    async def test_the_gauge_source_waits_for_the_controller(self, monkeypatch):
+        from server import main as main_mod
+
+        class Ctrl:
+            async def gauge_stream(self, udid, app, interval):
+                yield {"running": True, "sample_seconds": interval}
+        app = SimpleNamespace(state=SimpleNamespace(device_controller=None))
+
+        async def arrive():
+            await asyncio.sleep(0.2)
+            app.state.device_controller = Ctrl()
+        asyncio.ensure_future(arrive())
+        stream = main_mod._gauge_stream(app, SIM, "com.x", 1.0)
+        async with contextlib.aclosing(stream):
+            assert (await anext(stream))["running"] is True
+
+    async def test_a_controller_that_never_comes_is_said(self, monkeypatch):
+        from server import main as main_mod
+        monkeypatch.setattr(main_mod, "GAUGE_CONTROLLER_WAIT_S", 0.2)
+        app = SimpleNamespace(state=SimpleNamespace(device_controller=None))
+        with pytest.raises(RuntimeError, match="no device controller"):
+            await anext(main_mod._gauge_stream(app, SIM, "com.x", 1.0))
+
+    async def test_sysmontap_closes_before_the_connection(self, monkeypatch):
+        monkeypatch.setattr(performance, "_device_address", AsyncMock(return_value=("::1", 1)))
+        ns = 10**9
+        lib, rsd, _ = _fake_lib(pids=[42], ticks=[_tick(42, i * ns, 0, (i + 1) * ns)
+                                                  for i in range(5)])
+        order = []
+        real_exit = _FakeSysmontap.__aexit__
+
+        async def exit_(self, *a):
+            order.append("sysmontap")
+            return await real_exit(self, *a)
+        monkeypatch.setattr(_FakeSysmontap, "__aexit__", exit_)
+        rsd.close = AsyncMock(side_effect=lambda: order.append("rsd"))
+        monkeypatch.setattr(performance, "_pmd3", lambda: lib)
+        stream = performance.device_stream("UUID", "com.x", 1.0)
+        await anext(stream)
+        await stream.aclose()
+        assert order == ["sysmontap", "rsd"]

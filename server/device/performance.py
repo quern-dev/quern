@@ -587,9 +587,12 @@ async def device_stream(uuid: str, bundle_id: str, interval: float):
                             udid=uuid, bundle_id=bundle_id, platform="ios_device",
                             running=False, sample_seconds=_NOT_RUNNING_POLL_S))
                         continue
-                    async for snap in _sysmon_stream(lib.Sysmontap, dvt, uuid, bundle_id,
-                                                     pid, interval, fps):
-                        yield snap
+                    # Closed here, while the connection it reads is still open:
+                    # left to the finalizer, its sysmontap closed after `rsd`.
+                    async with contextlib.aclosing(_sysmon_stream(
+                            lib.Sysmontap, dvt, uuid, bundle_id, pid, interval, fps)) as sysmon:
+                        async for snap in sysmon:
+                            yield snap
                     # It exited, or sysmontap never listed it: paced, so an
                     # app sysmontap cannot see is not asked about in a loop.
                     await asyncio.sleep(_NOT_RUNNING_POLL_S)
