@@ -1135,7 +1135,8 @@ class DeviceController(DeviceControllerUI):
                 if name in avds:
                     serial = await self.adb.boot_emulator(name, headless=headless)
                     self._device_type_cache[serial] = DeviceType.ANDROID_EMULATOR
-                    self._active_udid = serial
+                    if set_active:
+                        self._active_udid = serial
                     return serial
 
             # Fall back to iOS simulator
@@ -1151,7 +1152,8 @@ class DeviceController(DeviceControllerUI):
 
             device_access.check(target.udid)
             await self.simctl.boot(target.udid)
-            self._active_udid = target.udid
+            if set_active:
+                self._active_udid = target.udid
             await self._restore_input_after_boot(target.udid)
             return target.udid
 

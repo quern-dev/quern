@@ -606,14 +606,25 @@ async def _build_and_install_xcode(
             return DeviceInstallResult(udid=udid, installed=False, error=(
                 f"Nothing was installed: its apps could not be listed first ({e}), and "
                 "its release needs that list to remove what this installs. Try again."))
-        try:
+        async def install_and_record() -> dict:
             await controller.install_app(str(app_path), udid)
+            if app is None:
+                return {}
+            return await session_installs.after_install(
+                app, before, await asyncio.to_thread(session_installs.bundle_id_of, app_path))
+
+        try:
+            if before is None:
+                ended = await install_and_record()
+            else:
+                # Cancelled mid-install, the install goes on and so must its
+                # record: dropped, its release would not know the app (#581).
+                task = asyncio.create_task(install_and_record())
+                _RECORDING.add(task)
+                task.add_done_callback(_RECORDING.discard)
+                ended = await asyncio.shield(task)
         except DeviceError as e:
             return DeviceInstallResult(udid=udid, installed=False, error=str(e))
-        ended = {}
-        if app is not None:
-            ended = await session_installs.after_install(
-                app, before, await asyncio.to_thread(session_installs.bundle_id_of, app_path))
 
         return DeviceInstallResult(udid=udid, installed=True, app_path=str(app_path),
                                    note=session_installs.hold_ended_note(ended))
@@ -642,6 +653,11 @@ async def _build_and_install_xcode(
     )
     response.summary = _build_install_summary(response)
     return response
+
+
+#: Installs a session holds the device for, kept to completion if their
+#: request is cancelled.
+_RECORDING: set[asyncio.Task] = set()
 
 
 def _is_gradle(path: str) -> bool:

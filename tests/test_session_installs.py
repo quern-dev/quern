@@ -366,6 +366,77 @@ def test_the_bundle_id_is_read_from_an_app_and_an_ipa(tmp_path):
     assert si.bundle_id_of(tmp_path / "missing.app") is None
 
 
+async def test_a_late_install_on_a_device_its_key_holds_again_goes_to_that_session():
+    """Released, and the key reserved it again, before the install finished:
+    the device is held, so the app is not removed under the new hold but put
+    on its record, for its release to remove."""
+    s, s2 = _session(), _session("client:a/s2", opened="o2")
+    app, ctrl, state = _app(holder=_held_by(s))
+    late = await si.before_install(app, SIM, _caller(s))
+    app.state.sessions.held = None
+    await _release(app, s)
+    app.state.sessions.held = _held_by(s2)
+    await _install(app, state, s2)                     # s2's record, adding nothing
+    state["apps"].append("com.example.late")
+    assert await si.after_install(app, late) == {"hold_ended": True,
+                                                 "handed_over": ["com.example.late"],
+                                                 "to": s2.id}
+    ctrl.uninstall_app.assert_not_awaited()
+    assert app.state.session_installs[SIM].added == {"com.example.late"}
+
+
+async def test_a_late_install_on_a_device_another_key_holds_is_left():
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s))
+    late = await si.before_install(app, SIM, _caller(s))
+    app.state.sessions.held = None
+    await _release(app, s)
+    app.state.sessions.held = _held_by(_session("client:b/x", principal="client:b"))
+    state["apps"].append("com.example.late")
+    assert await si.after_install(app, late) == {"hold_ended": True,
+                                                 "left": ["com.example.late"]}
+    ctrl.uninstall_app.assert_not_awaited()
+
+
+async def test_a_cancelled_xcode_install_is_still_recorded(tmp_path):
+    """The request cancelled while xcrun installs: the install finishes, and
+    its record with it, so the release knows the app."""
+    import plistlib
+
+    from server.api import build_app as build_api
+    from server.models import BuildResult
+
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s))
+    built = tmp_path / "App.app"
+    built.mkdir()
+    (built / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.x.app"}))
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def install(app_path, udid):
+        started.set()
+        await finish.wait()
+        state["apps"].append("com.x.app")
+
+    ctrl.install_app = AsyncMock(side_effect=install)
+    ctrl.simctl.boot = AsyncMock()
+    with patch.object(build_api, "_build", AsyncMock(return_value=BuildResult(succeeded=True))), \
+         patch.object(build_api, "_find_app", lambda *a: built), \
+         patch.object(build_api, "_record", AsyncMock(return_value=None)), \
+         patch.object(build_api, "_finish_records", AsyncMock(return_value=[])), \
+         patch("server.visibility.current_caller", lambda: _caller(s)):
+        route = asyncio.create_task(build_api._build_and_install_xcode(
+            ctrl, build_api.BuildAndInstallRequest(project_path="/p", scheme="S"), MagicMock(),
+            "-project", "/p", [], [SIM], {"iphonesimulator": tmp_path / "derived"}, app=app))
+        await asyncio.wait_for(started.wait(), 2)
+        route.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await route
+        finish.set()
+        await asyncio.wait_for(asyncio.gather(*build_api._RECORDING), 2)
+    assert app.state.session_installs[SIM].added == {"com.x.app"}
+
+
 # ----------------------------------------------------------------------------
 # At release
 # ----------------------------------------------------------------------------
@@ -537,6 +608,21 @@ async def test_a_reservation_before_the_erase_stops_it():
     actions = await _release(app, s)
     ctrl.erase.assert_not_awaited()
     assert not any(a.get("ok") is False for a in actions)
+
+
+async def test_a_controller_boot_by_name_honours_set_active():
+    from server.device.controller import DeviceController
+
+    controller = DeviceController()
+    controller.adb.is_installed = lambda: False
+    controller.simctl.list_devices = AsyncMock(return_value=[
+        SimpleNamespace(udid=SIM, name="iPhone 16")])
+    controller.simctl.boot = AsyncMock()
+    controller._restore_input_after_boot = AsyncMock()
+    controller._active_udid = "OWNERS"
+    with patch("server.device_access.check", lambda udid: None):
+        await controller.boot(name="iPhone 16", set_active=False)
+    assert controller._active_udid == "OWNERS"
 
 
 async def test_a_controller_boot_for_a_release_leaves_the_active_device():
@@ -777,6 +863,7 @@ async def test_a_gradle_build_says_when_the_hold_ended_during_its_install(monkey
     async def build(controller, body):
         state["apps"].append("com.example.built")
         app.state.session_installs.clear()           # the release ran meanwhile
+        app.state.sessions.held = None
         return {"devices": [{"udid": EMU, "installed": True}], "all_installed": True,
                 "build_records": [{
                     "build_id": "b", "created_at": "2026-11-01T00:00:00Z", "project_path": "/p",
@@ -807,6 +894,7 @@ async def test_an_xcode_install_says_when_the_hold_ended_during_it(tmp_path):
     async def install(app_path, udid):
         state["apps"].append("com.x.app")
         app.state.session_installs.clear()           # the release ran meanwhile
+        app.state.sessions.held = None
 
     ctrl.install_app = AsyncMock(side_effect=install)
     ctrl.simctl.boot = AsyncMock()

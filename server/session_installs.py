@@ -100,6 +100,7 @@ class Install:
     opened: Any
     udid: str
     before: frozenset[str]
+    principal: str = ""
 
 
 def policy_for(app: Any, principal_id: str) -> str:
@@ -183,6 +184,9 @@ def hold_ended_note(ended: dict) -> str | None:
     if ended.get("removed"):
         return (f"the session's hold ended during this install, so {ended['removed'][0]} "
                 "was removed again")
+    if ended.get("handed_over"):
+        return (f"the session's hold ended during this install; {ended['handed_over'][0]} "
+                f"is now {ended['to']}'s, whose release removes it")
     left = ", ".join(ended.get("left") or []) or "nothing new"
     why = f" (removing it failed: {ended['error']})" if ended.get("error") else ""
     return (f"the session's hold ended during this install, and what it added was left on "
@@ -229,7 +233,7 @@ async def before_install(app: Any, udid: str, caller: Any) -> Install | None:
         # still to retry -- carries over rather than being dropped.
         carried = record.added if record is not None else set()
         records[udid] = InstallRecord(session=session, opened=opened, added=set(carried))
-    return Install(session, opened, udid, before)
+    return Install(session, opened, udid, before, caller.principal)
 
 
 async def after_install(app: Any, install: Install | None,
@@ -255,6 +259,17 @@ async def after_install(app: Any, install: Install | None,
         if not known:
             return {"hold_ended": True, "left": sorted(added or ())}
         (bundle_id,) = added
+        registry = getattr(app.state, "sessions", None)
+        held = registry.holder_of(install.udid) if registry is not None else None
+        if held is not None:
+            # Someone holds it already: not this install's to change. Its
+            # key's next session takes the app, for its release to remove.
+            successor = record if record is not None and not record.ending and (
+                record.session, record.opened) == _opening(held.session) else None
+            if successor is not None and held.session.principal == install.principal:
+                successor.added.add(bundle_id)
+                return {"hold_ended": True, "handed_over": [bundle_id], "to": held.session.id}
+            return {"hold_ended": True, "left": [bundle_id]}
         try:
             await controller.uninstall_app(bundle_id, install.udid, set_active=False)
         except Exception as e:  # noqa: BLE001 -- reported on the answer
