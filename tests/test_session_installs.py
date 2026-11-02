@@ -385,6 +385,23 @@ async def test_a_late_install_on_a_device_its_key_holds_again_goes_to_that_sessi
     assert app.state.session_installs[SIM].added == {"com.example.late"}
 
 
+async def test_a_late_install_goes_to_its_keys_new_hold_even_before_it_installs():
+    """The key holds the device again but has installed nothing, so has no
+    record: one is made for it rather than the app being left."""
+    s, s2 = _session(), _session("client:a/s2", opened="o2")
+    app, ctrl, state = _app(holder=_held_by(s))
+    late = await si.before_install(app, SIM, _caller(s))
+    app.state.sessions.held = None
+    await _release(app, s)
+    app.state.sessions.held = _held_by(s2)
+    state["apps"].append("com.example.late")
+    assert (await si.after_install(app, late))["handed_over"] == ["com.example.late"]
+    record = app.state.session_installs[SIM]
+    assert (record.session, record.opened, record.added) == (s2.id, "o2", {"com.example.late"})
+    app.state.sessions.held = None
+    assert (await _release(app, s2))[0]["removed"] == ["com.example.late"]
+
+
 async def test_a_late_install_on_a_device_another_key_holds_is_left():
     s = _session()
     app, ctrl, state = _app(holder=_held_by(s))
@@ -393,10 +410,14 @@ async def test_a_late_install_on_a_device_another_key_holds_is_left():
     await _release(app, s)
     bob = _session("client:b/x", principal="client:b")
     app.state.sessions.held = _held_by(bob)
-    await _install(app, state, bob)                    # bob's own record
     state["apps"].append("com.example.late")
     assert await si.after_install(app, late) == {"hold_ended": True,
                                                  "left": ["com.example.late"]}
+    assert not app.state.session_installs, "no record made for another key"
+    await _install(app, state, bob)                    # bob's own record
+    state["apps"].append("com.example.later")
+    late2 = si.Install(s.id, s.opened_at, SIM, frozenset(state["apps"][:-1]), s.principal)
+    assert (await si.after_install(app, late2))["left"] == ["com.example.later"]
     ctrl.uninstall_app.assert_not_awaited()
     assert app.state.session_installs[SIM].added == set(), "not put on another key's record"
 
@@ -431,11 +452,14 @@ async def test_a_cancelled_xcode_install_is_still_recorded(tmp_path):
         route = asyncio.create_task(build_api._build_and_install_xcode(
             ctrl, build_api.BuildAndInstallRequest(project_path="/p", scheme="S"), MagicMock(),
             "-project", "/p", [], [SIM], {"iphonesimulator": tmp_path / "derived"}, app=app))
-        await asyncio.wait_for(started.wait(), 2)
-        route.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await route
-        finish.set()
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            route.cancel()
+            done, _ = await asyncio.wait({route}, timeout=2)
+            assert route in done, "the cancelled route must not wait for the install"
+            assert route.cancelled()
+        finally:
+            finish.set()
         await asyncio.wait_for(asyncio.gather(*build_api._RECORDING), 2)
     assert app.state.session_installs[SIM].added == {"com.x.app"}
 

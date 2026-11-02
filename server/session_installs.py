@@ -266,7 +266,13 @@ async def after_install(app: Any, install: Install | None,
             # key's next session takes the app, for its release to remove.
             successor = record if record is not None and not record.ending and (
                 record.session, record.opened) == _opening(held.session) else None
+            if successor is None and record is None:
+                # The new hold has installed nothing yet, so has no record:
+                # one is made for it, or the app would outlive its release.
+                session, opened = _opening(held.session)
+                successor = InstallRecord(session=session, opened=opened)
             if successor is not None and held.session.principal == install.principal:
+                _records(app).setdefault(install.udid, successor)
                 successor.added.add(bundle_id)
                 return {"hold_ended": True, "handed_over": [bundle_id], "to": held.session.id}
             return {"hold_ended": True, "left": [bundle_id]}
