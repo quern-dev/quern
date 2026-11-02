@@ -360,23 +360,25 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
         from server.api import build_android
 
         # What is installed now on each device, so a release can remove what
-        # this build adds (#581).
-        befores: dict[str, frozenset[str] | None] = {}
-        try:
-            for raw in [u for u in [body.udid, *(body.udids or [])] if u]:
-                target = await controller.resolve_udid(raw)
-                befores[target] = await session_installs.before_install(
-                    request.app, target, visibility.current_caller())
-        except session_installs.BaselineUnavailable as e:
-            raise HTTPException(503, (
-                f"Could not list the apps on a device before installing ({e}), and its "
-                "release needs that to remove what this installs. Try again.")) from None
-        except DeviceError:
-            pass                    # the build reports an unknown device itself
+        # this build adds (#581). The build's own target choice, so a build
+        # naming no device is tracked on the one it installs on.
+        caller = visibility.current_caller()
+        installs = []
+        if caller.session and session_installs.policy_for(
+                request.app, caller.principal) != "none":
+            for target in await build_android._android_targets(controller, body):
+                try:
+                    installs.append(await session_installs.before_install(
+                        request.app, target, caller))
+                except session_installs.BaselineUnavailable as e:
+                    raise HTTPException(503, (
+                        f"Nothing was built or installed: the apps on {target} could not "
+                        f"be listed first ({e}), and its release needs that list to "
+                        "remove what this installs. Try again.")) from None
         response = BuildAndInstallResponse(
             **await build_android.build_and_install(controller, body))
-        for target, before in befores.items():
-            await session_installs.after_install(request.app, target, before)
+        for install in installs:
+            await session_installs.after_install(request.app, install)
         response.summary = _android_summary(response)
         return response
 
@@ -594,14 +596,14 @@ async def _build_and_install_xcode(
                 app, udid, visibility.current_caller()) if app is not None else None)
         except session_installs.BaselineUnavailable as e:
             return DeviceInstallResult(udid=udid, installed=False, error=(
-                f"Could not list its apps before installing ({e}), which its release "
-                "needs to remove what this installs. Nothing was installed."))
+                f"Nothing was installed: its apps could not be listed first ({e}), and "
+                "its release needs that list to remove what this installs. Try again."))
         try:
             await controller.install_app(str(app_path), udid)
         except DeviceError as e:
             return DeviceInstallResult(udid=udid, installed=False, error=str(e))
         if app is not None:
-            await session_installs.after_install(app, udid, before)
+            await session_installs.after_install(app, before)
 
         return DeviceInstallResult(udid=udid, installed=True, app_path=str(app_path))
 

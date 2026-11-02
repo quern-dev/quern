@@ -668,8 +668,9 @@ async def install_app(request: Request, body: InstallAppRequest):
                 before = await session_installs.before_install(request.app, target, caller)
         except session_installs.BaselineUnavailable as e:
             raise HTTPException(503, (
-                f"Could not list the apps on the device before installing ({e}), and "
-                "its release needs that to remove what this installs. Try again."
+                f"Nothing was installed: the apps on the device could not be listed "
+                f"first ({e}), and its release needs that list to remove what this "
+                "installs. Try again."
             )) from None
         except DeviceError as e:
             raise _without_upload_path(_handle_device_error(e), upload) from None
@@ -677,13 +678,13 @@ async def install_app(request: Request, body: InstallAppRequest):
             udid = await controller.install_app(app_path=app_path, udid=target)
         except DeviceError as e:
             raise _without_upload_path(_handle_device_error(e), upload) from None
-        await session_installs.after_install(request.app, udid, before)
+        ended = await session_installs.after_install(request.app, before)
         act.udid = udid
         if upload:
             # Installed, so gone: kept on a failure, to try again within the hour.
             request.app.state.uploads.discard(upload.id)
-            return {"status": "installed", "udid": udid, "upload": upload.name}
-        return {"status": "installed", "udid": udid, "app_path": body.app_path}
+            return {"status": "installed", "udid": udid, "upload": upload.name, **ended}
+        return {"status": "installed", "udid": udid, "app_path": body.app_path, **ended}
 
 
 @router.post("/app/launch")

@@ -1710,9 +1710,11 @@ class DeviceController(DeviceControllerUI):
         self._invalidate_ui_cache(resolved)  # the app's screen is gone
         return resolved
 
-    async def uninstall_app(self, bundle_id: str, udid: str | None = None) -> str:
-        """Uninstall an app. Returns the resolved udid."""
-        resolved = await self.resolve_udid(udid)
+    async def uninstall_app(self, bundle_id: str, udid: str | None = None, *,
+                            set_active: bool = True) -> str:
+        """Uninstall an app. Returns the resolved udid. `set_active=False` for
+        housekeeping that must not change which device is active (#581)."""
+        resolved = await self.resolve_udid(udid, set_active=set_active)
         if self._is_android(resolved):
             await self.adb.uninstall_app(resolved, bundle_id)
         elif self._is_physical(resolved):
@@ -1721,9 +1723,11 @@ class DeviceController(DeviceControllerUI):
             await self.simctl.uninstall_app(resolved, bundle_id)
         return resolved
 
-    async def list_apps(self, udid: str | None = None) -> tuple[list[AppInfo], str]:
-        """List installed apps. Returns (apps, resolved_udid)."""
-        resolved = await self.resolve_udid(udid)
+    async def list_apps(self, udid: str | None = None, *,
+                        set_active: bool = True) -> tuple[list[AppInfo], str]:
+        """List installed apps. Returns (apps, resolved_udid). `set_active=False`
+        as for `uninstall_app`."""
+        resolved = await self.resolve_udid(udid, set_active=set_active)
         if self._is_android(resolved):
             apps = await self.adb.list_apps(resolved)
         elif self._is_physical(resolved):

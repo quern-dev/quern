@@ -748,8 +748,12 @@ async def run_release_policies(app) -> list[dict]:
             if failed:
                 registry.retry_release(session, failed)
         actions.extend(ended)
+        # An erase on release (#581) leaves a simulator it was to shut down
+        # shut down already.
+        erased = {a["udid"] for a in ended
+                  if a.get("action") == "erased" and a.get("ok") and not a.get("rebooted")}
         for r in session.reservations.values():
-            if r.on_release != "shutdown_booted" or not r.booted_here:
+            if r.on_release != "shutdown_booted" or not r.booted_here or r.udid in erased:
                 continue
             # Only if nobody reserved it again meanwhile.
             if registry.holder_of(r.udid) is not None or controller is None:

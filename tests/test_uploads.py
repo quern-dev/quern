@@ -196,7 +196,7 @@ class FakeController:
     async def resolve_udid(self, udid=None):
         return udid
 
-    async def list_apps(self, udid=None):
+    async def list_apps(self, udid=None, *, set_active=True):
         # What a release's clean-up notes before an install (#581).
         return [], udid
 

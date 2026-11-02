@@ -594,7 +594,7 @@ Answers say which platform was used and why: `platform`, and `platform_source` -
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
 | `reserve_devices` | POST | `/api/v1/sessions/{id}/reservations` | Reserve devices for this session (udids, count plus criteria, or a group), all or nothing; 409 names a holder. Each reserved device comes back with its name, model, OS version, family and type, so a caller that reserved by criteria knows what it got. When the pool has too few free devices for the criteria, the MCP adds which paired servers have enough -- booted, or shut down when `auto_boot` allows -- and how to switch (`use_remote`). See "Sessions and reservations" above. After a `use_remote` switch, the MCP adds `carried`: the mocks and session capture moved from the previous server, set up on the simulators just reserved |
-| `release_devices` | DELETE | `/api/v1/sessions/{id}/reservations` | Release one device (`?udid=`) or all. Each device's clean-up is reported in `actions`, including what the session installed (#581): `installs_removed` (with `removed`, and `reinstalled_kept`) or `erased` (`rebooted`), per `sessions.client_release` / `owner_release` |
+| `release_devices` | DELETE | `/api/v1/sessions/{id}/reservations` | Release one device (`?udid=`) or all. Each device's clean-up is reported in `actions`, including what the session installed (#581): `installs_removed` (with `removed`, `installs_adding_nothing` and `unclear_installs`), `installs_handed_over` or `erased` (`rebooted`), per `sessions.client_release` / `owner_release` |
 | `session_status` | GET | `/api/v1/sessions/{id}` | One session: state (`live`, `grace` with `grace_remaining_s`) and reservations. With `all`, the MCP tool lists every session |
 
 ### Remote access

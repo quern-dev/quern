@@ -5,39 +5,47 @@ data, stayed on the simulators after their sessions ended (17 GB across 44
 simulators on romulus), and on a machine several people use, one client's
 apps, data and keychain reached the next client to reserve the simulator.
 
-At a session's first install on a device it holds, the device's apps are
-noted -- the baseline. When the hold ends, the release policy for the
-caller's kind of key runs (``sessions.client_release``,
+Each install by a session that holds the device records what it added: the
+device's apps after it, less those before. When the hold ends, the release
+policy for the caller's kind of key runs (``sessions.client_release``,
 ``sessions.owner_release``, read at start):
 
-- ``uninstall``: remove the apps not in the baseline, except quern's own
-  driver. An app the session reinstalled over one already there is left, and
-  said.
-- ``erase``: erase the simulator, whether or not anything was installed, and
-  boot it again if it was booted. Android devices and physical iPhones fall
-  back to ``uninstall``: an emulator is wiped only by relaunching it, and a
-  phone cannot be erased safely from here.
+- ``uninstall``: remove what the session's installs added, and nothing else --
+  not an app the owner installed meanwhile, not quern's own drivers. An
+  install that added nothing (a reinstall) leaves what it replaced, and says so.
+- ``erase``: erase each iOS simulator the session held, whether or not anything
+  was installed, and boot it again if it was booted. Android devices and
+  physical iPhones fall back to ``uninstall``: an emulator is wiped only by
+  relaunching it, and a phone cannot be erased safely from here.
 - ``none``: leave the device as the session left it.
 
-The record belongs to the session, not to its key, so a device another
-session of the same key holds by then takes it over, as a device proxy's
-does. A clean-up that fails keeps the record and is tried again at the next
-sweep, up to three times; then it is given up on and said, so a device that
-went away cannot stay unreservable for good.
+What an install added is trusted only when it is one app: a listing that came
+back short before the install would make apps already there look new. An
+install that seems to add more than one, or whose result could not be listed,
+is counted as unclear; its apps are left, and the release says so.
+
+The record belongs to the session and its opening, not to its key: a device
+another session of the same key holds by then -- the same name opened again
+included -- takes the record over, as a device proxy does, and is never erased
+under it. A clean-up that fails keeps the record and is tried again at the next
+sweep, up to three times. An erase that finished, or was given up on, is not
+run again for that opening, whatever else on the device is retried.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
 from server import principal
+from server.device.ios.wda import WDA_BUNDLE_ID, WDA_RUNNER_BUNDLE_ID
 
-#: Never uninstalled: quern's WebDriverAgent, which drives physical iPhones
-#: and which quern installs itself.
-KEPT = frozenset({"com.facebook.WebDriverAgentRunner",
-                  "com.facebook.WebDriverAgentRunner.xctrunner"})
+#: Never uninstalled: quern's own drivers, which it installs itself -- its
+#: WebDriverAgent, and the uiautomator2 APK that carries Android's keyboard
+#: and set_locale's receiver.
+KEPT = frozenset({WDA_BUNDLE_ID, WDA_RUNNER_BUNDLE_ID, "com.github.uiautomator"})
 
 #: Attempts at a clean-up before giving up on it.
 ATTEMPTS = 3
@@ -45,6 +53,10 @@ ATTEMPTS = 3
 #: How long one clean-up may take: it runs in the sweep every session's
 #: expiry waits on. An erase and reboot is the slow case.
 TIMEOUT_S = 120.0
+
+#: How many finished erases are remembered. A retry comes within a few sweeps
+#: of its release, so only the recent ones matter.
+_FINISHED_MAX = 512
 
 
 class BaselineUnavailable(Exception):
@@ -56,15 +68,24 @@ class BaselineUnavailable(Exception):
 class InstallRecord:
     session: str
     opened: Any
-    #: Bundle ids on the device before the session's first install. None for a
-    #: record kept only to count a failed erase's attempts: no baseline, so
-    #: an uninstall from it removes nothing -- never "everything was new".
-    baseline: frozenset[str] | None
-    #: Installs that added no app: an app already there was reinstalled.
-    reinstalled: int = 0
+    #: Apps the session's installs added, one per install.
+    added: set[str] = field(default_factory=set)
+    #: Installs that added no app: one already there was reinstalled.
+    reinstalls: int = 0
+    #: Installs whose effect could not be told; their apps are left.
+    unclear: int = 0
     attempts: int = 0
     #: Kept for the report: what this record has uninstalled so far.
     removed: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Install:
+    """An install under way: whose, where, and what was there before it."""
+    session: str
+    opened: Any
+    udid: str
+    before: frozenset[str]
 
 
 def policy_for(app: Any, principal_id: str) -> str:
@@ -81,48 +102,87 @@ def _records(app: Any) -> dict[str, InstallRecord]:
     return records
 
 
-def _holding_session(app: Any, udid: str, session_id: str | None) -> Any:
-    registry = getattr(app.state, "sessions", None)
-    if registry is None or not session_id:
-        return None
-    held = registry.holder_of(udid)
-    return held.session if held is not None and held.session.id == session_id else None
+def _finished(app: Any) -> OrderedDict:
+    finished = getattr(app.state, "session_installs_finished", None)
+    if finished is None:
+        finished = app.state.session_installs_finished = OrderedDict()
+    return finished
 
 
-async def before_install(app: Any, udid: str, caller: Any) -> frozenset[str] | None:
+def _finish(app: Any, key: tuple) -> None:
+    finished = _finished(app)
+    finished[key] = True
+    while len(finished) > _FINISHED_MAX:
+        finished.popitem(last=False)
+
+
+def _opening(session: Any) -> tuple:
+    return getattr(session, "id", None), getattr(session, "opened_at", None)
+
+
+async def _apps(controller: Any, udid: str) -> frozenset[str]:
+    # set_active=False: a release or an install's bookkeeping must not move the
+    # owner's active device.
+    apps, _ = await controller.list_apps(udid, set_active=False)
+    return frozenset(a.bundle_id for a in apps if getattr(a, "app_type", "") != "System")
+
+
+async def before_install(app: Any, udid: str, caller: Any) -> Install | None:
     """Note the device's apps before an install by `caller`, when its session
-    holds the device and its policy would clean up. Returns the apps there now,
-    for `after_install`, or None when nothing is tracked. Raises
+    holds the device and its policy would clean up. Returns them for
+    `after_install`, or None when nothing is tracked. Raises
     `BaselineUnavailable` when they could not be listed: an install whose
     release could not be cleaned up is refused rather than made."""
-    session = _holding_session(app, udid, getattr(caller, "session", None))
-    if session is None or policy_for(app, caller.principal) == "none":
+    registry = getattr(app.state, "sessions", None)
+    session_id = getattr(caller, "session", None)
+    held = registry.holder_of(udid) if registry is not None and session_id else None
+    if held is None or getattr(held.session, "id", None) != session_id \
+            or policy_for(app, caller.principal) == "none":
         return None
     try:
-        apps, _ = await app.state.device_controller.list_apps(udid)
+        before = await _apps(app.state.device_controller, udid)
     except Exception as e:
         raise BaselineUnavailable(str(e) or type(e).__name__) from e
-    present = frozenset(a.bundle_id for a in apps)
+    session, opened = _opening(held.session)
     records = _records(app)
     record = records.get(udid)
-    opened = getattr(session, "opened_at", None)
-    if record is None or (record.session, record.opened) != (session.id, opened):
-        records[udid] = InstallRecord(session=session.id, opened=opened, baseline=present)
-    return present
+    if record is None or (record.session, record.opened) != (session, opened):
+        # A record left by another session of the same key -- its clean-up
+        # still to retry -- carries over rather than being dropped.
+        carried = record.added if record is not None else set()
+        records[udid] = InstallRecord(session=session, opened=opened, added=set(carried))
+    return Install(session, opened, udid, before)
 
 
-async def after_install(app: Any, udid: str, before: frozenset[str] | None) -> None:
-    """Count an install that added no app: one already there was reinstalled,
-    and is left at release. Never raises."""
-    record = _records(app).get(udid)
-    if before is None or record is None:
-        return
+async def after_install(app: Any, install: Install | None) -> dict:
+    """Record what an install added. Returns fields for the install's answer:
+    none normally; when the hold ended while the install ran, the release has
+    already cleaned up without this app, so it is removed here instead, and
+    the answer says so. Never raises."""
+    if install is None:
+        return {}
+    controller = app.state.device_controller
     try:
-        apps, _ = await app.state.device_controller.list_apps(udid)
+        added = await _apps(controller, install.udid) - install.before
     except Exception:
-        return
-    if not {a.bundle_id for a in apps} - before:
-        record.reinstalled += 1
+        added = None
+    record = _records(app).get(install.udid)
+    if record is None or (record.session, record.opened) != (install.session, install.opened):
+        if added is None or len(added) != 1 or added & KEPT:
+            return {"hold_ended": True, "left": sorted(added or ())}
+        (bundle_id,) = added
+        try:
+            await controller.uninstall_app(bundle_id, install.udid, set_active=False)
+        except Exception as e:  # noqa: BLE001 -- reported on the answer
+            return {"hold_ended": True, "left": [bundle_id], "error": str(e) or type(e).__name__}
+        return {"hold_ended": True, "removed": [bundle_id]}
+    if added is None or len(added) > 1:
+        record.unclear += 1
+    elif not added:
+        record.reinstalls += 1
+    else:
+        record.added |= added
+    return {}
 
 
 async def end_for_release(app: Any, registry: Any, session: Any, udid: str,
@@ -133,15 +193,14 @@ async def end_for_release(app: Any, registry: Any, session: Any, udid: str,
 
     records = _records(app)
     record = records.get(udid)
-    opened = getattr(session, "opened_at", None)
-    mine = record is not None and (record.session, record.opened) == (session.id, opened)
+    opening = _opening(session)
+    mine = record is not None and (record.session, record.opened) == opening
     held = registry.holder_of(udid)
-    if held is not None and getattr(held.session, "id", None) != session.id:
+    if held is not None and _opening(held.session) != opening:
         if mine and held.session.principal == session.principal:
-            # The key holds it still, through another session: that one's
-            # release cleans up.
-            record.session = held.session.id
-            record.opened = getattr(held.session, "opened_at", None)
+            # The key holds it still, through another session or the same
+            # name opened again: that one's release cleans up.
+            record.session, record.opened = _opening(held.session)
             actions.append({"udid": udid, "action": "installs_handed_over", "ok": True,
                             "to": held.session.id})
         elif mine:
@@ -151,18 +210,20 @@ async def end_for_release(app: Any, registry: Any, session: Any, udid: str,
                                     "installed was left"})
         return
     policy = policy_for(app, session.principal)
-    if policy == "none" or (policy == "uninstall" and not mine):
+    if policy == "none":
         return
     controller = getattr(app.state, "device_controller", None)
     if controller is None:
         return
-    erase = policy == "erase" and controller._device_type(udid) == DeviceType.SIMULATOR
+    key = (*opening, udid)
+    erase = (policy == "erase" and key not in _finished(app)
+             and controller._device_type(udid) == DeviceType.SIMULATOR)
     if not erase and not mine:
         return
     try:
         if erase:
-            done = await asyncio.wait_for(
-                _erase(app, controller, session, udid), TIMEOUT_S)
+            done = await asyncio.wait_for(_erase(controller, session, udid), TIMEOUT_S)
+            _finish(app, key)
         else:
             done = await asyncio.wait_for(_uninstall(controller, record, udid), TIMEOUT_S)
         records.pop(udid, None)
@@ -170,13 +231,15 @@ async def end_for_release(app: Any, registry: Any, session: Any, udid: str,
     except Exception as e:  # noqa: BLE001 -- reported, never raised
         error = (f"did not finish within {TIMEOUT_S:g}s" if isinstance(e, TimeoutError)
                  else str(e) or type(e).__name__)
-        if record is None:
-            record = records[udid] = InstallRecord(session=session.id, opened=opened,
-                                                   baseline=None)
+        if not mine:
+            # An erase with nothing installed: a record only to count attempts.
+            record = records[udid] = InstallRecord(session=opening[0], opened=opening[1])
         record.attempts += 1
         gave_up = record.attempts >= ATTEMPTS
         if gave_up:
             records.pop(udid, None)
+            if erase:
+                _finish(app, key)
         actions.append({"udid": udid, "action": "erased" if erase else "installs_removed",
                         "ok": False, "error": error, **({"gave_up": True, "note": (
                             f"Tried {record.attempts} times: what this session installed "
@@ -184,20 +247,18 @@ async def end_for_release(app: Any, registry: Any, session: Any, udid: str,
 
 
 async def _uninstall(controller: Any, record: InstallRecord, udid: str) -> dict:
-    if record.baseline is None:
-        return {"action": "installs_removed", "removed": [], "note": "no baseline was noted"}
-    apps, _ = await controller.list_apps(udid)
-    added = [a.bundle_id for a in apps
-             if a.bundle_id not in record.baseline and a.bundle_id not in KEPT
-             and getattr(a, "app_type", "") != "System"]
-    for bundle_id in added:
-        await controller.uninstall_app(bundle_id, udid)
+    present = await _apps(controller, udid)
+    for bundle_id in sorted((record.added & present) - KEPT - set(record.removed)):
+        await controller.uninstall_app(bundle_id, udid, set_active=False)
         record.removed.append(bundle_id)
     return {"action": "installs_removed", "removed": list(record.removed),
-            **({"reinstalled_kept": record.reinstalled} if record.reinstalled else {})}
+            **({"installs_adding_nothing": record.reinstalls} if record.reinstalls else {}),
+            **({"unclear_installs": record.unclear,
+                "note": "some installs could not be told apart from what was already "
+                        "there, so their apps were left"} if record.unclear else {})}
 
 
-async def _erase(app: Any, controller: Any, session: Any, udid: str) -> dict:
+async def _erase(controller: Any, session: Any, udid: str) -> dict:
     reservation = (getattr(session, "reservations", None) or {}).get(udid)
     shutting_down = (getattr(reservation, "on_release", "") == "shutdown_booted"
                      and getattr(reservation, "booted_here", False))

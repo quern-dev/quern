@@ -64,11 +64,11 @@ Apps a session installs on a device it holds (`install_app`, `build_and_install`
 {"sessions": {"client_release": "uninstall", "owner_release": "none"}}
 ```
 
-- **`uninstall`** (the default for client keys): the apps that weren't on the device before the session's first install there are removed. quern's own WebDriverAgent and system apps are never touched. An app the session reinstalled over one already there is left, and the release says so (`reinstalled_kept`).
+- **`uninstall`** (the default for client keys): each install notes the app it added, and those are removed -- nothing else, so an app installed at the machine meanwhile stays. quern's own drivers (WebDriverAgent, uiautomator2) and system apps are never touched. An install over an app already there adds nothing, so that app is left, and the release says so (`installs_adding_nothing`). An install that seemed to add several apps, or whose result couldn't be listed, can't be told apart from what was already there: its apps are left too, and said (`unclear_installs`).
 - **`erase`**, for a machine several people share: every iOS simulator a client held is erased when it lets go, whether or not anything was installed, and booted again if it was booted. Erasing also removes the proxy's certificate from it; `auto_install_cert` puts it back at the next capture. Android devices and physical iPhones fall back to `uninstall`.
 - **`none`** (the default for the owner's own sessions): left as the session left it.
 
-The release's answer lists what was done (`installs_removed`, `erased`). A clean-up that fails is tried again at the next sweep, up to three times, and then given up on and said. If the device's apps can't be listed before a client's install, the install is refused (503) rather than made, since its release couldn't tell what to remove.
+The release's answer lists what was done (`installs_removed`, `erased`). A device the same key still holds through another session, or the same session name opened again, is handed over (`installs_handed_over`) rather than cleaned under it. A clean-up that fails is tried again at the next sweep, up to three times, and then given up on and said. If the device's apps can't be listed before a client's install, the install is refused (503) rather than made, since its release couldn't tell what to remove. An install still running when the hold ends removes its app as it finishes, and its answer says so (`hold_ended`).
 
 ## Planned
 
