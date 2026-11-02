@@ -20,13 +20,13 @@ policy for the caller's kind of key runs (``sessions.client_release``,
 - ``none``: leave the device as the session left it.
 
 What an install added is trusted only when it is one app, and, where the
-artifact's bundle id or package can be read (an ``.app``, an ``.ipa``, a Gradle
-build's metadata), only when it is that app: a listing that came back short
-before the install would make apps already there look new, and an app another
-caller installed meanwhile would look like this install's. Anything else, or
-a result that could not be listed, is counted as unclear; its apps are left,
-and the release says so. An APK upload's package is not read, so it is held
-to the one-app rule alone.
+artifact's bundle id or package can be read (an ``.app``, an ``.ipa``, an APK
+through the Android SDK's ``aapt2``, a Gradle build's metadata), only when it
+is that app: a listing that came back short before the install would make
+apps already there look new, and an app another caller installed meanwhile
+would look like this install's. Anything else, or a result that could not be
+listed, is counted as unclear; its apps are left, and the release says so.
+An APK on a machine with no build-tools is held to the one-app rule alone.
 
 The record belongs to the session and its opening, not to its key: a device
 another session of the same key holds by then -- the same name opened again
@@ -39,7 +39,11 @@ run again for that opening, whatever else on the device is retried.
 from __future__ import annotations
 
 import asyncio
+import os
 import plistlib
+import re
+import shutil
+import subprocess
 import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -64,6 +68,12 @@ TIMEOUT_S = 120.0
 #: The largest Info.plist read from an .ipa: an upload's cap bounds its
 #: compressed size, not what one member inflates to.
 _MAX_PLIST_BYTES = 8 * 1024 * 1024
+
+#: How long `aapt2 dump packagename` may take. Measured: 0.3 s on a 10 MB APK.
+_AAPT2_TIMEOUT_S = 30.0
+
+#: A Java package name, as aapt2 prints it.
+_PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+")
 
 #: How many finished erases are remembered. A retry comes within a few sweeps
 #: of its release, so only the recent ones matter.
@@ -169,12 +179,44 @@ def bundle_id_of(app_path: str | Path) -> str | None:
                 if z.getinfo(name).file_size > _MAX_PLIST_BYTES:
                     return None
                 info = plistlib.loads(z.read(name))
+        elif path.suffix.lower() == ".apk":
+            return _apk_package(path)
         else:
             return None
     except Exception:  # noqa: BLE001 -- unreadable is unknown, not an error
         return None
     bundle_id = info.get("CFBundleIdentifier") if isinstance(info, dict) else None
     return bundle_id if isinstance(bundle_id, str) and bundle_id else None
+
+
+def _aapt2() -> str | None:
+    """The SDK's aapt2: on the PATH, else the newest build-tools' under
+    ANDROID_HOME, ANDROID_SDK_ROOT or Android Studio's default SDK."""
+    from server.device.android.adb import _SDK_SEARCH_PATHS
+
+    found = shutil.which("aapt2")
+    if found:
+        return found
+    roots = [Path(os.environ[v]) for v in ("ANDROID_HOME", "ANDROID_SDK_ROOT")
+             if os.environ.get(v)] + list(_SDK_SEARCH_PATHS)
+    for root in roots:
+        tools = [t for t in (root / "build-tools").glob("*/aapt2") if t.is_file()]
+        if tools:
+            newest = max(tools, key=lambda t: tuple(
+                int(n) for n in re.findall(r"\d+", t.parent.name)))
+            return str(newest)
+    return None
+
+
+def _apk_package(path: Path) -> str | None:
+    """The package an APK installs as, read by aapt2; None without one."""
+    tool = _aapt2()
+    if tool is None:
+        return None
+    done = subprocess.run([tool, "dump", "packagename", str(path)], capture_output=True,
+                          text=True, timeout=_AAPT2_TIMEOUT_S)
+    name = done.stdout.strip() if done.returncode == 0 else ""
+    return name if _PACKAGE.fullmatch(name) else None
 
 
 def hold_ended_note(ended: dict) -> str | None:

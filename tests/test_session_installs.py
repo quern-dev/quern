@@ -680,6 +680,81 @@ async def test_a_controller_boot_for_a_release_leaves_the_active_device():
     assert controller._active_udid == SIM
 
 
+def _fake_sdk(tmp_path, monkeypatch, tools: dict[str, str]):
+    """An SDK of fake aapt2s, version -> script body; the machine's own SDK
+    and PATH are out of reach."""
+    from server.device.android import adb
+
+    root = tmp_path / "sdk"
+    for version, body in tools.items():
+        tool = root / "build-tools" / version / "aapt2"
+        tool.parent.mkdir(parents=True)
+        tool.write_text(f"#!/bin/sh\n{body}\n")
+        tool.chmod(0o755)
+    monkeypatch.setattr(si.shutil, "which", lambda name: None)
+    monkeypatch.setattr(adb, "_SDK_SEARCH_PATHS", [])
+    monkeypatch.setenv("ANDROID_HOME", str(root))
+    monkeypatch.delenv("ANDROID_SDK_ROOT", raising=False)
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"PK")
+    return apk
+
+
+def test_an_apks_package_is_read_with_the_newest_aapt2(tmp_path, monkeypatch):
+    """The newest by version, not by name: 9.0.0 sorts after 36.1.0 as text."""
+    apk = _fake_sdk(tmp_path, monkeypatch, {
+        "9.0.0": "echo com.old.tools", "36.0.0": "echo com.older",
+        "36.1.0": 'test "$1 $2" = "dump packagename" && echo com.example.apk'})
+    assert si.bundle_id_of(apk) == "com.example.apk"
+
+
+@pytest.mark.parametrize("body", [
+    "echo 'ERROR: not an APK' >&2; exit 1",
+    "echo 'W/ziparchive: something odd'",
+    "exit 0",
+])
+def test_an_apk_aapt2_cannot_read_is_unknown(tmp_path, monkeypatch, body):
+    apk = _fake_sdk(tmp_path, monkeypatch, {"36.1.0": body})
+    assert si.bundle_id_of(apk) is None
+
+
+def test_an_apk_with_no_build_tools_is_unknown(tmp_path, monkeypatch):
+    apk = _fake_sdk(tmp_path, monkeypatch, {})
+    assert si.bundle_id_of(apk) is None
+
+
+def test_a_stalled_aapt2_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(si, "_AAPT2_TIMEOUT_S", 0.5)
+    apk = _fake_sdk(tmp_path, monkeypatch, {"36.1.0": "sleep 10; echo com.late"})
+    assert si.bundle_id_of(apk) is None
+
+
+async def test_an_apk_install_takes_only_its_own_package(tmp_path, monkeypatch):
+    """The gap this closes: an APK reinstall adding nothing while something
+    else installs another app was taken for the APK's install."""
+    from server.api import device as device_api
+    from server.models import InstallAppRequest
+
+    apk = _fake_sdk(tmp_path, monkeypatch, {"36.1.0": "echo com.example.mine"})
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s), installed=("com.example.mine",))
+    ctrl.resolve_udid = AsyncMock(return_value=SIM)
+
+    async def reinstall_while_another_lands(app_path, udid):
+        state["apps"].append("com.example.other")
+        return udid
+
+    ctrl.install_app = AsyncMock(side_effect=reinstall_while_another_lands)
+    app.state.uploads = MagicMock()
+    monkeypatch.setattr(device_api, "_get_controller", lambda r: ctrl)
+    monkeypatch.setattr("server.visibility.current_caller", lambda: SimpleNamespace(
+        session=s.id, principal=s.principal, is_owner=False))
+    await device_api.install_app(SimpleNamespace(app=app),
+                                 InstallAppRequest(app_path=str(apk), udid=SIM))
+    record = app.state.session_installs[SIM]
+    assert (record.added, record.unclear) == (set(), 1)
+
+
 def test_an_ipa_with_an_inflated_info_plist_is_not_read(tmp_path, monkeypatch):
     import plistlib
     import zipfile
