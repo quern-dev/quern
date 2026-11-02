@@ -289,3 +289,21 @@ async def test_a_late_installs_removal_is_bounded(monkeypatch):
     ended = await asyncio.wait_for(si.after_install(app, late), 5)
     assert ended["left"] == ["com.example.late"] and "did not finish" in ended["error"]
     assert registry.reserve("s1", [SIM]), "free once the bounded uninstall gave up"
+
+
+async def test_adbs_own_timeout_kills_its_child(monkeypatch):
+    """adb's bounded path relies on communicate() for the kill now."""
+    from server.device.android.adb import AdbBackend, AdbTimeout
+
+    started = []
+
+    async def spawn(*args, **kw):
+        started.append(await _sleeper())
+        return started[-1]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    backend = AdbBackend()
+    backend._adb_path = "adb"
+    with pytest.raises(AdbTimeout):
+        await backend._run_adb("-s", "emulator-5554", "uninstall", "x", timeout=0.3)
+    assert started[0].returncode is not None
