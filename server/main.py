@@ -22,7 +22,7 @@ import os
 import signal
 import sys
 import time
-from collections.abc import AsyncGenerator, Iterable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -238,7 +238,8 @@ def _log_keyboards(actions: list[dict], when: str) -> None:
 GAUGE_CONTROLLER_WAIT_S = 20.0
 
 
-async def _gauge_stream(app: FastAPI, udid: str, app_id: str, interval: float):
+async def _gauge_stream(app: FastAPI, udid: str, app_id: str,
+                        interval: float) -> AsyncIterator[object]:
     """A recording's gauge stream, once the device controller exists.
 
     A recording resumed at startup starts sampling before the lifespan has

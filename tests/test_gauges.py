@@ -1248,14 +1248,19 @@ class TestCodeRabbit596:
         asyncio.ensure_future(arrive())
         stream = main_mod._gauge_stream(app, SIM, "com.x", 1.0)
         async with contextlib.aclosing(stream):
-            assert (await anext(stream))["running"] is True
+            # Bounded: a wait that never ends must fail here, not hang the run.
+            async with asyncio.timeout(5):
+                assert (await anext(stream))["running"] is True
 
     async def test_a_controller_that_never_comes_is_said(self, monkeypatch):
         from server import main as main_mod
         monkeypatch.setattr(main_mod, "GAUGE_CONTROLLER_WAIT_S", 0.2)
         app = SimpleNamespace(state=SimpleNamespace(device_controller=None))
+        # Bounded (CodeRabbit): if the wait lost its deadline this would block
+        # the run forever rather than fail.
         with pytest.raises(RuntimeError, match="no device controller"):
-            await anext(main_mod._gauge_stream(app, SIM, "com.x", 1.0))
+            async with asyncio.timeout(5):
+                await anext(main_mod._gauge_stream(app, SIM, "com.x", 1.0))
 
     async def test_sysmontap_closes_before_the_connection(self, monkeypatch):
         monkeypatch.setattr(performance, "_device_address", AsyncMock(return_value=("::1", 1)))
