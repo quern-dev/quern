@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -25,6 +26,7 @@ from server.gauges import Sample, parse_sample, summarise
 from server.models import DeviceError, InvalidDeviceRequestError, PerformanceSnapshot
 from server.recording import recorder as rec_mod
 from server.recording.recorder import Filters, RecordingError, RecordingManager
+from tests.test_blind_mode import world  # noqa: F401 -- a fixture, used by name
 from tests.test_recording import SIM, Sources, _action, _app, _events, _now, _settle
 
 T0 = datetime(2026, 11, 1, 12, tzinfo=UTC)
@@ -521,7 +523,9 @@ class TestTheTrace:
             assert f"before recording {rid}" in why and "recording=" not in why
             client.post(f"/api/v1/recordings/{rid}/stop")
 
-    def test_live_an_action_older_than_the_samples_kept_points_at_the_file(self, tmp_path):
+    def test_live_an_action_older_than_the_samples_kept_points_at_the_file(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(rec_mod, "LIVE_GAUGE_SAMPLES", 1)      # the window is full
         src, fake = Sources(), FakeGauges()
         with TestClient(_gauged_app(src, fake)) as client:
             rid = client.post("/api/v1/recordings", json={
@@ -646,7 +650,9 @@ class TestTheControllerStream:
         async with contextlib.aclosing(stream):
             for _ in range(3):
                 assert (await anext(stream)).running is False
-        assert calls == [1.5, 1.5, 1.5] and sleeps == [1.5, 1.5]
+        # The wait comes before each is said, so its window is the time it
+        # speaks for.
+        assert calls == [1.5, 1.5, 1.5] and sleeps == [1.5, 1.5, 1.5]
 
     async def test_a_running_app_is_sampled_back_to_back(self, monkeypatch):
         from server.models import DeviceType
@@ -879,3 +885,312 @@ class TestThePhoneStream:
         with pytest.raises(DeviceError, match="reset"):
             await anext(performance.device_stream("UUID", "com.x", 1.0))
         rsd.close.assert_awaited_once()
+
+
+# ── what the adversarial review found (#245, phase 2) ────────────────────────
+
+def _t(seconds: float) -> datetime:
+    return T0 + timedelta(seconds=seconds)
+
+
+def _line(start, end, **snap):
+    snap.setdefault("running", True)
+    return parse_sample(gauges_mod.sample_line(snap, _t(start), _t(end)))
+
+
+class TestReviewFindings:
+    async def test_a_gauged_recording_with_no_reading_is_not_complete(self, tmp_path,
+                                                                       monkeypatch):
+        monkeypatch.setattr(rec_mod, "GAUGE_RETRY_S", 0.01)
+
+        def broken(udid, app, interval):
+            raise OSError("no tunnel to the phone")
+        m = _manager(Sources(), broken)
+        rec = await m.start(SIM, str(tmp_path / "r"), Filters(gauges="com.x"))
+        await _until(lambda: rec.counts.get("gauge", 0) >= 4)
+        await m.stop(rec.id)
+        summary = rec.summary()
+        assert summary["complete"] is False and summary["gauges_lost"] is True
+        # And read back so at the next start, from the file.
+        tally = rec_mod._tally(tmp_path / "r" / "events.jsonl")
+        assert tally.gauge_failures == summary["counts"]["gauge"]
+
+    async def test_not_running_and_a_slow_start_do_not_make_it_incomplete(self, tmp_path):
+        src, fake = Sources(), FakeGauges()
+        m = _manager(src, fake)
+        rec = await m.start(SIM, str(tmp_path / "r"), Filters(gauges="com.x"))
+        await asyncio.sleep(0.4)                        # a stream slow to answer
+        fake.push(running=False, unavailable={"cpu_percent": "the app is not running"},
+                  sample_seconds=0.1)
+        await _until(lambda: rec.counts.get("gauge") == 2)
+        await m.stop(rec.id)
+        assert rec.summary()["gauges_lost"] is False and rec.summary()["complete"] is True
+        assert Recording_without_gauges_is_none()
+
+    async def test_the_time_before_the_first_sample_is_said(self, tmp_path):
+        src, fake = Sources(), FakeGauges()
+        m = _manager(src, fake)
+        rec = await m.start(SIM, str(tmp_path / "r"), Filters(gauges="com.x"))
+        await asyncio.sleep(0.4)
+        fake.push(cpu_percent=1.0, sample_seconds=0.1)
+        await _until(lambda: rec.counts.get("gauge") == 2)
+        await m.stop(rec.id)
+        gap, sample = (g["data"] for g in _gauge_lines(tmp_path / "r"))
+        assert "starting" in gap["unavailable"]["cpu_percent"] and not gap.get("error")
+        assert gap["to"] == sample["from"]
+
+    async def test_a_cancelled_start_gives_the_device_back(self, tmp_path, monkeypatch):
+        import time
+        m = _manager(Sources(), FakeGauges())
+        real = m._begin_files
+
+        def slow(rec):
+            time.sleep(0.3)
+            real(rec)
+        monkeypatch.setattr(m, "_begin_files", slow)
+        task = asyncio.ensure_future(m.start(SIM, str(tmp_path / "a"), Filters(gauges="com.x")))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert m._gauging == {}
+
+    @pytest.mark.parametrize("failure", ["reserve_screen", "begin_files_oserror", "video_start"])
+    async def test_every_refused_start_gives_the_device_back(self, tmp_path, failure):
+        """Each path a start can fail by, pinned: only two were (review)."""
+        video = SimpleNamespace(start=AsyncMock(side_effect=RuntimeError("no screen")),
+                                stop=AsyncMock(return_value={"path": "x"}))
+        src = Sources()
+        m = RecordingManager(server_buffer=src.server, ring_buffer=src.ring,
+                             crash_buffer=src.crash, flow_store=src.flows, ip_map=lambda: {},
+                             gauges=FakeGauges(), video=video)
+        filters = Filters(gauges="com.x", video=failure != "begin_files_oserror")
+        if failure == "reserve_screen":
+            m._filming[SIM] = "rec_someone"
+        if failure == "begin_files_oserror":
+            def broken(rec):
+                raise PermissionError("read-only")
+            m._begin_files = broken
+        with pytest.raises(RecordingError):
+            await m.start(SIM, str(tmp_path / "r"), filters)
+        await asyncio.sleep(0)
+        assert SIM not in m._gauging
+
+    async def test_a_recording_that_comes_back_does_not_double_sample_a_device(self, tmp_path):
+        src = Sources()
+        m1 = _manager(src, FakeGauges())
+        a = await m1.start(SIM, str(tmp_path / "a"), Filters(gauges="com.x"))
+        await m1.shutdown()
+        (tmp_path / "a").rename(tmp_path / "a-away")
+        m2 = _manager(src, FakeGauges())
+        assert await m2.resume_all() == []
+        b = await m2.start(SIM, str(tmp_path / "b"), Filters(gauges="com.x"))
+        await m2.shutdown()
+        (tmp_path / "a-away").rename(tmp_path / "a")
+        fake3 = FakeGauges()
+        m3 = _manager(src, fake3)
+        resumed = await m3.resume_all()
+        assert sorted(resumed) == sorted([a.id, b.id])
+        await asyncio.sleep(0.05)
+        try:
+            assert len(fake3.calls) == 1, fake3.calls
+            loser = next(m3.get(r) for r in resumed if m3._gauging[SIM] != r)
+            assert any("not sampled after this restart" in w for w in loser.warnings)
+            assert loser.summary()["gauges_lost"] is True
+        finally:
+            for rid in resumed:
+                await m3.stop(rid)
+
+    def test_frames_across_an_outage_are_not_this_actions(self):
+        samples = [_line(0, 1, frames={"total_frames": 100, "janky_frames": 0,
+                                       "janky_method": "deadline"}),
+                   parse_sample(gauges_mod.failed_line("phone unplugged", _t(1), _t(300))),
+                   _line(300, 301, frames={"total_frames": 18100, "janky_frames": 900,
+                                           "janky_method": "deadline"})]
+        g = summarise(samples, _t(300.2), _t(300.3))
+        assert g["frames"] is None, g["frames"]       # one reading in it, and no adjacent one
+
+    def test_frames_across_an_app_restart_are_not_a_difference(self):
+        samples = [_line(0, 1, pid=100, frames={"total_frames": 100}),
+                   _line(1, 2, pid=200, frames={"total_frames": 400}),
+                   _line(2, 3, pid=200, frames={"total_frames": 450})]
+        # A window holding both processes' readings: no difference to take.
+        g = summarise(samples, _t(0.5), _t(2.5), grace=timedelta(0))
+        assert g["frames"] is None and "restarted" in g["unavailable"]["frames"]
+        # The reading before is the old process's: counted from the first
+        # inside instead, never 400 - 100.
+        after = summarise(samples, _t(1.5), _t(2.5), grace=timedelta(0))
+        assert after["frames"]["total"] == 50 and "not included" in after["frames"]["note"]
+        same = summarise(samples, _t(2.0), _t(2.5), grace=timedelta(0))
+        assert same["frames"]["total"] == 50 and "note" not in same["frames"]
+
+    def test_a_baseline_ending_exactly_at_the_start_counts(self):
+        samples = [_line(0, 10, frames={"total_frames": 100}),
+                   _line(10, 12, frames={"total_frames": 160})]
+        g = summarise(samples, _t(10), _t(11), grace=timedelta(0))
+        assert g["frames"]["total"] == 60 and "note" not in g["frames"]
+
+    def test_live_uncovered_does_not_send_the_reader_to_a_file_with_nothing_more(self):
+        from server.api import trace as trace_api
+        rec = SimpleNamespace(id="rec_x", started_at=_t(0))
+        samples = [Sample(start=_t(30), end=_t(31), running=True, cpu_percent=1.0)]
+        why = trace_api._live_uncovered(rec, samples, _t(5), _t(5.1))
+        assert "recording=" not in why
+
+    async def test_the_retry_pause_resets_after_a_good_sample(self, tmp_path, monkeypatch):
+        sleeps: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def sleep(seconds, *a):
+            if seconds >= 1:                          # the sampler's, not the test's
+                sleeps.append(seconds)
+            await real_sleep(0)
+        monkeypatch.setattr(rec_mod.asyncio, "sleep", sleep)
+        src, fake = Sources(), FakeGauges()
+        m = _manager(src, fake)
+        rec = await m.start(SIM, str(tmp_path / "r"), Filters(gauges="com.x"))
+        for item in (OSError("a"), OSError("b")):
+            fake.queue.put_nowait(item)
+        await _until(lambda: len(sleeps) == 2)
+        fake.push(cpu_percent=1.0)
+        fake.queue.put_nowait(OSError("c"))
+        await _until(lambda: len(sleeps) == 3)
+        await m.stop(rec.id)
+        assert sleeps == [2.0, 4.0, 2.0]
+
+    def test_a_torn_gauge_line_is_counted_unreadable(self, tmp_path):
+        d = tmp_path / "r"
+        d.mkdir()
+        lines = [{"type": "started", "at": T0.isoformat(), "monotonic": 1.0, "udid": SIM,
+                  "filters": {"gauges": "com.x"}},
+                 {"type": "gauge", "at": T0.isoformat(), "monotonic": 2.0, "data": {"x": 1}},
+                 {"type": "stopped", "at": T0.isoformat(), "monotonic": 3.0}]
+        (d / "events.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+        loaded = rec_mod.load(d)
+        assert loaded.gauges == [] and loaded.unreadable_lines == 1
+
+
+def Recording_without_gauges_is_none() -> bool:
+    from server.recording.recorder import Recording
+    rec = Recording(id="r", udid=SIM, dir=Path("/nonexistent"), filters=Filters(),
+                    started_at=T0)
+    return rec.gauges_lost is None
+
+
+def test_a_blind_client_does_not_see_the_owners_gauges(tmp_path, world):  # noqa: F811
+    from server.models import LogSource as _LS
+    from server.recording.recorder import Recording
+    from tests.test_blind_mode import SIM_A, _entry, _h
+    m = RecordingManager(server_buffer=world.app.state.server_buffer,
+                         ring_buffer=world.app.state.ring_buffer,
+                         crash_buffer=world.app.state.crash_buffer,
+                         flow_store=world.app.state.flow_store, ip_map=lambda: {},
+                         gauges=FakeGauges())
+    world.app.state.recordings = m
+    now = datetime.now(UTC)
+    owner = Recording(id="rec_owners_secret", udid=SIM_A, dir=tmp_path,
+                      filters=Filters(gauges="com.owner.unreleased"),
+                      started_at=now - timedelta(minutes=10), principal="owner")
+    m._recordings[owner.id] = owner
+    m._gauging[SIM_A] = owner.id
+    owner._gauge_samples.append(Sample(start=now - timedelta(seconds=2), end=now,
+                                       running=True, cpu_percent=77.0, memory_bytes=1234))
+
+    async def seed():
+        await world.app.state.server_buffer.append(_entry(
+            "server", ago=1, source=_LS.SERVER, message="alice-tap", action="tap",
+            udid=SIM_A, outcome="ok", session="alice:s1"))
+    asyncio.run(seed())
+    r = world.client.get("/api/v1/trace", headers=_h(world.alice))
+    assert r.status_code == 200 and "alice-tap" in r.text
+    assert "rec_owners_secret" not in r.text and "com.owner.unreleased" not in r.text
+    assert r.json()["gauges"] == {}
+    # And the refusal to a second gauged start does not name it either.
+    with pytest.raises(RecordingError) as e:
+        m._may_gauge(SIM_A, None, "alice")
+    assert "rec_owners_secret" not in str(e.value) and "another caller" in str(e.value)
+    with pytest.raises(RecordingError, match="rec_owners_secret"):
+        m._may_gauge(SIM_A, None, "owner")
+
+
+class TestDeviceSideReview:
+    @pytest.fixture(autouse=True)
+    def _tunnel(self, monkeypatch):
+        monkeypatch.setattr(performance, "_device_address", AsyncMock(return_value=("::1", 1)))
+        monkeypatch.setattr(performance, "_NOT_RUNNING_POLL_S", 0.0)
+
+    async def test_a_stale_fps_is_not_a_current_reading(self, monkeypatch):
+        ns = 10**9
+        lib, _, _ = _fake_lib(pids=[42], ticks=[_tick(42, i * ns, 0, (i + 1) * ns)
+                                                for i in range(4)],
+                              fps_events=[{"CoreAnimationFramesPerSecond": 1.0},
+                                          {"CoreAnimationFramesPerSecond": 60.0}])
+        monkeypatch.setattr(performance, "_pmd3", lambda: lib)
+        clock = [100.0]
+        monkeypatch.setattr(performance, "_clock", lambda: clock[0])
+        stream = performance.device_stream("UUID", "com.x", 1.0)
+        async with contextlib.aclosing(stream):
+            await anext(stream)
+            await asyncio.sleep(0.01)
+            assert (await anext(stream)).display_fps == 60.0
+            clock[0] += 10                          # the feed has said nothing since
+            stale = await anext(stream)
+        assert stale.display_fps is None and "went quiet" in stale.unavailable["display_fps"]
+
+    async def test_the_phone_stream_is_closed_by_the_controller(self, monkeypatch):
+        from server.device.controller import DeviceController
+        from server.models import DeviceType
+        closed = []
+
+        async def stream(uuid, app, interval):
+            try:
+                while True:
+                    yield PerformanceSnapshot(udid=uuid, bundle_id=app, platform="ios_device",
+                                              running=True, sample_seconds=1.0)
+            finally:
+                closed.append(True)
+        monkeypatch.setattr(performance, "device_stream", stream)
+        ctrl = DeviceController()
+        ctrl.resolve_udid = AsyncMock(side_effect=lambda udid, **kw: udid)
+        ctrl._device_type_cache["00008030-X"] = DeviceType.DEVICE
+        gen = ctrl.gauge_stream("00008030-X", "com.x", 1.0)
+        await anext(gen)
+        await gen.aclose()
+        assert closed == [True]
+
+
+class TestHangsInRecordings:
+    async def test_a_hang_is_its_own_kind_not_a_crash(self, tmp_path):
+        from server.models import LogEntry, LogLevel, LogSource
+        src = Sources()
+        m = _manager(src, FakeGauges())
+        rec = await m.start(SIM, str(tmp_path / "r"), Filters())
+        hang = LogEntry(id="android-hang-x", timestamp=_now(), device_id=SIM, process="com.x",
+                        level=LogLevel.ERROR, message="com.x hung", source=LogSource.CRASH)
+        crash = hang.model_copy(update={"id": "android-crash-y", "message": "com.x crashed"})
+        await src.crash.append(hang)
+        await src.crash.append(crash)
+        await _settle()
+        await m.stop(rec.id)
+        assert rec.counts["crash"] == 1 and rec.counts["hang"] == 1
+        kinds = [e["type"] for e in _events(tmp_path / "r")]
+        assert kinds.count("hang") == 1 and kinds.count("crash") == 1
+        assert {e.message for e in rec_mod.load(tmp_path / "r").logs} == {"com.x hung",
+                                                                         "com.x crashed"}
+        assert rec_mod._tally(tmp_path / "r" / "events.jsonl").counts["hang"] == 1
+
+    def test_an_android_hang_carries_the_device_clock_caveat(self):
+        from server.models import LogEntry, LogLevel, LogSource
+        from server.trace import build_trace
+        at = datetime.now(UTC)
+        tap = LogEntry(id="t", timestamp=at, device_id="server", process="server",
+                       level=LogLevel.INFO, message="tap", source=LogSource.SERVER,
+                       action="tap", udid="SERIAL", duration_ms=500, outcome="ok")
+        hang = LogEntry(id="android-hang-1", timestamp=at - timedelta(milliseconds=100),
+                        device_id="SERIAL", process="com.x", level=LogLevel.ERROR,
+                        message="hung", source=LogSource.CRASH)
+        [a] = build_trace([tap], [], [hang])
+        assert a.logs == [hang] and any("device's own clock" in c for c in a.caveats)
+        ios = hang.model_copy(update={"id": "crash-ios"})
+        [b] = build_trace([tap], [], [ios])
+        assert not any("device's own clock" in c for c in b.caveats)

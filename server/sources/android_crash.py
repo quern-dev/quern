@@ -44,7 +44,8 @@ _ANR = re.compile(r"^ANR in (\S+)")
 # "Window '44a30c2 com.quern.probe/com.quern.probe.MainActivity (server)' spent
 #  10562.6ms processing the last input event: MotionEvent" (Android 10)
 _SLOW_INPUT = re.compile(
-    r"^Window '(?:[0-9a-f]+ )?([A-Za-z0-9_.]+)(?:/[^']*)?' spent ([0-9]+(?:\.[0-9]+)?)ms "
+    r"^Window '(?:[0-9a-f]+ )?([A-Za-z0-9_.]+)(?:/[^' ]*)?(?: \(server\))?' "
+    r"spent ([0-9]+(?:\.[0-9]+)?)ms "
     r"processing the last input event: (\w+)")
 _ANR_PID = re.compile(r"^PID:\s*(\d+)")
 
@@ -65,6 +66,10 @@ COMM_LEN = 15
 #: a crash is recognised from -- so a tag filter quietly turned crash
 #: detection off. See `crash_specs_for` for when they are added.
 CRASH_TAG_SPECS = ("AndroidRuntime:E", "libc:F", "ActivityManager:E", "InputDispatcher:I")
+#: Of those, the tags let through only to be recognised: when a caller's filter
+#: would have silenced them, their lines become hang entries and are not kept
+#: as logs. InputDispatcher at info logs focus changes and stale events too.
+DETECTION_ONLY = frozenset({"InputDispatcher"})
 
 
 def crash_specs_for(tag_filter: str) -> list[str]:

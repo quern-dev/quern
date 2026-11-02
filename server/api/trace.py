@@ -102,9 +102,13 @@ def _live_gauges(request: Request, attributions: list[Attribution],
     found: dict[str, tuple] = {}
     if manager is None or not hasattr(manager, "live_gauges"):
         return found, {}
+    caller = visibility.current_caller()
+    blind = visibility.blind_for(caller)
     for udid in {a.action.udid for a in attributions if a.action.udid}:
         live = manager.live_gauges(udid)
-        if live is not None:
+        # Blind (#254): another principal's recording, its app and its
+        # samples are not this caller's to see (review).
+        if live is not None and (not blind or live[0].principal == caller.principal):
             found[udid] = live
     described = {udid: {"app": rec.filters.gauges, "interval_s": rec.filters.gauge_interval_s,
                         "recording": rec.id, "live_samples": len(samples)}
@@ -120,7 +124,9 @@ def _live_uncovered(rec, samples: list, started: datetime, finished: datetime) -
                 f"{rec.started_at.isoformat()}")
     if not samples:
         return "the recording sampling this device has no gauge sample yet"
-    if started < samples[0].start:
+    # Only once the live window has let samples go: before that the file holds
+    # nothing more, and saying otherwise sent a reader to it for nothing (review).
+    if started < samples[0].start and len(samples) >= recording_mod.LIVE_GAUGE_SAMPLES:
         return (f"before the earliest of the {len(samples)} samples a live trace keeps; the "
                 f"recording's file has them all: get_trace with recording=")
     return "no gauge sample overlaps this action"
@@ -577,7 +583,7 @@ async def _trace_from_recording(request: Request, ref: str, since: datetime | No
             "app": loaded.gauge_app, "interval_s": loaded.gauge_interval_s,
             "recording": str(directory), "samples": len(loaded.gauges)}}
             if loaded.gauge_app else {}),
-        "log_window_truncated": bool(holes("log", "crash")),
+        "log_window_truncated": bool(holes("log", "crash", "hang")),
         "logs_over_limit": False,
         "actions_over_limit": actions_over_limit,
         "action_window_truncated": bool(holes("action")),
@@ -589,7 +595,7 @@ async def _trace_from_recording(request: Request, ref: str, since: datetime | No
         "recording": {
             "directory": str(directory),
             "stopped": loaded.stopped,
-            "holes": holes("action", "flow", "request_started", "log", "crash"),
+            "holes": holes("action", "flow", "request_started", "log", "crash", "hang"),
             "unreadable_lines": loaded.unreadable_lines,
             "clock_anchors": loaded.clock_anchors,
             # A reboot during the run: `started_monotonic` values on either

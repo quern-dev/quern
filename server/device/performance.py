@@ -573,17 +573,19 @@ async def device_stream(uuid: str, bundle_id: str, interval: float):
             raise DeviceError(f"{uuid[:8]} did not answer within {_ANSWER_SLACK_S:g}s",
                               tool="pymobiledevice3") from None
         async with lib.DvtProvider(rsd) as dvt:
-            fps: dict = {"value": None, "why": "no FPS reading yet"}
+            fps: dict = {"value": None, "why": "no FPS reading yet", "at": None}
             feed = asyncio.create_task(_fps_feed(lib.Graphics, dvt, fps))
             try:
                 while True:
                     async with asyncio.timeout(_ANSWER_SLACK_S), lib.ProcessControl(dvt) as pc:
                         pid = await pc.process_identifier_for_bundle_identifier(bundle_id)
                     if not pid:
+                        # Said after the wait, so its window is the time it
+                        # speaks for (see `DeviceController.gauge_stream`).
+                        await asyncio.sleep(_NOT_RUNNING_POLL_S)
                         yield _not_running(PerformanceSnapshot(
                             udid=uuid, bundle_id=bundle_id, platform="ios_device",
                             running=False, sample_seconds=_NOT_RUNNING_POLL_S))
-                        await asyncio.sleep(_NOT_RUNNING_POLL_S)
                         continue
                     async for snap in _sysmon_stream(lib.Sysmontap, dvt, uuid, bundle_id,
                                                      pid, interval, fps):
@@ -629,10 +631,7 @@ async def _sysmon_stream(Sysmontap, dvt, uuid: str, bundle_id: str, pid: int,
                            f"leaves out an app in the background -- bring it to the foreground")
                     for name in ("cpu_percent", "memory_bytes", "threads"):
                         snap.unavailable[name] = why
-                    if fps["value"] is None:
-                        snap.unavailable["display_fps"] = fps["why"]
-                    else:
-                        snap.display_fps = fps["value"]
+                    _take_fps(snap, fps, interval)
                     yield _finish(snap)
                 else:
                     # Said, not skipped: until the next pid's first full tick
@@ -662,12 +661,28 @@ async def _sysmon_stream(Sysmontap, dvt, uuid: str, bundle_id: str, pid: int,
                 snap.memory_kind = "phys_footprint"
             _store(snap, "threads", threads if isinstance(threads, int) and threads > 0
                    else None, "sysmontap gave no threadCount")
-            if fps["value"] is None:
-                snap.unavailable["display_fps"] = fps["why"]
-            else:
-                snap.display_fps = fps["value"]
+            _take_fps(snap, fps, interval)
             previous = mine
             yield _finish(snap)
+
+
+#: How long a Core Animation reading stands for, at the least: Graphics sends
+#: about one a second, so an older one means the feed has gone quiet.
+_FPS_STALE_S = 3.0
+
+
+def _take_fps(snap: PerformanceSnapshot, fps: dict, interval: float) -> None:
+    """The latest FPS onto `snap`, unless there is none or it is stale -- a
+    feed gone quiet without ending would otherwise repeat its last reading as
+    current for the rest of the recording (review)."""
+    at = fps.get("at")
+    if fps["value"] is None:
+        snap.unavailable["display_fps"] = fps["why"]
+    elif at is not None and _clock() - at > max(_FPS_STALE_S, interval * 3):
+        snap.unavailable["display_fps"] = (
+            f"no FPS reading for {_clock() - at:.0f}s; the graphics service went quiet")
+    else:
+        snap.display_fps = fps["value"]
 
 
 async def _fps_feed(Graphics, dvt, fps: dict) -> None:
@@ -681,6 +696,7 @@ async def _fps_feed(Graphics, dvt, fps: dict) -> None:
                 n += 1
                 if n >= 2 and isinstance(ev, dict) and "CoreAnimationFramesPerSecond" in ev:
                     fps["value"] = float(ev["CoreAnimationFramesPerSecond"])
+                    fps["at"] = _clock()
         fps["value"], fps["why"] = None, "the graphics service stopped sending FPS"
     except asyncio.CancelledError:
         raise

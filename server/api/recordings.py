@@ -88,7 +88,8 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             keyframes=tuple(body.keyframes) if body.keyframes is not None
             else KEYFRAME_TRIGGERS,
             gauges=body.gauges, gauge_interval_s=body.gauge_interval_s)
-        await manager.check_start(udid, body.output_dir, filters)
+        await manager.check_start(udid, body.output_dir, filters,
+                                  principal=visibility.current_caller().principal)
     except RecordingError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     simulator_tls = None

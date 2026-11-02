@@ -400,7 +400,11 @@ def _log_caveat(attribution: Attribution, entry: LogEntry, firm: bool) -> None:
     # is nothing to reconcile. A physical device does not, and quern applies
     # no offset -- so an attribution near an interval boundary may be on the
     # wrong side of it.
-    if entry.source in _DEVICE_CLOCK_SOURCES:
+    # Android crash and hang entries are logcat lines too, on the same clock;
+    # a hang's stamp exists to attribute it, so the caveat matters most there.
+    if entry.source in _DEVICE_CLOCK_SOURCES or (
+            entry.source == LogSource.CRASH
+            and entry.id.startswith(("android-crash-", "android-hang-"))):
         _note(
             attribution,
             "device log times come from the device's own clock and are "

@@ -193,7 +193,7 @@ def shape_bodies(kind: str, data: dict, filters: Filters) -> dict:
 KINDS = ("actions", "flows", "logs")
 #: The event types each kind writes.
 _EVENT_TYPES = {"actions": ("action", "mark"), "flows": ("flow", "request_started"),
-                "logs": ("log", "crash"), "gauges": ("gauge",)}
+                "logs": ("log", "crash", "hang"), "gauges": ("gauge",)}
 #: What a recording's events can be read by: KINDS, and the gauges a
 #: recording takes when `Filters.gauges` names an app rather than by kind.
 READ_KINDS = (*KINDS, "gauges")
@@ -319,6 +319,9 @@ GAUGE_RETRY_MAX_S = 30.0
 #: is taken as stuck: ended, said, and started again. A stream that hangs
 #: otherwise writes nothing, which reads as a quiet app (live, on an iPhone).
 GAUGE_STALL_MIN_S = 30.0
+#: Less than this between a stream starting and its first sample's window is
+#: overhead, not a gap worth a line.
+GAUGE_GAP_S = 0.25
 
 
 @dataclass
@@ -390,6 +393,12 @@ class Recording:
     #: them unseen when that write then failed (review).
     _closing: bool = field(default=False, repr=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    #: Gauge lines that are failures -- the device could not be asked, or a
+    #: stream went quiet -- read back from the file on resume. Any makes the
+    #: recording incomplete, as lost video does (review).
+    gauge_failures: int = 0
+    #: Set when a resumed recording found its device sampled by another.
+    _gauges_off: bool = field(default=False, repr=False)
     #: The latest gauge samples, for the live trace: the file is the record,
     #: and reading it back on every trace would cost a parse of the whole run.
     _gauge_samples: deque = field(
@@ -412,7 +421,20 @@ class Recording:
         if self.state in ("recording", "interrupted"):
             return None
         return (self.state == "stopped" and not any(self.dropped.values()) and not self.gaps
-                and not self.video_lost)
+                and not self.video_lost and not self.gauges_lost)
+
+    @property
+    def gauges_lost(self) -> bool | None:
+        """Gauges were asked for and some of the time has none: a sample that
+        failed, a stream that went quiet. None when none were asked for.
+
+        A recording whose every sample failed read `complete: true`, with a
+        gauge count of five that were all failures (review). Not-running
+        samples are readings, not losses: "the app was not running" is an
+        answer."""
+        if not self.filters.gauges:
+            return None
+        return self.gauge_failures > 0
 
     @property
     def video_lost(self) -> bool | None:
@@ -445,6 +467,7 @@ class Recording:
             # Said apart from `complete`, so a reader told it is incomplete
             # can tell lost video from lost events (CodeRabbit).
             "video_lost": self.video_lost,
+            "gauges_lost": self.gauges_lost,
             "filters": self.filters.as_dict(), "warnings": list(self.warnings),
         }
 
@@ -497,6 +520,15 @@ def _holds_a_recording(events: Path) -> str:
 
 def _already_filmed(udid: str, holder: str) -> str:
     return f"{udid} is already being filmed by recording {holder}: one movie per simulator"
+
+
+def _line_kind(kind: str, item: object) -> str:
+    """A crash-buffer entry that is an Android hang is written as a `hang`,
+    not a `crash`: a CI check on no crashes must not fail over a 2 s stall
+    (review). Read back, both are the trace's log lines."""
+    if kind == "crash" and str(getattr(item, "id", "")).startswith("android-hang-"):
+        return "hang"
+    return kind
 
 
 def _line(kind: str, data: dict | None = None, **extra) -> str:
@@ -553,6 +585,8 @@ class _Tally:
     open_video: dict[str, dict] = field(default_factory=dict)
     #: The recording the file's `started` line names: whose file it is.
     recording_id: str | None = None
+    #: Gauge lines that are failures.
+    gauge_failures: int = 0
 
 
 def _tally(events: Path) -> _Tally:
@@ -567,6 +601,7 @@ def _tally(events: Path) -> _Tally:
     last_segment = 0
     last_at = None
     recording_id = None
+    gauge_failures = 0
     with open(events, "rb") as f:
         for raw in f:
             try:
@@ -583,8 +618,10 @@ def _tally(events: Path) -> _Tally:
                 if kind == "started" and recording_id is None:
                     recording_id = event.get("recording")
                 # Marks and gauges only when there are any.
-                if kind in counts or kind in ("mark", "gauge"):
+                if kind in counts or kind in ("mark", "gauge", "hang"):
                     counts[kind] = counts.get(kind, 0) + 1
+                    if kind == "gauge" and (event.get("data") or {}).get("error"):
+                        gauge_failures += 1
                 elif kind == "dropped" and event.get("what"):
                     what = event["what"]
                     dropped[what] = dropped.get(what, 0) + int(event.get("count") or 0)
@@ -603,7 +640,7 @@ def _tally(events: Path) -> _Tally:
                 continue
     return _Tally(counts=counts, dropped=dropped, gaps=gaps, last_at=last_at, video=video,
                   last_segment=last_segment, open_video=open_video,
-                  recording_id=recording_id)
+                  recording_id=recording_id, gauge_failures=gauge_failures)
 
 
 class RecordingManager:
@@ -722,7 +759,8 @@ class RecordingManager:
         return any(r.state == "recording" and r.dir == directory
                    for r in self._recordings.values())
 
-    async def check_start(self, udid: str, output_dir: str | None, filters: Filters) -> None:
+    async def check_start(self, udid: str, output_dir: str | None, filters: Filters,
+                          principal: str = "owner") -> None:
         """Refuse now what `start` would refuse, before a caller does anything
         that cannot be taken back: #414's CA check installs a CA, and a start
         refused after it had installed one for nothing (review). `start` checks
@@ -739,15 +777,20 @@ class RecordingManager:
             if holder is not None:
                 raise RecordingError(_already_filmed(udid, holder))
         if filters.gauges:
-            self._may_gauge(udid, None)
+            self._may_gauge(udid, None, principal)
 
-    def _may_gauge(self, udid: str, rec_id: str | None) -> None:
+    def _may_gauge(self, udid: str, rec_id: str | None, principal: str = "owner") -> None:
         if self._gauge_source is None:
             raise RecordingError("gauges cannot be sampled on this server")
         holder = self._gauging.get(udid)
         if holder is not None and holder != rec_id:
-            raise RecordingError(f"{udid} is already sampled by recording {holder}: one "
-                                 f"recording with gauges per device")
+            held = self._recordings.get(holder)
+            # Named to the owner and to its own principal; to anyone else it
+            # is another's recording, which a blind caller is not shown.
+            name = (f"recording {holder}" if principal == "owner" or held is None
+                    or held.principal == principal else "another caller's recording")
+            raise RecordingError(f"{udid} is already sampled by {name}: one recording with "
+                                 f"gauges per device")
 
     async def start(self, udid: str, output_dir: str | None, filters: Filters,
                     requested_by: str | None = None, *, principal: str = "owner",
@@ -767,7 +810,7 @@ class RecordingManager:
         if filters.gauges:
             # Taken before any await, as the screen is, so two starts cannot
             # both pass.
-            self._may_gauge(udid, rec.id)
+            self._may_gauge(udid, rec.id, principal)
             self._gauging[udid] = rec.id
         if filters.video:
             # Asked for and impossible is a refusal, not a recording that
@@ -795,6 +838,12 @@ class RecordingManager:
             self._release_screen(rec)
             self._release_gauges(rec)
             raise RecordingError(f"{out} could not be written: {e}") from e
+        except BaseException:
+            # Cancelled mid-write: no recording was made, so the device is not
+            # held by one (review: held, every later gauged start was refused
+            # over a recording that did not exist).
+            self._release_gauges(rec)
+            raise
         if filters.video:
             try:
                 rec._segment = await self._video.start(udid, out / "video-1.mp4")
@@ -889,7 +938,7 @@ class RecordingManager:
             queue = source.subscribe(accept)
             rec._subs.append((kind, source, queue))
             rec._pumps.append(asyncio.create_task(self._pump(rec, kind, queue)))
-        if rec.filters.gauges and self._gauge_source is not None:
+        if rec.filters.gauges and self._gauge_source is not None and not rec._gauges_off:
             # With the pumps, so every way a recording ends -- stop, pause,
             # failure -- ends the sampling too.
             rec._pumps.append(asyncio.create_task(self._sample(rec)))
@@ -945,8 +994,9 @@ class RecordingManager:
     async def _pump(self, rec: Recording, kind: str, queue: asyncio.Queue) -> None:
         while True:
             item = await queue.get()
-            rec._pending.append(_line(kind, self._record_of(rec, kind, item)))
-            rec.counts[kind] = rec.counts.get(kind, 0) + 1
+            kind_of = _line_kind(kind, item)
+            rec._pending.append(_line(kind_of, self._record_of(rec, kind, item)))
+            rec.counts[kind_of] = rec.counts.get(kind_of, 0) + 1
             if kind == "request_started":
                 rec._started_ids.append(item.id)
                 self._request_keyframe(rec)
@@ -973,6 +1023,7 @@ class RecordingManager:
             why = "the gauge stream ended"
             try:
                 stall = max(GAUGE_STALL_MIN_S, f.gauge_interval_s * 5)
+                first = True
                 async with contextlib.aclosing(
                         self._gauge_source(rec.udid, f.gauges, f.gauge_interval_s)) as stream:
                     while True:
@@ -992,8 +1043,18 @@ class RecordingManager:
                         seconds = data.get("sample_seconds")
                         if not isinstance(seconds, (int, float)) or seconds <= 0:
                             seconds = f.gauge_interval_s
-                        self._add_gauge(rec, gauges_mod.sample_line(
-                            data, end - timedelta(seconds=seconds), end))
+                        start = end - timedelta(seconds=seconds)
+                        # Time no reading covers, said: before a stream's first
+                        # sample (an iPhone's took 2-4 s), and any long pause
+                        # between two. Left unsaid it was an action with no
+                        # reason at all (review).
+                        gap = (start - covered_to).total_seconds()
+                        if gap > (GAUGE_GAP_S if first else max(1.0, f.gauge_interval_s)):
+                            self._add_gauge(rec, gauges_mod.gap_line(
+                                "the gauge stream was starting: no reading yet" if first
+                                else f"no gauge sample for {gap:.1f}s", covered_to, start))
+                        first = False
+                        self._add_gauge(rec, gauges_mod.sample_line(data, start, end))
                         covered_to, retry = end, GAUGE_RETRY_S
             except asyncio.CancelledError:
                 raise
@@ -1013,6 +1074,8 @@ class RecordingManager:
     def _add_gauge(self, rec: Recording, data: dict) -> None:
         rec._pending.append(_line("gauge", data))
         rec.counts["gauge"] = rec.counts.get("gauge", 0) + 1
+        if data.get("error"):
+            rec.gauge_failures += 1
         sample = gauges_mod.parse_sample(data)
         if sample is not None:
             rec._gauge_samples.append(sample)
@@ -1175,8 +1238,9 @@ class RecordingManager:
         for kind, _, queue in rec._subs:
             while not queue.empty():
                 item = queue.get_nowait()
-                rec._pending.append(_line(kind, self._record_of(rec, kind, item)))
-                rec.counts[kind] = rec.counts.get(kind, 0) + 1
+                kind_of = _line_kind(kind, item)
+                rec._pending.append(_line(kind_of, self._record_of(rec, kind, item)))
+                rec.counts[kind_of] = rec.counts.get(kind_of, 0) + 1
 
     async def _fail(self, rec: Recording, why: str) -> None:
         """The recording cannot go on. Called from inside a flush, holding the
@@ -1243,6 +1307,7 @@ class RecordingManager:
                 with contextlib.suppress(OSError):
                     tally = await asyncio.to_thread(_tally, rec.events)
                     rec.counts, rec.dropped, rec.gaps = tally.counts, tally.dropped, tally.gaps
+                    rec.gauge_failures = tally.gauge_failures
                     # The manifest is rewritten below: without these its
                     # video list went from one segment to none (review).
                     rec.video_segments = tally.video
@@ -1490,6 +1555,7 @@ class RecordingManager:
                 rec.counts, rec.dropped, rec.gaps = tally.counts, tally.dropped, tally.gaps
                 rec.video_segments = tally.video
                 rec._segment_number = tally.last_segment
+                rec.gauge_failures = tally.gauge_failures
                 gap = {"from": tally.last_at.isoformat() if tally.last_at else None,
                        "to": _now().isoformat(), "reason": "quern was not running"}
                 if rec.principal != "owner":
@@ -1553,7 +1619,23 @@ class RecordingManager:
                 # manifest is rewritten at stop. Said, not fatal.
                 rec.warnings.append(f"{rec.manifest} could not be updated: {e}")
             if rec.filters.gauges and self._gauge_source is not None:
-                self._gauging[rec.udid] = rec.id
+                holder = self._gauging.get(rec.udid)
+                if holder is not None and holder != rec.id:
+                    # Another recording took the device while this one could
+                    # not resume (its directory was gone). Both sampling it
+                    # would double what the device is asked, and the live
+                    # trace could read only one; this one goes without, and
+                    # says so in its file (review).
+                    why = (f"not sampled after this restart: recording {holder} samples "
+                           f"{rec.udid} now")
+                    rec.warnings.append(why)
+                    rec._gauges_off = True
+                    now = _now()
+                    rec._pending.append(_line("gauge", gauges_mod.failed_line(why, now, now)))
+                    rec.counts["gauge"] = rec.counts.get("gauge", 0) + 1
+                    rec.gauge_failures += 1
+                else:
+                    self._gauging[rec.udid] = rec.id
             self._attach(rec)
             if rec.filters.video:
                 rec._resuming = self._spawn(self._resume_video(rec, tally.open_video))
@@ -1625,8 +1707,8 @@ class Loaded:
         return None
 
 
-_EVERYTHING = frozenset({"action", "flow", "log", "crash", "gauge"})
-_NOT_FLOWS = frozenset({"action", "log", "crash", "gauge"})
+_EVERYTHING = frozenset({"action", "flow", "log", "crash", "hang", "gauge"})
+_NOT_FLOWS = frozenset({"action", "log", "crash", "hang", "gauge"})
 
 
 def _gap_holes(start, end, why, *, exact_flows: bool = False) -> list[tuple]:
@@ -1649,7 +1731,7 @@ def _gap_holes(start, end, why, *, exact_flows: bool = False) -> list[tuple]:
 #: How a record line begins, as `_line` writes it: type first, compact.
 _RECORD_PREFIXES = tuple(f'{{"type":"{k}",'
                          for k in ("action", "flow", "request_started", "log", "crash",
-                                   "gauge"))
+                                   "hang", "gauge"))
 _AT = re.compile(r'"at":"([^"]+)"')
 
 
@@ -1721,7 +1803,7 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                     runs.setdefault(flow.id, run)
                 elif kind == "mark":
                     marks.append(event.get("data") or {})
-                elif kind in ("log", "crash"):
+                elif kind in ("log", "crash", "hang"):
                     logs.append(LogEntry.model_validate(event["data"]))
                 elif kind == "gauge":
                     sample = gauges_mod.parse_sample(event.get("data"))

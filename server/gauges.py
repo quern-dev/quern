@@ -54,6 +54,9 @@ class Sample:
     end: datetime
     #: None when the sample failed: the device could not be asked at all.
     running: bool | None
+    #: The app's process, when known: frames counted across two are not a
+    #: difference of anything.
+    pid: int | None = None
     cpu_percent: float | None = None
     memory_bytes: int | None = None
     threads: int | None = None
@@ -96,9 +99,11 @@ def parse_sample(data: object) -> Sample | None:
     running = data.get("running")
     frames = data.get("frames")
     unavailable = data.get("unavailable")
+    pid = data.get("pid")
     return Sample(
         start=start, end=end,
         running=running if isinstance(running, bool) else None,
+        pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
         cpu_percent=_number(data.get("cpu_percent")),
         memory_bytes=_number(data.get("memory_bytes")),
         threads=_number(data.get("threads")),
@@ -124,6 +129,15 @@ def failed_line(why: str, start: datetime, end: datetime) -> dict:
     should have covered, so the gap reads as "could not tell", not "quiet"."""
     return {"from": start.isoformat(), "to": end.isoformat(), "running": None,
             "error": why, "unavailable": {m: why for m in METRICS}}
+
+
+def gap_line(why: str, start: datetime, end: datetime) -> dict:
+    """A `gauge` line for time no sample covers that is not a failure -- a
+    stream starting, its first reading still to come. Said, so an action in
+    it reads "no reading yet" rather than nothing; not an `error`, so it does
+    not make the recording incomplete."""
+    return {"from": start.isoformat(), "to": end.isoformat(), "running": None,
+            "unavailable": {m: why for m in METRICS}}
 
 
 def _reasons(samples: list[Sample], metric: str) -> str:
@@ -204,6 +218,10 @@ def summarise(samples: list[Sample], started: datetime, finished: datetime, *,
     return summary
 
 
+def _same_process(a: Sample, b: Sample) -> bool:
+    return a.pid is None or b.pid is None or a.pid == b.pid
+
+
 def _counter(s: Sample, key: str) -> int | None:
     value = (s.frames or {}).get(key)
     return value if isinstance(value, int) and not isinstance(value, bool) else None
@@ -222,10 +240,21 @@ def _frames(samples: list[Sample], covering: list[Sample], started: datetime,
     read = [s for s in covering if _counter(s, "total_frames") is not None]
     if not read:
         return None, _reasons(covering, "frames")
-    before = [s for s in samples if s.end <= started and _counter(s, "total_frames") is not None]
-    base, last = (before[-1] if before else read[0]), read[-1]
+    # The baseline is the sample just before the window -- whatever it is --
+    # and only if it read frames from the same process. The last reading
+    # before, however far back, counted five minutes of an outage as one
+    # tap's frames (review).
+    previous = [s for s in samples if s.end <= started]
+    before = previous[-1] if previous else None
+    if before is not None and (_counter(before, "total_frames") is None
+                               or not _same_process(before, read[0])):
+        before = None
+    base, last = (before or read[0]), read[-1]
     if base is last:
         return None, "only one frame reading covers this window; frames need two"
+    if any(not _same_process(base, s) for s in read):
+        return None, ("the app restarted in this window; frames from two processes are not "
+                      "a difference")
     total = _counter(last, "total_frames") - _counter(base, "total_frames")
     if total < 0:
         return None, ("gfxinfo's frame count went down in this window: the app restarted or "

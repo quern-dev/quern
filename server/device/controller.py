@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 import time
@@ -1771,8 +1772,12 @@ class DeviceController(DeviceControllerUI):
                 return performance.android_snapshot(self.adb, resolved, app, interval,
                                                     memory="rss")
         elif self._is_physical(resolved):
-            async for snap in performance.device_stream(resolved, app, interval):
-                yield snap
+            # Closed here, not left to the finalizer: it holds the device's
+            # Instruments connection.
+            async with contextlib.aclosing(
+                    performance.device_stream(resolved, app, interval)) as stream:
+                async for snap in stream:
+                    yield snap
             return
         elif self._device_type(resolved) == DeviceType.SIMULATOR:
             def sample():
@@ -1782,12 +1787,13 @@ class DeviceController(DeviceControllerUI):
                               tool="quern")
         while True:
             snap = await sample()
-            yield snap
             if not snap.running:
                 # Answered at once, with nothing measured: wait out the
-                # interval, or an app not yet launched is asked about in a
-                # tight loop.
+                # interval before saying so, so the sample's window -- which
+                # ends when it is said -- is the time it speaks for, and an
+                # app not yet launched is not asked about in a tight loop.
                 await asyncio.sleep(interval)
+            yield snap
 
     async def _ensure_android_screen_on(self, udid: str) -> None:
         """Wake an Android device screen if it's off."""
