@@ -322,6 +322,9 @@ GAUGE_STALL_MIN_S = 30.0
 #: Less than this between a stream starting and its first sample's window is
 #: overhead, not a gap worth a line.
 GAUGE_GAP_S = 0.25
+#: How long a failed recording's sampler and pumps get to finish cancelling
+#: -- closing a phone's connection -- before its device is given back anyway.
+PUMP_SETTLE_S = 5.0
 
 
 @dataclass
@@ -1248,12 +1251,23 @@ class RecordingManager:
         lock, so it ends the writer without waiting on it."""
         logger.error("Recording %s failed: %s", rec.id, why)
         rec.state, rec.error, rec.stopped_at = "failed", why, _now()
-        self._release_gauges(rec)
         rec._closing = True
         rec._wake.set()
-        for task in rec._pumps:
+        pumps, rec._pumps = rec._pumps, []
+        for task in pumps:
             task.cancel()
-        rec._pumps = []
+        # The device is given back only once the sampler has finished closing
+        # its stream -- a phone's Instruments connection -- and not before:
+        # another recording could take it meanwhile (CodeRabbit). Not awaited
+        # here, as the movie is not: this holds the flush lock. Shutdown waits
+        # on it with the rest of the background work.
+        sampling = [t for t in pumps if t is not asyncio.current_task()]
+
+        async def settle() -> None:
+            if sampling:
+                await asyncio.wait(sampling, timeout=PUMP_SETTLE_S)
+            self._release_gauges(rec)
+        self._spawn(settle())
         for _, source, queue in rec._subs:
             source.unsubscribe(queue)
         rec._subs = []

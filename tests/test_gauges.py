@@ -397,7 +397,53 @@ class TestOnePerDevice:
         m = _manager(src, fake)
         rec = await m.start(SIM, str(tmp_path / "r"), Filters(gauges="com.x"))
         await m._fail(rec, "disk full")
-        assert m._gauging == {} and m.live_gauges(SIM) is None
+        assert m.live_gauges(SIM) is None                 # failed: nothing live to read
+        await _until(lambda: m._gauging == {})            # given back once its stream closed
+
+    async def test_a_failed_recording_keeps_the_device_until_its_stream_has_closed(self, tmp_path):
+        """CodeRabbit on #596: given back at once, another recording could take
+        the device while the phone's connection was still closing."""
+        closing = asyncio.Event()
+
+        class SlowToClose(FakeGauges):
+            async def _stream(self):
+                try:
+                    while True:
+                        yield await self.queue.get()
+                finally:
+                    closing.set()
+                    await asyncio.sleep(0.2)          # an Instruments connection unwinding
+                    self.closed += 1
+        src, fake = Sources(), SlowToClose()
+        m = _manager(src, fake)
+        rec = await m.start(SIM, str(tmp_path / "r"), Filters(gauges="com.x"))
+        fake.push(cpu_percent=1.0)
+        await _until(lambda: rec.counts.get("gauge") == 1)
+        await m._fail(rec, "disk full")
+        await asyncio.wait_for(closing.wait(), 5)
+        assert fake.closed == 0 and m._gauging == {SIM: rec.id}      # still closing
+        with pytest.raises(RecordingError, match="already sampled"):
+            await m.check_start(SIM, None, Filters(gauges="com.x"))
+        await _until(lambda: m._gauging == {})
+        assert fake.closed == 1
+
+    async def test_shutdown_waits_for_a_failed_recordings_stream(self, tmp_path):
+        class SlowToClose(FakeGauges):
+            async def _stream(self):
+                try:
+                    while True:
+                        yield await self.queue.get()
+                finally:
+                    await asyncio.sleep(0.2)
+                    self.closed += 1
+        src, fake = Sources(), SlowToClose()
+        m = _manager(src, fake)
+        rec = await m.start(SIM, str(tmp_path / "r"), Filters(gauges="com.x"))
+        fake.push(cpu_percent=1.0)
+        await _until(lambda: rec.counts.get("gauge") == 1)
+        await m._fail(rec, "disk full")
+        await m.shutdown()
+        assert fake.closed == 1 and m._gauging == {}
 
     async def test_a_server_that_cannot_sample_refuses(self, tmp_path):
         m = _manager(Sources(), None)
