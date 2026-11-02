@@ -336,16 +336,19 @@ async def _present_ids(controller: Any, pool: Any) -> set[str]:
 
 
 def _what(device: Any) -> dict:
-    """A reserved device's name, model, OS, family and type; empty when the
+    """A reserved device's name, model, OS, family and type -- and for an
+    Android device, how it comes to trust quern's CA (#582); empty when the
     pool does not know it."""
     if device is None:
         return {}
     kind = getattr(device, "device_type", None)
+    ca_install = getattr(device, "ca_install", "")
     return {"name": getattr(device, "name", None),
             "model": getattr(device, "model", "") or None,
             "os_version": getattr(device, "os_version", None),
             "device_family": getattr(device, "device_family", "") or None,
-            "device_type": getattr(kind, "value", kind)}
+            "device_type": getattr(kind, "value", kind),
+            **({"ca_install": ca_install} if isinstance(ca_install, str) and ca_install else {})}
 
 
 @router.delete("/{session_id}/reservations")
@@ -537,6 +540,9 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
     adapter = getattr(app.state, "proxy_adapter", None)
     manager = getattr(app.state, "recordings", None)
     for udid in session.reservations:
+        # First: the proxy record is the session's, not the key's, so it is
+        # handed on rather than skipped with the rest (review).
+        await _end_device_proxy(app, registry, session, udid, actions)
         held = registry.holder_of(udid)
         if held is not None and held.session.principal == session.principal:
             continue                       # still the key's, through another session
@@ -627,6 +633,71 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
                     actions.append({"udid": claim.udid, "action": "session_capture_released",
                                     "ok": False, "error": str(e)})
     return actions
+
+
+#: Attempts at clearing a released device's proxy before giving up: a device
+#: that was shut down or unplugged cannot be cleared, and retrying it every
+#: second kept it unreservable for good (review).
+_PROXY_CLEAR_ATTEMPTS = 3
+#: How long one clear may take at release, the network bounce included: it
+#: runs in the sweep every session's expiry waits on, so a stalled adb must
+#: not hold it (CodeRabbit). Above a healthy bounce.
+_PROXY_CLEAR_TIMEOUT_S = 45.0
+
+
+async def _end_device_proxy(app: Any, registry: Any, session: Any, udid: str,
+                            actions: list[dict]) -> None:
+    """Clear the proxy this session applied to an Android device, as its hold
+    on the device ends (#582), whoever's session it was: left set, the next
+    holder inherited a proxied device that loses its network when the proxy
+    stops. The CA stays installed -- removing it needs the device's Settings
+    or root. Never raises."""
+    holds = getattr(app.state, "device_proxy_holds", None) or {}
+    record = holds.get(udid)
+    if record is None or tuple(record[:2]) != (session.id, getattr(session, "opened_at", None)):
+        return
+    held = registry.holder_of(udid)
+    if held is not None and held.session.id != session.id:
+        if held.session.principal == session.principal:
+            # The key holds it still, through another session: that session's
+            # release clears it.
+            holds[udid] = (held.session.id, getattr(held.session, "opened_at", None), 0)
+            actions.append({"udid": udid, "action": "device_proxy_handed_over", "ok": True,
+                            "to": held.session.id})
+        else:
+            # Another key's device now: not this session's to change.
+            holds.pop(udid, None)
+            actions.append({"udid": udid, "action": "device_proxy_left", "ok": True,
+                            "note": "another session holds it now, so its proxy setting "
+                                    "was not changed"})
+        return
+    from server.api.proxy_certs import clear_device_proxy
+
+    try:
+        try:
+            cleared = await asyncio.wait_for(
+                clear_device_proxy(app.state.device_controller, udid), _PROXY_CLEAR_TIMEOUT_S)
+        except TimeoutError:
+            raise RuntimeError(
+                f"the device did not answer within {_PROXY_CLEAR_TIMEOUT_S:g}s") from None
+        if cleared["proxy_verified"] is False:
+            raise RuntimeError(f"its proxy still reads {cleared['device_proxy']} after the clear")
+        holds.pop(udid, None)
+        actions.append({"udid": udid, "action": "device_proxy_cleared", "ok": True,
+                        "proxy_verified": cleared["proxy_verified"],
+                        "network_reattached": cleared["network_reattached"]})
+    except Exception as e:  # noqa: BLE001 -- reported, never raised
+        attempts = (record[2] if len(record) > 2 else 0) + 1
+        gave_up = attempts >= _PROXY_CLEAR_ATTEMPTS
+        if gave_up:
+            holds.pop(udid, None)
+        else:
+            holds[udid] = (record[0], record[1], attempts)
+        actions.append({"udid": udid, "action": "device_proxy_cleared", "ok": False,
+                        "error": str(e), **({"gave_up": True, "note": (
+                            f"Tried {attempts} times. Its proxy setting may still be "
+                            f"set: clear it with device-proxy-config clear=true once "
+                            f"{udid} is reachable.")} if gave_up else {})})
 
 
 async def run_release_policies(app) -> list[dict]:

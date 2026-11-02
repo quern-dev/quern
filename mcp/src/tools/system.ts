@@ -106,7 +106,7 @@ A server that could not be asked says why (not running, timed out, certificate c
 
 One server at a time: devices you hold on the current server must be released first (release_devices), or pass release=true to release them as part of the switch -- also needed when the current server cannot say what you hold. The switch is made only once your session is live on the new server; if it cannot be, you stay where you were.
 
-What you set up follows you: the mocks you set are removed from the old server and, with the session capture you asked for, set up again on the simulators of your next reservation on the new one (that answer's "carried" lists the new rule ids); this project's knowledge base is loaded there. Mocks the old server could not remove are listed in "carried.still_on_old"; switching back to that server tries again, and "left_here_earlier" then says which went and which are still_there. The answer's "proxy" says whether the new server's proxy runs -- mocks and capture need it, and only its owner can start it. Machine-wide proxy settings (local capture, system proxy, intercept, bypass), recordings, logging and device settings stay where they were. The quern CLI in your shell is not switched; it still talks to this Mac's server.`,
+What you set up follows you: the mocks you set are removed from the old server and set up again on the devices of your next reservation on the new one -- each on the kind of device it was scoped to -- with the session capture you asked for on its simulators, and the Android devices you routed through the proxy (record_device_proxy_config apply=true, held) are unrouted by the old server and the new reservation's Android devices routed through the new proxy (that answer's "carried" lists the new rule ids); this project's knowledge base is loaded there. Mocks the old server could not remove are listed in "carried.still_on_old"; switching back to that server tries again, and "left_here_earlier" then says which went and which are still_there. The answer's "proxy" says whether the new server's proxy runs -- mocks, capture and routed Android devices need it, and only its owner can start it. Machine-wide proxy settings (local capture, system proxy, intercept, bypass), recordings, logging and device settings stay where they were. The quern CLI in your shell is not switched; it still talks to this Mac's server.`,
     inputSchema: strictParams({
       name: z.string().describe(`A server's name from list_remotes, or "local" for this Mac's own`),
       release: z.boolean().optional().describe("Release the devices you hold on the current server as part of the switch (default false: refuse)"),
@@ -238,7 +238,7 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
     knowledge = { kind: "failed", reason: errorText(e) };
   }
   const there = await proxyThere();
-  const waiting = carried.mocks + carried.session_capture;
+  const waiting = carried.mocks + carried.session_capture + (carried.device_proxy ? 1 : 0);
   return reply({
     current: target, server_url: url, version, ...(released.length ? { released } : {}),
     ...(waiting || carried.still_on_old ? { carried } : {}),
@@ -246,9 +246,12 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
     ...(knowledge !== undefined ? { knowledge } : {}),
     proxy: there,
     note: `Every tool call now goes to ${target}. Reserve a device there with reserve_devices.` +
-      (waiting ? ` Your ${carried.mocks} mock(s) and ${carried.session_capture} session ` +
-        "capture(s) moved with you: they are set up on the simulators of your next " +
-        "reservation here, and its answer lists their new rule ids." : "") +
+      (carried.mocks + carried.session_capture ? ` Your ${carried.mocks} mock(s) and ` +
+        `${carried.session_capture} session capture(s) moved with you: they are set up on the ` +
+        "simulators of your next reservation here, and its answer lists their new rule ids."
+        : "") +
+      (carried.device_proxy ? " The Android devices of your next reservation here are routed " +
+        "through this server's proxy, as you routed devices on the last one." : "") +
       (carried.still_on_old ? ` Could not remove ${carried.still_on_old.join(", ")} from ` +
         `${from}: they still answer traffic there. Switching back there tries again to remove ` +
         "them (see left_here_earlier then)." : "") +

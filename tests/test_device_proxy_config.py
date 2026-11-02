@@ -57,6 +57,9 @@ def _android(udid: str = "PHONE1", *, ssid="MonaLisa", ip="192.168.1.244"):
     ctrl.adb.is_network_transport = MagicMock(return_value=False)
     ctrl.adb.clear_http_proxy = AsyncMock()
     ctrl.adb.get_http_proxy = AsyncMock(return_value=None)
+    ctrl.adb.is_rootable = AsyncMock(return_value=True)
+    ctrl.adb._get_cert_hash = AsyncMock(return_value="c8750f0d")
+    ctrl.adb.system_cert_state = AsyncMock(return_value=True)
     return ctrl
 
 
@@ -782,3 +785,388 @@ class TestApplyingToAProxyThatIsNotThere:
 
         assert out["cleared"] is True
         ctrl.adb.clear_http_proxy.assert_awaited_once()
+
+
+class TestAProxyEndsWithTheHoldThatAppliedIt:
+    """#582: a client applied a proxy to an emulator, released it, and the
+    setting stayed (measured on romulus) -- the next holder inherited a
+    proxied device that loses its network when the proxy stops."""
+
+    def _holding(self, request, session_id="client:a/s1", udid="PHONE1"):
+        from datetime import UTC, datetime
+
+        opened = datetime(2026, 11, 1, tzinfo=UTC)
+        session = SimpleNamespace(id=session_id, opened_at=opened)
+        request.app.state.sessions = SimpleNamespace(
+            holder_of=lambda u: SimpleNamespace(session=session) if u == udid else None)
+        return opened
+
+    async def _apply(self, ctrl, request, caller_session, **body):
+        a, b = _hosts()
+        caller = SimpleNamespace(session=caller_session, principal="client:a",
+                                 is_owner=False)
+        with a, b, patch("server.api.proxy_certs.visibility.current_caller",
+                         return_value=caller):
+            return await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", **body), request)
+
+    async def test_the_holding_session_that_applies_it_is_recorded(self):
+        ctrl, request = _android(), None
+        request = _request(ctrl)
+        opened = self._holding(request)
+        await self._apply(ctrl, request, "client:a/s1", apply=True)
+        assert request.app.state.device_proxy_holds == {"PHONE1": ("client:a/s1", opened, 0)}
+
+    async def test_an_apply_without_a_hold_is_not_recorded(self):
+        ctrl = _android()
+        request = _request(ctrl)
+        self._holding(request, session_id="client:b/other")
+        await self._apply(ctrl, request, "client:a/s1", apply=True)
+        assert request.app.state.device_proxy_holds == {}
+
+    async def test_a_clear_ends_the_record(self):
+        ctrl = _android()
+        request = _request(ctrl)
+        self._holding(request)
+        await self._apply(ctrl, request, "client:a/s1", apply=True)
+        await self._apply(ctrl, request, "client:a/s1", clear=True)
+        assert request.app.state.device_proxy_holds == {}
+
+    async def test_release_clears_it_and_says_so(self):
+        from server.api import sessions as sessions_api
+
+        ctrl = _android()
+        opened = object()
+        app = SimpleNamespace(state=SimpleNamespace(
+            device_controller=ctrl, session_proxies=None, proxy_adapter=None,
+            recordings=None, mock_owners={},
+            device_proxy_holds={"PHONE1": ("ci", opened), "PHONE2": ("other", None)}))
+        registry = SimpleNamespace(holder_of=lambda udid: None)
+        session = SimpleNamespace(id="ci", principal="owner", opened_at=opened,
+                                  reservations=["PHONE1", "PHONE2"])
+
+        actions = await sessions_api._end_client_work(app, registry, session)
+        ctrl.adb.clear_http_proxy.assert_awaited_once_with("PHONE1")
+        assert {"udid": "PHONE1", "action": "device_proxy_cleared", "ok": True,
+                "proxy_verified": True, "network_reattached": True} in actions
+        assert app.state.device_proxy_holds == {"PHONE2": ("other", None)}
+
+    async def test_a_later_opening_of_the_session_does_not_clear_an_earlier_ones(self):
+        """The same id, opened again, is not the hold that applied it."""
+        from server.api import sessions as sessions_api
+
+        ctrl = _android()
+        app = SimpleNamespace(state=SimpleNamespace(
+            device_controller=ctrl, session_proxies=None, proxy_adapter=None,
+            recordings=None, mock_owners={},
+            device_proxy_holds={"PHONE1": ("ci", "first opening")}))
+        session = SimpleNamespace(id="ci", principal="owner", opened_at="second opening",
+                                  reservations=["PHONE1"])
+        await sessions_api._end_client_work(
+            app, SimpleNamespace(holder_of=lambda udid: None), session)
+        ctrl.adb.clear_http_proxy.assert_not_awaited()
+
+    async def test_a_failed_clear_is_reported_and_kept_for_a_retry(self):
+        from server.api import sessions as sessions_api
+
+        ctrl = _android()
+        ctrl.adb.clear_http_proxy = AsyncMock(side_effect=RuntimeError("device offline"))
+        app = SimpleNamespace(state=SimpleNamespace(
+            device_controller=ctrl, session_proxies=None, proxy_adapter=None,
+            recordings=None, mock_owners={}, device_proxy_holds={"PHONE1": ("ci", None)}))
+        session = SimpleNamespace(id="ci", principal="owner", opened_at=None,
+                                  reservations=["PHONE1"])
+        actions = await sessions_api._end_client_work(
+            app, SimpleNamespace(holder_of=lambda udid: None), session)
+        assert {"udid": "PHONE1", "action": "device_proxy_cleared", "ok": False,
+                "error": "device offline"} in actions
+        assert "PHONE1" in app.state.device_proxy_holds
+
+
+class TestApplyingSaysWhetherHttpsWillWork:
+    """#582: routed but not trusting the CA, every HTTPS request fails, and
+    nothing said so until requests failed. Warned, not refused."""
+
+    async def _apply(self, ctrl):
+        a, b = _hosts()
+        with a, b:
+            return await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), _request(ctrl))
+
+    async def test_a_rootable_device_that_trusts_the_ca_says_nothing_more(self):
+        out = await self._apply(_android())
+        assert out["applied"] is True
+        assert out["https"] == {"ca_install": "automatic", "ca_trusted": True, "note": None}
+
+    async def test_a_rootable_device_without_the_ca_is_told_to_install_it(self):
+        ctrl = _android()
+        ctrl.adb.system_cert_state = AsyncMock(return_value=False)
+        out = await self._apply(ctrl)
+        assert out["applied"] is True
+        assert out["https"]["ca_trusted"] is False
+        assert "install_proxy_cert" in out["https"]["note"]
+        assert "reboot" in out["https"]["note"]
+
+    async def test_an_unrootable_device_gets_the_manual_path_and_no_false_answer(self):
+        ctrl = _android()
+        ctrl.adb.is_rootable = AsyncMock(return_value=False)
+        out = await self._apply(ctrl)
+        https = out["https"]
+        assert https["ca_install"] == "manual"
+        assert https["ca_trusted"] is None, "a user CA is where adb cannot read it"
+        assert "user certificate" in https["note"] and "network security config" in https["note"]
+        ctrl.adb.system_cert_state.assert_not_awaited()
+
+    @pytest.mark.parametrize("failure", ["unreadable props", "adb raises"])
+    async def test_a_check_that_cannot_run_is_unknown_not_a_failed_apply(self, failure):
+        ctrl = _android()
+        ctrl.adb.is_rootable = (AsyncMock(return_value=None) if failure == "unreadable props"
+                                else AsyncMock(side_effect=RuntimeError("offline")))
+        out = await self._apply(ctrl)
+        assert out["applied"] is True
+        assert out["https"]["ca_install"] == "unknown" and out["https"]["ca_trusted"] is None
+
+    async def test_a_failed_ca_lookup_is_could_not_check(self):
+        ctrl = _android()
+        ctrl.adb.system_cert_state = AsyncMock(return_value=None)
+        out = await self._apply(ctrl)
+        assert out["https"]["ca_trusted"] is None
+        assert out["https"]["note"].startswith("Could not check")
+
+
+class TestTheReleaseClearReviewFindings:
+    """#582 review: the record is the session's, not the key's; a device that
+    is gone is not retried for ever; a clear that did not take is no ok."""
+
+    def _app(self, ctrl, holds):
+        return SimpleNamespace(state=SimpleNamespace(
+            device_controller=ctrl, session_proxies=None, proxy_adapter=None,
+            recordings=None, mock_owners={}, device_proxy_holds=holds))
+
+    async def _end(self, app, session_id="client:a/s1", holder=None):
+        from server.api import sessions as sessions_api
+
+        session = SimpleNamespace(id=session_id, principal="client:a", opened_at="o1",
+                                  reservations=["PHONE1"])
+        return await sessions_api._end_client_work(
+            app, SimpleNamespace(holder_of=lambda udid: holder), session)
+
+    async def test_another_session_of_the_key_holding_it_takes_the_record(self):
+        ctrl = _android()
+        app = self._app(ctrl, {"PHONE1": ("client:a/s1", "o1", 0)})
+        s2 = SimpleNamespace(session=SimpleNamespace(id="client:a/s2", principal="client:a",
+                                                     opened_at="o2"))
+        actions = await self._end(app, holder=s2)
+        ctrl.adb.clear_http_proxy.assert_not_awaited()
+        assert app.state.device_proxy_holds == {"PHONE1": ("client:a/s2", "o2", 0)}
+        assert {"udid": "PHONE1", "action": "device_proxy_handed_over", "ok": True,
+                "to": "client:a/s2"} in actions
+
+    async def test_another_keys_device_is_left_alone(self):
+        ctrl = _android()
+        app = self._app(ctrl, {"PHONE1": ("client:a/s1", "o1", 0)})
+        bob = SimpleNamespace(session=SimpleNamespace(id="client:b/s1", principal="client:b",
+                                                      opened_at="x"))
+        actions = await self._end(app, holder=bob)
+        ctrl.adb.clear_http_proxy.assert_not_awaited()
+        assert app.state.device_proxy_holds == {}
+        assert any(a["action"] == "device_proxy_left" for a in actions)
+
+    async def test_a_gone_device_is_given_up_on_after_three_attempts(self):
+        ctrl = _android()
+        ctrl.adb.clear_http_proxy = AsyncMock(side_effect=RuntimeError("device not found"))
+        app = self._app(ctrl, {"PHONE1": ("client:a/s1", "o1", 0)})
+        for attempt in (1, 2):
+            actions = await self._end(app)
+            assert app.state.device_proxy_holds["PHONE1"][2] == attempt
+            assert not any(a.get("gave_up") for a in actions)
+        actions = await self._end(app)
+        assert app.state.device_proxy_holds == {}
+        [last] = [a for a in actions if a["action"] == "device_proxy_cleared"]
+        assert last["ok"] is False and last["gave_up"] is True and "clear=true" in last["note"]
+        await self._end(app)
+        assert ctrl.adb.clear_http_proxy.await_count == 3, "not tried again after giving up"
+
+    async def test_a_clear_whose_read_back_still_shows_a_proxy_is_not_ok(self):
+        ctrl = _android()
+        ctrl.adb.get_http_proxy = AsyncMock(return_value="10.0.0.1:9101")
+        app = self._app(ctrl, {"PHONE1": ("client:a/s1", "o1", 0)})
+        actions = await self._end(app)
+        [act] = [a for a in actions if a["action"] == "device_proxy_cleared"]
+        assert act["ok"] is False and "10.0.0.1:9101" in act["error"]
+        assert "PHONE1" in app.state.device_proxy_holds
+
+    async def test_an_apply_by_anyone_else_ends_the_record(self):
+        ctrl = _android()
+        request = _request(ctrl)
+        request.app.state.device_proxy_holds = {"PHONE1": ("client:a/s1", "o1", 0)}
+        request.app.state.sessions = SimpleNamespace(holder_of=lambda u: None)
+        a, b = _hosts()
+        owner = SimpleNamespace(session=None, principal="owner", is_owner=True)
+        with a, b, patch("server.api.proxy_certs.visibility.current_caller",
+                         return_value=owner):
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), request)
+        assert request.app.state.device_proxy_holds == {}
+        assert out["ends_with_hold"] is False
+
+
+class TestSystemCertState:
+    """True, False, or None when the device could not be asked: the check
+    `is_system_cert_installed` makes reads a failed adb call as False."""
+
+    async def test_present_absent_and_could_not_ask(self):
+        from server.device.android.adb import AdbBackend
+        from server.models import DeviceError
+
+        backend = AdbBackend()
+        backend._run_adb_for_device = AsyncMock(return_value=("quern-present\n", ""))
+        assert await backend.system_cert_state("S", "c.0") is True
+        backend._run_adb_for_device = AsyncMock(return_value=("quern-absent\n", ""))
+        assert await backend.system_cert_state("S", "c.0") is False
+        backend._run_adb_for_device = AsyncMock(side_effect=DeviceError("device offline", "adb"))
+        assert await backend.system_cert_state("S", "c.0") is None
+        backend._run_adb_for_device = AsyncMock(return_value=("", ""))
+        assert await backend.system_cert_state("S", "c.0") is None
+
+
+def test_the_reservation_answer_says_an_android_devices_ca_install():
+    from server.api.sessions import _what
+    from server.models import DeviceType
+
+    emu = SimpleNamespace(name="Pixel_9", model="Pixel 9", os_version="16",
+                          device_family="Android", device_type=DeviceType.ANDROID_EMULATOR,
+                          ca_install="manual")
+    sim = SimpleNamespace(name="iPhone", model="", os_version="iOS 18.6",
+                          device_family="iPhone", device_type=DeviceType.SIMULATOR, ca_install="")
+    assert _what(emu)["ca_install"] == "manual"
+    assert "ca_install" not in _what(sim)
+
+
+async def test_a_pool_entry_takes_the_ca_install_its_device_reports_now(tmp_path):
+    """Listed as unknown while booting, then readable: the pool's entry must
+    follow, or pool-backed answers stay 'unknown' (review)."""
+    from server.device.pool import DevicePool
+    from server.models import DeviceInfo, DeviceState
+
+    def row(ca):
+        return DeviceInfo(udid="emulator-5554", name="Pixel_9", state=DeviceState.BOOTED,
+                          device_type=DeviceType.ANDROID_EMULATOR, os_version="16",
+                          ca_install=ca)
+
+    ctrl = MagicMock()
+    ctrl.list_devices = AsyncMock(return_value=[row("unknown")])
+    pool = DevicePool(ctrl)
+    pool._pool_file = tmp_path / "device-pool.json"
+    await pool.refresh(force=True)
+    ctrl.list_devices = AsyncMock(return_value=[row("automatic")])
+    await pool.refresh(force=True)
+    assert pool._read_state().devices["emulator-5554"].ca_install == "automatic"
+
+
+@pytest.mark.parametrize("read_back", [("10.0.0.1:9101", True), (None, False)],
+                         ids=["still-set", "unreadable"])
+async def test_a_clear_that_is_not_confirmed_keeps_the_record(read_back):
+    """Ended only once the device says it holds nothing: otherwise the
+    release, which retries, would find no record (CodeRabbit)."""
+    ctrl = _android()
+    value, readable = read_back
+    ctrl.adb.get_http_proxy = (AsyncMock(return_value=value) if readable
+                               else AsyncMock(side_effect=RuntimeError("offline")))
+    request = _request(ctrl)
+    request.app.state.device_proxy_holds = {"PHONE1": ("client:a/s1", "o1", 0)}
+    out = await record_device_proxy_config_endpoint(
+        RecordDeviceProxyRequest(udid="PHONE1", clear=True), request)
+    assert out["proxy_verified"] is not True
+    assert request.app.state.device_proxy_holds == {"PHONE1": ("client:a/s1", "o1", 0)}
+
+
+async def test_a_hold_that_ends_while_the_proxy_is_applied_gets_it_cleared():
+    """The release ran while the write and the network bounce did, and found
+    no record yet: the proxy stayed on a device nobody held (CodeRabbit)."""
+    ctrl = _android()
+    request = _request(ctrl)
+    session = SimpleNamespace(id="client:a/s1", opened_at="o1")
+    holding = {"now": True}
+    request.app.state.sessions = SimpleNamespace(
+        holder_of=lambda u: SimpleNamespace(session=session) if holding["now"] else None)
+
+    async def bounce(udid):
+        holding["now"] = False                # the session is released meanwhile
+        return True
+
+    ctrl.adb.reattach_network = AsyncMock(side_effect=bounce)
+    a, b = _hosts()
+    caller = SimpleNamespace(session="client:a/s1", principal="client:a", is_owner=False)
+    with a, b, patch("server.api.proxy_certs.visibility.current_caller", return_value=caller):
+        out = await record_device_proxy_config_endpoint(
+            RecordDeviceProxyRequest(udid="PHONE1", apply=True), request)
+    ctrl.adb.clear_http_proxy.assert_awaited_once_with("PHONE1")
+    assert out["hold_ended"] is True and out["ends_with_hold"] is False
+    assert request.app.state.device_proxy_holds == {}
+
+
+async def test_a_failed_write_leaves_no_record():
+    ctrl = _android()
+    ctrl.adb.set_http_proxy = AsyncMock(side_effect=RuntimeError("adb offline"))
+    request = _request(ctrl)
+    session = SimpleNamespace(id="client:a/s1", opened_at="o1")
+    request.app.state.sessions = SimpleNamespace(
+        holder_of=lambda u: SimpleNamespace(session=session))
+    a, b = _hosts()
+    caller = SimpleNamespace(session="client:a/s1", principal="client:a", is_owner=False)
+    with a, b, patch("server.api.proxy_certs.visibility.current_caller", return_value=caller), \
+         pytest.raises(HTTPException):
+        await record_device_proxy_config_endpoint(
+            RecordDeviceProxyRequest(udid="PHONE1", apply=True), request)
+    assert request.app.state.device_proxy_holds == {}
+
+
+async def test_a_stalled_clear_at_release_is_bounded(monkeypatch):
+    """It runs in the sweep every session's expiry waits on (CodeRabbit)."""
+    import asyncio
+
+    from server.api import sessions as sessions_api
+
+    ctrl = _android()
+
+    async def hangs(udid):
+        await asyncio.sleep(10)
+
+    ctrl.adb.clear_http_proxy = AsyncMock(side_effect=hangs)
+    monkeypatch.setattr(sessions_api, "_PROXY_CLEAR_TIMEOUT_S", 0.05)
+    app = SimpleNamespace(state=SimpleNamespace(
+        device_controller=ctrl, session_proxies=None, proxy_adapter=None, recordings=None,
+        mock_owners={}, device_proxy_holds={"PHONE1": ("ci", None, 0)}))
+    session = SimpleNamespace(id="ci", principal="owner", opened_at=None,
+                              reservations=["PHONE1"])
+    actions = await asyncio.wait_for(sessions_api._end_client_work(
+        app, SimpleNamespace(holder_of=lambda udid: None), session), 2)
+    [act] = [x for x in actions if x["action"] == "device_proxy_cleared"]
+    assert act["ok"] is False and "did not answer" in act["error"]
+
+
+async def test_a_failed_clear_after_the_hold_ended_is_reported_and_kept_for_a_retry():
+    """The clear the route makes itself when the hold ended mid-apply: one
+    that fails, or does not read back clear, is said and its record kept for
+    the release's retry, not dropped (CodeRabbit)."""
+    ctrl = _android()
+    ctrl.adb.clear_http_proxy = AsyncMock(side_effect=RuntimeError("device offline"))
+    request = _request(ctrl)
+    session = SimpleNamespace(id="client:a/s1", opened_at="o1")
+    holding = {"now": True}
+    request.app.state.sessions = SimpleNamespace(
+        holder_of=lambda u: SimpleNamespace(session=session) if holding["now"] else None)
+
+    async def bounce(udid):
+        holding["now"] = False
+        return True
+
+    ctrl.adb.reattach_network = AsyncMock(side_effect=bounce)
+    a, b = _hosts()
+    caller = SimpleNamespace(session="client:a/s1", principal="client:a", is_owner=False)
+    with a, b, patch("server.api.proxy_certs.visibility.current_caller", return_value=caller):
+        out = await record_device_proxy_config_endpoint(
+            RecordDeviceProxyRequest(udid="PHONE1", apply=True), request)
+    assert out["hold_ended"] is True and "device offline" in out["hold_ended_clear_error"]
+    assert "PHONE1" in request.app.state.device_proxy_holds
