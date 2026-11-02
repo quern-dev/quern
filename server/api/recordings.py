@@ -86,8 +86,10 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             video=body.video, bodies=body.bodies, max_body_bytes=body.max_body_bytes,
             exclude_content_types=body.exclude_content_types,
             keyframes=tuple(body.keyframes) if body.keyframes is not None
-            else KEYFRAME_TRIGGERS)
-        await manager.check_start(udid, body.output_dir, filters)
+            else KEYFRAME_TRIGGERS,
+            gauges=body.gauges, gauge_interval_s=body.gauge_interval_s)
+        await manager.check_start(udid, body.output_dir, filters,
+                                  principal=visibility.current_caller().principal)
     except RecordingError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     simulator_tls = None
@@ -277,7 +279,8 @@ async def recording_events(
     request: Request,
     recording: Annotated[str, Query(description="The recording's id, or its directory")],
     kinds: Annotated[str | None, Query(description=(
-        "Comma-separated, any of actions, flows, logs. Default all."))] = None,
+        "Comma-separated, any of actions, flows, logs, gauges. Default actions, flows and "
+        "logs: gauges, a sample a second, are read when named."))] = None,
     since: Annotated[UtcDatetime | None, Query()] = None,
     until: Annotated[UtcDatetime | None, Query()] = None,
     cursor: Annotated[int, Query(ge=0, description="next_cursor from the previous page")] = 0,
@@ -288,9 +291,9 @@ async def recording_events(
     """A recording's events -- any combination of actions, flows and logs -- for a window."""
     directory = recording_dir(request, recording)
     chosen = tuple(k.strip() for k in kinds.split(",") if k.strip()) if kinds else KINDS
-    if unknown := [k for k in chosen if k not in KINDS]:
+    if unknown := [k for k in chosen if k not in recording_mod.READ_KINDS]:
         raise HTTPException(status_code=400, detail=f"unknown kinds {unknown}: choose from "
-                                                    f"{', '.join(KINDS)}")
+                                                    f"{', '.join(recording_mod.READ_KINDS)}")
     try:
         page = await asyncio.to_thread(
             recording_mod.read_events, directory, chosen, since=since, until=until,

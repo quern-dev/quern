@@ -42,13 +42,14 @@ import re
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from server import config as config_mod
+from server import gauges as gauges_mod
 from server import logging_ext
 from server.models import FlowRecord, LogEntry, LogSource
 from server.trace import APP_LOG_SOURCES, Ownership, device_of, owns
@@ -192,7 +193,14 @@ def shape_bodies(kind: str, data: dict, filters: Filters) -> dict:
 KINDS = ("actions", "flows", "logs")
 #: The event types each kind writes.
 _EVENT_TYPES = {"actions": ("action", "mark"), "flows": ("flow", "request_started"),
-                "logs": ("log", "crash")}
+                "logs": ("log", "crash", "hang"), "gauges": ("gauge",)}
+#: What a recording's events can be read by: KINDS, and the gauges a
+#: recording takes when `Filters.gauges` names an app rather than by kind.
+READ_KINDS = (*KINDS, "gauges")
+
+
+#: A bundle id or package name, as `performance.PACKAGE_NAME` has it.
+_APP_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def event_types(kinds) -> set[str]:
@@ -221,6 +229,10 @@ class Filters:
     #: What asks for a keyframe when filming (#415). Requests matter for runs
     #: quern does not drive: a CI suite has no quern actions at all.
     keyframes: tuple[str, ...] = KEYFRAME_TRIGGERS
+    #: The app to sample CPU, memory and frames of, by bundle id or package
+    #: (#245, phase 2): `gauge` lines, and per-action peaks in the trace.
+    gauges: str | None = None
+    gauge_interval_s: float = gauges_mod.INTERVAL_DEFAULT_S
 
     def __post_init__(self) -> None:
         unknown = [k for k in self.kinds if k not in KINDS]
@@ -237,6 +249,16 @@ class Filters:
             raise RecordingError(f"keyframes must be some of {', '.join(KEYFRAME_TRIGGERS)}, "
                                  f"not {unknown}")
         self.keyframes = tuple(k for k in KEYFRAME_TRIGGERS if k in self.keyframes)
+        if self.gauges is not None and not _APP_ID.fullmatch(self.gauges):
+            # It reaches a device shell on Android, so refused here.
+            raise RecordingError(f"gauges must be a bundle id or package name, not "
+                                 f"{self.gauges!r}")
+        if isinstance(self.gauge_interval_s, bool) or not isinstance(
+                self.gauge_interval_s, (int, float)) or not (
+                gauges_mod.INTERVAL_MIN_S <= self.gauge_interval_s <= gauges_mod.INTERVAL_MAX_S):
+            raise RecordingError(f"gauge_interval_s must be {gauges_mod.INTERVAL_MIN_S:g} to "
+                                 f"{gauges_mod.INTERVAL_MAX_S:g} seconds, not "
+                                 f"{self.gauge_interval_s!r}")
 
     def as_dict(self) -> dict:
         return {"kinds": list(self.kinds), "hosts": self.hosts,
@@ -244,7 +266,8 @@ class Filters:
                 "include_unattributed": self.include_unattributed, "video": self.video,
                 "bodies": self.bodies, "max_body_bytes": self.max_body_bytes,
                 "exclude_content_types": self.exclude_content_types,
-                "keyframes": list(self.keyframes)}
+                "keyframes": list(self.keyframes),
+                "gauges": self.gauges, "gauge_interval_s": self.gauge_interval_s}
 
     @classmethod
     def from_dict(cls, d: dict) -> Filters:
@@ -259,7 +282,9 @@ class Filters:
                    exclude_content_types=d.get("exclude_content_types"),
                    # A manifest from before #415 has no `keyframes`: it was
                    # recorded with action keyframes only, and resumes so.
-                   keyframes=tuple(d["keyframes"]) if "keyframes" in d else ("actions",))
+                   keyframes=tuple(d["keyframes"]) if "keyframes" in d else ("actions",),
+                   gauges=d.get("gauges"),
+                   gauge_interval_s=d.get("gauge_interval_s", gauges_mod.INTERVAL_DEFAULT_S))
 
 
 def _anchor() -> dict:
@@ -281,6 +306,25 @@ SHUTDOWN_WAIT = 2.0  # s
 #: `quern stop` kills the server after 5s, so these must fit well inside it.
 PAUSE_WAIT = 1.5  # s
 CANCEL_WAIT = 0.5  # s
+
+
+#: How many gauge samples a live trace can read: an hour at the default
+#: interval. A trace over the recording itself reads the whole file.
+LIVE_GAUGE_SAMPLES = 3600
+#: How long a failed gauge stream waits before trying again, doubling to the
+#: most. A device that went away is asked again, but not hammered.
+GAUGE_RETRY_S = 2.0
+GAUGE_RETRY_MAX_S = 30.0
+#: How long a gauge stream may go without a sample, at the least, before it
+#: is taken as stuck: ended, said, and started again. A stream that hangs
+#: otherwise writes nothing, which reads as a quiet app (live, on an iPhone).
+GAUGE_STALL_MIN_S = 30.0
+#: Less than this between a stream starting and its first sample's window is
+#: overhead, not a gap worth a line.
+GAUGE_GAP_S = 0.25
+#: How long a failed recording's sampler and pumps get to finish cancelling
+#: -- closing a phone's connection -- before its device is given back anyway.
+PUMP_SETTLE_S = 5.0
 
 
 @dataclass
@@ -352,6 +396,16 @@ class Recording:
     #: them unseen when that write then failed (review).
     _closing: bool = field(default=False, repr=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    #: Gauge lines that are failures -- the device could not be asked, or a
+    #: stream went quiet -- read back from the file on resume. Any makes the
+    #: recording incomplete, as lost video does (review).
+    gauge_failures: int = 0
+    #: Set when a resumed recording found its device sampled by another.
+    _gauges_off: bool = field(default=False, repr=False)
+    #: The latest gauge samples, for the live trace: the file is the record,
+    #: and reading it back on every trace would cost a parse of the whole run.
+    _gauge_samples: deque = field(
+        default_factory=lambda: deque(maxlen=LIVE_GAUGE_SAMPLES), repr=False)
 
     @property
     def events(self) -> Path:
@@ -370,7 +424,20 @@ class Recording:
         if self.state in ("recording", "interrupted"):
             return None
         return (self.state == "stopped" and not any(self.dropped.values()) and not self.gaps
-                and not self.video_lost)
+                and not self.video_lost and not self.gauges_lost)
+
+    @property
+    def gauges_lost(self) -> bool | None:
+        """Gauges were asked for and some of the time has none: a sample that
+        failed, a stream that went quiet. None when none were asked for.
+
+        A recording whose every sample failed read `complete: true`, with a
+        gauge count of five that were all failures (review). Not-running
+        samples are readings, not losses: "the app was not running" is an
+        answer."""
+        if not self.filters.gauges:
+            return None
+        return self.gauge_failures > 0
 
     @property
     def video_lost(self) -> bool | None:
@@ -403,6 +470,7 @@ class Recording:
             # Said apart from `complete`, so a reader told it is incomplete
             # can tell lost video from lost events (CodeRabbit).
             "video_lost": self.video_lost,
+            "gauges_lost": self.gauges_lost,
             "filters": self.filters.as_dict(), "warnings": list(self.warnings),
         }
 
@@ -455,6 +523,15 @@ def _holds_a_recording(events: Path) -> str:
 
 def _already_filmed(udid: str, holder: str) -> str:
     return f"{udid} is already being filmed by recording {holder}: one movie per simulator"
+
+
+def _line_kind(kind: str, item: object) -> str:
+    """A crash-buffer entry that is an Android hang is written as a `hang`,
+    not a `crash`: a CI check on no crashes must not fail over a 2 s stall
+    (review). Read back, both are the trace's log lines."""
+    if kind == "crash" and str(getattr(item, "id", "")).startswith("android-hang-"):
+        return "hang"
+    return kind
 
 
 def _line(kind: str, data: dict | None = None, **extra) -> str:
@@ -511,6 +588,8 @@ class _Tally:
     open_video: dict[str, dict] = field(default_factory=dict)
     #: The recording the file's `started` line names: whose file it is.
     recording_id: str | None = None
+    #: Gauge lines that are failures.
+    gauge_failures: int = 0
 
 
 def _tally(events: Path) -> _Tally:
@@ -525,6 +604,7 @@ def _tally(events: Path) -> _Tally:
     last_segment = 0
     last_at = None
     recording_id = None
+    gauge_failures = 0
     with open(events, "rb") as f:
         for raw in f:
             try:
@@ -540,8 +620,11 @@ def _tally(events: Path) -> _Tally:
                 # after this one, which the next save then forgot (review).
                 if kind == "started" and recording_id is None:
                     recording_id = event.get("recording")
-                if kind in counts or kind == "mark":  # marks only when there are any
+                # Marks and gauges only when there are any.
+                if kind in counts or kind in ("mark", "gauge", "hang"):
                     counts[kind] = counts.get(kind, 0) + 1
+                    if kind == "gauge" and (event.get("data") or {}).get("error"):
+                        gauge_failures += 1
                 elif kind == "dropped" and event.get("what"):
                     what = event["what"]
                     dropped[what] = dropped.get(what, 0) + int(event.get("count") or 0)
@@ -560,7 +643,7 @@ def _tally(events: Path) -> _Tally:
                 continue
     return _Tally(counts=counts, dropped=dropped, gaps=gaps, last_at=last_at, video=video,
                   last_segment=last_segment, open_video=open_video,
-                  recording_id=recording_id)
+                  recording_id=recording_id, gauge_failures=gauge_failures)
 
 
 class RecordingManager:
@@ -568,7 +651,9 @@ class RecordingManager:
 
     def __init__(self, *, server_buffer, ring_buffer, crash_buffer, flow_store,
                  ip_map: Callable[[], dict[str, tuple[str, bool]]] | None = None,
-                 video: Any = None) -> None:
+                 video: Any = None,
+                 gauges: Callable[[str, str, float], AsyncIterator[Any]] | None = None,
+                 ) -> None:
         #: Starts and stops quern-media (`recording_video.VideoRecorder`);
         #: None where this server cannot record video.
         self._video = video
@@ -592,6 +677,13 @@ class RecordingManager:
         #: Which recording is filming each simulator: one quern-media per
         #: screen, taken before any await so two starts cannot both pass.
         self._filming: dict[str, str] = {}
+        #: Samples one app's CPU, memory and frames on a device
+        #: (`DeviceController.gauge_stream`); None where this server cannot.
+        self._gauge_source = gauges
+        #: Which recording samples each device's gauges: one at a time, since
+        #: two would each double what the device is asked every second, and
+        #: the live trace could not tell whose samples it was reading.
+        self._gauging: dict[str, str] = {}
         listeners = getattr(flow_store, "pending_dropped_listeners", None)
         if listeners is not None:
             listeners.append(self._note_proxy_stopped)
@@ -670,7 +762,8 @@ class RecordingManager:
         return any(r.state == "recording" and r.dir == directory
                    for r in self._recordings.values())
 
-    async def check_start(self, udid: str, output_dir: str | None, filters: Filters) -> None:
+    async def check_start(self, udid: str, output_dir: str | None, filters: Filters,
+                          principal: str = "owner") -> None:
         """Refuse now what `start` would refuse, before a caller does anything
         that cannot be taken back: #414's CA check installs a CA, and a start
         refused after it had installed one for nothing (review). `start` checks
@@ -686,6 +779,21 @@ class RecordingManager:
             holder = self._filming.get(udid)
             if holder is not None:
                 raise RecordingError(_already_filmed(udid, holder))
+        if filters.gauges:
+            self._may_gauge(udid, None, principal)
+
+    def _may_gauge(self, udid: str, rec_id: str | None, principal: str = "owner") -> None:
+        if self._gauge_source is None:
+            raise RecordingError("gauges cannot be sampled on this server")
+        holder = self._gauging.get(udid)
+        if holder is not None and holder != rec_id:
+            held = self._recordings.get(holder)
+            # Named to the owner and to its own principal; to anyone else it
+            # is another's recording, which a blind caller is not shown.
+            name = (f"recording {holder}" if principal == "owner" or held is None
+                    or held.principal == principal else "another caller's recording")
+            raise RecordingError(f"{udid} is already sampled by {name}: one recording with "
+                                 f"gauges per device")
 
     async def start(self, udid: str, output_dir: str | None, filters: Filters,
                     requested_by: str | None = None, *, principal: str = "owner",
@@ -702,16 +810,27 @@ class RecordingManager:
         rec = Recording(id=rec_id, udid=udid, dir=out, filters=filters, started_at=_now(),
                         requested_by=(requested_by or "").strip() or None,
                         principal=principal, blind=blind)
+        if filters.gauges:
+            # Taken before any await, as the screen is, so two starts cannot
+            # both pass.
+            self._may_gauge(udid, rec.id, principal)
+            self._gauging[udid] = rec.id
         if filters.video:
             # Asked for and impossible is a refusal, not a recording that
             # quietly has no video.
             if self._video is None:
+                self._release_gauges(rec)
                 raise RecordingError("video cannot be recorded on this server")
-            self._reserve_screen(rec)
+            try:
+                self._reserve_screen(rec)
+            except RecordingError:
+                self._release_gauges(rec)
+                raise
         try:
             await asyncio.to_thread(self._begin_files, rec)
         except FileExistsError as e:
             self._release_screen(rec)
+            self._release_gauges(rec)
             # Created exclusively, which is what decides two starts racing
             # into one directory: a check before it would let both through.
             # And before the video, which a loser would otherwise start on
@@ -720,7 +839,15 @@ class RecordingManager:
             raise RecordingError(_holds_a_recording(rec.events)) from e
         except OSError as e:
             self._release_screen(rec)
+            self._release_gauges(rec)
             raise RecordingError(f"{out} could not be written: {e}") from e
+        except BaseException:
+            # Cancelled mid-write: no recording was made, so neither the device
+            # nor its screen is held by one (review: held, every later gauged or
+            # filmed start was refused over a recording that did not exist).
+            self._release_screen(rec)
+            self._release_gauges(rec)
+            raise
         if filters.video:
             try:
                 rec._segment = await self._video.start(udid, out / "video-1.mp4")
@@ -741,6 +868,7 @@ class RecordingManager:
 
                 def cleanup(_: object = None) -> None:
                     self._release_screen(rec)
+                    self._release_gauges(rec)
                     _unbegin(rec)
                 try:
                     await asyncio.shield(finish)
@@ -778,6 +906,18 @@ class RecordingManager:
         if self._filming.get(rec.udid) == rec.id:
             del self._filming[rec.udid]
 
+    def _release_gauges(self, rec: Recording) -> None:
+        if self._gauging.get(rec.udid) == rec.id:
+            del self._gauging[rec.udid]
+
+    def live_gauges(self, udid: str) -> tuple[Recording, list] | None:
+        """The recording sampling `udid`'s gauges, and its recent samples,
+        while it records: what a live trace attaches to that device's actions."""
+        rec = self._recordings.get(self._gauging.get(udid, ""))
+        if rec is None or rec.state != "recording":
+            return None
+        return rec, list(rec._gauge_samples)
+
     def _attach(self, rec: Recording) -> None:
         """Subscribe to every source this recording draws on, and start its
         writer. Filtered at the subscription, so another device's traffic
@@ -802,6 +942,10 @@ class RecordingManager:
             queue = source.subscribe(accept)
             rec._subs.append((kind, source, queue))
             rec._pumps.append(asyncio.create_task(self._pump(rec, kind, queue)))
+        if rec.filters.gauges and self._gauge_source is not None and not rec._gauges_off:
+            # With the pumps, so every way a recording ends -- stop, pause,
+            # failure -- ends the sampling too.
+            rec._pumps.append(asyncio.create_task(self._sample(rec)))
         rec._flusher_task = asyncio.create_task(self._flusher(rec))
 
     def _on_action_device(self, udid: str, action: object) -> None:
@@ -854,13 +998,91 @@ class RecordingManager:
     async def _pump(self, rec: Recording, kind: str, queue: asyncio.Queue) -> None:
         while True:
             item = await queue.get()
-            rec._pending.append(_line(kind, self._record_of(rec, kind, item)))
-            rec.counts[kind] = rec.counts.get(kind, 0) + 1
+            kind_of = _line_kind(kind, item)
+            rec._pending.append(_line(kind_of, self._record_of(rec, kind, item)))
+            rec.counts[kind_of] = rec.counts.get(kind_of, 0) + 1
             if kind == "request_started":
                 rec._started_ids.append(item.id)
                 self._request_keyframe(rec)
             elif kind == "flow" and item.id not in rec._started_ids:
                 self._request_keyframe(rec)
+
+    async def _sample(self, rec: Recording) -> None:
+        """Write a `gauge` line per sample of the recording's app, for as long
+        as it records.
+
+        Never fatal to the recording: a device that cannot be asked is said
+        as a sample that failed, covering the time it could not tell about,
+        and asked again after a pause that doubles to `GAUGE_RETRY_MAX_S`.
+        """
+        # Not inside whatever action started the recording: the task inherits
+        # that action's context, and every sample's device lookup would then
+        # be reported as that action's device -- asking for a keyframe of a
+        # filmed recording each time (see `_on_action_device`).
+        logging_ext.clear_current_action()
+        f = rec.filters
+        retry = GAUGE_RETRY_S
+        covered_to = _now()
+        while True:
+            why = "the gauge stream ended"
+            try:
+                stall = max(GAUGE_STALL_MIN_S, f.gauge_interval_s * 5)
+                first = True
+                async with contextlib.aclosing(
+                        self._gauge_source(rec.udid, f.gauges, f.gauge_interval_s)) as stream:
+                    while True:
+                        deadline = asyncio.timeout(stall)
+                        try:
+                            async with deadline:
+                                snap = await anext(stream)
+                        except StopAsyncIteration:
+                            break
+                        except TimeoutError:
+                            if not deadline.expired():
+                                raise           # the stream's own, said as its failure
+                            why = f"no gauge sample in {stall:g}s; the device is not answering"
+                            break
+                        data = snap if isinstance(snap, dict) else snap.model_dump()
+                        end = _now()
+                        seconds = data.get("sample_seconds")
+                        if not isinstance(seconds, (int, float)) or seconds <= 0:
+                            seconds = f.gauge_interval_s
+                        start = end - timedelta(seconds=seconds)
+                        # Time no reading covers, said: before a stream's first
+                        # sample (an iPhone's took 2-4 s), and any long pause
+                        # between two. Left unsaid it was an action with no
+                        # reason at all (review).
+                        gap = (start - covered_to).total_seconds()
+                        if gap > (GAUGE_GAP_S if first else max(1.0, f.gauge_interval_s)):
+                            self._add_gauge(rec, gauges_mod.gap_line(
+                                "the gauge stream was starting: no reading yet" if first
+                                else f"no gauge sample for {gap:.1f}s", covered_to, start))
+                        first = False
+                        self._add_gauge(rec, gauges_mod.sample_line(data, start, end))
+                        covered_to, retry = end, GAUGE_RETRY_S
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 -- said in the file, never fatal
+                why = str(e) or repr(e)
+            failed_at = _now()
+            self._add_gauge(rec, gauges_mod.failed_line(
+                f"gauges could not be read: {why}", covered_to, failed_at))
+            await asyncio.sleep(retry)
+            # The pause is time nothing was read either, and said so: left
+            # unsaid it would read as an action no sample happened to cover.
+            covered_to = _now()
+            self._add_gauge(rec, gauges_mod.failed_line(
+                f"gauges were being retried after: {why}", failed_at, covered_to))
+            retry = min(retry * 2, GAUGE_RETRY_MAX_S)
+
+    def _add_gauge(self, rec: Recording, data: dict) -> None:
+        rec._pending.append(_line("gauge", data))
+        rec.counts["gauge"] = rec.counts.get("gauge", 0) + 1
+        if data.get("error"):
+            rec.gauge_failures += 1
+        sample = gauges_mod.parse_sample(data)
+        if sample is not None:
+            rec._gauge_samples.append(sample)
 
     @staticmethod
     def _record_of(rec: Recording, kind: str, item) -> dict:
@@ -1020,8 +1242,9 @@ class RecordingManager:
         for kind, _, queue in rec._subs:
             while not queue.empty():
                 item = queue.get_nowait()
-                rec._pending.append(_line(kind, self._record_of(rec, kind, item)))
-                rec.counts[kind] = rec.counts.get(kind, 0) + 1
+                kind_of = _line_kind(kind, item)
+                rec._pending.append(_line(kind_of, self._record_of(rec, kind, item)))
+                rec.counts[kind_of] = rec.counts.get(kind_of, 0) + 1
 
     async def _fail(self, rec: Recording, why: str) -> None:
         """The recording cannot go on. Called from inside a flush, holding the
@@ -1030,9 +1253,21 @@ class RecordingManager:
         rec.state, rec.error, rec.stopped_at = "failed", why, _now()
         rec._closing = True
         rec._wake.set()
-        for task in rec._pumps:
+        pumps, rec._pumps = rec._pumps, []
+        for task in pumps:
             task.cancel()
-        rec._pumps = []
+        # The device is given back only once the sampler has finished closing
+        # its stream -- a phone's Instruments connection -- and not before:
+        # another recording could take it meanwhile (CodeRabbit). Not awaited
+        # here, as the movie is not: this holds the flush lock. Shutdown waits
+        # on it with the rest of the background work.
+        sampling = [t for t in pumps if t is not asyncio.current_task()]
+
+        async def settle() -> None:
+            if sampling:
+                await asyncio.wait(sampling, timeout=PUMP_SETTLE_S)
+            self._release_gauges(rec)
+        self._spawn(settle())
         for _, source, queue in rec._subs:
             source.unsubscribe(queue)
         rec._subs = []
@@ -1087,6 +1322,7 @@ class RecordingManager:
                 with contextlib.suppress(OSError):
                     tally = await asyncio.to_thread(_tally, rec.events)
                     rec.counts, rec.dropped, rec.gaps = tally.counts, tally.dropped, tally.gaps
+                    rec.gauge_failures = tally.gauge_failures
                     # The manifest is rewritten below: without these its
                     # video list went from one segment to none (review).
                     rec.video_segments = tally.video
@@ -1113,6 +1349,7 @@ class RecordingManager:
         if rec.state != "recording":
             return rec
         await self._close_writer(rec)
+        self._release_gauges(rec)
         if rec.state != "recording":          # the last write failed
             await self._finish_video(rec, write=False)
             return rec
@@ -1333,6 +1570,7 @@ class RecordingManager:
                 rec.counts, rec.dropped, rec.gaps = tally.counts, tally.dropped, tally.gaps
                 rec.video_segments = tally.video
                 rec._segment_number = tally.last_segment
+                rec.gauge_failures = tally.gauge_failures
                 gap = {"from": tally.last_at.isoformat() if tally.last_at else None,
                        "to": _now().isoformat(), "reason": "quern was not running"}
                 if rec.principal != "owner":
@@ -1395,6 +1633,24 @@ class RecordingManager:
                 # The events file is the record and it is taking lines; the
                 # manifest is rewritten at stop. Said, not fatal.
                 rec.warnings.append(f"{rec.manifest} could not be updated: {e}")
+            if rec.filters.gauges and self._gauge_source is not None:
+                holder = self._gauging.get(rec.udid)
+                if holder is not None and holder != rec.id:
+                    # Another recording took the device while this one could
+                    # not resume (its directory was gone). Both sampling it
+                    # would double what the device is asked, and the live
+                    # trace could read only one; this one goes without, and
+                    # says so in its file (review).
+                    why = (f"not sampled after this restart: recording {holder} samples "
+                           f"{rec.udid} now")
+                    rec.warnings.append(why)
+                    rec._gauges_off = True
+                    now = _now()
+                    rec._pending.append(_line("gauge", gauges_mod.failed_line(why, now, now)))
+                    rec.counts["gauge"] = rec.counts.get("gauge", 0) + 1
+                    rec.gauge_failures += 1
+                else:
+                    self._gauging[rec.udid] = rec.id
             self._attach(rec)
             if rec.filters.video:
                 rec._resuming = self._spawn(self._resume_video(rec, tally.open_video))
@@ -1440,6 +1696,11 @@ class Loaded:
     #: within a run -- a resume after a reboot starts a new base -- so a
     #: record joins only the segment from its own run.
     runs: dict[str, int] = field(default_factory=dict)
+    #: The app the recording sampled (#245, phase 2), or None if it sampled
+    #: none; and its samples, in the order written.
+    gauge_app: str | None = None
+    gauge_interval_s: float | None = None
+    gauges: list = field(default_factory=list)
 
     def video_at(self, monotonic: float | None, run: int) -> dict | None:
         """Where `monotonic` falls in this run's movie: its path and the
@@ -1461,8 +1722,8 @@ class Loaded:
         return None
 
 
-_EVERYTHING = frozenset({"action", "flow", "log", "crash"})
-_NOT_FLOWS = frozenset({"action", "log", "crash"})
+_EVERYTHING = frozenset({"action", "flow", "log", "crash", "hang", "gauge"})
+_NOT_FLOWS = frozenset({"action", "log", "crash", "hang", "gauge"})
 
 
 def _gap_holes(start, end, why, *, exact_flows: bool = False) -> list[tuple]:
@@ -1484,7 +1745,8 @@ def _gap_holes(start, end, why, *, exact_flows: bool = False) -> list[tuple]:
 
 #: How a record line begins, as `_line` writes it: type first, compact.
 _RECORD_PREFIXES = tuple(f'{{"type":"{k}",'
-                         for k in ("action", "flow", "request_started", "log", "crash"))
+                         for k in ("action", "flow", "request_started", "log", "crash",
+                                   "hang", "gauge"))
 _AT = re.compile(r'"at":"([^"]+)"')
 
 
@@ -1516,6 +1778,7 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
     warnings: list[str] = []
     udid, stopped, bad, resets = None, False, 0, 0
     last_at, last_mono, failed = None, None, None
+    gauge_app, gauge_interval, gauge_samples = None, None, []
     with open(directory / EVENTS) as f:
         for raw in f:
             if markers_only and raw.startswith(_RECORD_PREFIXES):
@@ -1555,13 +1818,23 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                     runs.setdefault(flow.id, run)
                 elif kind == "mark":
                     marks.append(event.get("data") or {})
-                elif kind in ("log", "crash"):
+                elif kind in ("log", "crash", "hang"):
                     logs.append(LogEntry.model_validate(event["data"]))
+                elif kind == "gauge":
+                    sample = gauges_mod.parse_sample(event.get("data"))
+                    if sample is None:
+                        bad += 1
+                    else:
+                        gauge_samples.append(sample)
                 elif kind in ("started", "resumed"):
                     if kind == "started":
                         udid = udid or event.get("udid")
                         if isinstance(event.get("format_version"), int):
                             version = event["format_version"]
+                        started_filters = event.get("filters")
+                        if isinstance(started_filters, dict) and started_filters.get("gauges"):
+                            gauge_app = str(started_filters["gauges"])
+                            gauge_interval = started_filters.get("gauge_interval_s")
                     if isinstance(event.get("clock_anchor"), dict):
                         anchors.append({**event["clock_anchor"], "segment": kind})
                     if kind == "resumed":
@@ -1642,7 +1915,10 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                                         else f"the recording failed ({failed})" if failed
                                         else "the recording ended without finishing it")
                       for p, r in video_open.items()],
-                  runs=runs)
+                  runs=runs, gauge_app=gauge_app,
+                  gauge_interval_s=gauge_interval if isinstance(gauge_interval, (int, float))
+                  else None,
+                  gauges=sorted(gauge_samples, key=lambda g: g.start))
 
 
 def _unfinished_video(path: str, run: int, why: str) -> dict:
@@ -1727,6 +2003,9 @@ def _summary(kind: str, data: dict) -> dict:
                 "started_monotonic": data.get("started_monotonic"),
                 "session": data.get("session", ""),
                 "message": data.get("message")}
+    if kind == "gauge":
+        return {k: data.get(k) for k in ("from", "to", "running", "cpu_percent",
+                                          "memory_bytes", "threads", "display_fps", "error")}
     return {"timestamp": data.get("timestamp"), "level": data.get("level"),
             "process": data.get("process"), "message": data.get("message")}
 
@@ -1762,7 +2041,8 @@ def read_events(directory: Path, kinds, *, since: datetime | None = None,
                 if flow_id is not None and (kind not in ("flow", "request_started")
                                             or data.get("id") != flow_id):
                     continue
-                at = _dt(data.get("timestamp"))
+                # A gauge sample has a window, not a timestamp: by its end.
+                at = _dt(data.get("timestamp") if kind != "gauge" else data.get("to"))
                 if at is not None and ((since and at < since) or (until and at > until)):
                     continue
                 if detail == "summary":

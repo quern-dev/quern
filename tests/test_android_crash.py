@@ -189,19 +189,102 @@ class TestProcessFiltering:
         assert process_matches("com.example", crash)
 
 
+#: Measured on a Pixel 3 XL (Android 10), tapping the probe's "Trigger ANR"
+#: and touching the screen while its main thread was blocked: system_server's
+#: line when the hang ended, and the app's own Choreographer line. No ANR.
+SLOW_INPUT = [
+    "2026-11-01 23:43:49.819 +0000 19845 19845 I Choreographer: Skipped 720 frames!  "
+    "The application may be doing too much work on its main thread.",
+    "2026-11-01 23:43:49.833 +0000  1347  1700 I InputDispatcher: Window '44a30c2 "
+    "com.quern.probe/com.quern.probe.MainActivity (server)' spent 10562.6ms processing the "
+    "last input event: MotionEvent",
+    "2026-11-01 23:43:49.835 +0000  1347  1700 I InputDispatcher: Dropped event because it "
+    "is stale.",
+]
+
+
+class TestHang:
+    def test_the_measured_line_is_a_hang_of_the_app(self):
+        [hang], _ = _feed(SLOW_INPUT)
+        assert hang.source == LogSource.CRASH and hang.level == LogLevel.ERROR
+        assert hang.process == "com.quern.probe" and hang.pid is None    # not system_server's
+        assert "10563 ms" in hang.message and "MotionEvent" in hang.message
+        assert hang.device_id == "emulator-5554" and "spent 10562.6ms" in hang.raw
+
+    def test_it_is_stamped_when_the_hang_began_not_when_it_was_logged(self):
+        [hang], _ = _feed(SLOW_INPUT)
+        assert hang.timestamp.isoformat() == "2026-11-01T23:43:39.270400+00:00"
+        assert "ended at 2026-11-01T23:43:49.833" in hang.message
+
+    def test_other_input_dispatcher_lines_are_not_hangs(self):
+        assert _feed([SLOW_INPUT[2]])[0] == []
+        # The same words from the app's own tag are not system_server's measurement.
+        assert _feed([SLOW_INPUT[1].replace("InputDispatcher", "MyApp")])[0] == []
+
+    def test_a_window_named_by_package_and_server_alone(self):
+        line = SLOW_INPUT[1].replace("44a30c2 com.quern.probe/com.quern.probe.MainActivity "
+                                     "(server)", "a1b2c3d com.quern.probe (server)")
+        [hang], _ = _feed([line])
+        assert hang.process == "com.quern.probe"
+
+    def test_the_window_braces_form_from_aosp_cts(self):
+        line = SLOW_INPUT[1].replace(
+            "44a30c2 com.quern.probe/com.quern.probe.MainActivity (server)",
+            "Window{4b32796 u0 org.c0reteam.audiotest/org.c0reteam.audiotest.AudioTest}")
+        [hang], _ = _feed([line])
+        assert hang.process == "org.c0reteam.audiotest"
+
+    def test_an_absurd_duration_is_not_a_hang_and_does_not_raise(self):
+        """Any app can log under this tag; a duration timedelta cannot hold
+        raised out of the reader and ended capture (CodeRabbit)."""
+        line = SLOW_INPUT[1].replace("10562.6ms", "999999999999999999ms")
+        assert _feed([line])[0] == []
+        [days], _ = _feed([SLOW_INPUT[1].replace("10562.6ms", "999999999ms")])
+        assert days.process == "com.quern.probe"
+
+    def test_it_is_anchored(self):
+        line = SLOW_INPUT[1].replace("Window '", "Quoted: Window '")
+        assert _feed([line])[0] == []
+
+    def test_a_window_named_without_an_activity(self):
+        line = SLOW_INPUT[1].replace("44a30c2 com.quern.probe/com.quern.probe.MainActivity "
+                                     "(server)", "com.example.app")
+        [hang], _ = _feed([line])
+        assert hang.process == "com.example.app"
+
+    def test_a_trace_attributes_it_to_the_tap_that_caused_it(self):
+        """The point of the stamp: logged 10.5 s after the tap -- past the
+        trace's grace -- the line alone would land on no action."""
+        from datetime import timedelta
+
+        from server.models import LogEntry
+        from server.trace import build_trace
+        [hang], _ = _feed(SLOW_INPUT)
+        tap = LogEntry(id="t", timestamp=hang.timestamp + timedelta(milliseconds=150),
+                       device_id="server", process="server", level=LogLevel.INFO,
+                       message="tap ok", source=LogSource.SERVER, action="tap",
+                       udid="emulator-5554", duration_ms=300, outcome="ok")
+        [attributed] = build_trace([tap], [], [hang])
+        assert attributed.logs == [hang]
+        [unstamped] = build_trace([tap], [], _entries([SLOW_INPUT[1]]))
+        assert unstamped.logs == []
+
+
 class TestCrashSpecs:
     """liblog applies the last rule for a tag, so what is appended matters."""
 
     def test_a_silencing_filter_gets_every_crash_tag(self):
         from server.sources.android_crash import crash_specs_for
 
-        assert crash_specs_for("MyTag:D *:S") == ["AndroidRuntime:E", "libc:F", "ActivityManager:E"]
+        assert crash_specs_for("MyTag:D *:S") == ["AndroidRuntime:E", "libc:F", "ActivityManager:E",
+                                                  "InputDispatcher:I"]
 
     def test_a_tag_the_caller_named_is_left_as_they_set_it(self):
         """Appending AndroidRuntime:E narrowed a caller's AndroidRuntime:V."""
         from server.sources.android_crash import crash_specs_for
 
-        assert crash_specs_for("AndroidRuntime:V *:S") == ["libc:F", "ActivityManager:E"]
+        assert crash_specs_for("AndroidRuntime:V *:S") == ["libc:F", "ActivityManager:E",
+                                                           "InputDispatcher:I"]
 
     def test_without_a_default_rule_nothing_is_added(self):
         """The default level is verbose; adding specs only lowered tags the
@@ -250,6 +333,40 @@ class TestTheAdapterEmitsThem:
         assert adapter._error is not None and "ended unexpectedly" in adapter._error, adapter._error
         return emitted
 
+    async def test_a_silenced_input_dispatcher_gives_its_hangs_and_not_its_lines(self):
+        """Let through by `InputDispatcher:I` only to be recognised: a caller's
+        `*:S` silenced the tag, and its chatty info lines must stay out (review)."""
+        async def run(detection_only):
+            original = LogcatAdapter.__init__
+
+            def init(adapter, *a, **kw):
+                original(adapter, *a, **kw)
+                adapter._detection_only = detection_only
+            LogcatAdapter.__init__ = init
+            try:
+                return await self._run(SLOW_INPUT)
+            finally:
+                LogcatAdapter.__init__ = original
+        silenced = await run({"InputDispatcher"})
+        assert [e.process for e in silenced if e.source == LogSource.LOGCAT] == ["Choreographer"]
+        assert [e.source for e in silenced].count(LogSource.CRASH) == 1
+        unsilenced = await run(set())
+        assert [e.process for e in unsilenced].count("InputDispatcher") == 2
+
+    async def test_the_tag_filter_decides_what_is_detection_only(self, monkeypatch):
+        from tests.test_device_clock_is_utc import FakeAdb
+
+        FakeAdb(monkeypatch)
+        silencing = LogcatAdapter(serial="emulator-5554", tag_filter="MyTag:D *:S")
+        await silencing.start()
+        assert silencing._detection_only == {"InputDispatcher"}
+        named = LogcatAdapter(serial="emulator-5554", tag_filter="InputDispatcher:V *:S")
+        await named.start()
+        assert named._detection_only == set()          # the caller asked for its lines
+        open_filter = LogcatAdapter(serial="emulator-5554", tag_filter="MyTag:D")
+        await open_filter.start()
+        assert open_filter._detection_only == set()    # nothing silenced it
+
     async def test_the_crash_and_the_raw_lines_are_both_emitted(self):
         emitted = await self._run(JAVA_CRASH)
 
@@ -281,7 +398,7 @@ class TestTheAdapterEmitsThem:
         adb = FakeAdb(monkeypatch)
         await LogcatAdapter(serial="emulator-5554", tag_filter="MyTag:D *:S").start()
 
-        for spec in ("AndroidRuntime:E", "libc:F", "ActivityManager:E"):
+        for spec in ("AndroidRuntime:E", "libc:F", "ActivityManager:E", "InputDispatcher:I"):
             assert spec in adb.logcat_args(), f"a tag filter silences {spec} at the device"
 
     async def test_a_crash_cut_off_by_the_stream_ending_is_emitted(self):
