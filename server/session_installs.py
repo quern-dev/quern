@@ -19,10 +19,14 @@ policy for the caller's kind of key runs (``sessions.client_release``,
   relaunching it, and a phone cannot be erased safely from here.
 - ``none``: leave the device as the session left it.
 
-What an install added is trusted only when it is one app: a listing that came
-back short before the install would make apps already there look new. An
-install that seems to add more than one, or whose result could not be listed,
-is counted as unclear; its apps are left, and the release says so.
+What an install added is trusted only when it is one app, and, where the
+artifact's bundle id or package can be read (an ``.app``, an ``.ipa``, a Gradle
+build's metadata), only when it is that app: a listing that came back short
+before the install would make apps already there look new, and an app another
+caller installed meanwhile would look like this install's. Anything else, or
+a result that could not be listed, is counted as unclear; its apps are left,
+and the release says so. An APK upload's package is not read, so it is held
+to the one-app rule alone.
 
 The record belongs to the session and its opening, not to its key: a device
 another session of the same key holds by then -- the same name opened again
@@ -35,8 +39,11 @@ run again for that opening, whatever else on the device is retried.
 from __future__ import annotations
 
 import asyncio
+import plistlib
+import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from server import principal
@@ -75,6 +82,9 @@ class InstallRecord:
     #: Installs whose effect could not be told; their apps are left.
     unclear: int = 0
     attempts: int = 0
+    #: Set while its release cleans up: an install finishing then is past the
+    #: clean-up, and removes its own app as if the hold had ended.
+    ending: bool = False
     #: Kept for the report: what this record has uninstalled so far.
     removed: list[str] = field(default_factory=list)
 
@@ -109,11 +119,47 @@ def _finished(app: Any) -> OrderedDict:
     return finished
 
 
+def _drop(records: dict, udid: str, record: InstallRecord | None) -> None:
+    """Drop `record`, not whatever is under `udid` by now: a session of the
+    same key reserving during the clean-up has a record of its own there."""
+    if record is not None and records.get(udid) is record:
+        records.pop(udid, None)
+
+
+def _erase_attempts(app: Any) -> dict:
+    tries = getattr(app.state, "session_installs_erase_attempts", None)
+    if tries is None:
+        tries = app.state.session_installs_erase_attempts = {}
+    return tries
+
+
 def _finish(app: Any, key: tuple) -> None:
+    _erase_attempts(app).pop(key, None)
     finished = _finished(app)
     finished[key] = True
     while len(finished) > _FINISHED_MAX:
         finished.popitem(last=False)
+
+
+def bundle_id_of(app_path: str | Path) -> str | None:
+    """The bundle id an ``.app`` or ``.ipa`` installs as, or None when it
+    cannot be read from it (an APK, a damaged bundle)."""
+    path = Path(app_path)
+    try:
+        if path.is_dir():
+            with open(path / "Info.plist", "rb") as f:
+                info = plistlib.load(f)
+        elif path.suffix.lower() == ".ipa":
+            with zipfile.ZipFile(path) as z:
+                name = next(n for n in z.namelist() if n.count("/") == 2
+                            and n.startswith("Payload/") and n.endswith(".app/Info.plist"))
+                info = plistlib.loads(z.read(name))
+        else:
+            return None
+    except Exception:  # noqa: BLE001 -- unreadable is unknown, not an error
+        return None
+    bundle_id = info.get("CFBundleIdentifier") if isinstance(info, dict) else None
+    return bundle_id if isinstance(bundle_id, str) and bundle_id else None
 
 
 def _opening(session: Any) -> tuple:
@@ -143,6 +189,11 @@ async def before_install(app: Any, udid: str, caller: Any) -> Install | None:
         before = await _apps(app.state.device_controller, udid)
     except Exception as e:
         raise BaselineUnavailable(str(e) or type(e).__name__) from e
+    # The listing can take seconds: a hold that ended meanwhile has been
+    # released without this record, and nothing would ever clean it up.
+    now = registry.holder_of(udid)
+    if now is None or _opening(now.session) != _opening(held.session):
+        raise BaselineUnavailable("the session's hold ended while the apps were listed")
     session, opened = _opening(held.session)
     records = _records(app)
     record = records.get(udid)
@@ -154,11 +205,14 @@ async def before_install(app: Any, udid: str, caller: Any) -> Install | None:
     return Install(session, opened, udid, before)
 
 
-async def after_install(app: Any, install: Install | None) -> dict:
-    """Record what an install added. Returns fields for the install's answer:
-    none normally; when the hold ended while the install ran, the release has
-    already cleaned up without this app, so it is removed here instead, and
-    the answer says so. Never raises."""
+async def after_install(app: Any, install: Install | None,
+                        expected: str | None = None) -> dict:
+    """Record what an install added. `expected` is the bundle id or package
+    the artifact installs as, when it could be read: then only that app is
+    the install's. Returns fields for the install's answer: none normally;
+    when the hold ended while the install ran, the release has cleaned up
+    without this app, so it is removed here instead, and the answer says so.
+    Never raises."""
     if install is None:
         return {}
     controller = app.state.device_controller
@@ -166,9 +220,12 @@ async def after_install(app: Any, install: Install | None) -> dict:
         added = await _apps(controller, install.udid) - install.before
     except Exception:
         added = None
+    known = (added is not None and len(added) == 1 and not added & KEPT
+             and (expected is None or added == {expected}))
     record = _records(app).get(install.udid)
-    if record is None or (record.session, record.opened) != (install.session, install.opened):
-        if added is None or len(added) != 1 or added & KEPT:
+    if record is None or record.ending \
+            or (record.session, record.opened) != (install.session, install.opened):
+        if not known:
             return {"hold_ended": True, "left": sorted(added or ())}
         (bundle_id,) = added
         try:
@@ -176,12 +233,12 @@ async def after_install(app: Any, install: Install | None) -> dict:
         except Exception as e:  # noqa: BLE001 -- reported on the answer
             return {"hold_ended": True, "left": [bundle_id], "error": str(e) or type(e).__name__}
         return {"hold_ended": True, "removed": [bundle_id]}
-    if added is None or len(added) > 1:
-        record.unclear += 1
-    elif not added:
+    if added is not None and not added:
         record.reinstalls += 1
-    else:
+    elif known:
         record.added |= added
+    else:
+        record.unclear += 1
     return {}
 
 
@@ -218,31 +275,41 @@ async def end_for_release(app: Any, registry: Any, session: Any, udid: str,
     key = (*opening, udid)
     erase = (policy == "erase" and key not in _finished(app)
              and controller._device_type(udid) == DeviceType.SIMULATOR)
-    if not erase and not mine:
-        return
+    if not mine:
+        if not erase:
+            return
+        record = None                   # another opening's, not this release's
+    else:
+        record.ending = True
     try:
         if erase:
             done = await asyncio.wait_for(_erase(controller, session, udid), TIMEOUT_S)
             _finish(app, key)
         else:
             done = await asyncio.wait_for(_uninstall(controller, record, udid), TIMEOUT_S)
-        records.pop(udid, None)
+        _drop(records, udid, record)
         actions.append({"udid": udid, "ok": True, **done})
     except Exception as e:  # noqa: BLE001 -- reported, never raised
         error = (f"did not finish within {TIMEOUT_S:g}s" if isinstance(e, TimeoutError)
                  else str(e) or type(e).__name__)
-        if not mine:
-            # An erase with nothing installed: a record only to count attempts.
-            record = records[udid] = InstallRecord(session=opening[0], opened=opening[1])
-        record.attempts += 1
-        gave_up = record.attempts >= ATTEMPTS
+        if erase:
+            # Counted apart from the records, which hold installs only: an
+            # erase runs with or without one, and must not replace another
+            # opening's.
+            tries = _erase_attempts(app)
+            attempts = tries[key] = tries.get(key, 0) + 1
+        else:
+            attempts = record.attempts = record.attempts + 1
+        if record is not None:
+            record.ending = False
+        gave_up = attempts >= ATTEMPTS
         if gave_up:
-            records.pop(udid, None)
+            _drop(records, udid, record)
             if erase:
                 _finish(app, key)
         actions.append({"udid": udid, "action": "erased" if erase else "installs_removed",
                         "ok": False, "error": error, **({"gave_up": True, "note": (
-                            f"Tried {record.attempts} times: what this session installed "
+                            f"Tried {attempts} times: what this session installed "
                             "may still be on it.")} if gave_up else {})})
 
 

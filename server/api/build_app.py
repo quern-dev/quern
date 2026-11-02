@@ -377,8 +377,12 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
                         "remove what this installs. Try again.")) from None
         response = BuildAndInstallResponse(
             **await build_android.build_and_install(controller, body))
-        for install in installs:
-            await session_installs.after_install(request.app, install)
+        # The package the build made, so an app something else installed
+        # meanwhile is not taken for it. No record, no build: nothing installed.
+        if response.build_records:
+            expected = response.build_records[0].bundle_id or None
+            for install in installs:
+                await session_installs.after_install(request.app, install, expected)
         response.summary = _android_summary(response)
         return response
 
@@ -603,7 +607,8 @@ async def _build_and_install_xcode(
         except DeviceError as e:
             return DeviceInstallResult(udid=udid, installed=False, error=str(e))
         if app is not None:
-            await session_installs.after_install(app, before)
+            await session_installs.after_install(
+                app, before, await asyncio.to_thread(session_installs.bundle_id_of, app_path))
 
         return DeviceInstallResult(udid=udid, installed=True, app_path=str(app_path))
 

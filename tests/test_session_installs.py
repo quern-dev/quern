@@ -259,6 +259,106 @@ async def test_a_hold_that_ends_during_the_install_never_removes_querns_driver()
     ctrl.uninstall_app.assert_not_awaited()
 
 
+async def test_a_hold_that_ends_while_the_apps_are_listed_refuses_the_install():
+    """Released during the listing, with no record yet: a record made after
+    it would belong to an ended opening, and nothing would clean it up."""
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s))
+
+    async def list_then_release(udid, *, set_active=True):
+        app.state.sessions.held = None
+        return [], udid
+
+    ctrl.list_apps = AsyncMock(side_effect=list_then_release)
+    with pytest.raises(si.BaselineUnavailable, match="hold ended"):
+        await si.before_install(app, SIM, _caller(s))
+    assert not getattr(app.state, "session_installs", {})
+
+
+async def test_only_the_artifacts_own_app_is_taken_for_the_install():
+    """A reinstall over an app already there, while something else installs
+    another: the one new app is not the artifact's, so it is unclear."""
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s), installed=("com.example.mine",))
+    before = await si.before_install(app, SIM, _caller(s))
+    state["apps"].append("com.example.other")
+    await si.after_install(app, before, "com.example.mine")
+    record = app.state.session_installs[SIM]
+    assert (record.added, record.unclear) == (set(), 1)
+
+
+async def test_a_hold_that_ends_never_removes_an_app_that_is_not_the_artifacts():
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s))
+    before = await si.before_install(app, SIM, _caller(s))
+    app.state.sessions.held = None
+    await _release(app, s)
+    state["apps"].append("com.example.other")
+    assert (await si.after_install(app, before, "com.example.mine"))["left"] == [
+        "com.example.other"]
+    ctrl.uninstall_app.assert_not_awaited()
+
+
+async def test_an_install_finishing_during_the_clean_up_removes_its_own_app():
+    """The release's uninstall is under way when the install finishes: added
+    to the record then, the app outlived the clean-up that dropped it."""
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s), installed=("com.example.first",))
+    _record(app, s, added=("com.example.first",))
+    late = await si.before_install(app, SIM, _caller(s))
+    real = ctrl.uninstall_app.side_effect
+    answers, finished = [], []
+
+    async def slow_uninstall(bundle_id, udid, *, set_active=True):
+        if not finished:
+            finished.append(True)
+            state["apps"].append("com.example.late")
+            answers.append(await si.after_install(app, late))
+        return await real(bundle_id, udid, set_active=set_active)
+
+    ctrl.uninstall_app = AsyncMock(side_effect=slow_uninstall)
+    app.state.sessions.held = None
+    await _release(app, s)
+    assert answers == [{"hold_ended": True, "removed": ["com.example.late"]}]
+    assert state["apps"] == []
+
+
+async def test_the_clean_up_does_not_drop_a_record_made_while_it_ran():
+    """The key reserves the device again during the release's uninstall: the
+    new opening's record is its own, and the old release must not drop it."""
+    s, s2 = _session(), _session("client:a/s2", opened="o2")
+    app, ctrl, state = _app(installed=("com.example.first",))
+    _record(app, s, added=("com.example.first",))
+    real = ctrl.uninstall_app.side_effect
+
+    async def reserved_meanwhile(bundle_id, udid, *, set_active=True):
+        app.state.session_installs[SIM] = si.InstallRecord(session=s2.id, opened="o2")
+        return await real(bundle_id, udid, set_active=set_active)
+
+    ctrl.uninstall_app = AsyncMock(side_effect=reserved_meanwhile)
+    await _release(app, s)
+    assert app.state.session_installs[SIM].opened == "o2"
+
+
+def test_the_bundle_id_is_read_from_an_app_and_an_ipa(tmp_path):
+    import plistlib
+    import zipfile
+
+    app_dir = tmp_path / "My.app"
+    app_dir.mkdir()
+    (app_dir / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.x.app"}))
+    ipa = tmp_path / "My.ipa"
+    with zipfile.ZipFile(ipa, "w") as z:
+        z.writestr("Payload/My.app/Info.plist", plistlib.dumps({"CFBundleIdentifier": "com.x.ipa"}))
+        z.writestr("Payload/My.app/PlugIns/W.appex/Info.plist",
+                   plistlib.dumps({"CFBundleIdentifier": "com.x.ipa.widget"}))
+    (tmp_path / "app.apk").write_bytes(b"PK")
+    assert si.bundle_id_of(app_dir) == "com.x.app"
+    assert si.bundle_id_of(ipa) == "com.x.ipa"
+    assert si.bundle_id_of(tmp_path / "app.apk") is None
+    assert si.bundle_id_of(tmp_path / "missing.app") is None
+
+
 # ----------------------------------------------------------------------------
 # At release
 # ----------------------------------------------------------------------------
@@ -395,16 +495,25 @@ async def test_a_failure_is_retried_then_given_up_on():
 
 
 async def test_a_failed_erase_never_turns_into_uninstalling_everything():
-    """The record a failed erase leaves only counts attempts: it holds no app,
-    so nothing is uninstalled from it."""
+    """A failed erase is counted apart from the install records: none is made
+    for it, so nothing can be uninstalled from one."""
     s = _session()
     app, ctrl, _ = _app(client="erase", installed=("com.apple.Maps", "com.example.new"))
     ctrl.erase = AsyncMock(side_effect=RuntimeError("busy"))
     await _release(app, s)
-    record = app.state.session_installs[SIM]
-    assert record.added == set() and record.attempts == 1
-    done = await si._uninstall(ctrl, record, SIM)
-    assert done["removed"] == [] and ctrl.uninstall_app.await_count == 0
+    assert not getattr(app.state, "session_installs", {})
+    ctrl.uninstall_app.assert_not_awaited()
+
+
+async def test_a_failed_erase_does_not_replace_another_openings_record():
+    """The same name opened again and released while the old opening's erase
+    is still being retried: the new opening's record stays."""
+    s, again = _session(), _session(opened="o2")
+    app, ctrl, _ = _app(client="erase")
+    ctrl.erase = AsyncMock(side_effect=RuntimeError("busy"))
+    _record(app, again)
+    await _release(app, s)
+    assert app.state.session_installs[SIM].opened == "o2"
 
 
 async def test_a_stalled_clean_up_is_bounded(monkeypatch):
@@ -471,19 +580,31 @@ async def test_the_install_route_records_the_install(monkeypatch):
     assert app.state.session_installs[SIM].added == {"com.example.new"}
 
 
+@pytest.mark.parametrize("there, appears, record, added, unclear", [
+    ((), ["com.example.built"], True, {"com.example.built"}, 0),
+    # The build's package was there already, and something else appeared
+    # meanwhile: not the build's, so unclear rather than taken for it.
+    (("com.example.built",), ["com.other"], True, set(), 1),
+    # A build that failed made nothing: nothing to record, not even unclear.
+    ((), ["com.other"], False, set(), 0),
+])
 async def test_a_gradle_build_naming_no_device_is_recorded_on_the_one_it_installs_on(
-        monkeypatch):
+        monkeypatch, there, appears, record, added, unclear):
     from server.api import build_android
     from server.api import build_app as build_api
 
     s = _session()
-    app, ctrl, state = _app(holder=_held_by(s), kind=DeviceType.ANDROID_EMULATOR)
+    app, ctrl, state = _app(holder=_held_by(s), kind=DeviceType.ANDROID_EMULATOR,
+                            installed=there)
     monkeypatch.setattr(build_api, "_is_gradle", lambda p: True)
     monkeypatch.setattr(build_android, "_android_targets", AsyncMock(return_value=[EMU]))
 
     async def build(controller, body):
-        state["apps"].append("com.example.built")
-        return {"devices": [], "all_installed": True}
+        state["apps"].extend(appears)
+        return {"devices": [], "all_installed": True, "build_records": [{
+            "build_id": "b", "created_at": "2026-11-01T00:00:00Z", "project_path": "/p",
+            "scheme": "debug", "configuration": "debug", "platform": "android",
+            "app_path": "/p/app.apk", "bundle_id": "com.example.built"}] if record else []}
 
     monkeypatch.setattr(build_android, "build_and_install", build)
     monkeypatch.setattr(build_api, "_android_summary", lambda r: "")
@@ -491,7 +612,8 @@ async def test_a_gradle_build_naming_no_device_is_recorded_on_the_one_it_install
         session=s.id, principal=s.principal, is_owner=False))
     await build_api.build_and_install(SimpleNamespace(app=app),
                                       build_api.BuildAndInstallRequest(project_path="/p"))
-    assert app.state.session_installs[EMU].added == {"com.example.built"}
+    got = app.state.session_installs[EMU]
+    assert (got.added, got.unclear) == (added, unclear)
 
 
 async def test_an_xcode_install_unseen_is_refused_on_that_device(tmp_path):

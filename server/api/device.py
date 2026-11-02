@@ -678,7 +678,9 @@ async def install_app(request: Request, body: InstallAppRequest):
             udid = await controller.install_app(app_path=app_path, udid=target)
         except DeviceError as e:
             raise _without_upload_path(_handle_device_error(e), upload) from None
-        ended = await session_installs.after_install(request.app, before)
+        ended = await session_installs.after_install(request.app, before, (
+            await asyncio.to_thread(session_installs.bundle_id_of, app_path)
+            if before is not None else None))
         act.udid = udid
         if upload:
             # Installed, so gone: kept on a failure, to try again within the hour.
