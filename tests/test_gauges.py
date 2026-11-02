@@ -403,7 +403,7 @@ class TestOnePerDevice:
     async def test_a_failed_recording_keeps_the_device_until_its_stream_has_closed(self, tmp_path):
         """CodeRabbit on #596: given back at once, another recording could take
         the device while the phone's connection was still closing."""
-        closing = asyncio.Event()
+        closing, may_close = asyncio.Event(), asyncio.Event()
 
         class SlowToClose(FakeGauges):
             async def _stream(self):
@@ -412,7 +412,10 @@ class TestOnePerDevice:
                         yield await self.queue.get()
                 finally:
                     closing.set()
-                    await asyncio.sleep(0.2)          # an Instruments connection unwinding
+                    # Held by the test, not a fixed delay, so the assertions
+                    # below cannot race it (CodeRabbit); bounded, so a broken
+                    # release fails rather than hangs.
+                    await asyncio.wait_for(may_close.wait(), 10)
                     self.closed += 1
         src, fake = Sources(), SlowToClose()
         m = _manager(src, fake)
@@ -421,11 +424,31 @@ class TestOnePerDevice:
         await _until(lambda: rec.counts.get("gauge") == 1)
         await m._fail(rec, "disk full")
         await asyncio.wait_for(closing.wait(), 5)
+        await asyncio.sleep(0.3)                      # long past any fixed cap's slack
         assert fake.closed == 0 and m._gauging == {SIM: rec.id}      # still closing
         with pytest.raises(RecordingError, match="already sampled"):
             await m.check_start(SIM, None, Filters(gauges="com.x"))
+        may_close.set()
         await _until(lambda: m._gauging == {})
         assert fake.closed == 1
+
+    async def test_the_phone_connection_close_is_bounded(self, monkeypatch):
+        """The device is held until the stream has closed, so the close itself
+        must end: an RSD close that never answers is cut off (CodeRabbit)."""
+        monkeypatch.setattr(performance, "_device_address", AsyncMock(return_value=("::1", 1)))
+        monkeypatch.setattr(performance, "_CLOSE_S", 0.2)
+        ns = 10**9
+        lib, rsd, _ = _fake_lib(pids=[42], ticks=[_tick(42, i * ns, 0, (i + 1) * ns)
+                                                  for i in range(4)])
+
+        async def never():
+            await asyncio.Event().wait()
+        rsd.close = never
+        monkeypatch.setattr(performance, "_pmd3", lambda: lib)
+        stream = performance.device_stream("UUID", "com.x", 1.0)
+        await anext(stream)
+        async with asyncio.timeout(5):
+            await stream.aclose()
 
     async def test_shutdown_waits_for_a_failed_recordings_stream(self, tmp_path):
         class SlowToClose(FakeGauges):

@@ -606,8 +606,15 @@ async def device_stream(uuid: str, bundle_id: str, interval: float):
         raise DeviceError(f"Instruments channel to {uuid[:8]} failed: {e!r}",
                           tool="pymobiledevice3") from e
     finally:
+        # Bounded: a recording gives its device back only once this has
+        # returned, so a close that never answered would hold it for good.
         with contextlib.suppress(Exception):
-            await rsd.close()
+            async with asyncio.timeout(_CLOSE_S):
+                await rsd.close()
+
+
+#: How long closing a phone's Instruments connection may take.
+_CLOSE_S = 5.0
 
 
 async def _sysmon_stream(Sysmontap, dvt, uuid: str, bundle_id: str, pid: int,
