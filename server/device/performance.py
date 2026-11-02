@@ -26,9 +26,10 @@ import logging
 import re
 import tempfile
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from server.models import (
     DeviceError,
@@ -547,7 +548,8 @@ async def device_snapshot(uuid: str, bundle_id: str, seconds: float) -> Performa
 _NOT_RUNNING_POLL_S = 1.0
 
 
-async def device_stream(uuid: str, bundle_id: str, interval: float):
+async def device_stream(uuid: str, bundle_id: str,
+                        interval: float) -> AsyncIterator[PerformanceSnapshot]:
     """Samples of one app on a physical iPhone, one per `interval`, for as
     long as the caller iterates (#245, phase 2).
 
@@ -622,7 +624,7 @@ _CLOSE_S = 5.0
 
 
 @contextlib.asynccontextmanager
-async def _exits_within(cm, seconds: float):
+async def _exits_within(cm: Any, seconds: float) -> AsyncIterator[Any]:
     """`async with cm`, its exit bounded: a channel's stop command can wait on
     a stalled transport, and the stream's close must end. An exit that times
     out or fails is given up on -- the connection is closed after it anyway --
@@ -641,8 +643,8 @@ async def _exits_within(cm, seconds: float):
                 await cm.__aexit__(None, None, None)
 
 
-async def _sysmon_stream(Sysmontap, dvt, uuid: str, bundle_id: str, pid: int,
-                         interval: float, fps: dict):
+async def _sysmon_stream(Sysmontap: Any, dvt: Any, uuid: str, bundle_id: str, pid: int,
+                         interval: float, fps: dict) -> AsyncIterator[PerformanceSnapshot]:
     """One sample per sysmontap tick for `pid`, until it leaves the list.
 
     A pid Instruments names for the app can be missing from sysmontap's list

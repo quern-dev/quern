@@ -7,6 +7,7 @@ import contextlib
 import logging
 import math
 import time
+from collections.abc import AsyncIterator
 
 from server import logging_ext
 from server.device import performance
@@ -1753,7 +1754,8 @@ class DeviceController(DeviceControllerUI):
             f"get_performance could not tell what kind of device {resolved} is",
             tool="quern")
 
-    async def gauge_stream(self, udid: str, app: str, interval: float):
+    async def gauge_stream(self, udid: str, app: str,
+                           interval: float) -> AsyncIterator[PerformanceSnapshot]:
         """One app's samples, one per `interval`, for as long as the caller
         iterates: a recording's gauges (#245, phase 2).
 
