@@ -674,19 +674,40 @@ async def install_app(request: Request, body: InstallAppRequest):
             )) from None
         except DeviceError as e:
             raise _without_upload_path(_handle_device_error(e), upload) from None
+        async def install_and_record() -> tuple[str, dict]:
+            # Holds the upload itself: shielded, it outlives a cancelled
+            # request and that request's hold with it.
+            with store.installing(upload.id) if upload else contextlib.nullcontext():
+                udid = await controller.install_app(app_path=app_path, udid=target)
+                ended = await session_installs.after_install(request.app, before, (
+                    await asyncio.to_thread(session_installs.bundle_id_of, app_path)
+                    if before is not None else None))
+            if upload:
+                # Installed, so gone: kept on a failure, to try again within the hour.
+                store.discard(upload.id)
+            return udid, ended
+
         try:
-            udid = await controller.install_app(app_path=app_path, udid=target)
+            if before is None:
+                udid, ended = await install_and_record()
+            else:
+                # Cancelled mid-install, the install goes on and so must its
+                # record: dropped, its release would not know the app (#581).
+                task = asyncio.create_task(install_and_record())
+                _RECORDING.add(task)
+                task.add_done_callback(_RECORDING.discard)
+                udid, ended = await asyncio.shield(task)
         except DeviceError as e:
             raise _without_upload_path(_handle_device_error(e), upload) from None
-        ended = await session_installs.after_install(request.app, before, (
-            await asyncio.to_thread(session_installs.bundle_id_of, app_path)
-            if before is not None else None))
         act.udid = udid
         if upload:
-            # Installed, so gone: kept on a failure, to try again within the hour.
-            request.app.state.uploads.discard(upload.id)
             return {"status": "installed", "udid": udid, "upload": upload.name, **ended}
         return {"status": "installed", "udid": udid, "app_path": body.app_path, **ended}
+
+
+#: Installs a session holds the device for, kept to completion if their
+#: request is cancelled (#581).
+_RECORDING: set[asyncio.Task] = set()
 
 
 @router.post("/app/launch")

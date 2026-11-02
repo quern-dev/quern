@@ -75,6 +75,17 @@ def store(tmp_path):
     return UploadStore(tmp_path / "uploads", max_bytes=1024 * 1024)
 
 
+def test_an_upload_held_twice_stays_held_until_both_let_go(store):
+    """A tracked install's task holds its upload past its request (#581): the
+    request letting go must not free it under the install."""
+    up = _receive(store, "client:alice", "My.ipa", b"PK\x03\x04")
+    with store.installing(up.id):
+        with store.installing(up.id):
+            pass
+        assert store.busy(up.id)
+    assert not store.busy(up.id)
+
+
 class TestKinds:
     def test_the_three_kinds(self):
         assert kind_of("My.ipa") == "ipa"

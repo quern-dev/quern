@@ -375,20 +375,29 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
                         f"Nothing was built or installed: the apps on {target} could not "
                         f"be listed first ({e}), and its release needs that list to "
                         "remove what this installs. Try again.")) from None
-        response = BuildAndInstallResponse(
-            **await build_android.build_and_install(controller, body))
-        # The package the build made, so an app something else installed
-        # meanwhile is not taken for it. No record, no build: nothing installed.
-        if response.build_records:
-            expected = response.build_records[0].bundle_id or None
-            for install in installs:
-                ended = await session_installs.after_install(request.app, install, expected)
-                if note := session_installs.hold_ended_note(ended):
-                    for device in response.devices:
-                        if device.udid == install.udid:
-                            device.note = f"{device.note}; {note}" if device.note else note
-        response.summary = _android_summary(response)
-        return response
+        async def build_and_record() -> BuildAndInstallResponse:
+            response = BuildAndInstallResponse(
+                **await build_android.build_and_install(controller, body))
+            # The package the build made, so an app something else installed
+            # meanwhile is not taken for it. No record, no build: nothing installed.
+            if response.build_records:
+                expected = response.build_records[0].bundle_id or None
+                for install in installs:
+                    ended = await session_installs.after_install(request.app, install, expected)
+                    if note := session_installs.hold_ended_note(ended):
+                        for device in response.devices:
+                            if device.udid == install.udid:
+                                device.note = f"{device.note}; {note}" if device.note else note
+            response.summary = _android_summary(response)
+            return response
+
+        if not any(installs):
+            return await build_and_record()
+        # Cancelled mid-build, the installs go on and so must their records.
+        task = asyncio.create_task(build_and_record())
+        _RECORDING.add(task)
+        task.add_done_callback(_RECORDING.discard)
+        return await asyncio.shield(task)
 
     build_adapter = request.app.state.build_adapter
     if build_adapter is None:

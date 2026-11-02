@@ -8,6 +8,7 @@ the previous one's apps, data and keychain on it."""
 from __future__ import annotations
 
 import asyncio
+import pathlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -680,54 +681,72 @@ async def test_a_controller_boot_for_a_release_leaves_the_active_device():
     assert controller._active_udid == SIM
 
 
-def _fake_sdk(tmp_path, monkeypatch, tools: dict[str, str]):
-    """An SDK of fake aapt2s, version -> script body; the machine's own SDK
-    and PATH are out of reach."""
+def _fake_sdk(tmp_path, monkeypatch, tools: dict):
+    """An SDK whose build-tools hold an aapt2 per version, and aapt2's run
+    mocked: version -> (exit code, stdout), or an exception to raise. Nothing
+    is executed, and the machine's own SDK and PATH are out of reach."""
+    import subprocess
+
     from server.device.android import adb
 
     root = tmp_path / "sdk"
-    for version, body in tools.items():
+    for version in tools:
         tool = root / "build-tools" / version / "aapt2"
         tool.parent.mkdir(parents=True)
-        tool.write_text(f"#!/bin/sh\n{body}\n")
-        tool.chmod(0o755)
+        tool.write_text("not run")
+    runs = []
+
+    def run(argv, **kw):
+        runs.append((argv, kw))
+        assert argv[1:3] == ["dump", "packagename"], argv
+        outcome = tools[pathlib.Path(argv[0]).parent.name]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        code, out = outcome
+        return subprocess.CompletedProcess(argv, code, out, "")
+
+    monkeypatch.setattr(si.subprocess, "run", run)
     monkeypatch.setattr(si.shutil, "which", lambda name: None)
     monkeypatch.setattr(adb, "_SDK_SEARCH_PATHS", [])
     monkeypatch.setenv("ANDROID_HOME", str(root))
     monkeypatch.delenv("ANDROID_SDK_ROOT", raising=False)
     apk = tmp_path / "app.apk"
     apk.write_bytes(b"PK")
-    return apk
+    return apk, runs
 
 
 def test_an_apks_package_is_read_with_the_newest_aapt2(tmp_path, monkeypatch):
     """The newest by version, not by name: 9.0.0 sorts after 36.1.0 as text."""
-    apk = _fake_sdk(tmp_path, monkeypatch, {
-        "9.0.0": "echo com.old.tools", "36.0.0": "echo com.older",
-        "36.1.0": 'test "$1 $2" = "dump packagename" && echo com.example.apk'})
+    apk, runs = _fake_sdk(tmp_path, monkeypatch, {
+        "9.0.0": (0, "com.old.tools\n"), "36.0.0": (0, "com.older\n"),
+        "36.1.0": (0, "com.example.apk\n")})
     assert si.bundle_id_of(apk) == "com.example.apk"
+    assert [pathlib.Path(a[0]).parent.name for a, _ in runs] == ["36.1.0"]
 
 
-@pytest.mark.parametrize("body", [
-    "echo 'ERROR: not an APK' >&2; exit 1",
-    "echo com.half.read; exit 1",                  # a failure is not believed
-    "echo 'W/ziparchive: something odd'",
-    "exit 0",
+@pytest.mark.parametrize("outcome", [
+    (1, ""),                                        # not an APK
+    (1, "com.half.read\n"),                         # a failure is not believed
+    (0, "W/ziparchive: something odd\n"),
+    (0, ""),
 ])
-def test_an_apk_aapt2_cannot_read_is_unknown(tmp_path, monkeypatch, body):
-    apk = _fake_sdk(tmp_path, monkeypatch, {"36.1.0": body})
+def test_an_apk_aapt2_cannot_read_is_unknown(tmp_path, monkeypatch, outcome):
+    apk, _ = _fake_sdk(tmp_path, monkeypatch, {"36.1.0": outcome})
     assert si.bundle_id_of(apk) is None
 
 
 def test_an_apk_with_no_build_tools_is_unknown(tmp_path, monkeypatch):
-    apk = _fake_sdk(tmp_path, monkeypatch, {})
-    assert si.bundle_id_of(apk) is None
+    apk, runs = _fake_sdk(tmp_path, monkeypatch, {})
+    assert si.bundle_id_of(apk) is None and runs == []
 
 
 def test_a_stalled_aapt2_is_bounded(tmp_path, monkeypatch):
-    monkeypatch.setattr(si, "_AAPT2_TIMEOUT_S", 0.5)
-    apk = _fake_sdk(tmp_path, monkeypatch, {"36.1.0": "sleep 10; echo com.late"})
+    import subprocess
+
+    apk, runs = _fake_sdk(tmp_path, monkeypatch, {
+        "36.1.0": subprocess.TimeoutExpired("aapt2", si._AAPT2_TIMEOUT_S)})
     assert si.bundle_id_of(apk) is None
+    assert runs[0][1]["timeout"] == si._AAPT2_TIMEOUT_S
 
 
 async def test_an_apk_install_takes_only_its_own_package(tmp_path, monkeypatch):
@@ -736,7 +755,7 @@ async def test_an_apk_install_takes_only_its_own_package(tmp_path, monkeypatch):
     from server.api import device as device_api
     from server.models import InstallAppRequest
 
-    apk = _fake_sdk(tmp_path, monkeypatch, {"36.1.0": "echo com.example.mine"})
+    apk, _ = _fake_sdk(tmp_path, monkeypatch, {"36.1.0": (0, "com.example.mine\n")})
     s = _session()
     app, ctrl, state = _app(holder=_held_by(s), installed=("com.example.mine",))
     ctrl.resolve_udid = AsyncMock(return_value=SIM)
@@ -1024,6 +1043,93 @@ async def test_an_xcode_install_says_when_the_hold_ended_during_it(tmp_path):
     assert "com.x.app was removed again" in resp.devices[0].note
     assert "com.x.app was removed again" in resp.summary, "the MCP tool shows only this"
     assert state["apps"] == []
+
+
+async def test_a_cancelled_direct_install_is_recorded_and_keeps_its_upload_held(
+        tmp_path, monkeypatch):
+    """The request cancelled while the APK installs: the install goes on, its
+    upload stays held -- the sweep would delete it under the install -- and
+    the app is recorded, then the upload discarded."""
+    from server.api import device as device_api
+    from server.models import InstallAppRequest
+    from server.uploads import UploadStore
+
+    apk, _ = _fake_sdk(tmp_path, monkeypatch, {"36.1.0": (0, "com.example.mine\n")})
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s), kind=DeviceType.ANDROID_EMULATOR)
+    store = UploadStore(tmp_path / "uploads", max_bytes=1 << 20)
+
+    async def chunks():
+        yield apk.read_bytes()
+
+    upload = await store.receive(s.principal, "mine.apk", chunks(), None)
+    app.state.uploads = store
+    ctrl.resolve_udid = AsyncMock(return_value=EMU)
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def install(app_path, udid):
+        started.set()
+        await finish.wait()
+        state["apps"].append("com.example.mine")
+        return udid
+
+    ctrl.install_app = AsyncMock(side_effect=install)
+    monkeypatch.setattr(device_api, "_get_controller", lambda r: ctrl)
+    monkeypatch.setattr("server.visibility.current_caller", lambda: SimpleNamespace(
+        session=s.id, principal=s.principal, is_owner=False))
+    route = asyncio.create_task(device_api.install_app(
+        SimpleNamespace(app=app), InstallAppRequest(upload_id=upload.id, udid=EMU)))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        route.cancel()
+        done, _ = await asyncio.wait({route}, timeout=2)
+        assert route in done and route.cancelled()
+        assert store.busy(upload.id), "the install still holds its upload"
+    finally:
+        finish.set()
+    await asyncio.wait_for(asyncio.gather(*device_api._RECORDING), 2)
+    assert app.state.session_installs[EMU].added == {"com.example.mine"}
+    assert not store.busy(upload.id)
+    from server.uploads import UploadError
+
+    with pytest.raises(UploadError):
+        store.get(upload.id, s.principal)              # installed, so discarded
+
+
+async def test_a_cancelled_gradle_build_is_still_recorded(monkeypatch):
+    from server.api import build_android
+    from server.api import build_app as build_api
+
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s), kind=DeviceType.ANDROID_EMULATOR)
+    monkeypatch.setattr(build_api, "_is_gradle", lambda p: True)
+    monkeypatch.setattr(build_android, "_android_targets", AsyncMock(return_value=[EMU]))
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def build(controller, body):
+        started.set()
+        await finish.wait()
+        state["apps"].append("com.example.built")
+        return {"devices": [{"udid": EMU, "installed": True}], "all_installed": True,
+                "build_records": [{
+                    "build_id": "b", "created_at": "2026-11-01T00:00:00Z", "project_path": "/p",
+                    "scheme": "debug", "configuration": "debug", "platform": "android",
+                    "app_path": "/p/app.apk", "bundle_id": "com.example.built"}]}
+
+    monkeypatch.setattr(build_android, "build_and_install", build)
+    monkeypatch.setattr("server.visibility.current_caller", lambda: SimpleNamespace(
+        session=s.id, principal=s.principal, is_owner=False))
+    route = asyncio.create_task(build_api.build_and_install(
+        SimpleNamespace(app=app), build_api.BuildAndInstallRequest(project_path="/p")))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        route.cancel()
+        done, _ = await asyncio.wait({route}, timeout=2)
+        assert route in done and route.cancelled()
+    finally:
+        finish.set()
+    await asyncio.wait_for(asyncio.gather(*build_api._RECORDING), 2)
+    assert app.state.session_installs[EMU].added == {"com.example.built"}
 
 
 async def test_the_release_loop_runs_the_policy():
