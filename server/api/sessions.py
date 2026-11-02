@@ -648,6 +648,11 @@ _PROXY_CLEAR_ATTEMPTS = 3
 #: not hold it (CodeRabbit). Above a healthy bounce.
 _PROXY_CLEAR_TIMEOUT_S = 45.0
 
+#: How long a release's shutdown of a simulator or emulator it booted may take.
+#: Bounded because nobody can reserve the device until it returns (#598):
+#: simctl and adb are otherwise awaited with no limit.
+_SHUTDOWN_TIMEOUT_S = 60.0
+
 
 async def _end_device_proxy(app: Any, registry: Any, session: Any, udid: str,
                             actions: list[dict]) -> None:
@@ -716,10 +721,14 @@ async def run_release_policies(app) -> list[dict]:
     if registry is None:
         return []
     actions = []
-    for session in registry.take_released():
-        # Nobody reserves its devices until all of this has run (#598).
-        cleaning = getattr(registry, "cleaning", None)
-        with cleaning(session.reservations) if cleaning else contextlib.nullcontext():
+    released = registry.take_released()
+    # Nobody reserves their devices until all of this has run (#598): every
+    # session taken is marked before the first await, not each in its turn,
+    # or the later ones' devices were open while the earlier ones' ran.
+    cleaning = getattr(registry, "cleaning", None)
+    every = [u for session in released for u in session.reservations]
+    with cleaning(every) if cleaning else contextlib.nullcontext():
+        for session in released:
             await _release_session(app, registry, controller, session, actions)
     return actions
 
@@ -771,12 +780,14 @@ async def _release_session(app, registry, controller, session, actions: list[dic
         if registry.holder_of(r.udid) is not None or controller is None:
             continue
         try:
-            await controller.shutdown(r.udid)
+            await asyncio.wait_for(controller.shutdown(r.udid), _SHUTDOWN_TIMEOUT_S)
             actions.append({"udid": r.udid, "action": "shutdown", "ok": True})
         except Exception as e:  # noqa: BLE001 -- reported, never raised
-            logger.warning("Could not shut down %s on release: %s", r.udid, e)
+            error = (f"did not finish within {_SHUTDOWN_TIMEOUT_S:g}s"
+                     if isinstance(e, TimeoutError) else str(e))
+            logger.warning("Could not shut down %s on release: %s", r.udid, error)
             actions.append({"udid": r.udid, "action": "shutdown", "ok": False,
-                            "error": str(e)})
+                            "error": error})
     actions.extend(keyboards)
     for a in actions[start:]:
         a["_session"] = session.id         # whose release it was; stripped before answering

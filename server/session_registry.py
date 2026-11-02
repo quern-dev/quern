@@ -164,7 +164,8 @@ class SessionRegistry:
         #: can overlap. Reservable by nobody, the owner included, until it
         #: has finished -- the clean-up awaits device commands, and a hold
         #: taken during one had that command (an erase, an uninstall) finish
-        #: under it (#598). Bounded by the clean-up's own timeouts.
+        #: under it (#598). The steps that wait on a device -- erase,
+        #: uninstall, proxy clear, keyboard, shutdown -- are each time-bounded.
         self._cleaning: Counter[str] = Counter()
         self._generations = 0
 
