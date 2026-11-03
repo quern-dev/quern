@@ -120,7 +120,7 @@ To drive quern from another machine -- a laptop reaching a CI Mac, a team sharin
 {"remote": {"enabled": true, "bind": "0.0.0.0:9130", "hosts": ["ci.lan"]}}
 ```
 
-`hosts` are extra names it answers to besides this Mac's LAN address (a request naming anything else gets 421). The main API stays on 127.0.0.1. `client_viewer_links` (default on) lets a client key issue viewer links for its own recordings; see [The LAN viewer](#the-lan-viewer).
+`hosts` are extra names it answers to besides this Mac's LAN address (a request naming anything else gets 421). The main API stays on 127.0.0.1. `client_viewer_links` (default on) lets a client key issue viewer links for its own recordings; see [The LAN viewer](#the-lan-viewer). `client_builds` (default off, on only when literally `true`) lets a client key use `POST /api/v1/device/build-and-install` onto devices its session holds; off, that route is 403 and the refusal names the setting.
 
 **Pairing** gives the other machine a client key and the listener's certificate fingerprint in one step:
 

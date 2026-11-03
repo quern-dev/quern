@@ -28,6 +28,8 @@ Builds once per required architecture — not once per device:
 
 Both architectures are built concurrently when the target list mixes physical and simulator devices.
 
+On a remote quern (use_remote), project_path is on that server's disk, not this machine's, and a client key may build only when the server's owner has set remote.client_builds; otherwise the call is refused with a 403 that says so.
+
 Each checkout builds into its own DerivedData, under builds/ in quern's state directory (~/.quern unless QUERN_STATE_DIR moves it) and keyed by the project's path, scheme and platform -- never Xcode's default, nor another checkout's. So no -derivedDataPath is needed to keep two checkouts of one project, or this build and Xcode's, from colliding.
 
 Handles UDID resolution automatically — pass Quern device UDIDs from list_devices and Quern

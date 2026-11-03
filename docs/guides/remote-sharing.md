@@ -20,10 +20,11 @@ The key decides who is calling, not the network address: a client key used on th
 - **Install its apps from its own machine.** The MCP uploads the app (`.ipa`, `.apk` or `.app.tar.gz`) and installs it.
 - **Load its project's knowledge base for its own session.** It's uploaded, used only by that session, and dropped when the session ends.
 - **Issue viewer links for its own recordings,** unless you turned off `remote.client_viewer_links`.
+- **Build and install onto devices it holds,** but only if you turned on `remote.client_builds`. The project has to be on this Mac's disk; quern doesn't copy source from the client.
 
-What a client can't do is anything that affects the whole Mac: starting or stopping the proxy, the system proxy, local capture, intercepts, server-wide mocks and knowledge bases, log filters, updates. Those are the server owner's.
+What a client can't do is anything that affects the whole Mac: starting or stopping the proxy, the system proxy, local capture, intercepts, server-wide mocks and knowledge bases, log filters, updates. Those are the server owner's. So are builds, unless you allow them.
 
-A client key isn't a sandbox. It keeps cooperating users from changing each other's devices and the Mac's shared settings by mistake. An app a client installs still runs as the Mac's user, so only give keys to people you'd let use the Mac.
+A client key isn't a sandbox. It keeps cooperating users from changing each other's devices and the Mac's shared settings by mistake. An app a client installs still runs as the Mac's user, and so does a build you let it run, so only give keys to people you'd let use the Mac.
 
 ## Keeping clients out of each other's work
 
