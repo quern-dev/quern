@@ -78,7 +78,9 @@ def load(name: str) -> Remote:
     try:
         return Remote(name=name, url=str(entry["url"]).rstrip("/"),
                       fingerprint=cert_mod.normalise(str(entry["fingerprint"])),
-                      key=str(entry["key"]), label=str(entry.get("label", "")),
+                      key=str(entry["key"]),
+                      # null is no label, not the text "None" (#607)
+                      label="" if entry.get("label") is None else str(entry["label"]),
                       paired_at=str(entry.get("paired_at", "")))
     except (KeyError, ValueError) as e:
         raise RemoteError(f"the remote {name!r} in {remotes_path()} is incomplete ({e}); "

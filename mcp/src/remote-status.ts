@@ -12,9 +12,10 @@
  * a deadline.
  */
 
+import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-import { discoverServer, LOCAL } from "./config.js";
+import { API_KEY_FILE, LOCAL, readStateFile } from "./config.js";
 import { quernHeaders, serverFetch } from "./http.js";
 import { normalise, PinMismatch, REMOTES_FILE } from "./remote.js";
 
@@ -38,9 +39,9 @@ export interface Target {
 
 export type Row = Record<string, unknown>;
 
-class Unexpected extends Error {}
+export class Unexpected extends Error {}
 
-class HttpStatus extends Error {
+export class HttpStatus extends Error {
   constructor(readonly status: number) {
     super(`HTTP ${status}`);
   }
@@ -74,36 +75,61 @@ export function readRemotes(file = REMOTES_FILE): Record<string, unknown> {
   return remotes as Record<string, unknown>;
 }
 
-/** One entry as a target, or why it cannot be one (client.load's checks). */
+/** Python's str() of a JSON value, which client.load applies to each field:
+ * so a numeric key is accepted as its digits, and null reads "None". */
+function pyStr(v: unknown): string {
+  if (v === null || v === undefined) return "None";
+  if (v === true) return "True";
+  if (v === false) return "False";
+  if (typeof v === "string") return v;
+  return typeof v === "object" ? JSON.stringify(v) : String(v);
+}
+
+/** Python's repr() of a string, which the messages quote names with. */
+export function pyRepr(s: string): string {
+  if (s.includes("'") && !s.includes('"')) return `"${s.replaceAll("\\", "\\\\")}"`;
+  return `'${s.replaceAll("\\", "\\\\").replaceAll("'", "\\'")}'`;
+}
+
+/** Python's truthiness: empty strings, lists, objects, 0 and null are false. */
+function truthy(v: unknown): boolean {
+  if (Array.isArray(v)) return v.length > 0;
+  if (v && typeof v === "object") return Object.keys(v).length > 0;
+  return Boolean(v);
+}
+
+/** One entry as a target, or why it cannot be one, in client.load's words:
+ * the url first, then the fingerprint, then the key, as its constructor
+ * reads them. */
 export function loadTarget(name: string, entry: unknown, file = REMOTES_FILE): Target | string {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-    return `no remote called '${name}': pair with one first ` +
+    return `no remote called ${pyRepr(name)}: pair with one first ` +
       `(quern connect <url> --code <code> --name ${name})`;
   }
   const e = entry as Record<string, unknown>;
-  if (!String(e.url ?? "").toLowerCase().startsWith("https://")) {
-    return `the remote '${name}' in ${file} is not an https:// address: its key would ` +
+  const incomplete = (why: string) =>
+    `the remote ${pyRepr(name)} in ${file} is incomplete (${why}); pair with it again`;
+  if (!pyStr(e.url ?? "").toLowerCase().startsWith("https://")) {
+    return `the remote ${pyRepr(name)} in ${file} is not an https:// address: its key would ` +
       "travel in clear; pair with it again";
   }
-  if (typeof e.key !== "string" || typeof e.fingerprint !== "string") {
-    return `the remote '${name}' in ${file} is incomplete (no ` +
-      `${typeof e.key !== "string" ? "key" : "fingerprint"}); pair with it again`;
-  }
+  if (!("fingerprint" in e)) return incomplete("'fingerprint'");
   let fingerprint: string;
   try {
-    fingerprint = normalise(e.fingerprint);
-  } catch (err) {
-    return `the remote '${name}' in ${file} is incomplete (${(err as Error).message}); ` +
-      "pair with it again";
+    fingerprint = normalise(pyStr(e.fingerprint));
+  } catch {
+    return incomplete(`not a SHA-256 fingerprint: ${pyRepr(pyStr(e.fingerprint))}`);
   }
-  return { name, url: String(e.url).replace(/\/+$/, ""), key: e.key, fingerprint,
-           label: typeof e.label === "string" ? e.label : String(e.label ?? "") };
+  if (!("key" in e)) return incomplete("'key'");
+  return { name, url: pyStr(e.url).replace(/\/+$/, ""), key: pyStr(e.key), fingerprint,
+           // An explicit null is no label, not the text "None" (#607).
+           label: e.label === null || e.label === undefined ? "" : pyStr(e.label) };
 }
 
 async function get(target: Target, path: string, timeoutMs: number): Promise<unknown> {
   const resp = await serverFetch(
-    // No fingerprint: this Mac's server, over Node's own fetch, which reads no
-    // proxy from the environment -- one would be handed the owner's key.
+    // No fingerprint: this Mac's server, over a direct connection that never
+    // takes a proxy from the environment (serverFetch).
     target.fingerprint ? { fingerprint: target.fingerprint } : {},
     target.url + path,
     { headers: { ...quernHeaders(target.key), "X-Quern-Session": STATUS_SESSION },
@@ -118,7 +144,8 @@ async function get(target: Target, path: string, timeoutMs: number): Promise<unk
   }
 }
 
-/** Why a server could not be asked, in status.py's words. */
+/** Why a server could not be asked, in status.py's words. A network error's
+ * own text is the runtime's: Python quotes its errno, this the code. */
 export function reason(e: unknown): string {
   const cause = (e as { cause?: unknown })?.cause;
   if (e instanceof PinMismatch) return `certificate changed: ${e.message}`;
@@ -135,22 +162,26 @@ export function reason(e: unknown): string {
   if (name === "TimeoutError" || name === "AbortError") return "not reachable (timed out)";
   const code = (cause as { code?: string })?.code ?? (e as { code?: string })?.code;
   if (code) return `not reachable (${code})`;
-  const message = (cause as Error)?.message ?? (e as Error)?.message ?? String(e);
-  return `could not be asked (${message})`;
+  const err = (cause ?? e) as Error;
+  return `could not be asked (${err?.name ?? "Error"}: ${err?.message ?? String(err)})`;
 }
 
-function health(answer: unknown): string {
+/** The version a quern /health answer carries; Unexpected otherwise. */
+export function health(answer: unknown): string {
   const a = answer as { status?: unknown; version?: unknown } | null;
-  if (!a || typeof a !== "object" || a.status !== "ok" || typeof a.version !== "string") {
+  if (!a || typeof a !== "object" || Array.isArray(a) || a.status !== "ok" ||
+      typeof a.version !== "string") {
     throw new Unexpected("no quern health answer");
   }
   return a.version;
 }
 
 /** Devices from a device-list answer. Anything that is not a list of devices
- * is Unexpected, never read as "none". */
+ * is Unexpected, never read as "none". Truthiness is Python's, so the two
+ * lists agree on what a malformed server sends (#607). */
 export function devices(answer: unknown, label = ""): Row[] {
-  const rows = (answer as { devices?: unknown } | null)?.devices;
+  const rows = answer && typeof answer === "object" && !Array.isArray(answer)
+    ? (answer as { devices?: unknown }).devices : undefined;
   if (!Array.isArray(rows) || !rows.every((d) => d && typeof d === "object" && !Array.isArray(d))) {
     throw new Unexpected("no device list");
   }
@@ -165,22 +196,22 @@ export function devices(answer: unknown, label = ""): Row[] {
       os_version: d.os_version ?? null, device_type: d.device_type ?? null,
       device_family: d.device_family ?? null,
       model: d.model ?? null,
-      ...(d.ca_install ? { ca_install: d.ca_install } : {}),
+      ...(truthy(d.ca_install) ? { ca_install: d.ca_install } : {}),
       state: d.state ?? null, is_available: d.is_available ?? null,
-      held_by: h ? (h.held_by ?? null) : null,
+      held_by: truthy(h) ? (h!.held_by ?? null) : null,
       free: h === null,
       // Held by this key through any of its sessions: a server that says
       // (this_key) is believed, an older one read by its sessions' label.
-      yours: Boolean(h && (h.this_key || h.yours || (
-        label && String(h.held_by ?? "").startsWith(`${label}:`)))),
+      yours: truthy(h) && (truthy(h!.this_key) || truthy(h!.yours) || (
+        Boolean(label) && pyStr(h!.held_by ?? "").startsWith(`${label}:`))),
     };
   });
 }
 
 /** One server's state now. Never throws: one server's odd answer must not
- * cost the list every other server. */
-export async function probe(target: Target, localVersion: string | null,
-                            timeoutMs = TIMEOUT_MS): Promise<Row> {
+ * cost the list every other server. version_matches is set by the caller,
+ * against this machine's version. */
+export async function probe(target: Target, timeoutMs = TIMEOUT_MS): Promise<Row> {
   const out = blank(target.name, target.url, target.label);
   let version: string;
   try {
@@ -191,7 +222,6 @@ export async function probe(target: Target, localVersion: string | null,
   }
   out.reachable = true;
   out.version = version;
-  if (localVersion) out.version_matches = version === localVersion;
   try {
     const list = devices(await get(target, "/api/v1/device/list", timeoutMs), target.label);
     out.devices = list;
@@ -202,30 +232,65 @@ export async function probe(target: Target, localVersion: string | null,
   return out;
 }
 
-/** This Mac's own server, or the row saying why it cannot be asked. */
-export function local(): Target | Row {
-  const server = discoverServer("");
-  if (server.source === "default") {
-    return { ...blank(LOCAL, null, "this Mac"), local: true,
-             error: "not running here (quern start)" };
+/** This Mac's server listens on `port`: the pid lsof reports, or null when it
+ * cannot say (no lsof, nothing listening), as ports._get_pid_on_port. */
+export function pidOnPort(port: number): Promise<number | null> {
+  return new Promise((resolve) => {
+    execFile("lsof", ["-ti", `TCP:${port}`, "-sTCP:LISTEN"], { timeout: 5000 }, (err, out) => {
+      const first = Number.parseInt(String(out ?? "").trim().split("\n")[0] ?? "", 10);
+      resolve(err || Number.isNaN(first) ? null : first);
+    });
+  });
+}
+
+const NOT_RUNNING = "not running here (quern start)";
+
+/** The key a quern client on this machine sends (config.client_api_key):
+ * QUERN_CLIENT_KEY, else the owner's key file. */
+function clientApiKey(): string {
+  const explicit = process.env.QUERN_CLIENT_KEY?.trim();
+  if (explicit) return explicit;
+  try {
+    return readFileSync(API_KEY_FILE, "utf-8").trim();
+  } catch {
+    return "";
   }
-  return { name: LOCAL, url: server.url.replace(/\/+$/, ""), key: server.apiKey,
-           fingerprint: "", label: "this Mac" };
+}
+
+/** This Mac's own server, as `quern url` finds it (__main__._server_base_url):
+ * state.json's port on loopback, and only while the pid listening there is
+ * the one it recorded -- a process that took a dead server's port is never
+ * handed the key. Not QUERN_SERVER_URL, which can point anywhere. Health is
+ * asked by the caller; any failure there also reads "not running here". */
+export async function local(lookupPid = pidOnPort): Promise<Target | Row> {
+  const notRunning = { ...blank(LOCAL, null, "this Mac"), local: true, error: NOT_RUNNING };
+  const state = readStateFile();
+  const port: unknown = state?.server_port;
+  if (!state || typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return notRunning;
+  }
+  if (Number.isInteger(state.pid)) {
+    const listener = await lookupPid(port);
+    if (listener !== null && listener !== state.pid) return notRunning;
+  }
+  return { name: LOCAL, url: `http://127.0.0.1:${port}`, key: clientApiKey(),
+           fingerprint: "", label: "this Mac", isLocal: true } as Target;
 }
 
 const isTarget = (x: Target | Row): x is Target => typeof (x as Target).key === "string" &&
   typeof (x as Target).fingerprint === "string";
 
 /** Every paired remote in name order, this Mac's server first: what
- * `quern remote list --json --with-local` prints. */
+ * `quern remote list --json --with-local` prints. The version compared against
+ * is this Mac's server's when it answers, else `ownVersion` (this MCP's). */
 export async function remoteList(
-  { localVersion = null as string | null, file = REMOTES_FILE, timeoutMs = TIMEOUT_MS,
+  { ownVersion = null as string | null, file = REMOTES_FILE, timeoutMs = TIMEOUT_MS,
     deadlineMs = DEADLINE_MS, localServer = local }: {
-    localVersion?: string | null; file?: string; timeoutMs?: number; deadlineMs?: number;
+    ownVersion?: string | null; file?: string; timeoutMs?: number; deadlineMs?: number;
     /** This Mac's server, injectable so a test never asks the real one. */
-    localServer?: () => Target | Row;
+    localServer?: () => Target | Row | Promise<Target | Row>;
   } = {},
-): Promise<{ local_version: string | null; remotes: Row[] }> {
+): Promise<{ local_version: string; remotes: Row[] }> {
   const ends = Date.now() + deadlineMs;
   let names: string[];
   let entries: Record<string, unknown>;
@@ -233,14 +298,15 @@ export async function remoteList(
     entries = readRemotes(file);
     names = Object.keys(entries).sort();
   } catch (e) {
-    return { local_version: localVersion, remotes: [{ name: null, error: (e as Error).message }] };
+    return { local_version: ownVersion ?? "unknown",
+             remotes: [{ name: null, error: (e as Error).message }] };
   }
   const loaded: (Target | Row)[] = names.map((name) => {
     const t = loadTarget(name, entries[name], file);
     return typeof t === "string" ? { name, url: null, reachable: false, error: t } : t;
   });
   try {
-    loaded.unshift(localServer());
+    loaded.unshift(await localServer());
   } catch (e) {
     loaded.unshift({ ...blank(LOCAL, null, "this Mac"), local: true,
                      error: `could not be asked (${(e as Error).message})` });
@@ -254,24 +320,24 @@ export async function remoteList(
       timer = setTimeout(() => resolve(late), Math.max(0, ends - Date.now()));
     });
     try {
-      const row = await Promise.race([probe(t, localVersion, timeoutMs), deadline]);
-      // A state.json left behind by a server that is gone: status.py says
-      // so before asking, from its health check; this learns it by asking.
-      if (!t.fingerprint && t.name === LOCAL && !row.reachable &&
-          /^not reachable \((ECONNREFUSED|ECONNRESET|ENOTFOUND)\)$/.test(String(row.error))) {
-        return { ...row, local: true, error: "not running here (quern start)" };
+      const row = await Promise.race([probe(t, timeoutMs), deadline]);
+      // status.py asks this Mac's server for its health before listing it,
+      // and reads any failure as not running -- never a remote's row.
+      if ((t as { isLocal?: boolean }).isLocal && !row.reachable) {
+        return { ...row, error: NOT_RUNNING };
       }
       return row;
     } finally {
       clearTimeout(timer);
     }
   }));
+  const here = rows[0];
+  const baseline = here?.reachable && typeof here.version === "string" ? here.version : ownVersion;
   for (const row of rows) {
-    // By position and label, never by name alone: a remote paired as "local"
-    // is not this Mac.
+    // By name and label, as status.py marks it: a remote paired as "local"
+    // (which `quern connect` refuses) is not this Mac unless it is labelled so.
     row.local = row.name === LOCAL && row.label === "this Mac";
+    if (row.reachable && baseline) row.version_matches = row.version === baseline;
   }
-  // The local row is this Mac's only when it came from local(): a paired
-  // remote can be called "local" only by editing remotes.json by hand.
-  return { local_version: localVersion, remotes: rows };
+  return { local_version: baseline ?? "unknown", remotes: rows };
 }

@@ -3,18 +3,43 @@
 // server -- every server here is a fake on loopback, and the local one is
 // injected.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { devices, loadTarget, probe, readRemotes, remoteList } from "../dist/remote-status.js";
+import { devices, health, HttpStatus, loadTarget, probe, readRemotes, reason, remoteList, Unexpected }
+  from "../dist/remote-status.js";
+import { execFile } from "node:child_process";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = JSON.parse(readFileSync(join(here, "..", "..", "tests", "fixtures",
                                              "remote-status.json"), "utf-8"));
+
+for (const c of FIXTURE.entries) {
+  test(`shared fixture, entry: ${c.name} ${JSON.stringify(c.entry).slice(0, 40)}`, () => {
+    const file = "/x/remotes.json";
+    const got = loadTarget(c.name, c.entry, file);
+    if (c.error) assert.equal(got, c.error.replaceAll("{file}", file));
+    else assert.deepEqual(got, { name: c.name, ...c.target });
+  });
+}
+
+for (const c of FIXTURE.reasons) {
+  test(`shared fixture, reason: ${c.text.slice(0, 30)}`, () => {
+    const e = c.http ? new HttpStatus(c.http) : new Unexpected(c.unexpected);
+    assert.equal(reason(e), c.text);
+  });
+}
+
+for (const c of FIXTURE.health) {
+  test(`shared fixture, health: ${JSON.stringify(c.answer)}`, () => {
+    if (c.version === null) assert.throws(() => health(c.answer), /no quern health answer/);
+    else assert.equal(health(c.answer), c.version);
+  });
+}
 
 for (const c of FIXTURE.cases) {
   test(`shared fixture: ${c.name}`, () => {
@@ -54,10 +79,9 @@ const OK = { "/health": [200, { status: "ok", version: "0.25.0" }],
 test("a server that answers: version, devices, free, and the key and its own session sent", async () => {
   const s = await fake(OK);
   try {
-    const row = await probe(target(s.url), "0.25.0");
+    const row = await probe(target(s.url));
     assert.equal(row.reachable, true);
     assert.equal(row.version, "0.25.0");
-    assert.equal(row.version_matches, true);
     assert.equal(row.free, 1);
     assert.equal(row.devices.length, 1);
     assert.equal(row.error, null);
@@ -67,20 +91,28 @@ test("a server that answers: version, devices, free, and the key and its own ses
   }
 });
 
-test("another version is said, and no local version leaves it unknown", async () => {
-  const s = await fake(OK);
+test("versions are compared with this Mac's server when it answers, else this MCP's own", async () => {
+  const here = await fake(OK);                                        // 0.25.0
+  const mine = target(here.url, { isLocal: true });
   try {
-    assert.equal((await probe(target(s.url), "0.24.0")).version_matches, false);
-    assert.equal((await probe(target(s.url), null)).version_matches, null);
+    const file = remotesFile();
+    let out = await remoteList({ ownVersion: "9.9", file, localServer: () => mine });
+    assert.equal(out.local_version, "0.25.0", "the local server's version wins over the MCP's");
+    assert.equal(out.remotes[0].version_matches, true);
+    await here.close();
+    out = await remoteList({ ownVersion: "9.9", file, localServer: () => mine });
+    assert.equal(out.local_version, "9.9", "not running: the MCP's own version");
+    out = await remoteList({ ownVersion: null, file, localServer: () => mine });
+    assert.equal(out.local_version, "unknown", "as the CLI prints it");
   } finally {
-    await s.close();
+    await here.close().catch(() => {});
   }
 });
 
 test("something that is not quern is said, never read as a server with no devices", async () => {
   const s = await fake({ "/health": [200, "<html>router login</html>"] });
   try {
-    const row = await probe(target(s.url), null);
+    const row = await probe(target(s.url));
     assert.equal(row.reachable, false);
     assert.equal(row.devices, null);
     assert.match(row.error, /not quern's \(not JSON\)/);
@@ -92,7 +124,7 @@ test("something that is not quern is said, never read as a server with no device
 test("a revoked key is 'refused its key'", async () => {
   const s = await fake({ "/health": [401, { detail: "Invalid or missing API key" }] });
   try {
-    assert.match((await probe(target(s.url), null)).error, /^refused its key \(HTTP 401\)/);
+    assert.match((await probe(target(s.url))).error, /^refused its key \(HTTP 401\)/);
   } finally {
     await s.close();
   }
@@ -101,7 +133,7 @@ test("a revoked key is 'refused its key'", async () => {
 test("health answered but devices failed: reachable, devices null, and why", async () => {
   const s = await fake({ "/health": OK["/health"], "/api/v1/device/list": [500, { detail: "x" }] });
   try {
-    const row = await probe(target(s.url), null);
+    const row = await probe(target(s.url));
     assert.equal(row.reachable, true);
     assert.equal(row.devices, null);
     assert.equal(row.free, null);
@@ -115,10 +147,10 @@ test("nothing listening is 'not reachable', and a slow server times out", async 
   const s = await fake({});
   const url = s.url;
   await s.close();
-  assert.match((await probe(target(url), null)).error, /^not reachable \(ECONNREFUSED\)$/);
+  assert.match((await probe(target(url))).error, /^not reachable \(ECONNREFUSED\)$/);
   const slow = await fake({ "/health": () => {} });   // never answers
   try {
-    const row = await probe(target(slow.url), null, 200);
+    const row = await probe(target(slow.url), 200);
     assert.equal(row.error, "not reachable (timed out)");
   } finally {
     await slow.close();
@@ -146,7 +178,7 @@ test("remotes.json: none is no remotes; unreadable or shapeless is an error, nev
 
 test("an entry that cannot be used says why: http, no key, a bad fingerprint", () => {
   assert.match(loadTarget("a", { url: "http://x", key: "k", fingerprint: FP }), /not an https:\/\//);
-  assert.match(loadTarget("a", { url: "https://x", fingerprint: FP }), /incomplete \(no key\)/);
+  assert.match(loadTarget("a", { url: "https://x", fingerprint: FP }), /incomplete \('key'\)/);
   assert.match(loadTarget("a", { url: "https://x", key: "k", fingerprint: "zz" }),
                /incomplete \(not a SHA-256/);
   const ok = loadTarget("a", { url: "https://x:9130/", key: "k", fingerprint: `SHA256:${FP}`,
@@ -164,8 +196,8 @@ test("the list: this Mac first, remotes by name, a broken entry listed with why"
       zed: { url: "http://plain", key: "k", fingerprint: FP },
       alpha: { url: `https://127.0.0.1:${closedPort}`, key: "k", fingerprint: FP },
     } });
-    const out = await remoteList({ localVersion: "0.25.0", file, timeoutMs: 1000,
-                                   localServer: () => target(s.url) });
+    const out = await remoteList({ ownVersion: "0.25.0", file, timeoutMs: 1000,
+                                   localServer: () => target(s.url, { isLocal: true }) });
     assert.deepEqual(out.remotes.map((r) => r.name), ["local", "alpha", "zed"]);
     assert.equal(out.remotes[0].local, true);
     assert.equal(out.remotes[0].reachable, true);
@@ -178,13 +210,73 @@ test("the list: this Mac first, remotes by name, a broken entry listed with why"
   }
 });
 
-test("a state.json left by a server that is gone reads 'not running here'", async () => {
-  const s = await fake({});
-  const url = s.url;
-  await s.close();
-  const out = await remoteList({ file: remotesFile(), localServer: () => target(url) });
-  assert.equal(out.remotes[0].error, "not running here (quern start)");
-  assert.equal(out.remotes[0].local, true);
+test("this Mac's server failing its health check in any way reads 'not running here'", async () => {
+  const gone = await fake({});
+  const url = gone.url;
+  await gone.close();
+  const junk = await fake({ "/health": [200, "<html>"] });
+  try {
+    for (const u of [url, junk.url]) {
+      const out = await remoteList({ file: remotesFile(), localServer: () => target(u, { isLocal: true }) });
+      assert.equal(out.remotes[0].error, "not running here (quern start)");
+      assert.equal(out.remotes[0].local, true);
+    }
+  } finally {
+    await junk.close();
+  }
+});
+
+test("a remote's failure keeps its own reason: only this Mac's reads 'not running'", async () => {
+  const gone = await fake({});
+  const url = gone.url;
+  await gone.close();
+  const out = await remoteList({ file: remotesFile(), localServer: () => target(url, { name: "x" }) });
+  assert.equal(out.remotes[0].error, "not reachable (ECONNREFUSED)");
+});
+
+test("a remote paired by hand as 'local' is not this Mac", async () => {
+  const file = remotesFile({ remotes: { local: { url: "https://127.0.0.1:9", key: "k",
+                                                 fingerprint: FP, label: "studio" } } });
+  const out = await remoteList({ file, timeoutMs: 300, localServer: () => ({ name: "local",
+    label: "this Mac", reachable: false, error: "not running here (quern start)" }) });
+  assert.deepEqual(out.remotes.map((r) => [r.name, r.label, r.local]),
+                   [["local", "this Mac", true], ["local", "studio", false]]);
+});
+
+/** local() in a child, whose HOME holds the state.json given: config.ts fixes
+ * its paths when it loads. `pid` is what the port lookup answers. */
+function runLocal({ state, pid, env = {} }) {
+  const home = mkdtempSync(join(tmpdir(), "quern-local-"));
+  mkdirSync(join(home, ".quern"));
+  if (state) writeFileSync(join(home, ".quern", "state.json"), JSON.stringify(state));
+  writeFileSync(join(home, ".quern", "api-key"), "owner-key\n");
+  const mod = new URL("../dist/remote-status.js", import.meta.url).href;
+  const code = `const m = await import(${JSON.stringify(mod)});` +
+    `console.log(JSON.stringify(await m.local(async () => ${JSON.stringify(pid ?? null)})));`;
+  return new Promise((ok, no) => execFile(process.execPath, ["--input-type=module", "-e", code],
+    { env: { PATH: process.env.PATH, HOME: home, ...env }, timeout: 15_000 },
+    (e, out, err) => (e ? no(new Error(String(err))) : ok(JSON.parse(String(out))))));
+}
+
+test("local(): state.json's port on loopback, the owner's key, QUERN_SERVER_URL ignored", async () => {
+  const t = await runLocal({ state: { server_port: 9110, pid: 42 }, pid: 42,
+                             env: { QUERN_SERVER_URL: "http://elsewhere.example:1" } });
+  assert.equal(t.url, "http://127.0.0.1:9110");
+  assert.equal(t.key, "owner-key");
+  assert.equal(t.isLocal, true);
+  const c = await runLocal({ state: { server_port: 9110, pid: 42 }, pid: null,
+                             env: { QUERN_CLIENT_KEY: " qc_k " } });
+  assert.equal(c.key, "qc_k", "QUERN_CLIENT_KEY, as config.client_api_key; an unknown listener is asked");
+});
+
+test("local(): no state, a bad port, or another process on the port is not running here", async () => {
+  for (const args of [{}, { state: { server_port: "9110", pid: 42 } },
+                      { state: { server_port: 70000 } },
+                      { state: { server_port: 9110, pid: 42 }, pid: 99 }]) {
+    const t = await runLocal(args);
+    assert.equal(t.error, "not running here (quern start)", JSON.stringify(args));
+    assert.equal(t.key, undefined, "no key for an impostor");
+  }
 });
 
 test("an unreadable remotes.json is one row saying so", async () => {

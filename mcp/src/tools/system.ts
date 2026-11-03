@@ -443,5 +443,5 @@ export function markCurrent(data: unknown, current: string): unknown {
  * CLI (#605): a machine with only the MCP installed lists them too. */
 export function quernRemoteList(): Promise<unknown> {
   const version = readOwnVersion();
-  return remoteList({ localVersion: version === "unknown" ? null : version });
+  return remoteList({ ownVersion: version === "unknown" ? null : version });
 }
