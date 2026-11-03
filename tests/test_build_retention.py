@@ -115,6 +115,17 @@ def test_a_directory_a_build_holds_is_never_chosen():
     assert [d.path.name for d, _ in out] == ["old"]
 
 
+def test_one_used_in_the_last_hour_survives_the_cap():
+    """A second server on the same ~/.quern builds without this one seeing
+    its lock; its build's stamp is what keeps the cap off it."""
+    now = 100 * DAY
+    found = _found(("building-elsewhere", now - 600), ("idle", now - 2 * 3600))
+    sizes = {Path("building-elsewhere"): 10, Path("idle"): 10}
+    out = dr.plan(found, now=now, max_age_days=7, max_bytes=1, busy=lambda p: False,
+                  size=_sizes(sizes))
+    assert [d.path.name for d, _ in out] == ["idle"]
+
+
 def test_zero_turns_each_limit_off():
     now = 100 * DAY
     found = _found(("ancient", now - 365 * DAY))

@@ -6,7 +6,9 @@ one project, 32 GB on another machine for three -- every one untouched for
 months. A DerivedData unused for `builds.max_age_days` (default 7) is removed,
 and while the rest is over `builds.max_gb` (default 20), the least recently
 used next. One a build holds is never removed: the sweep takes the build's own
-lock, so a build cannot start in a directory being deleted either.
+lock, so a build cannot start in a directory being deleted either. Nor is one
+used in the last hour, which covers a build by another server sharing the
+store, whose lock this one cannot see.
 
 "Used" is when a build last took the directory, which `mark_used` stamps. A
 directory from before the stamp existed -- the `builds/<scheme>` layout #442
@@ -32,6 +34,13 @@ logger = logging.getLogger(__name__)
 
 #: The file a build touches in its DerivedData when it takes it.
 STAMP = ".quern-last-used"
+
+#: A DerivedData used more recently than this is never removed, whatever the
+#: cap says. The build locks are one server's: a second server on the same
+#: ~/.quern -- one started from a worktree without QUERN_STATE_DIR -- builds
+#: in the store without this one seeing its lock, but its build stamps the
+#: directory as it starts.
+MIN_IDLE_S = 3600
 
 #: How often the sweep runs after the one at start.
 SWEEP_SECONDS = 3600
@@ -122,15 +131,16 @@ def disk_size(path: Path) -> int:
 
 def plan(found: list[Derived], *, now: float, max_age_days: int, max_bytes: int,
          busy: Callable[[Path], bool], size: Callable[[Path], int] = disk_size,
-         ) -> list[tuple[Derived, str]]:
+         min_idle_s: float = MIN_IDLE_S) -> list[tuple[Derived, str]]:
     """What to remove, and why: past `max_age_days` (0: no limit), then the
     least recently used while the rest is over `max_bytes` (0: no cap). A
-    busy directory is neither removed nor sized; it counts toward the cap
-    as nothing, since nothing can be done about it now."""
+    busy directory, or one used within `min_idle_s`, is neither removed nor
+    sized; it counts toward the cap as nothing, since nothing can be done
+    about it now."""
     out: list[tuple[Derived, str]] = []
     keep: list[Derived] = []
     for d in found:
-        if busy(d.path):
+        if busy(d.path) or now - d.last_used < min_idle_s:
             continue
         if max_age_days and now - d.last_used > max_age_days * 86400:
             out.append((d, f"unused for {int((now - d.last_used) // 86400)} days"))
