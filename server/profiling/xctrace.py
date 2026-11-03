@@ -14,6 +14,7 @@ refs before looking at a field, or it reads empty values out of a full table.
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass
@@ -58,8 +59,15 @@ class Preset:
 
 
 PRESETS: dict[str, Preset] = {
-    "hangs": Preset("Time Profiler", ("Hangs",), True,
-                    "main-thread hangs, with CPU samples to show what ran"),
+    # System Call Trace for a hang the thread spent blocked rather than busy:
+    # without it, Time Profiler sees nothing (it samples running threads) and
+    # triage's system calls read "N/A". Measured: it named the probe's 12 s
+    # `sleepForTimeInterval:` down to __semwait_signal, and cost +0.8 MB per
+    # 30 s on an iPhone 11 (3.2 to 4.0), +4.1 MB per 40 s on a simulator,
+    # with save and triage times unchanged.
+    "hangs": Preset("Time Profiler", ("Hangs", "System Call Trace"), True,
+                    "main-thread hangs, each with what the thread was doing: its CPU samples "
+                    "if busy, the system call it waited in if blocked"),
     "cpu": Preset("Time Profiler", (), True, "where CPU time goes"),
     "hitches": Preset("Animation Hitches", (), False,
                       "dropped or late frames, with Instruments' explanation of each"),
@@ -77,6 +85,23 @@ def record_command(xctrace: tuple[str, ...], device: str, preset: Preset, time_l
         cmd += ["--instrument", instrument]
     return cmd + ["--time-limit", f"{time_limit_s}s", "--no-prompt", "--output", str(output),
                   "--launch", "--", bundle_id]
+
+
+def triage_command(xctrace: tuple[str, ...], trace: Path, limit: int) -> list[str]:
+    """`xctrace triage --style hangs` (Xcode 27.2): Apple's own reading of each
+    hang -- its tier, the main thread's CPU, and the system calls it made."""
+    return [*xctrace, "triage", "--input", str(trace), "--style", "hangs", "--limit", str(limit),
+            "--format", "text"]
+
+
+def calltree_command(xctrace: tuple[str, ...], trace: Path, track: str, calltree: str,
+                     start_ns: int, duration_ns: int) -> list[str]:
+    """`xctrace show` for one call tree over one window, with each frame's
+    library, in markdown: the heaviest stack is marked, one row per frame."""
+    return [*xctrace, "show", "--input", str(trace), "--track", track, "--calltree", calltree,
+            # xctrace refuses a start of 0, in any unit (measured: exit 49).
+            "--time-start", f"{max(start_ns, 1)}ns", "--duration", f"{duration_ns}ns",
+            "--format", "markdown", "--arrange-columns", "Library Name|..."]
 
 
 def export_command(xctrace: tuple[str, ...], trace: Path, schema: str | None) -> list[str]:
@@ -275,3 +300,146 @@ def parse_time_profile(text: str, process: str | None, top: int = 10) -> dict:
 def _binary(refs: _Refs, frame: ET.Element) -> str | None:
     binary = refs(frame.find("binary"))
     return binary.attrib.get("name") if binary is not None else None
+
+
+# -- triage (xctrace 27.2) ----------------------------------------------------
+
+#: A hang's main thread averaging less CPU than this was mostly waiting
+#: (blocked); at or above BUSY_PERCENT, mostly working (busy). Between, both.
+BLOCKED_PERCENT = 20.0
+BUSY_PERCENT = 50.0
+#: A heaviest stack keeps this many frames from the app's end and the leaf's.
+STACK_HEAD = 6
+STACK_TAIL = 6
+
+_UNITS_MS = {"ns": 1e-6, "µs": 1e-3, "us": 1e-3, "ms": 1.0, "s": 1000.0, "min": 60000.0}
+_DURATION = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*(ns|µs|us|ms|s|min)$")
+_SHOW = re.compile(r'--track "(?P<track>[^"]+)" --summary "Summary: CPU Usage" '
+                   r'--time-start (?P<start>[0-9]+)ns --duration (?P<duration>[0-9]+)ns')
+_ROW = re.compile(r"^(?P<branch>[├└]─ )(?P<name>\S(?:.*?\S)?)\s{2,}(?P<count>[0-9]+)\s+"
+                  r"(?P<duration>[0-9.]+ (?:ns|µs|us|ms|s|min))\b")
+
+
+def duration_ms(text: str) -> float | None:
+    """"12.00 s", "500.02 ms", "292 ns" in milliseconds; None when not one."""
+    m = _DURATION.match(text.strip())
+    return round(float(m.group(1)) * _UNITS_MS[m.group(2)], 6) if m else None
+
+
+def _clock_s(text: str) -> float | None:
+    """triage's "Start Time: 00:22.916.005" -- [hh:]mm:ss.mmm.uuu -- in seconds."""
+    parts = text.strip().split(":")
+    try:
+        head = [int(p) for p in parts[:-1]]
+        sec, ms, us = (int(x) for x in parts[-1].split("."))
+    except ValueError:
+        return None
+    minutes = 0
+    for h in head:
+        minutes = minutes * 60 + h
+    return round(minutes * 60 + sec + ms / 1000 + us / 1e6, 6)
+
+
+def parse_triage(text: str) -> dict:
+    """`xctrace triage --style hangs` output: the tiers it counted, and per
+    hang its start, duration, tier, main-thread CPU, system calls and where
+    to look closer. Sections it printed "N/A" or "No Data" for are None, so
+    "none recorded" stays apart from "made none"."""
+    tiers: dict[str, int] = {}
+    hangs: list[dict] = []
+    blocks = re.split(r"^=+Hang #\d+=+$", text, flags=re.M)
+    summary, per_hang = blocks[0], blocks[1:]
+    for line in summary.splitlines():
+        m = re.match(r"^[├└]─ (.+?)\s{2,}([0-9]+)\s", line)
+        if m:
+            tiers[m.group(1)] = int(m.group(2))
+    for block in per_hang:
+        hang: dict = {"start_s": None, "duration_ms": None, "tier": None,
+                      "main_thread_cpu": None, "system_calls": None, "window": None}
+        for line in block.splitlines():
+            if line.startswith("Start Time:"):
+                hang["start_s"] = _clock_s(line.split(":", 1)[1])
+            elif line.startswith("Duration:"):
+                hang["duration_ms"] = duration_ms(line.split(":", 1)[1])
+            elif line.startswith("Hang Type:"):
+                hang["tier"] = line.split(":", 1)[1].strip()
+        cpu = re.search(r"^CPU Usage of Main Thread.*\n.*\n\* All \*\s+([0-9.]+)%\s+([0-9.]+)%"
+                        r"\s+([0-9.]+)%", block, flags=re.M)
+        if cpu:
+            hang["main_thread_cpu"] = {"avg_percent": float(cpu.group(1)),
+                                       "max_percent": float(cpu.group(3))}
+        show = _SHOW.search(block)
+        if show:
+            hang["window"] = {"track": show.group("track"), "start_ns": int(show.group("start")),
+                              "duration_ns": int(show.group("duration"))}
+        calls = re.search(r"^Summary of System Calls(?P<head>.*)$(?P<body>(?:\n(?!Run `|$).*)*)",
+                          block, flags=re.M)
+        if calls and "N/A" not in calls.group("head"):
+            rows = []
+            for line in calls.group("body").splitlines():
+                m = _ROW.match(line)
+                if m:
+                    rows.append({"call": m.group("name").strip(), "count": int(m.group("count")),
+                                 "duration_ms": duration_ms(m.group("duration"))})
+            hang["system_calls"] = rows
+        hangs.append(hang)
+    return {"tiers": tiers, "hangs": hangs}
+
+
+def nature(cpu: dict | None) -> str | None:
+    """"blocked", "busy" or "mixed", by the main thread's average CPU."""
+    if not cpu:
+        return None
+    avg = cpu["avg_percent"]
+    return "blocked" if avg < BLOCKED_PERCENT else "busy" if avg >= BUSY_PERCENT else "mixed"
+
+
+def parse_heaviest(markdown: str, app: str | None) -> list[str] | None:
+    """The heaviest stack of an `xctrace show --format markdown` call tree,
+    from the app's own innermost frames down: "symbol (library)" each. The
+    frames above the app's -- the run loop, UIKit's dispatch -- are the same
+    for every hang and say nothing. None when the tree had no rows."""
+    lines = [ln for ln in markdown.splitlines() if ln.startswith("|")]
+    if len(lines) < 3:
+        return None
+    header = [c.strip() for c in lines[0].strip("|").split("|")]
+    try:
+        lib_i, sym_i = header.index("Library Name"), header.index("Symbol Names")
+    except ValueError:
+        return None
+    frames = []
+    for line in lines[2:]:
+        # Symbol Names is the last column and can hold a "|" (`operator|`), so
+        # it takes the rest of the row; strip("|") would also eat the empty
+        # first cell of every row that is not on the heaviest path.
+        cells = line.removeprefix("|").removesuffix("|").split("|", len(header) - 1)
+        if len(cells) == len(header) and cells[0].strip() == "*":
+            frames.append((cells[sym_i].strip(), cells[lib_i].strip()))
+    if not frames:
+        return None
+    mine = [i for i, (_sym, lib) in enumerate(frames) if app and lib == app]
+    if mine:
+        start = mine[-1]
+        while start - 1 in mine:
+            start -= 1
+    else:
+        start = max(0, len(frames) - STACK_TAIL)
+    stack = [_frame(sym, lib) for sym, lib in frames[start:]]
+    if len(stack) > STACK_HEAD + STACK_TAIL + 1:
+        # Measured: a busy main thread's heaviest path ran 50 frames below the
+        # app's, most of them unsymbolicated system addresses. Whose code it
+        # was and what the CPU was doing at the leaf are the two ends.
+        hidden = len(stack) - STACK_HEAD - STACK_TAIL
+        stack = [*stack[:STACK_HEAD], f"... {hidden} frames ...", *stack[-STACK_TAIL:]]
+    return stack
+
+
+def _frame(sym: str, lib: str) -> str:
+    """"symbol (library)". An unsymbolicated frame comes as
+    "0x185028f24 (UIKitCore +0x228f87) <B884823E-...>": it names its library
+    already, and the image UUID is for a symbolicator, not a reader."""
+    if sym.startswith("0x"):
+        sym = re.sub(r" <[0-9A-F-]+>$", "", sym)
+        if "(" in sym:
+            return sym
+    return f"{sym} ({lib})" if lib else sym

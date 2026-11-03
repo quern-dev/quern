@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Each iOS hang says what the main thread was doing (#245).** With Xcode 27.2, `stop_profile` reads the hangs with `xctrace triage`: each gets its tier, the main thread's CPU, `nature` -- `blocked` or `busy`, the first thing to know about a hang -- the system calls it waited in, and, for the longest three, the main thread's heaviest stack over it, from the app's own frames down. Measured on the probe's 12 s sleep: blocked, `semwait_signal` 12.00 s, `DiagViewController.hang()` → `+[NSThread sleepForTimeInterval:]` → `__semwait_signal`.
+  - **The `hangs` preset records System Call Trace.** A blocked thread is not running, so Time Profiler has no samples of it; the system calls are where it waited. It cost +0.8 MB per 30 s on an iPhone 11, with saving and triage no slower. A blocked hang in a profile without it gets no stack rather than a misleading one, and says why.
+  - **An older Xcode** keeps the hangs as Instruments listed them, with `unavailable.triage` saying why.
 - **Profile an Android app: `start_profile` and `stop_profile` record it with perfetto (#245).** The same four tools as iOS, on an emulator or phone, without relaunching the app.
   - **Hangs are input the app left unanswered**, read from InputDispatcher's own per-window queue in the trace -- measured at 10,571.6 ms for a hang InputDispatcher put at 10,571.9 ms. An idle app's main thread also sleeps, so a sleeping thread is never read as a hang.
   - **Frames, CPU by thread, and the slowest work**, from the trace.

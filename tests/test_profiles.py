@@ -101,7 +101,8 @@ class TestReaders:
                                 Path("/p/profile.trace"), "com.x")
         assert cmd == ["xcrun", "xctrace", "record", "--device", "00008030-X",
                        "--template", "Time Profiler", "--instrument", "Hangs",
-                       "--time-limit", "30s", "--no-prompt", "--output", "/p/profile.trace",
+                       "--instrument", "System Call Trace", "--time-limit", "30s",
+                       "--no-prompt", "--output", "/p/profile.trace",
                        "--launch", "--", "com.x"]
 
     def test_only_an_xctrace_recording_into_this_trace_is_ours(self):
@@ -111,6 +112,84 @@ class TestReaders:
         assert not manager_mod._records_into(mine.replace("prof_1", "prof_10"), trace)
         assert not manager_mod._records_into(f"/bin/sleep --output {trace} ", trace)
         assert not manager_mod._records_into(None, trace)
+
+
+def out(name: str) -> str:
+    return (FIXTURES / name).read_text()
+
+
+SYSCALL_STACK = ["@objc DiagViewController.hang() (QuernProbe)",
+                 "DiagViewController.hang() (QuernProbe)",
+                 "+[NSThread sleepForTimeInterval:] (Foundation)",
+                 "nanosleep (libsystem_c.dylib)", "__semwait_signal (libsystem_kernel.dylib)"]
+
+
+class TestTriageReaders:
+    """On real `xctrace triage --style hangs` and `xctrace show` output: the
+    probe's 12 s main-thread sleep, recorded with and without System Call
+    Trace on an iOS 27.0 simulator."""
+
+    def test_a_hang_with_its_system_calls(self):
+        triage = xt.parse_triage(out("sim-syscall-triage.out"))
+        assert triage["tiers"] == {"Severe Hang": 1}
+        [hang] = triage["hangs"]
+        assert hang == {
+            "start_s": 22.916005, "duration_ms": 12010.0, "tier": "Severe Hang",
+            "main_thread_cpu": {"avg_percent": 0.0, "max_percent": 30.0},
+            # The nested row under it is its signature, not a second call.
+            "system_calls": [{"call": "semwait_signal", "count": 1, "duration_ms": 12000.0}],
+            "window": {"track": "QuernProbe (83576)/Main Thread (0xa5a68d8)",
+                       "start_ns": 22916005458, "duration_ns": 12005175792}}
+
+    def test_not_recorded_is_none_not_no_calls(self):
+        [hang] = xt.parse_triage(out("sim-nosyscall-triage.out"))["hangs"]
+        assert hang["system_calls"] is None and hang["start_s"] == 22.110901
+
+    def test_a_trace_with_no_hangs(self):
+        assert xt.parse_triage(out("device-nohangs-triage.out")) == {"tiers": {}, "hangs": []}
+
+    @pytest.mark.parametrize("text, ms", [("12.00 s", 12000.0), ("500.02 ms", 500.02),
+                                          ("292 ns", 0.000292), ("4.5 µs", 0.0045),
+                                          ("2 min", 120000.0), ("n/a", None)])
+    def test_durations(self, text, ms):
+        assert xt.duration_ms(text) == ms
+
+    def test_clock_with_hours(self):
+        assert xt._clock_s("01:02:03.004.005") == 3723.004005
+        assert xt._clock_s("soon") is None
+
+    @pytest.mark.parametrize("avg, nature", [(0.0, "blocked"), (19.9, "blocked"), (20.0, "mixed"),
+                                             (49.9, "mixed"), (50.0, "busy"), (None, None)])
+    def test_nature(self, avg, nature):
+        assert xt.nature(None if avg is None else {"avg_percent": avg}) == nature
+
+    def test_the_stack_a_blocked_hang_waited_in(self):
+        assert xt.parse_heaviest(out("sim-syscall-calltree.md"), "QuernProbe") == SYSCALL_STACK
+
+    def test_a_long_stack_keeps_both_ends(self):
+        stack = xt.parse_heaviest(out("sim-cpu-calltree.md"), "QuernProbe")
+        assert stack[0] == "main (QuernProbe)"
+        assert stack[6] == "... 40 frames ..." and len(stack) == 13
+        assert stack[-1] == "CA::Layer::superlayer(CA::Transaction*) (QuartzCore)"
+        # An unsymbolicated frame names its library itself, and loses the UUID.
+        assert stack[3] == "0x185028f24 (UIKitCore +0x228f87)"
+
+    def test_without_the_app_the_leaf_end(self):
+        stack = xt.parse_heaviest(out("sim-syscall-calltree.md"), None)
+        assert len(stack) == xt.STACK_TAIL and stack[-5:] == SYSCALL_STACK
+
+    def test_a_symbol_with_a_pipe_keeps_its_frame(self):
+        tree = ("|is heaviest|ID|Library Name|Symbol Names|\n|---|---|---|---|\n"
+                "|*|1|App|Flags.operator|(Flags)|\n||2|App|other|\n")
+        assert xt.parse_heaviest(tree, "App") == ["Flags.operator|(Flags) (App)"]
+
+    def test_no_rows_is_none(self):
+        assert xt.parse_heaviest("", "QuernProbe") is None
+        assert xt.parse_heaviest("|a|b|\n|-|-|\n|*|x|\n", "QuernProbe") is None
+
+    def test_a_window_at_zero_is_asked_from_one_ns(self):
+        cmd = xt.calltree_command(("x",), Path("/t"), "P/Main", "Profile", 0, 5)
+        assert cmd[cmd.index("--time-start") + 1] == "1ns"
 
 
 # -- the manager -------------------------------------------------------------
@@ -429,6 +508,103 @@ class TestUnreadableIsNotEmpty:
         profile, _ = await _start(_manager(), limit=10)
         await _finished(profile)
         assert profile.state == "failed" and "could not be read" in profile.error
+
+
+class TestTriage:
+    """Triage onto a summary's hangs, against the fake, which prints the real
+    outputs above. The 12 s sleep is blocked: its CPU samples cannot say where
+    it waited, and the system calls can."""
+
+    SYSCALL = "toc=sim-syscall-toc,hangs=sim-syscall-potential-hangs"
+    NOSYSCALL = "toc=sim-nosyscall-toc,hangs=sim-nosyscall-potential-hangs"
+    BLOCKED = f"{SYSCALL},triage=sim-syscall-triage"
+
+    async def _summary(self, monkeypatch, mode):
+        monkeypatch.setenv("FAKE_XCTRACE_MODE", mode)
+        profile, _ = await _start(_manager(), limit=10)
+        await _finished(profile)
+        assert profile.state == "finished", profile.error
+        shows = profile.trace.parent / "shows"
+        return profile.summary(), shows.read_text().splitlines() if shows.exists() else []
+
+    async def test_a_blocked_hang_gets_the_call_it_waited_in(self, state, monkeypatch):
+        summary, shows = await self._summary(monkeypatch, self.BLOCKED)
+        assert summary["hang_tiers"] == {"Severe Hang": 1}
+        [hang] = summary["hangs"]
+        assert (hang["tier"], hang["nature"]) == ("Severe Hang", "blocked")
+        assert hang["system_calls"] == [{"call": "semwait_signal", "count": 1,
+                                         "duration_ms": 12000.0}]
+        assert (hang["stack"], hang["stack_from"]) == (SYSCALL_STACK, "system calls")
+        assert shows == ["Profile: System Calls"]
+        assert "triage" not in summary["unavailable"]
+
+    async def test_without_system_calls_a_blocked_hang_gets_no_stack(self, state, monkeypatch):
+        summary, shows = await self._summary(monkeypatch,
+                                             f"{self.NOSYSCALL},triage=sim-nosyscall-triage")
+        [hang] = summary["hangs"]
+        assert hang["nature"] == "blocked" and hang["system_calls"] is None
+        assert "did not include System Call Trace" in hang["system_calls_note"]
+        assert "stack" not in hang and "cannot show where it waited" in hang["stack_note"]
+        assert shows == []
+
+    async def test_a_busy_hang_gets_its_cpu_samples(self, state, monkeypatch):
+        summary, shows = await self._summary(monkeypatch,
+                                             f"{self.NOSYSCALL},triage=sim-busy-triage")
+        [hang] = summary["hangs"]
+        assert hang["nature"] == "busy" and hang["stack_from"] == "CPU samples"
+        assert hang["stack"][0] == "main (QuernProbe)" and shows == ["Profile"]
+
+    async def test_a_mixed_hang_with_system_calls_gets_them(self, state, monkeypatch):
+        summary, shows = await self._summary(monkeypatch, f"{self.SYSCALL},triage=sim-mixed-triage")
+        [hang] = summary["hangs"]
+        assert hang["nature"] == "mixed" and hang["stack_from"] == "system calls"
+        assert shows == ["Profile: System Calls"]
+
+    async def test_no_triage_leaves_instruments_hangs(self, state, monkeypatch):
+        summary, shows = await self._summary(monkeypatch, self.SYSCALL)
+        [hang] = summary["hangs"]
+        assert hang["duration_ms"] and "tier" not in hang and "hang_tiers" not in summary
+        assert "Xcode 27.2" in summary["unavailable"]["triage"]
+        assert "unknown command" in summary["unavailable"]["triage"] and shows == []
+
+    async def test_a_hang_triage_did_not_list_is_left_alone(self, state, monkeypatch):
+        # The default hangs (6.979 s, 24.726 s) are another trace's.
+        summary, shows = await self._summary(monkeypatch, "triage=sim-syscall-triage")
+        assert summary["hang_tiers"] == {"Severe Hang": 1}
+        assert all("tier" not in h for h in summary["hangs"]) and shows == []
+
+    async def test_a_stack_that_cannot_be_read_is_noted(self, state, monkeypatch):
+        summary, _ = await self._summary(monkeypatch,
+                                         f"{self.SYSCALL},triage=sim-syscall-triage,show-fail")
+        [hang] = summary["hangs"]
+        assert hang["tier"] == "Severe Hang" and "stack" not in hang
+        assert "xctrace show failed: Error: no such track" in hang["stack_note"]
+
+    async def test_an_empty_call_tree_is_noted(self, state, monkeypatch):
+        summary, _ = await self._summary(monkeypatch,
+                                         f"{self.SYSCALL},triage=sim-syscall-triage,show-empty")
+        [hang] = summary["hangs"]
+        assert "stack" not in hang
+        assert hang["stack_note"] == "no system calls on the main thread over it"
+
+    async def test_only_the_first_few_get_a_stack(self, state, monkeypatch):
+        monkeypatch.setattr(manager_mod, "TRIAGE_STACKS", 0)
+        summary, shows = await self._summary(monkeypatch, self.BLOCKED)
+        [hang] = summary["hangs"]
+        assert hang["tier"] == "Severe Hang" and "stack" not in hang and shows == []
+
+    async def test_the_stacks_stop_at_the_limit(self, state, monkeypatch):
+        monkeypatch.setattr(manager_mod, "TRIAGE_STACKS", 1)
+        summary, shows = await self._summary(monkeypatch,
+                                             "toc=sim-syscall-toc,triage=sim-two-triage")
+        first, second = sorted(summary["hangs"], key=lambda h: -h["start_s"])   # triage's order
+        assert first["stack"] == SYSCALL_STACK and second["tier"] == "Severe Hang"
+        assert "stack" not in second and shows == ["Profile: System Calls"]
+
+    async def test_no_hangs_runs_no_triage(self, state, monkeypatch):
+        summary, _ = await self._summary(monkeypatch,
+                                         "empty=potential-hangs,triage=sim-syscall-triage")
+        assert "hang_tiers" not in summary and "triage" not in summary["unavailable"]
 
 
 class TestOverrun:

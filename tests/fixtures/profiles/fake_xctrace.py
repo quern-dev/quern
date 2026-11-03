@@ -13,7 +13,17 @@ for FAKE_XCTRACE_SAVE_S. FAKE_XCTRACE_MODE picks the behaviour: ok, offline,
 exit-early, error-stays (reports a failure and keeps running), stubborn
 (ignores SIGINT and never saves), crash (dies mid-recording, never saving),
 toc=<name> (which TOC fixture), fail=<schema>, empty=<schema> (the export
-prints no table), sim-launch (the simulator's empty launch table).
+prints no table), sim-launch (the simulator's empty launch table),
+hangs=<name> (which potential-hangs fixture).
+
+triage prints triage=<name>'s .out (real `triage --style hangs` output, but
+sim-busy- and sim-mixed-triage, which are sim-nosyscall- and sim-syscall-triage
+with the main thread's CPU edited, and sim-two-triage, sim-syscall-triage's
+hang twice at sim-hangs-potential-hangs' two starts); without triage= it fails, as an xctrace
+older than 27.2 has no triage (the message is not a measured one). show
+prints the call tree it is asked for -- sim-syscall-calltree.md for "Profile:
+System Calls", sim-cpu-calltree.md for "Profile" -- and notes the name in
+<trace's parent>/shows; show-fail fails it, show-empty prints nothing.
 """
 
 import os
@@ -91,12 +101,39 @@ def export():
             print('<?xml version="1.0"?>\n<trace-query-result>\n</trace-query-result>')
             return 0
         launch = "sim-launch" if "sim-launch" in MODE else "device-launch"
-        name = {"potential-hangs": "sim-hangs-potential-hangs", "hitches": "device-hitches",
+        name = {"potential-hangs": _mode("hangs") or "sim-hangs-potential-hangs",
+                "hitches": "device-hitches",
                 "time-profile": "device-time-profile",
                 "life-cycle-period": f"{launch}-life-cycle-period"}[schema]
     sys.stdout.write((HERE / f"{name}.xml").read_text())
     return 0
 
 
+def _mode(key):
+    return next((m.split("=", 1)[1] for m in MODE.split(",") if m.startswith(f"{key}=")), None)
+
+
+def triage():
+    name = _mode("triage")
+    if name is None:
+        print("Error: unknown command 'triage'", file=sys.stderr)
+        return 64
+    sys.stdout.write((HERE / f"{name}.out").read_text())
+    return 0
+
+
+def show():
+    calltree = arg("--calltree")
+    with (Path(arg("--input")).parent / "shows").open("a") as f:
+        f.write(f"{calltree}\n")
+    if "show-fail" in MODE:
+        print("Error: no such track", file=sys.stderr)
+        return 5
+    if "show-empty" not in MODE:
+        name = {"Profile: System Calls": "sim-syscall-calltree", "Profile": "sim-cpu-calltree"}
+        sys.stdout.write((HERE / f"{name[calltree]}.md").read_text())
+    return 0
+
+
 if __name__ == "__main__":
-    sys.exit(record() if sys.argv[1] == "record" else export())
+    sys.exit({"record": record, "triage": triage, "show": show}.get(sys.argv[1], export)())

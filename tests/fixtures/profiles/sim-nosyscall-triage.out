@@ -1,0 +1,28 @@
+============== Summary ==============
+Run: 1
+Trace Duration: 40.42 s
+Summary of Hangs (Sorted by Hang Type Ascending)
+Hang Type       Count  Min Duration  Avg Duration  Std Dev Duration  Max Duration  Range
+* All *             1       12.00 s       12.00 s               n/a       12.00 s    n/a
+└─ Severe Hang      1       12.00 s       12.00 s               n/a       12.00 s    n/a
+
+Hangs By Duration (Limit = 10, Sorted by Duration Descending):
+==============Hang #1==============
+Start Time: 00:22.110.901
+Duration: 12.00 s
+Hang Type: Severe Hang
+
+CPU Usage of Main Thread (Sorted by Category Ascending)
+Category  Avg CPU Usage  Min CPU Usage  Max CPU Usage  Std Dev CPU Usage
+* All *            0.0%           0.0%          30.0%               0.9%
+Run `xctrace show --input "sim-hang-0.trace" --track "QuernProbe (83260)/Main Thread (0xa5a6004)" --summary "Summary: CPU Usage" --time-start 22110901416ns --duration 12002916500ns` to see this in full.
+
+Profile of Main Thread (Min Samples = 10, System Libraries Flattened, Sorted by Weight Descending):
+No Data
+Run `xctrace show --input "sim-hang-0.trace" --track "QuernProbe (83260)/Main Thread (0xa5a6004)" --calltree "Profile" --time-start 22110901416ns --duration 12002916500ns` to see this in full.
+
+Summary of SwiftUI Long Updates: N/A
+
+Summary of OS Signposts: N/A
+
+Summary of System Calls: N/A

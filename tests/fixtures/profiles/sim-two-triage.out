@@ -1,0 +1,57 @@
+============== Summary ==============
+Run: 1
+Trace Duration: 40.42 s
+Summary of Hangs (Sorted by Hang Type Ascending)
+Hang Type       Count  Min Duration  Avg Duration  Std Dev Duration  Max Duration  Range
+* All *             2       12.01 s       12.01 s               n/a       12.01 s    n/a
+└─ Severe Hang      2       12.01 s       12.01 s               n/a       12.01 s    n/a
+
+Hangs By Duration (Limit = 10, Sorted by Duration Descending):
+==============Hang #1==============
+Start Time: 00:24.726.366
+Duration: 12.01 s
+Hang Type: Severe Hang
+
+CPU Usage of Main Thread (Sorted by Category Ascending)
+Category  Avg CPU Usage  Min CPU Usage  Max CPU Usage  Std Dev CPU Usage
+* All *            0.0%           0.0%          30.0%               1.1%
+Run `xctrace show --input "sim-hang-1.trace" --track "QuernProbe (83576)/Main Thread (0xa5a68d8)" --summary "Summary: CPU Usage" --time-start 22916005458ns --duration 12005175792ns` to see this in full.
+
+Profile of Main Thread (Min Samples = 10, System Libraries Flattened, Sorted by Weight Descending):
+No Data
+Run `xctrace show --input "sim-hang-1.trace" --track "QuernProbe (83576)/Main Thread (0xa5a68d8)" --calltree "Profile" --time-start 22916005458ns --duration 12005175792ns` to see this in full.
+
+Summary of SwiftUI Long Updates: N/A
+
+Summary of OS Signposts: N/A
+
+Summary of System Calls of Main Thread (Duration ≥ 1.00 ms, Sorted by Duration Descending)
+Call / Signature      Count  Duration  Min Duration  Avg Duration  Std Dev Duration  Max Duration  CPU Time  Min CPU Time  Avg CPU Time  Std Dev CPU Time  Max CPU Time
+* All *                  24   12.00 s        292 ns     500.02 ms            2.45 s       12.00 s       n/a           n/a           n/a               n/a           n/a
+└─ semwait_signal         1   12.00 s       12.00 s       12.00 s               n/a       12.00 s       n/a           n/a           n/a               n/a           n/a
+   └─ semwait_signal      1   12.00 s       12.00 s       12.00 s               n/a       12.00 s       n/a           n/a           n/a               n/a           n/a
+Run `xctrace show --input "sim-hang-1.trace" --track "QuernProbe (83576)/Main Thread (0xa5a68d8)" --summary "Summary: System Calls" --time-start 22916005458ns --duration 12005175792ns` to see this in full.
+==============Hang #2==============
+Start Time: 00:06.979.399
+Duration: 12.01 s
+Hang Type: Severe Hang
+
+CPU Usage of Main Thread (Sorted by Category Ascending)
+Category  Avg CPU Usage  Min CPU Usage  Max CPU Usage  Std Dev CPU Usage
+* All *            0.0%           0.0%          30.0%               1.1%
+Run `xctrace show --input "sim-hang-1.trace" --track "QuernProbe (83576)/Main Thread (0xa5a68d8)" --summary "Summary: CPU Usage" --time-start 22916005458ns --duration 12005175792ns` to see this in full.
+
+Profile of Main Thread (Min Samples = 10, System Libraries Flattened, Sorted by Weight Descending):
+No Data
+Run `xctrace show --input "sim-hang-1.trace" --track "QuernProbe (83576)/Main Thread (0xa5a68d8)" --calltree "Profile" --time-start 22916005458ns --duration 12005175792ns` to see this in full.
+
+Summary of SwiftUI Long Updates: N/A
+
+Summary of OS Signposts: N/A
+
+Summary of System Calls of Main Thread (Duration ≥ 1.00 ms, Sorted by Duration Descending)
+Call / Signature      Count  Duration  Min Duration  Avg Duration  Std Dev Duration  Max Duration  CPU Time  Min CPU Time  Avg CPU Time  Std Dev CPU Time  Max CPU Time
+* All *                  24   12.00 s        292 ns     500.02 ms            2.45 s       12.00 s       n/a           n/a           n/a               n/a           n/a
+└─ semwait_signal         1   12.00 s       12.00 s       12.00 s               n/a       12.00 s       n/a           n/a           n/a               n/a           n/a
+   └─ semwait_signal      1   12.00 s       12.00 s       12.00 s               n/a       12.00 s       n/a           n/a           n/a               n/a           n/a
+Run `xctrace show --input "sim-hang-1.trace" --track "QuernProbe (83576)/Main Thread (0xa5a68d8)" --summary "Summary: System Calls" --time-start 22916005458ns --duration 12005175792ns` to see this in full.
