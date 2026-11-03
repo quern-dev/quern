@@ -139,6 +139,8 @@ const FP = "ab".repeat(32);
 test("remotes.json: none is no remotes; unreadable or shapeless is an error, never an empty list", () => {
   assert.deepEqual(readRemotes(remotesFile()), {});
   assert.throws(() => readRemotes(remotesFile("{not json")), /is not readable/);
+  // A file that exists and cannot be read (here, a directory) is not "none".
+  assert.throws(() => readRemotes(mkdtempSync(join(tmpdir(), "quern-rs-dir-"))), /is not readable/);
   assert.throws(() => readRemotes(remotesFile({ remotes: [] })), /no 'remotes' object/);
 });
 
