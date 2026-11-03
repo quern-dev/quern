@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`list_remotes` works without the quern CLI (#605).** It ran `quern remote list` on the MCP's machine, so a Linux or Windows machine with only the MCP installed, paired with a Mac, couldn't list its remotes, and the "free elsewhere" hint on `reserve_devices` and `list_devices` silently never appeared. The MCP now asks each server itself, with the same answer, timeouts and failure wording, and a shared fixture keeps the Python and TypeScript versions from drifting.
 - **Profile an Android app: `start_profile` and `stop_profile` record it with perfetto (#245).** The same four tools as iOS, on an emulator or phone, without relaunching the app.
   - **Hangs are input the app left unanswered**, read from InputDispatcher's own per-window queue in the trace -- measured at 10,571.6 ms for a hang InputDispatcher put at 10,571.9 ms. An idle app's main thread also sleeps, so a sleeping thread is never read as a hang.
   - **Frames, CPU by thread, and the slowest work**, from the trace.
