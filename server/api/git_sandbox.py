@@ -132,6 +132,17 @@ async def _cgi(request: Request, repo: str, tail: str, service: str) -> Streamin
 
     over_cap = asyncio.Event()
 
+    # stderr is read as it comes: unread, a full pipe blocks the backend
+    # mid-push, and the push never ends. The tail is kept for the log.
+    err_tail = bytearray()
+
+    async def drain_stderr() -> None:
+        while chunk := await proc.stderr.read(65536):
+            err_tail.extend(chunk)
+            del err_tail[:-4096]
+
+    draining = asyncio.create_task(drain_stderr())
+
     async def feed() -> None:
         sent = 0
         try:
@@ -155,24 +166,55 @@ async def _cgi(request: Request, repo: str, tail: str, service: str) -> Streamin
 
     feeding = asyncio.create_task(feed())
 
+    # The backend's output, read as it comes into a bounded queue. Read so a
+    # full pipe never stalls the backend; bounded so a slow client holds back
+    # a fetch's pack instead of it piling up here.
+    out: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=64)
+
+    async def read_out() -> None:
+        try:
+            while chunk := await proc.stdout.read(65536):
+                await out.put(chunk)
+        finally:
+            await out.put(None)
+
+    reading = asyncio.create_task(read_out())
+
+    def stop() -> None:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        for task in (feeding, reading, draining):
+            task.cancel()
+
+    # No answer until the whole request has reached the backend. It writes its
+    # CGI headers before it reads the body, and a 200 sent on them while the
+    # client is still uploading makes curl stop sending: the push hung, with
+    # receive-pack waiting for a pack that never came (found by a 2 MB push).
+    try:
+        await feeding
+    except asyncio.CancelledError:
+        stop()
+        raise
+    if over_cap.is_set():
+        stop()
+        raise HTTPException(413, f"this push grew past the {room // 2**20} MB the key's git "
+                                 "sandboxes have left (sandboxes.max_mb)")
+
     # The CGI's own headers, up to the blank line.
     raw = b""
     while b"\r\n\r\n" not in raw and b"\n\n" not in raw:
-        chunk = await proc.stdout.read(4096)
-        if not chunk:
+        chunk = await out.get()
+        if chunk is None:
             break
         raw += chunk
-    if over_cap.is_set():
-        feeding.cancel()
-        raise HTTPException(413, f"this push grew past the {room // 2**20} MB the key's git "
-                                 "sandboxes have left (sandboxes.max_mb)")
     sep = b"\r\n\r\n" if b"\r\n\r\n" in raw else b"\n\n"
     head, _, first = raw.partition(sep)
     if not head:
-        err = (await proc.stderr.read()).decode(errors="replace").strip()
-        feeding.cancel()
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(draining, 2)
+        err = bytes(err_tail).decode(errors="replace").strip()
+        stop()
         raise HTTPException(500, f"git http-backend gave no answer: {err or 'nothing'}")
     status, headers = 200, {}
     for line in head.decode("latin-1").splitlines():
@@ -189,13 +231,14 @@ async def _cgi(request: Request, repo: str, tail: str, service: str) -> Streamin
         try:
             if first:
                 yield first
-            while chunk := await proc.stdout.read(65536):
+            while (chunk := await out.get()) is not None:
                 yield chunk
-            await feeding
             rc = await proc.wait()
             if pushing and request.method == "POST":
                 if rc != 0:
-                    err = (await proc.stderr.read()).decode(errors="replace").strip()
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(draining, 2)
+                    err = bytes(err_tail).decode(errors="replace").strip()
                     logger.warning("sandbox push %s/%s: http-backend exited %s: %s",
                                    principal, repo, rc, err)
                     return
@@ -205,10 +248,7 @@ async def _cgi(request: Request, repo: str, tail: str, service: str) -> Streamin
                 except sandboxes.SandboxError as e:
                     logger.warning("sandbox push %s/%s: checkout failed: %s", principal, repo, e)
         finally:
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-            feeding.cancel()
+            stop()
 
     headers.pop("Content-Length", None)    # streamed: let the server frame it
     media = headers.pop("Content-Type", None)

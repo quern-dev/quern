@@ -367,13 +367,24 @@ class TestEndToEnd:
         _git("clone", "-q", "-b", "quern-sync", f"{server}/git/app.git", str(tmp_path / "back"))
         assert (tmp_path / "back" / "README").read_text() == "r\n"
 
+    def test_a_large_chunked_push_completes(self, server, root, project):
+        """The backend writes its CGI headers before it reads the body; a 200
+        sent on them mid-upload made curl stop sending, and the push hung.
+        A small push never showed it."""
+        _commit(project, {"blob.bin": os.urandom(2**20).hex()})
+        r = subprocess.run(["git", "-c", "http.postBuffer=1024", "push",
+                            f"{server}/git/app.git", "HEAD:refs/heads/main"],
+                           cwd=project, capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        assert (root / "owner" / "work" / "app" / "main" / "blob.bin").stat().st_size == 2 * 2**20
+
     def test_a_chunked_push_past_the_cap_is_cut_off(self, server, root, project, limits):
         limits["max_bytes"] = 64 * 1024
         # Incompressible, and big enough that git sends it chunked.
         _commit(project, {"blob.bin": os.urandom(2 * 2**20).hex()})
         r = subprocess.run(["git", "-c", "http.postBuffer=1024", "push",
                             f"{server}/git/app.git", "HEAD:refs/heads/main"],
-                           cwd=project, capture_output=True, text=True)
+                           cwd=project, capture_output=True, text=True, timeout=60)
         assert r.returncode != 0
         assert not (root / "owner" / "work" / "app" / "main").exists()
         assert json.dumps(sandboxes.listing(OWNER))  # still readable
