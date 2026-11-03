@@ -162,33 +162,52 @@ async def test_a_directory_whose_build_is_running_is_left(tmp_path):
     assert held.exists()
 
 
-async def test_a_build_starting_during_the_removal_waits_for_it(tmp_path, monkeypatch):
-    """The sweep holds the build's own lock while it deletes, so a build
-    cannot start writing into a directory being removed."""
+async def test_a_build_starting_during_the_removal_never_meets_it(tmp_path, monkeypatch):
+    """The sweep holds the build's lock until the directory is moved aside;
+    a build waiting on it then finds no directory, not one half deleted."""
     import weakref
 
     now = time.time()
     path = _derived(tmp_path / "P-0123456789" / "S" / "iphoneos", age_days=30, now=now)
     locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
-    order = []
-    real_rmtree = dr.shutil.rmtree
+    real_size = dr.disk_size
 
-    def slow_rmtree(p, ignore_errors=False):
-        time.sleep(0.2)
-        order.append("removed")
-        real_rmtree(p, ignore_errors)
+    def slow_size(p):                                   # runs under the lock
+        time.sleep(0.3)
+        return real_size(p)
 
-    monkeypatch.setattr(dr.shutil, "rmtree", slow_rmtree)
+    monkeypatch.setattr(dr, "disk_size", slow_size)
     sweeping = asyncio.create_task(dr.sweep(locks, base=tmp_path, max_age_days=7, max_bytes=0,
                                             now=now))
-    for _ in range(100):
-        if path in locks and locks[path].locked():
+    lock = None
+    for _ in range(200):
+        lock = locks.get(path)
+        if lock is not None and lock.locked():
             break
         await asyncio.sleep(0.01)
-    async with locks[path]:
-        order.append("built")
+    assert lock is not None and lock.locked(), "the sweep holds the build's lock"
+    async with lock:
+        met = path.exists()
     await sweeping
-    assert order == ["removed", "built"]
+    assert met is False, "the waiting build found the directory still there"
+    assert not path.exists() and not list(tmp_path.glob(dr._REMOVING + "*"))
+
+
+async def test_what_a_failed_delete_leaves_is_retried_and_never_used(tmp_path, monkeypatch):
+    """A partial delete left a directory that read as used just now (its own
+    mtime) and that the next build would build into (review). Moved aside
+    first, the leftover is neither: it is deleted at the next pass."""
+    now = time.time()
+    path = _derived(tmp_path / "P-0123456789" / "S" / "iphoneos", age_days=30, now=now)
+    monkeypatch.setattr(dr, "_remove", lambda p: ["blob: Operation not permitted"])
+    done = await dr.sweep({}, base=tmp_path, max_age_days=7, max_bytes=0, now=now)
+    assert done[0]["ok"] and "tried again" in done[0]["note"]
+    assert not path.exists(), "nothing half deleted is left where a build would use it"
+    [leftover] = list(tmp_path.glob(dr._REMOVING + "*"))
+    assert dr.find(tmp_path) == []
+    monkeypatch.undo()
+    await dr.sweep({}, base=tmp_path, max_age_days=7, max_bytes=0, now=now)
+    assert not leftover.exists()
 
 
 async def test_the_sweep_never_deletes_through_a_symlink(tmp_path):
@@ -295,3 +314,96 @@ async def test_emptying_the_store_keeps_the_store(tmp_path):
     (store / ".DS_Store").write_text("finder")
     await dr.sweep({}, base=store, max_age_days=7, max_bytes=0)
     assert store.is_dir() and not (store / "Only-0123456789").exists()
+
+
+@pytest.mark.parametrize("scheme", ["Build", "build", "Logs", "Index.noindex"])
+def test_a_scheme_named_like_a_marker_is_still_a_scheme(tmp_path, scheme):
+    """A scheme called Build made the project look like a DerivedData, and the
+    whole project was removed, a running build's directory with it (review)."""
+    project = tmp_path / "App-0123456789"
+    platform = _derived(project / scheme / "iphoneos")
+    sibling = _derived(project / "Other" / "iphonesimulator")
+    assert {d.path for d in dr.find(tmp_path)} == {platform, sibling}
+
+
+async def test_a_lock_on_a_path_inside_or_around_it_keeps_it(tmp_path):
+    """The guard rested on exact path equality between the store's listing and
+    the build's lock key; any mismatch turned it off silently (review)."""
+    now = time.time()
+    old = _derived(tmp_path / "SeattleSirens", age_days=30, now=now)
+    lock = asyncio.Lock()
+    await lock.acquire()
+    assert await dr.sweep({old / "Build": lock}, base=tmp_path, max_age_days=7, max_bytes=0,
+                          now=now) == []
+    assert old.exists()
+
+
+async def test_one_used_between_the_plan_and_its_turn_is_kept(tmp_path, monkeypatch):
+    """A build that took the lock and let it go while the plan ran stamped
+    the directory; it was removed all the same (review)."""
+    now = time.time()
+    path = _derived(tmp_path / "P-0123456789" / "S" / "iphoneos", age_days=30, now=now)
+    real_plan = dr.plan
+
+    def plan_then_a_build(*a, **k):
+        out = real_plan(*a, **k)
+        dr.mark_used(path)
+        return out
+
+    monkeypatch.setattr(dr, "plan", plan_then_a_build)
+    assert await dr.sweep({}, base=tmp_path, max_age_days=7, max_bytes=0, now=now) == []
+    assert path.exists()
+
+
+def test_the_cap_never_takes_the_most_recently_used():
+    """A project bigger than the cap on its own lost its cache every hour."""
+    now = 100 * DAY
+    found = _found(("SeattleSirens", now - 2 * DAY), ("older", now - 3 * DAY))
+    sizes = {Path("SeattleSirens"): 27, Path("older"): 1}
+    out = dr.plan(found, now=now, max_age_days=7, max_bytes=20, busy=lambda p: False,
+                  size=_sizes(sizes))
+    assert [d.path.name for d, _ in out] == ["older"]
+
+
+async def test_an_unreadable_config_skips_the_pass(monkeypatch):
+    """Falling back to the defaults would turn on a retention its owner had
+    turned off, on any pass that met a half-written config.json (review)."""
+    from server import config
+
+    calls = []
+
+    async def sweep(*a, **k):
+        calls.append(k)
+        raise asyncio.CancelledError
+
+    def unreadable():
+        if not calls and not getattr(unreadable, "seen", False):
+            unreadable.seen = True
+            raise config.ConfigUnreadable("config.json cannot be read")
+        return {"max_age_days": 0, "max_bytes": 0, "note": None}
+
+    monkeypatch.setattr(dr, "sweep", sweep)
+    monkeypatch.setattr(dr, "SWEEP_SECONDS", 0)
+    with pytest.raises(asyncio.CancelledError):
+        await dr.run_forever({}, unreadable)
+    assert calls == [{"max_age_days": 0, "max_bytes": 0}], "skipped once, then the real setting"
+
+
+def test_builds_settings_raises_on_an_unreadable_config(monkeypatch, tmp_path):
+    from server import config
+
+    broken = tmp_path / "config.json"
+    broken.write_text('{"builds": {"max_age_days": 0,')
+    monkeypatch.setattr(config, "USER_CONFIG_FILE", broken)
+    with pytest.raises(config.ConfigUnreadable):
+        config.builds_settings()
+
+
+async def test_nothing_outside_the_store_is_removed_whatever_find_says(tmp_path, monkeypatch):
+    """The last guard, apart from find's symlink filter."""
+    outside = _derived(tmp_path / "outside" / "Precious", age_days=300)
+    store = tmp_path / "builds"
+    store.mkdir()
+    monkeypatch.setattr(dr, "find", lambda base: [dr.Derived(outside, 0.0)])
+    assert await dr.sweep({}, base=store, max_age_days=7, max_bytes=0) == []
+    assert outside.exists()

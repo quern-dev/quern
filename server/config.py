@@ -524,7 +524,10 @@ def builds_settings() -> dict:
     A DerivedData unused for `max_age_days` is removed, then the least
     recently used while the rest is over `max_gb`. 0 turns either off. A value
     that is not a whole number of 0 or more reads as the default, with a note."""
-    raw = read_user_config().get("builds")
+    # Strict: a config.json that cannot be read raises ConfigUnreadable, and
+    # the sweep skips its pass. The defaults instead would turn on a retention
+    # its owner turned off, on any pass that met a half-written file.
+    raw = read_user_config(strict=True).get("builds")
     raw = raw if isinstance(raw, dict) else {}
     notes = []
 

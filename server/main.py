@@ -793,8 +793,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from server.builds import derived_retention
     from server.config import builds_settings as _builds_settings
 
-    if _builds_settings()["note"]:
-        logger.warning("%s", _builds_settings()["note"])
     app.state.build_store_sweep = None
 
     def _record_build_sweep(done: list[dict]) -> None:
