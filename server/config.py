@@ -437,7 +437,7 @@ def client_viewer_links() -> bool:
     turned it off and must not find it back on (review)."""
     try:
         config = read_user_config(strict=True)
-    except ConfigUnreadable:
+    except OSError:          # ConfigUnreadable, or PermissionError from exists()
         return False
     if "remote" not in config:
         return True
