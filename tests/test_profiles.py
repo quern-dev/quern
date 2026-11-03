@@ -560,7 +560,19 @@ class TestTriage:
                                              f"{self.NOSYSCALL},triage=sim-nosyscall-triage")
         [hang] = summary["hangs"]
         assert hang["nature"] == "blocked" and hang["system_calls"] is None
-        assert "did not include System Call Trace" in hang["system_calls_note"]
+        assert "did not record System Call Trace" in hang["system_calls_note"]
+        assert "stack" not in hang and "cannot show where it waited" in hang["stack_note"]
+        assert shows == []
+
+    async def test_a_syscall_table_triage_cannot_read_is_not_system_calls(self, state,
+                                                                          monkeypatch):
+        """An iPhone hitches trace has a syscall table and triage reads N/A
+        for every hang: the TOC does not say there are system calls to read."""
+        summary, shows = await self._summary(
+            monkeypatch, "toc=sim-syscall-toc,hangs=sim-nosyscall-potential-hangs,"
+                         "triage=sim-nosyscall-triage")
+        [hang] = summary["hangs"]
+        assert hang["system_calls"] is None and "did not record" in hang["system_calls_note"]
         assert "stack" not in hang and "cannot show where it waited" in hang["stack_note"]
         assert shows == []
 

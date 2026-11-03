@@ -711,11 +711,10 @@ class ProfileManager:
             summary[section] = value
         # triage needs both tables, and has something to say only about hangs.
         if summary.get("hangs") and {"potential-hangs", "time-profile"} <= set(toc["tables"]):
-            await self._triage(profile, summary, process, "syscall" in toc["tables"])
+            await self._triage(profile, summary, process)
         return summary
 
-    async def _triage(self, profile: Profile, summary: dict, process: str | None,
-                      syscalls_recorded: bool) -> None:
+    async def _triage(self, profile: Profile, summary: dict, process: str | None) -> None:
         """Apple's reading of each hang, onto the hangs already listed:
         `xctrace triage --style hangs` (Xcode 27.2) for its tier, the main
         thread's CPU and the system calls it made; then, for the longest
@@ -751,14 +750,17 @@ class ProfileManager:
             hang["tier"] = read["tier"]
             hang["main_thread_cpu"] = read["main_thread_cpu"]
             hang["nature"] = xt.nature(read["main_thread_cpu"])
-            if read["system_calls"] is not None:
+            # Whether there are system calls to read is triage's to say, per
+            # hang, not the TOC's: an iPhone hitches trace has a syscall table
+            # and triage reads "N/A" for every one of its hangs (measured).
+            syscalls_recorded = read["system_calls"] is not None
+            if syscalls_recorded:
                 hang["system_calls"] = read["system_calls"][:5]
             else:
                 hang["system_calls"] = None
                 hang["system_calls_note"] = (
-                    "triage reported none" if syscalls_recorded else
-                    "not recorded: this profile did not include System Call Trace "
-                    "(the hangs preset records it now)")
+                    "triage had no system calls to read for it: the profile did not record "
+                    "System Call Trace (the hangs preset records it now)")
             if stacks >= TRIAGE_STACKS or not read["window"]:
                 continue
             if hang["nature"] == "blocked" and not syscalls_recorded:

@@ -345,8 +345,9 @@ def _clock_s(text: str) -> float | None:
 def parse_triage(text: str) -> dict:
     """`xctrace triage --style hangs` output: the tiers it counted, and per
     hang its start, duration, tier, main-thread CPU, system calls and where
-    to look closer. Sections it printed "N/A" or "No Data" for are None, so
-    "none recorded" stays apart from "made none"."""
+    to look closer. A section it printed "N/A" for is None -- not recorded --
+    and one with no rows is [], so "none recorded" stays apart from "made
+    none"."""
     tiers: dict[str, int] = {}
     hangs: list[dict] = []
     blocks = re.split(r"^=+Hang #\d+=+$", text, flags=re.M)
