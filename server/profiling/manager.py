@@ -245,6 +245,13 @@ def _records_into(command: str | None, trace: Path) -> bool:
     return bool(command) and "xctrace" in command and f" --output {trace} " in f" {command} "
 
 
+
+def _why(e: BaseException) -> str:
+    """An exception in words; a timeout's own str() is empty."""
+    if isinstance(e, TimeoutError):
+        return f"xctrace did not answer within {EXPORT_TIMEOUT_S:.0f} s"
+    return str(e) or type(e).__name__
+
 class ProfileManager:
     def __init__(self, xctrace: tuple[str, ...] = ("xcrun", "xctrace"),
                  warm_up: Callable[[str], Awaitable[None]] | None = None,
@@ -729,17 +736,18 @@ class ProfileManager:
             raise
         except Exception as e:  # noqa: BLE001 -- the hangs above stand without it
             summary["unavailable"]["triage"] = (
-                f"xctrace triage could not read the hangs ({e}); it needs Xcode 27.2 or later. "
-                "The hangs above are Instruments' own list")
+                f"xctrace triage could not read the hangs: {_why(e)}. triage is in Xcode 27.2 "
+                "and later; the hangs above are Instruments' own list")
             return
         summary["hang_tiers"] = triage["tiers"]
-        stacks = 0
+        stacks = matched = 0
         for read in triage["hangs"]:
             hang = next((h for h in summary["hangs"]
                          if h.get("start_s") is not None and read["start_s"] is not None
                          and abs(h["start_s"] - read["start_s"]) < TRIAGE_MATCH_S), None)
             if hang is None:
                 continue
+            matched += 1
             hang["tier"] = read["tier"]
             hang["main_thread_cpu"] = read["main_thread_cpu"]
             hang["nature"] = xt.nature(read["main_thread_cpu"])
@@ -771,7 +779,7 @@ class ProfileManager:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 -- one hang's stack never sinks the rest
-                hang["stack_note"] = f"its {calltree} call tree could not be read: {e}"
+                hang["stack_note"] = f"its {calltree} call tree could not be read: {_why(e)}"
                 continue
             if stack is None:
                 hang["stack_note"] = (
@@ -780,6 +788,13 @@ class ProfileManager:
             else:
                 hang["stack"] = stack
                 hang["stack_from"] = "system calls" if blocked else "CPU samples"
+        summary["hangs_triaged"] = matched
+        if not matched:
+            # Output it could not parse reads as no hangs at all: say so,
+            # rather than leave it looking like triage had nothing to add.
+            summary["unavailable"]["triage"] = (
+                f"xctrace triage read {len(triage['hangs'])} hangs, and none of them is one "
+                "listed above")
 
     # -- disk ------------------------------------------------------------------
 

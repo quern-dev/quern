@@ -327,17 +327,19 @@ def duration_ms(text: str) -> float | None:
 
 
 def _clock_s(text: str) -> float | None:
-    """triage's "Start Time: 00:22.916.005" -- [hh:]mm:ss.mmm.uuu -- in seconds."""
+    """triage's "Start Time: 00:22.916.005" -- [hh:]mm:ss.mmm[.uuu] -- in seconds."""
     parts = text.strip().split(":")
     try:
         head = [int(p) for p in parts[:-1]]
-        sec, ms, us = (int(x) for x in parts[-1].split("."))
+        sec, *fraction = (int(x) for x in parts[-1].split("."))
     except ValueError:
+        return None
+    if len(fraction) > 3:
         return None
     minutes = 0
     for h in head:
         minutes = minutes * 60 + h
-    return round(minutes * 60 + sec + ms / 1000 + us / 1e6, 6)
+    return round(minutes * 60 + sec + sum(f / 1000 ** (i + 1) for i, f in enumerate(fraction)), 6)
 
 
 def parse_triage(text: str) -> dict:
@@ -398,7 +400,10 @@ def parse_heaviest(markdown: str, app: str | None) -> list[str] | None:
     """The heaviest stack of an `xctrace show --format markdown` call tree,
     from the app's own innermost frames down: "symbol (library)" each. The
     frames above the app's -- the run loop, UIKit's dispatch -- are the same
-    for every hang and say nothing. None when the tree had no rows."""
+    for every hang and say nothing. When the app's only frames on the path
+    are its entry point (`main` and what it calls to start UIKit), the hang
+    ran in no code of the app's own, and the stack is the leaf's end alone.
+    None when the tree had no rows."""
     lines = [ln for ln in markdown.splitlines() if ln.startswith("|")]
     if len(lines) < 3:
         return None
@@ -417,13 +422,20 @@ def parse_heaviest(markdown: str, app: str | None) -> list[str] | None:
             frames.append((cells[sym_i].strip(), cells[lib_i].strip()))
     if not frames:
         return None
-    mine = [i for i, (_sym, lib) in enumerate(frames) if app and lib == app]
+    # A Debug build since Xcode 16 keeps the app's code in <App>.debug.dylib,
+    # beside a stub executable (Xcode's ENABLE_DEBUG_DYLIB; not measured here).
+    mine = [i for i, (_sym, lib) in enumerate(frames) if app and lib in (app, f"{app}.debug.dylib")]
+    start = None
     if mine:
         start = mine[-1]
         while start - 1 in mine:
             start -= 1
-    else:
-        start = max(0, len(frames) - STACK_TAIL)
+        # Measured on an iPhone: two of three busy hangs' heaviest paths had
+        # no app frame but main, AppDelegate.$main and UIApplicationDelegate.main.
+        if any(sym == "main" for sym, _lib in frames[start:mine[-1] + 1]):
+            start = None
+    if start is None:
+        start = max(0, len(frames) - STACK_HEAD - STACK_TAIL)
     stack = [_frame(sym, lib) for sym, lib in frames[start:]]
     if len(stack) > STACK_HEAD + STACK_TAIL + 1:
         # Measured: a busy main thread's heaviest path ran 50 frames below the

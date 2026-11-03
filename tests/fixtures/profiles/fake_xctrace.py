@@ -22,7 +22,7 @@ with the main thread's CPU edited, and sim-two-triage, sim-syscall-triage's
 hang twice at sim-hangs-potential-hangs' two starts); without triage= it fails, as an xctrace
 older than 27.2 has no triage (the message is not a measured one). show
 prints the call tree it is asked for -- sim-syscall-calltree.md for "Profile:
-System Calls", sim-cpu-calltree.md for "Profile" -- and notes the name in
+System Calls", device-busy-calltree.md for "Profile" -- and notes the name in
 <trace's parent>/shows; show-fail fails it, show-empty prints nothing.
 """
 
@@ -130,7 +130,7 @@ def show():
         print("Error: no such track", file=sys.stderr)
         return 5
     if "show-empty" not in MODE:
-        name = {"Profile: System Calls": "sim-syscall-calltree", "Profile": "sim-cpu-calltree"}
+        name = {"Profile: System Calls": "sim-syscall-calltree", "Profile": "device-busy-calltree"}
         sys.stdout.write((HERE / f"{name[calltree]}.md").read_text())
     return 0
 

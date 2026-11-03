@@ -156,7 +156,8 @@ class TestTriageReaders:
 
     def test_clock_with_hours(self):
         assert xt._clock_s("01:02:03.004.005") == 3723.004005
-        assert xt._clock_s("soon") is None
+        assert xt._clock_s("00:22.916") == 22.916            # no microseconds
+        assert xt._clock_s("soon") is None and xt._clock_s("00:01.2.3.4.5") is None
 
     @pytest.mark.parametrize("avg, nature", [(0.0, "blocked"), (19.9, "blocked"), (20.0, "mixed"),
                                              (49.9, "mixed"), (50.0, "busy"), (None, None)])
@@ -167,16 +168,32 @@ class TestTriageReaders:
         assert xt.parse_heaviest(out("sim-syscall-calltree.md"), "QuernProbe") == SYSCALL_STACK
 
     def test_a_long_stack_keeps_both_ends(self):
-        stack = xt.parse_heaviest(out("sim-cpu-calltree.md"), "QuernProbe")
-        assert stack[0] == "main (QuernProbe)"
-        assert stack[6] == "... 40 frames ..." and len(stack) == 13
-        assert stack[-1] == "CA::Layer::superlayer(CA::Transaction*) (QuartzCore)"
+        # A busy hang on an iPhone 11: the app's table view, down to hashing.
+        stack = xt.parse_heaviest(out("device-busy-calltree.md"), "QuernProbe")
+        assert stack[0] == "@objc ScrollViewController.tableView(_:cellForRowAt:) (QuernProbe)"
+        assert stack[6] == "... 12 frames ..." and len(stack) == 13
+        assert stack[-1] == "static Hasher._hash(seed:_:) (libswiftCore.dylib)"
         # An unsymbolicated frame names its library itself, and loses the UUID.
-        assert stack[3] == "0x185028f24 (UIKitCore +0x228f87)"
+        assert stack[7] == "0x1a6115f00 (UIKitCore +0x7f61d3)"
+
+    def test_an_app_only_at_its_entry_point_gets_the_leaf_end(self):
+        """main, AppDelegate.$main, UIApplicationDelegate.main: the same for
+        every hang, so the frames kept are the leaf's."""
+        stack = xt.parse_heaviest(out("sim-cpu-calltree.md"), "QuernProbe")
+        assert len(stack) == xt.STACK_HEAD + xt.STACK_TAIL
+        assert not any("QuernProbe" in f for f in stack)
+        assert stack[-1] == "CA::Layer::superlayer(CA::Transaction*) (QuartzCore)"
+
+    def test_a_debug_dylib_is_the_app(self):
+        tree = ("|is heaviest|Library Name|Symbol Names|\n|---|---|---|\n"
+                "|*|App|main|\n|*|UIKitCore|UIApplicationMain|\n"
+                "|*|App.debug.dylib|Thing.work()|\n|*|libsystem_c.dylib|memcpy|\n")
+        assert xt.parse_heaviest(tree, "App") == ["Thing.work() (App.debug.dylib)",
+                                                  "memcpy (libsystem_c.dylib)"]
 
     def test_without_the_app_the_leaf_end(self):
         stack = xt.parse_heaviest(out("sim-syscall-calltree.md"), None)
-        assert len(stack) == xt.STACK_TAIL and stack[-5:] == SYSCALL_STACK
+        assert len(stack) == xt.STACK_HEAD + xt.STACK_TAIL and stack[-5:] == SYSCALL_STACK
 
     def test_a_symbol_with_a_pipe_keeps_its_frame(self):
         tree = ("|is heaviest|ID|Library Name|Symbol Names|\n|---|---|---|---|\n"
@@ -536,7 +553,7 @@ class TestTriage:
                                          "duration_ms": 12000.0}]
         assert (hang["stack"], hang["stack_from"]) == (SYSCALL_STACK, "system calls")
         assert shows == ["Profile: System Calls"]
-        assert "triage" not in summary["unavailable"]
+        assert summary["hangs_triaged"] == 1 and "triage" not in summary["unavailable"]
 
     async def test_without_system_calls_a_blocked_hang_gets_no_stack(self, state, monkeypatch):
         summary, shows = await self._summary(monkeypatch,
@@ -552,7 +569,7 @@ class TestTriage:
                                              f"{self.NOSYSCALL},triage=sim-busy-triage")
         [hang] = summary["hangs"]
         assert hang["nature"] == "busy" and hang["stack_from"] == "CPU samples"
-        assert hang["stack"][0] == "main (QuernProbe)" and shows == ["Profile"]
+        assert hang["stack"][0].startswith("@objc ScrollViewController") and shows == ["Profile"]
 
     async def test_a_mixed_hang_with_system_calls_gets_them(self, state, monkeypatch):
         summary, shows = await self._summary(monkeypatch, f"{self.SYSCALL},triage=sim-mixed-triage")
@@ -567,11 +584,19 @@ class TestTriage:
         assert "Xcode 27.2" in summary["unavailable"]["triage"]
         assert "unknown command" in summary["unavailable"]["triage"] and shows == []
 
-    async def test_a_hang_triage_did_not_list_is_left_alone(self, state, monkeypatch):
+    async def test_a_triage_that_matches_no_hang_says_so(self, state, monkeypatch):
+        """Output it cannot place -- another trace's here, as a changed format
+        would be -- is not "nothing to add"."""
         # The default hangs (6.979 s, 24.726 s) are another trace's.
         summary, shows = await self._summary(monkeypatch, "triage=sim-syscall-triage")
-        assert summary["hang_tiers"] == {"Severe Hang": 1}
         assert all("tier" not in h for h in summary["hangs"]) and shows == []
+        assert summary["hangs_triaged"] == 0
+        assert "none of them is one listed above" in summary["unavailable"]["triage"]
+
+    def test_a_timeout_is_said_in_words(self):
+        assert manager_mod._why(TimeoutError()) == "xctrace did not answer within 120 s"
+        assert manager_mod._why(ValueError()) == "ValueError"
+        assert manager_mod._why(ProfileError("xctrace show failed", 500)) == "xctrace show failed"
 
     async def test_a_stack_that_cannot_be_read_is_noted(self, state, monkeypatch):
         summary, _ = await self._summary(monkeypatch,
