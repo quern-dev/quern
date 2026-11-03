@@ -158,8 +158,10 @@ async def test_a_directory_whose_build_is_running_is_left(tmp_path):
     held = _derived(tmp_path / "P-0123456789" / "S" / "iphoneos", age_days=30, now=now)
     lock = asyncio.Lock()
     await lock.acquire()
-    assert await dr.sweep({held: lock}, base=tmp_path, max_age_days=7, max_bytes=0,
-                          now=now) == []
+    # Bounded: with the busy checks gone, the sweep would wait on this held
+    # lock for ever, and a hang is not a failure anyone reads.
+    assert await asyncio.wait_for(dr.sweep({held: lock}, base=tmp_path, max_age_days=7,
+                                           max_bytes=0, now=now), 5) == []
     assert held.exists()
 
 
@@ -187,9 +189,13 @@ async def test_a_build_starting_during_the_removal_never_meets_it(tmp_path, monk
             break
         await asyncio.sleep(0.01)
     assert lock is not None and lock.locked(), "the sweep holds the build's lock"
-    async with lock:
-        met = path.exists()
-    await sweeping
+
+    async def meet() -> bool:
+        async with lock:
+            return path.exists()
+
+    met = await asyncio.wait_for(meet(), 5)
+    await asyncio.wait_for(sweeping, 5)
     assert met is False, "the waiting build found the directory still there"
     assert not path.exists() and not list(tmp_path.glob(dr._REMOVING + "*"))
 
@@ -334,8 +340,8 @@ async def test_a_lock_on_a_path_inside_or_around_it_keeps_it(tmp_path):
     old = _derived(tmp_path / "SeattleSirens", age_days=30, now=now)
     lock = asyncio.Lock()
     await lock.acquire()
-    assert await dr.sweep({old / "Build": lock}, base=tmp_path, max_age_days=7, max_bytes=0,
-                          now=now) == []
+    assert await asyncio.wait_for(dr.sweep({old / "Build": lock}, base=tmp_path,
+                                           max_age_days=7, max_bytes=0, now=now), 5) == []
     assert old.exists()
 
 
