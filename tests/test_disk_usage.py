@@ -531,3 +531,23 @@ def test_a_misbehaving_server_is_reported_not_raised(monkeypatch, tmp_path):
     report, reason = du.fetch(1)
     assert report is None and "could not ask" in reason
     assert du.report_lines({"measuring": False})[0].startswith("not measured")
+
+
+def test_a_simulator_read_in_part_makes_the_total_incomplete(tmp_path, monkeypatch):
+    """Counted as complete, the device left out read as nothing there
+    (CodeRabbit)."""
+    sims = tmp_path / "Devices"
+    _sim(sims, "AAAA", "kept", 10_000)
+    _sim(sims, "GONE", "gone mid-walk", 10_000)
+    real = du.disk_size
+
+    def gone(path, stop=None):
+        if path.name == "GONE":
+            raise FileNotFoundError(f"{path} disappeared")
+        return real(path, stop)
+
+    monkeypatch.setattr(du, "disk_size", gone)
+    report = _measure(tmp_path)
+    assert report["stores"]["simulators"]["partial"] is True
+    assert report["used_complete"] is False
+    assert any("could not read all of simulators" in w for w in report["warnings"])

@@ -123,6 +123,7 @@ def _simulators(root: Path, stop: threading.Event | None = None) -> dict:
     sizes.sort(key=lambda d: -d["bytes"])
     out = {"path": str(root), "bytes": total, "count": len(sizes), "largest": sizes[:LARGEST]}
     if partial:
+        out["partial"] = True
         out["note"] = "some simulators could not be read: the total leaves them out"
     return out
 
@@ -150,6 +151,11 @@ def measure(*, sim_devices: Path | None = None, config_dir: Path | None = None,
     known = [s["bytes"] for s in stores.values() if s["bytes"] is not None]
     used = sum(known)
     unknown = [name for name, s in stores.items() if s["bytes"] is None]
+    # Read in part -- a simulator gone mid-walk, or unreadable -- is not
+    # complete either: counted as complete, the shortfall read as nothing
+    # there (CodeRabbit).
+    partial = [name for name, s in stores.items()
+               if s["bytes"] is not None and s.get("partial")]
     warnings = []
     if settings["warn_bytes"] and used > settings["warn_bytes"]:
         warnings.append(f"simulators and quern's stores take {_gb(used)}, over "
@@ -160,8 +166,11 @@ def measure(*, sim_devices: Path | None = None, config_dir: Path | None = None,
     if unknown:
         warnings.append(f"could not measure {', '.join(unknown)}: the total leaves "
                         f"{'it' if len(unknown) == 1 else 'them'} out")
+    if partial:
+        warnings.append(f"could not read all of {', '.join(partial)}: the total leaves "
+                        "some of it out")
     return {"measured_at": now(), "stores": stores, "used_bytes": used,
-            "used_complete": not unknown, "disk": disk, "warnings": warnings,
+            "used_complete": not unknown and not partial, "disk": disk, "warnings": warnings,
             "note": settings.get("note")}
 
 
