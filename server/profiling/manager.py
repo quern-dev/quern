@@ -98,12 +98,13 @@ def _now() -> str:
 
 
 
-def _recorded_s(profile: Profile) -> float | None:
-    """How long the profile ran: start to end, but never past its time limit
-    -- one finished by a later server ended long before it was read."""
+def _recorded_s(profile: Profile, recording_at: str | None = None) -> float | None:
+    """How long the profile ran: from when it was recording (else its start)
+    to its end, but never past its time limit -- one finished by a later
+    server ended long before it was read."""
     try:
         span = (datetime.fromisoformat(profile.ended_at or "")
-                - datetime.fromisoformat(profile.started_at)).total_seconds()
+                - datetime.fromisoformat(recording_at or profile.started_at)).total_seconds()
     except ValueError:
         return None
     return min(span, profile.time_limit_s) if span > 0 else None
@@ -403,6 +404,12 @@ class ProfileManager:
         except (OSError, TimeoutError) as e:
             raise ProfileError(f"perfetto could not be started on {profile.device}: {e!r}",
                                502) from e
+        # When perfetto said it was recording: what a trace's span is held to,
+        # not started_at, which is before the snapshot and the device's start
+        # (CodeRabbit). Without it the summary falls back to started_at.
+        first["recording_at"] = _now()
+        with contextlib.suppress(OSError):
+            await asyncio.to_thread(_write_json_atomic, profile.start_file, first)
 
     async def _spawn(self, profile: Profile, preset: xt.Preset) -> None:
         cmd = xt.record_command(self.xctrace, profile.device, preset, profile.time_limit_s,
@@ -636,7 +643,7 @@ class ProfileManager:
         summary = await ad.summarize(
             preset=profile.preset, package=profile.bundle_id, trace=profile.trace,
             first=first, last=last, tp=self.trace_processor, tp_status=status.as_dict(),
-            logged_hangs=logged, expected_s=_recorded_s(profile))
+            logged_hangs=logged, expected_s=_recorded_s(profile, first.get("recording_at")))
         await asyncio.to_thread(_write_json_atomic, profile.summary_file, summary)
         profile.state = "finished"
 

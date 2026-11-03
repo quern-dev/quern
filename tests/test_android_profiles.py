@@ -207,6 +207,9 @@ class TestConfig:
         assert manager_mod._recorded_s(p) == 30
         p.ended_at = "2026-11-03T10:00:12.500000+00:00"
         assert manager_mod._recorded_s(p) == 12.5
+        # From when perfetto said it was recording, not from the request: the
+        # snapshot and the device's start come between (CodeRabbit).
+        assert manager_mod._recorded_s(p, "2026-11-03T10:00:02.500000+00:00") == 10.0
         p.ended_at = None
         assert manager_mod._recorded_s(p) is None
 
@@ -850,7 +853,10 @@ class TestManager:
                            adb=adb, trace_processor=FakeTP(), logged_hangs=None)
         profile, _ = await _start(m)
         assert b"max_file_size_bytes: 67108864" in adb.config
-        assert json.loads(profile.start_file.read_text())["max_trace_bytes"] == 64 * 2**20
+        record = json.loads(profile.start_file.read_text())
+        assert record["max_trace_bytes"] == 64 * 2**20
+        # Written once perfetto confirmed the session, after the request.
+        assert record["recording_at"] > profile.started_at
         async with asyncio.timeout(10):
             await m.stop(profile.id)
 
