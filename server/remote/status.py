@@ -167,12 +167,16 @@ def _disk(remote: client.Remote, timeout: float) -> tuple[dict | None, str | Non
         return None, "disk use could not be read: not a report"
     if report.get("measuring"):
         return {"measuring": True}, None
+    if report.get("error") and not isinstance(report.get("stores"), dict):
+        return None, f"disk use could not be measured there: {report['error']}"
     disk = report.get("disk") if isinstance(report.get("disk"), dict) else {}
     return {"used_bytes": report.get("used_bytes"),
             "used_complete": report.get("used_complete"),
             "free_bytes": disk.get("free_bytes"),
             "total_bytes": disk.get("total_bytes"),
-            "warnings": report.get("warnings") or [],
+            "warnings": (report.get("warnings") or []) + (
+                [f"the latest measurement failed: {report['last_error']}"]
+                if report.get("last_error") else []),
             "measured_at": report.get("measured_at")}, None
 
 

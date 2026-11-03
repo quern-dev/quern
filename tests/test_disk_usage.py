@@ -64,10 +64,10 @@ def test_a_store_that_cannot_be_read_is_unknown_not_empty(tmp_path, monkeypatch)
     (tmp_path / "quern" / "recordings").mkdir(parents=True)
     real = du.disk_size
 
-    def unreadable(path):
+    def unreadable(path, stop=None):
         if path.name == "recordings":
             raise PermissionError("Operation not permitted")
-        return real(path)
+        return real(path, stop)
 
     monkeypatch.setattr(du, "disk_size", unreadable)
     report = _measure(tmp_path)
@@ -132,7 +132,7 @@ def test_an_unreadable_config_raises_rather_than_warning_on_defaults(monkeypatch
 async def test_a_pass_that_fails_does_not_stop_the_next(monkeypatch):
     calls = []
 
-    def measure():
+    def measure(**kw):
         calls.append(1)
         if len(calls) == 1:
             raise RuntimeError("disk on fire")
@@ -350,3 +350,184 @@ def test_doctor_prints_the_servers_report(monkeypatch, capsys):
     main._report_disk()
     out = capsys.readouterr().out
     assert "59.0 GB used" in out and "! 12.0 GB free on the disk" in out
+
+
+# ----------------------------------------------------------------------------
+# Review of the first pass
+# ----------------------------------------------------------------------------
+
+
+async def test_a_client_never_sees_a_path_in_an_error():
+    """str(OSError) names the path: /Users/<owner>/.quern/... (review)."""
+    report = _report()
+    report["stores"]["recordings"]["error"] = (
+        "[Errno 13] Permission denied: '/Users/owner/.quern/recordings'")
+    report["disk"] = {"total_bytes": None, "free_bytes": None,
+                      "error": "[Errno 2] No such file: '/Users/owner/.quern'"}
+    out = await _route(report, principal="client:a")
+    assert "/Users/owner" not in str(out)
+    assert out["stores"]["recordings"]["error"] == "could not be read"
+    assert out["disk"]["error"] == "could not be read"
+    owner = await _route(report)
+    assert "/Users/owner/.quern/recordings" in owner["stores"]["recordings"]["error"]
+
+
+async def test_a_client_gets_no_sweep_while_measuring():
+    out = await _route(None, principal="client:a", sweep={"removed": [{"path": "/Users/o"}]})
+    assert out == {"measuring": True, "build_store_sweep": None}
+
+
+async def _route_failed(report, failure, principal="owner"):
+    from server import visibility
+    from server.api import system
+
+    app = SimpleNamespace(state=SimpleNamespace(
+        disk_usage=report, disk_usage_error={"error": failure, "at": 1.0},
+        build_store_sweep=None))
+    caller = visibility.Caller(session="s", principal=principal)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(visibility, "current_caller", lambda: caller)
+        return await system.disk_use(SimpleNamespace(app=app))
+
+
+async def test_a_failed_first_pass_is_a_failure_not_measuring():
+    """Left as None, it read 'measuring' for good (review)."""
+    out = await _route_failed(None, "skipped: /Users/o/.quern/config.json cannot be read")
+    assert out["measuring"] is False and "cannot be read" in out["error"]
+    assert du.report_lines(out)[0].startswith("not measured: skipped")
+    client = await _route_failed(None, "skipped: /Users/o/.quern/config.json", "client:a")
+    assert client["error"] == "the measurement failed"
+
+
+async def test_a_later_failure_keeps_the_older_report_and_says_so():
+    out = await _route_failed(_report(), "disk on fire")
+    assert out["last_error"] == "disk on fire" and out["stores"]
+    assert any("latest measurement failed" in line for line in du.report_lines(out))
+
+
+async def test_a_pass_that_fails_records_why(monkeypatch):
+    from server import config
+
+    def measure(**kw):
+        raise config.ConfigUnreadable("config.json cannot be read")
+
+    monkeypatch.setattr(du, "measure", measure)
+    app = SimpleNamespace(state=SimpleNamespace(disk_usage=None))
+    task = asyncio.create_task(du.run_forever(app))
+    for _ in range(100):
+        if getattr(app.state, "disk_usage_error", None):
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert app.state.disk_usage is None
+    assert "cannot be read" in app.state.disk_usage_error["error"]
+
+
+def test_a_remote_whose_measurement_failed_says_so(monkeypatch):
+    from server.remote import status
+
+    def get(remote, path, timeout):
+        return {"/health": {"status": "ok", "version": "0.25.0"},
+                "/api/v1/device/list": {"devices": []},
+                "/api/v1/system/disk": {"measuring": False,
+                                        "error": "the measurement failed"}}[path]
+
+    monkeypatch.setattr(status, "_get", get)
+    row = status.probe(_remote(), "0.25.0")
+    assert row["disk"] is None and "could not be measured there" in row["disk_error"]
+
+
+def test_the_simulators_are_walked_once(tmp_path, monkeypatch):
+    """Walked as a whole and then device by device, every file was read twice
+    -- 18 s became 36 per pass on 27 GB (review)."""
+    sims = tmp_path / "Devices"
+    _sim(sims, "AAAA", "a", 1000)
+    _sim(sims, "BBBB", "b", 1000)
+    (sims / "device_set.plist").write_bytes(b"x" * 100)
+    opened = []
+    real = du.os.scandir
+
+    def counting(path):
+        opened.append(str(path))
+        return real(path)
+
+    monkeypatch.setattr(du.os, "scandir", counting)
+    out = du._simulators(sims)
+    data = [p for p in opened if p.endswith("/data")]
+    assert len(data) == 2 and len(set(data)) == 2, f"each device's data once: {data}"
+    assert out["count"] == 2 and out["bytes"] >= 2000
+
+
+def test_a_symlinked_device_is_not_followed(tmp_path):
+    outside = _sim(tmp_path / "elsewhere", "REAL", "real", 50_000)
+    sims = tmp_path / "Devices"
+    sims.mkdir()
+    (sims / "LINK").symlink_to(outside, target_is_directory=True)
+    out = du._simulators(sims)
+    assert out["count"] == 0 and out["bytes"] < 50_000
+
+
+def test_a_stopping_server_ends_the_walk(tmp_path):
+    import threading
+
+    _sim(tmp_path / "Devices", "AAAA", "a", 1000)
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(du.Stopped):
+        du.disk_size(tmp_path / "Devices", stop)
+
+
+async def test_cancelling_the_task_stops_the_thread(monkeypatch):
+    """The thread cannot be cancelled; the server's exit waited for it."""
+    import threading
+
+    seen = []
+    started = threading.Event()
+
+    def measure(*, stop=None, **kw):
+        started.set()
+        stop.wait(5)
+        seen.append(stop.is_set())
+        raise du.Stopped()
+
+    monkeypatch.setattr(du, "measure", measure)
+    task = asyncio.create_task(du.run_forever(SimpleNamespace(state=SimpleNamespace())))
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(100):
+        if seen:
+            break
+        await asyncio.sleep(0.01)
+    assert seen == [True]
+
+
+def test_unknown_free_space_is_said_not_crashed():
+    report = _report()
+    report["disk"] = {"total_bytes": None, "free_bytes": None, "error": "x"}
+    assert "free space unknown" in du.summary_line(report)
+    from server.remote_cli import _status_line
+
+    row = {"name": "r", "url": "u", "label": "l", "reachable": True, "version": "1",
+           "devices": [], "free": 0, "disk": {"used_bytes": None, "free_bytes": None}}
+    assert _status_line(row).endswith(", disk ? used / ? free")
+
+
+def test_a_misbehaving_server_is_reported_not_raised(monkeypatch, tmp_path):
+    import http.client
+
+    from server import config
+
+    (tmp_path / "key").write_text("k")
+    monkeypatch.setattr(config, "API_KEY_FILE", tmp_path / "key")
+
+    def bad(*a, **k):
+        raise http.client.BadStatusLine("garbage")
+
+    monkeypatch.setattr("urllib.request.urlopen", bad)
+    report, reason = du.fetch(1)
+    assert report is None and "could not ask" in reason
+    assert du.report_lines({"measuring": False})[0].startswith("not measured")

@@ -19,6 +19,7 @@ import logging
 import os
 import plistlib
 import shutil
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -42,14 +43,22 @@ MEASURE_SECONDS = 15 * 60
 LARGEST = 5
 
 
-def disk_size(path: Path) -> int:
+class Stopped(Exception):
+    """The server is stopping: the walk ends rather than hold up its exit."""
+
+
+def disk_size(path: Path, stop: threading.Event | None = None) -> int:
     """Bytes `path` takes on disk, symlinks not followed. Raises OSError when
     `path` itself cannot be read; entries inside it that cannot be read count
-    as nothing -- an estimate, not an audit."""
+    as nothing -- an estimate, not an audit. Raises Stopped once `stop` is
+    set: a walk of tens of GB runs in a thread nothing can cancel, and
+    `quern stop` waited for it, then killed the server (review)."""
     total = 0
     stack = [path]
     first = True
     while stack:
+        if stop is not None and stop.is_set():
+            raise Stopped()
         current = stack.pop()
         try:
             it = os.scandir(current)
@@ -70,52 +79,66 @@ def disk_size(path: Path) -> int:
     return total
 
 
-def _store(path: Path) -> dict:
+def _store(path: Path, stop: threading.Event | None = None) -> dict:
     """One store's size: 0 when it does not exist yet, unknown with the reason
-    when it exists and cannot be read."""
-    if not path.exists():
-        return {"path": str(path), "bytes": 0}
+    when it exists and cannot be read -- or when whether it exists cannot be
+    told, which a parent that cannot be searched raises (review)."""
     try:
-        return {"path": str(path), "bytes": disk_size(path)}
+        if not path.exists():
+            return {"path": str(path), "bytes": 0}
+        return {"path": str(path), "bytes": disk_size(path, stop)}
     except OSError as e:
         return {"path": str(path), "bytes": None, "error": str(e)}
 
 
-def _simulators(root: Path) -> dict:
-    out = _store(root)
-    if out["bytes"] is None or not root.exists():
-        return out
+def _simulators(root: Path, stop: threading.Event | None = None) -> dict:
+    """The simulators' data, in one walk: each device sized once, and the
+    total their sum with whatever else the directory holds. Walking the root
+    and then each device read every file twice (review)."""
+    try:
+        if not root.exists():
+            return {"path": str(root), "bytes": 0, "count": 0, "largest": []}
+        entries = list(os.scandir(root))
+    except OSError as e:
+        return {"path": str(root), "bytes": None, "error": str(e)}
+    total = 0
     sizes = []
-    with contextlib.suppress(OSError):
-        for device in root.iterdir():
-            if not device.is_dir() or device.is_symlink():
+    partial = False
+    for entry in entries:
+        try:
+            st = entry.stat(follow_symlinks=False)
+            total += getattr(st, "st_blocks", 0) * 512 or st.st_size
+            if not entry.is_dir(follow_symlinks=False):
                 continue
-            try:
-                size = disk_size(device)
-            except OSError:
-                continue
-            name = None
-            with contextlib.suppress(OSError, plistlib.InvalidFileException, ValueError):
-                info = plistlib.loads((device / "device.plist").read_bytes())
-                name = info.get("name") if isinstance(info, dict) else None
-            sizes.append({"udid": device.name, "name": name, "bytes": size})
+            size = disk_size(Path(entry.path), stop)
+        except OSError:
+            partial = True                       # gone mid-walk, or unreadable
+            continue
+        total += size
+        name = None
+        with contextlib.suppress(OSError, plistlib.InvalidFileException, ValueError):
+            info = plistlib.loads((Path(entry.path) / "device.plist").read_bytes())
+            name = info.get("name") if isinstance(info, dict) else None
+        sizes.append({"udid": entry.name, "name": name, "bytes": size})
     sizes.sort(key=lambda d: -d["bytes"])
-    out["count"] = len(sizes)
-    out["largest"] = sizes[:LARGEST]
+    out = {"path": str(root), "bytes": total, "count": len(sizes), "largest": sizes[:LARGEST]}
+    if partial:
+        out["note"] = "some simulators could not be read: the total leaves them out"
     return out
 
 
 def measure(*, sim_devices: Path | None = None, config_dir: Path | None = None,
-            settings: dict | None = None, now: Callable[[], float] = time.time) -> dict:
+            settings: dict | None = None, now: Callable[[], float] = time.time,
+            stop: threading.Event | None = None) -> dict:
     """Measure every store now. Blocking: run it in a thread."""
     config_dir = config_dir or config_mod.CONFIG_DIR
     settings = settings or config_mod.disk_settings()
     stores = {
-        "simulators": _simulators(sim_devices or SIM_DEVICES),
-        "builds": _store(config_dir / "builds"),
-        "recordings": _store(config_dir / "recordings"),
-        "profiles": _store(config_dir / "profiles"),
-        "uploads": _store(config_dir / "uploads"),
+        "simulators": _simulators(sim_devices or SIM_DEVICES, stop),
+        "builds": _store(config_dir / "builds", stop),
+        "recordings": _store(config_dir / "recordings", stop),
+        "profiles": _store(config_dir / "profiles", stop),
+        "uploads": _store(config_dir / "uploads", stop),
     }
     try:
         usage = shutil.disk_usage(config_dir if config_dir.exists() else config_dir.parent)
@@ -149,6 +172,7 @@ def _gb(n: int) -> str:
 def fetch(port: int, *, host: str = "127.0.0.1", timeout: float = 10.0) -> tuple[dict | None, str]:
     """The running server's disk report, for the CLI; None and why when it
     could not be asked -- distinct from a report, which may say "measuring"."""
+    import http.client
     import json
     import urllib.error
     import urllib.request
@@ -165,7 +189,7 @@ def fetch(port: int, *, host: str = "127.0.0.1", timeout: float = 10.0) -> tuple
             body = json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
         return None, f"the server answered {e.code}"
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
         return None, f"could not ask the server: {e}"
     return (body, "") if isinstance(body, dict) else (None, "the server's answer was not a report")
 
@@ -176,7 +200,12 @@ def report_lines(report: dict, *, now: float | None = None) -> list[str]:
     now = time.time() if now is None else now
     if report.get("measuring"):
         return ["measuring (the first measurement runs at start and takes a while)"]
+    if not isinstance(report.get("stores"), dict):
+        return [f"not measured: {report.get('error') or 'the server answered without a report'}"]
     lines = [summary_line(report)]
+    if report.get("last_error"):
+        lines.append(f"! the latest measurement failed, so this is an older one: "
+                     f"{report['last_error']}")
     sims = report["stores"].get("simulators", {})
     if sims.get("largest"):
         named = ", ".join(f"{d.get('name') or d['udid'][:8]} {_gb(d['bytes'])}"
@@ -207,15 +236,25 @@ def summary_line(report: dict) -> str:
 
 async def run_forever(app: Any) -> None:
     """Measure at start and every MEASURE_SECONDS after, into
-    `app.state.disk_usage`. Never raises."""
+    `app.state.disk_usage`. A pass that fails leaves the last good report and
+    says why in `app.state.disk_usage_error`: left as None, a failure read as
+    "measuring" for good (review). Cancelled, it stops the walk in its thread
+    rather than hold up the server's exit. Never raises."""
+    stop = threading.Event()
     while True:
         try:
-            report = await asyncio.to_thread(measure)
+            report = await asyncio.to_thread(measure, stop=stop)
             app.state.disk_usage = report
+            app.state.disk_usage_error = None
             for warning in report["warnings"]:
                 logger.warning("Disk: %s", warning)
+        except asyncio.CancelledError:
+            stop.set()
+            raise
         except config_mod.ConfigUnreadable as e:
+            app.state.disk_usage_error = {"error": f"skipped: {e}", "at": time.time()}
             logger.warning("Disk measurement skipped: %s", e)
-        except Exception:  # noqa: BLE001 -- the measurement must outlive one bad pass
+        except Exception as e:  # noqa: BLE001 -- the measurement must outlive one bad pass
+            app.state.disk_usage_error = {"error": str(e) or type(e).__name__, "at": time.time()}
             logger.exception("Disk measurement failed")
         await asyncio.sleep(MEASURE_SECONDS)
