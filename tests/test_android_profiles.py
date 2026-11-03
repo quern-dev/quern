@@ -633,6 +633,12 @@ class TestParseCsv:
     def test_nothing(self):
         assert parse_csv("") == [] and parse_csv("Query executed in 0 ms\n") == []
 
+    def test_a_field_past_csvs_default_limit(self):
+        """Measured: the wq section was 300 KB on a Pixel 5, and csv's 128 KiB
+        default failed the whole summary."""
+        big = "5B" * 200_000
+        assert parse_csv(f'"wq","n"\n"{big}",1\n') == [{"wq": big, "n": 1}]
+
 
 # ── the manager ──────────────────────────────────────────────────────────────
 
