@@ -93,13 +93,20 @@ def remote_trace(profile_id: str) -> str:
 
 def config_text(preset: Preset, package: str, time_limit_s: int) -> str:
     """perfetto's text config: streamed to its file, ended by its own time
-    limit, with the app's atrace so its own slices are recorded."""
+    limit, with the app's atrace so its own slices are recorded.
+
+    A ring buffer, flushed every second. A DISCARD buffer stops taking data
+    once it has filled, even while it is being written out, so it capped the
+    whole trace at its 32 MiB: measured on a Pixel 5 (Android 14), a 25 s
+    profile kept 19 s, and trace_processor named the config as data loss.
+    The same profile with this one kept all 25 s and reported none."""
     events = " ".join(f'ftrace_events: "{e}"' for e in preset.ftrace)
     categories = " ".join(f'atrace_categories: "{c}"' for c in preset.atrace)
     return (
-        "buffers { size_kb: 32768 fill_policy: DISCARD }\n"
+        "buffers { size_kb: 32768 fill_policy: RING_BUFFER }\n"
         "write_into_file: true\n"
         "file_write_period_ms: 1000\n"
+        "flush_period_ms: 1000\n"
         "max_file_size_bytes: 268435456\n"
         f"duration_ms: {time_limit_s * 1000}\n"
         'data_sources { config { name: "linux.ftrace" ftrace_config { '
@@ -339,14 +346,16 @@ select
      select s.name as name, t.name as thread, s.dur as dur, s.ts as ts
      from slice s join thread_track tt on s.track_id = tt.id
      join thread t using (utid) join process p using (upid)
-     where p.name = '{package}' order by s.dur desc limit 10))) as slices
+     where p.name = '{package}' order by s.dur desc limit 10))) as slices,
+  hex((select json_group_array(json_array(name, idx, value)) from stats
+     where severity = 'data_loss' and value > 0)) as loss
 """
 
 
 def decode_summary_row(row: dict) -> dict:
     """The one row SUMMARY_SQL gives, its hex sections decoded."""
     out = {k: row.get(k) for k in ("start_ts", "end_ts", "procs")}
-    for key in ("wq", "frames", "cpu", "slices"):
+    for key in ("wq", "frames", "cpu", "slices", "loss"):
         raw = row.get(key)
         out[key] = json.loads(bytes.fromhex(raw).decode()) if raw else []
     return out
@@ -488,6 +497,15 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
 
     if read is not None:
         start_ns, end_ns = read["start_ts"] or 0, read["end_ts"] or 0
+        if read["loss"]:
+            # What trace_processor itself rates as data loss: the sections
+            # below are then read from a trace with holes in it.
+            summary["trace_data_loss"] = [{"stat": name if idx is None else f"{name}[{idx}]",
+                                           "value": value} for name, idx, value in read["loss"]]
+            summary["trace_note"] = (
+                "trace_processor says the trace lost data, so what it holds is incomplete: "
+                "counts read from it are lower bounds, and a gap is not proof of nothing "
+                "happening")
         if not read["procs"]:
             unavailable["app"] = f"{package} did not run during the profile"
         if preset == "cpu":

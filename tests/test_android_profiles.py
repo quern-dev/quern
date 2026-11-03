@@ -124,9 +124,10 @@ class FakeAdb:
 class FakeTP:
     """trace_processor with its real answers, by query."""
 
-    def __init__(self, state="installed", fail: set[str] = frozenset()):
+    def __init__(self, state="installed", fail: set[str] = frozenset(), fixture="summary"):
         self._state = state
         self.fail = fail
+        self.fixture = fixture
         self.ensured = 0
 
     def status(self):
@@ -143,7 +144,7 @@ class FakeTP:
         assert "json_group_array" in sql, sql          # one query, one load of the trace
         if self.fail:
             raise RuntimeError("trace_processor failed (exit -11): no output")
-        return parse_csv(csv_fixture("summary"))
+        return parse_csv(csv_fixture(self.fixture))
 
 
 @pytest.fixture
@@ -178,7 +179,9 @@ class TestConfig:
         text = ad.config_text(ad.PRESETS[preset], PKG, 45)
         assert text.count("{") == text.count("}")
         assert "duration_ms: 45000" in text and f'atrace_apps: "{PKG}"' in text
-        assert "write_into_file: true" in text            # streamed, not a ring buffer
+        assert "write_into_file: true" in text            # streamed to its file
+        # A DISCARD buffer capped the whole trace at its size (measured).
+        assert "fill_policy: RING_BUFFER" in text and "flush_period_ms: 1000" in text
 
     def test_the_hangs_preset_records_input(self):
         assert "input" in ad.PRESETS["hangs"].atrace and "input" not in ad.PRESETS["cpu"].atrace
@@ -326,7 +329,7 @@ class TestReducers:
     def test_the_hang_from_a_live_trace(self):
         d = _decoded()
         [hang] = ad.hangs_from_counters(d["wq"], PKG, d["start_ts"], d["end_ts"])
-        assert hang["duration_ms"] == pytest.approx(10635.4, abs=0.1)
+        assert hang["duration_ms"] == pytest.approx(10159.7, abs=0.1)
         assert hang["window"].startswith("com.quern.probe/") and "note" not in hang
 
     def test_a_hang_with_more_input_queued_is_still_one_hang(self):
@@ -416,6 +419,18 @@ class TestSummarize:
         assert s["frames"]["source"] == "gfxinfo" and s["cpu"]["source"] == "/proc"
         assert s["slowest_slices"] is None and "trace_processor" in s["unavailable"]
         assert s["trace_processor"]["state"] == tp_state
+
+    async def test_a_trace_that_lost_data_says_so(self):
+        """A Pixel 5's 25 s profile with the old DISCARD buffer: the trace
+        stopped at 19 s, and trace_processor named it as data loss."""
+        s = await _summary(FakeTP(fixture="summary-lossy"))
+        assert {d["stat"] for d in s["trace_data_loss"]} == {
+            "config_write_into_file_discard[0]", "traced_buf_patches_failed[0]"}
+        assert "lower bounds" in s["trace_note"]
+
+    async def test_a_whole_trace_reports_no_loss(self):
+        s = await _summary(FakeTP())
+        assert "trace_data_loss" not in s and "trace_note" not in s
 
     async def test_no_source_for_hangs_is_said_not_empty(self):
         s = await _summary(FakeTP("disabled"))
