@@ -384,6 +384,10 @@ class ProfileManager:
         trace_processor starts here, while it records, not at the stop."""
         device = self._device(profile)
         first = await device.snapshot(profile.bundle_id)
+        # Recorded with the start, so the summary judges the trace by the
+        # limit it was written under, not by today's config.
+        first["max_trace_bytes"] = self.settings().get("android_max_trace_bytes",
+                                                       ad.MAX_TRACE_BYTES)
         await asyncio.to_thread(_write_json_atomic, profile.start_file, first)
         self.trace_processor.ensure()
         # Recorded before perfetto is asked, as an xctrace is at spawn: a
@@ -393,7 +397,7 @@ class ProfileManager:
         await self._save()
         try:
             await device.start(profile.id, profile.bundle_id, preset, profile.time_limit_s,
-                               profile.log)
+                               profile.log, first["max_trace_bytes"])
         except ad.StartFailed as e:
             raise ProfileError(str(e), 502) from e
         except (OSError, TimeoutError) as e:

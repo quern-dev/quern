@@ -53,6 +53,12 @@ FRAME_BUDGET_MS = 1000 / 60
 LIST_LIMIT = 50
 #: An adb call to the device: perfetto's own answers measured 0.2-0.3 s.
 ADB_TIMEOUT_S = 30.0
+#: The trace file's limit when config.json does not set one
+#: (profiles.android_max_trace_mb).
+MAX_TRACE_BYTES = 256 * 2**20
+#: A trace file this close to its limit reached it: perfetto stops before
+#: the packet that would cross it.
+FULL_FILE = 0.98
 #: A trace this much (or a tenth) shorter than its profile stopped early.
 TRACE_SHORT_S = 3.0
 #: Pulling the trace: 4.1 MB took 0.14 s; a 300 s profile can be 100+ MB.
@@ -98,7 +104,8 @@ def remote_trace(profile_id: str) -> str:
     return f"{REMOTE_DIR}/quern-{profile_id}.pftrace"
 
 
-def config_text(preset: Preset, package: str, time_limit_s: int) -> str:
+def config_text(preset: Preset, package: str, time_limit_s: int,
+                max_file_bytes: int = MAX_TRACE_BYTES) -> str:
     """perfetto's text config: streamed to its file, ended by its own time
     limit, with the app's atrace so its own slices are recorded.
 
@@ -114,7 +121,7 @@ def config_text(preset: Preset, package: str, time_limit_s: int) -> str:
         "write_into_file: true\n"
         "file_write_period_ms: 1000\n"
         "flush_period_ms: 1000\n"
-        "max_file_size_bytes: 268435456\n"
+        f"max_file_size_bytes: {max_file_bytes}\n"
         f"duration_ms: {time_limit_s * 1000}\n"
         'data_sources { config { name: "linux.ftrace" ftrace_config { '
         f'{events} {categories} atrace_apps: "{package}" }} }} }}\n'
@@ -174,10 +181,10 @@ class Device:
         self._turn = asyncio.Lock()
 
     async def start(self, profile_id: str, package: str, preset: Preset,
-                    time_limit_s: int, log: Path) -> None:
+                    time_limit_s: int, log: Path, max_file_bytes: int = MAX_TRACE_BYTES) -> None:
         """Start the detached session, and confirm it is running: perfetto's
         exit status is the request, `--is_detached` is the outcome."""
-        cfg = config_text(preset, package, time_limit_s).encode()
+        cfg = config_text(preset, package, time_limit_s, max_file_bytes).encode()
         rc, out, err = await self.run(
             self.serial, "shell",
             f"perfetto --detach={session_key(profile_id)} --txt -c - "
@@ -634,15 +641,15 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
             # stops at max_file_size_bytes, which a busy device reaches in
             # ~130 s (Pixel 5: 48 MB per 25 s), and a 300 s profile is allowed.
             loss.append({"stat": "trace ended early", "value": round(span_s, 1),
-                         "detail": f"the trace covers {span_s:.1f} s of a {expected_s:.1f} s "
-                                   "profile; perfetto stops writing at its 256 MiB file limit"})
+                         "detail": _why_short(span_s, expected_s, trace,
+                                              first.get("max_trace_bytes"))})
         if loss:
             # The sections below are then read from a trace with holes in it.
             summary["trace_data_loss"] = loss
             summary["trace_note"] = (
-                "trace_processor says the trace lost data, so what it holds is incomplete: "
-                "counts read from it are lower bounds, and a gap is not proof of nothing "
-                "happening")
+                "the trace lost data (trace_data_loss says how), so what it holds is "
+                "incomplete: counts read from it are lower bounds, and a gap is not proof "
+                "of nothing happening")
         if not read["procs"]:
             unavailable["app"] = f"{package} did not run during the profile"
         if preset == "cpu":
@@ -710,6 +717,21 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
             unavailable.setdefault("cpu", why)
     return summary
 
+
+
+def _why_short(span_s: float, expected_s: float, trace: Path, limit: int | None) -> str:
+    """Why a trace covers less than its profile, as far as the file can say:
+    one that reached perfetto's file limit stopped there."""
+    said = f"the trace covers {span_s:.1f} s of a {expected_s:.1f} s profile"
+    try:
+        size = trace.stat().st_size
+    except OSError:
+        size = None
+    if limit and size is not None and size >= limit * FULL_FILE:
+        return (f"{said}: it reached perfetto's {limit // 2**20} MiB file limit, which "
+                "config.json's profiles.android_max_trace_mb raises")
+    return (f"{said}, and its file ({size // 2**20 if size is not None else '?'} MiB) is "
+            "short of perfetto's file limit, so the trace does not say why")
 
 def _why_not(status: dict) -> str:
     state, detail = status.get("state"), status.get("detail")

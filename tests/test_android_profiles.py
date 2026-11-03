@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from server import config as config_mod
 from server.models import LogEntry, LogLevel, LogSource
 from server.profiling import android as ad
 from server.profiling import manager as manager_mod
@@ -45,6 +46,7 @@ class FakeAdb:
     def __init__(self):
         self.sessions: dict[str, bool] = {}       # key -> running
         self.calls: list[str] = []
+        self.config: bytes | None = None
         self.busy_stops = 0                        # stops refused as busy before one lands
         self.start_rc = 0
         self.start_said = "perfetto_cmd.cc:658 Connected to the Perfetto traced service, TTL: 60s"
@@ -81,6 +83,7 @@ class FakeAdb:
         if "--detach=" in cmd:
             key = cmd.split("--detach=")[1].split()[0]
             assert stdin and b"duration_ms" in stdin
+            self.config = stdin
             if self.start_rc == 0:
                 self.sessions[key] = self.confirm
                 self.remote.add(cmd.split(" -o ")[1].strip())
@@ -206,6 +209,24 @@ class TestConfig:
         assert manager_mod._recorded_s(p) == 12.5
         p.ended_at = None
         assert manager_mod._recorded_s(p) is None
+
+    def test_the_file_limit_is_the_one_asked_for(self):
+        assert "max_file_size_bytes: 268435456" in ad.config_text(ad.PRESETS["hangs"], PKG, 30)
+        assert "max_file_size_bytes: 1048576" in ad.config_text(ad.PRESETS["hangs"], PKG, 30,
+                                                                 2**20)
+
+    @pytest.mark.parametrize("raw, mb, noted", [
+        ({}, 256, False), ({"android_max_trace_mb": 1024}, 1024, False),
+        ({"android_max_trace_mb": 31}, 256, True), ({"android_max_trace_mb": 2049}, 256, True),
+        ({"android_max_trace_mb": True}, 256, True), ({"android_max_trace_mb": "512"}, 256, True),
+        ({"android_max_trace_mb": 32}, 32, False), ({"android_max_trace_mb": 2048}, 2048, False)])
+    def test_the_file_limit_setting(self, monkeypatch, raw, mb, noted):
+        monkeypatch.setattr(config_mod, "read_user_config", lambda: {"profiles": raw})
+        got = config_mod.profile_settings()
+        assert got["android_max_trace_bytes"] == mb * 2**20
+        assert (got["note"] is not None) is noted
+        if noted:
+            assert "android_max_trace_mb" in got["note"]
 
     def test_the_hangs_preset_records_input(self):
         assert "input" in ad.PRESETS["hangs"].atrace and "input" not in ad.PRESETS["cpu"].atrace
@@ -481,12 +502,12 @@ class TestReducers:
 
 
 async def _summary(tp, logged=(None, "logcat was not captured"), preset="hangs",
-                   expected_s=None):
-    first = {"pid": 1, "ticks": 100, "uptime": 10.0,
+                   expected_s=None, trace=Path("/t"), max_trace_bytes=None):
+    first = {"pid": 1, "ticks": 100, "uptime": 10.0, "max_trace_bytes": max_trace_bytes,
              "frames": {"total_frames": 50, "janky_frames": 2, "janky_method": "legacy"}}
     last = {"pid": 1, "ticks": 150, "uptime": 20.0,
             "frames": {"total_frames": 80, "janky_frames": 5, "janky_method": "legacy"}}
-    return await ad.summarize(preset=preset, package=PKG, trace=Path("/t"), first=first,
+    return await ad.summarize(preset=preset, package=PKG, trace=trace, first=first,
                               last=last, tp=tp, tp_status=tp.status().as_dict(),
                               logged_hangs=logged, expected_s=expected_s)
 
@@ -584,6 +605,17 @@ class TestSummarize:
         [loss] = s["trace_data_loss"]
         assert loss["stat"] == "trace ended early" and loss["value"] == 24.8
         assert "24.8 s of a 60.0 s profile" in loss["detail"] and "lower bounds" in s["trace_note"]
+        assert "does not say why" in loss["detail"]
+
+    async def test_a_trace_at_its_file_limit_says_which_setting_raises_it(self, tmp_path):
+        trace = tmp_path / "profile.pftrace"
+        trace.write_bytes(b"x" * 1000)
+        s = await _summary(FakeTP(), expected_s=60.0, trace=trace, max_trace_bytes=1000)
+        [loss] = s["trace_data_loss"]
+        assert "reached perfetto's 0 MiB file limit" in loss["detail"]
+        assert "profiles.android_max_trace_mb" in loss["detail"]
+        s = await _summary(FakeTP(), expected_s=60.0, trace=trace, max_trace_bytes=4000)
+        assert "does not say why" in s["trace_data_loss"][0]["detail"]
 
     async def test_no_source_for_hangs_is_said_not_empty(self):
         s = await _summary(FakeTP("disabled"))
@@ -811,6 +843,17 @@ class TestParseCsv:
 # ── the manager ──────────────────────────────────────────────────────────────
 
 class TestManager:
+    async def test_the_configured_file_limit_reaches_perfetto_and_the_record(self, state):
+        adb = FakeAdb()
+        m = ProfileManager(settings=lambda: {"max_bytes": 2048 * 2**20,
+                                             "android_max_trace_bytes": 64 * 2**20},
+                           adb=adb, trace_processor=FakeTP(), logged_hangs=None)
+        profile, _ = await _start(m)
+        assert b"max_file_size_bytes: 67108864" in adb.config
+        assert json.loads(profile.start_file.read_text())["max_trace_bytes"] == 64 * 2**20
+        async with asyncio.timeout(10):
+            await m.stop(profile.id)
+
     async def test_start_stop_summary(self, state):
         adb, tp = FakeAdb(), FakeTP()
         m = _manager(adb, tp)
