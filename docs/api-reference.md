@@ -608,6 +608,9 @@ Answers say which platform was used and why: `platform`, and `platform_source` -
 | `install_app` | POST | `/api/v1/uploads` | `?name=MyApp.ipa`: an app to install, as the raw body (`.ipa`, `.apk`, or `.app.tar.gz`), or a knowledge base as `<app>.knowledge.tar.gz` for `load_landmarks` (#560): → `{upload_id, name, kind, bytes, expires_in}`. 413 past the key's cap, 507 past the disk's free-space floor. Kept for the key that sent it. See "Remote access" above |
 | — | GET | `/api/v1/uploads` | The caller's own uploads, and `max_bytes` |
 | — | DELETE | `/api/v1/uploads/{id}` | Delete one of the caller's own uploads |
+| `build_and_install` | GET | `/git/{repo}/info/refs` | Prototype (#605). `{repo}` is `<name>.git`. Git smart HTTP, `?service=git-receive-pack` or `git-upload-pack`, into the caller's own git sandbox, handed to `git http-backend`. A client key needs `remote.client_builds` on. Build what was pushed with `project_path: "sandbox:<repo>/<branch>/<path in the repo>"` |
+| `build_and_install` | POST | `/git/{repo}/git-receive-pack` | Prototype (#605). A push; the repository is made on the first one, and every pushed branch is checked out before the response ends |
+| — | POST | `/git/{repo}/git-upload-pack` | Prototype (#605). A fetch or clone of the caller's own sandbox repository |
 
 ### App knowledge and landmarks
 

@@ -1074,6 +1074,8 @@ def create_app(
     app.include_router(remote_router)
     from server.api.uploads import router as uploads_router
     app.include_router(uploads_router)
+    from server.api.git_sandbox import router as git_sandbox_router
+    app.include_router(git_sandbox_router)
     from server.api.screenshots import router as screenshots_router
     app.include_router(screenshots_router)
     app.include_router(crashes_router)

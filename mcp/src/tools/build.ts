@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { discoverServer } from "../config.js";
 import { apiRequest } from "../http.js";
+import { pathsAreRemote } from "../remote-paths.js";
+import { syncProject, type Synced } from "../sandbox-sync.js";
 import { reportProgress, type HandlerExtra, type RunningBuild } from "./build-progress.js";
 import { strictParams, errorText } from "./helpers.js";
 
@@ -123,6 +126,13 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
     });
     try {
       const body: Record<string, unknown> = { project_path, configuration };
+      // On another machine the project is not on the server's disk: send it to
+      // this key's git sandbox there and build that (#605, prototype).
+      let synced: Synced | undefined;
+      if (!project_path.startsWith("sandbox:") && await pathsAreRemote(discoverServer())) {
+        synced = await syncProject(discoverServer(), project_path);
+        body.project_path = synced.project_path;
+      }
       if (skip_plugin_validation) body.skip_plugin_validation = true;
       if (variant) body.variant = variant;
       if (module) body.module = module;
@@ -148,13 +158,16 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
 
       // Return concise summary on full success, full JSON on any failure
       const resp = data as Record<string, unknown>;
+      const sent = synced ? `Sent to the server as ${synced.project_path} ` +
+        `(commit ${synced.commit.slice(0, 12)}). ` : "";
       if (resp.all_installed && resp.summary) {
         return {
           content: [
-            { type: "text" as const, text: resp.summary as string },
+            { type: "text" as const, text: sent + (resp.summary as string) },
           ],
         };
       }
+      if (synced) resp.synced = synced;
 
       return {
         content: [

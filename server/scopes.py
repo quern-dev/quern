@@ -129,6 +129,11 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("POST", "/api/v1/uploads"): _RESERVE,
     ("GET", "/api/v1/uploads"): _RESERVE,
     ("DELETE", "/api/v1/uploads/{upload_id}"): _RESERVE,
+    # Git sandboxes (#605): each key's own repositories, pushed to build. The
+    # route refuses a client unless the owner allows client builds.
+    ("GET", "/git/{repo}/info/refs"): _RESERVE,
+    ("POST", "/git/{repo}/git-receive-pack"): _RESERVE,
+    ("POST", "/git/{repo}/git-upload-pack"): _RESERVE,
 
     # -- devices: reading -----------------------------------------------------
     ("GET", "/api/v1/device/list"): _VIEW,
