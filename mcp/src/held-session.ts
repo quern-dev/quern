@@ -121,6 +121,24 @@ export async function sessionReady(timeoutMs = 5000): Promise<boolean> {
   return exists();
 }
 
+/** Wait up to `timeoutMs` for the held session to be live -- its socket
+ * attached -- when it is on its way there (opening or connecting). A
+ * reservation needs a live session, and one made right as the MCP starts
+ * otherwise arrives first and is refused with "has no live connection" (#608).
+ * Whether it is live; no wait at all when it is not on its way. */
+export async function liveSoon(timeoutMs = 5000): Promise<boolean> {
+  // Read through a function: `state` changes under the await, which a
+  // narrowed read of the variable would not see.
+  const now = (): HeldState => state;
+  const onTheWay = () => now() === "opening" || now() === "connecting" ||
+    (now() === "idle" && token !== null);
+  const deadline = Date.now() + timeoutMs;
+  while (now() !== "live" && onTheWay() && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return now() === "live";
+}
+
 /** Open the session and hold its socket. Returns at once; retries quietly. */
 export function startHeldSession(): void {
   if (typeof WebSocket === "undefined") {

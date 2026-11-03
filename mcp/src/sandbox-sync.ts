@@ -16,12 +16,12 @@
 
 import { execFile } from "node:child_process";
 import { createHash, X509Certificate } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, relative, resolve } from "node:path";
 import { connect } from "node:tls";
 
-import { SESSION_ID } from "./http.js";
+import { quernHeaders, serverFetch } from "./http.js";
 import { PinMismatch } from "./remote.js";
 
 /** The branch every synced snapshot goes to: one checkout per repository, at
@@ -92,7 +92,15 @@ export function repoName(root: string): string {
 /** Push the working tree holding `projectPath` to the server's sandbox and say
  * what to build there. */
 export async function syncProject(server: Server, projectPath: string): Promise<Synced> {
-  const path = resolve(projectPath);
+  // The real path: git names the top level by it, so a project reached
+  // through a symlink (macOS's /var is one) would otherwise come out as
+  // ../../.. relative to its own repository.
+  let path: string;
+  try {
+    path = realpathSync(resolve(projectPath));
+  } catch (e) {
+    throw new Error(`${projectPath} could not be read (${(e as Error).message})`);
+  }
   let root: string;
   try {
     root = await git(["-C", path, "rev-parse", "--show-toplevel"]);
@@ -116,30 +124,77 @@ export async function syncProject(server: Server, projectPath: string): Promise<
       parent = undefined;     // an unborn branch: nothing to start from
     }
     await git(["add", "-A"], { cwd: root, env });
+    const staged = await git(["ls-files", "-s"], { cwd: root, env });
+    refuseWhatCannotBeSent(staged);
+    // LFS: a .gitattributes in the snapshot that sends files through the lfs
+    // filter means the push would carry only pointers.
+    for (const line of staged.split("\n")) {
+      const [meta, file] = line.split("\t");
+      if (!file || !/(^|\/)\.gitattributes$/.test(file)) continue;
+      const blob = meta.split(" ")[1];
+      if (/filter=lfs/.test(await git(["cat-file", "-p", blob], { cwd: root }))) {
+        throw new Error(`this project uses Git LFS (${file}), whose files a push to a remote ` +
+          "quern's sandbox would not carry: build it on the server's own disk instead");
+      }
+    }
     const tree = await git(["write-tree"], { cwd: root, env });
     const commit = await git(["-c", "user.name=quern", "-c", "user.email=quern@localhost",
       "commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", "quern sync"],
       { cwd: root, env });
 
     const repo = repoName(root);
-    const settings = [
-      "-c", "credential.helper=",
-      "-c", `http.extraHeader=Authorization: Bearer ${server.apiKey}`,
-      "-c", `http.extraHeader=X-Quern-Session: ${SESSION_ID}`,
-    ];
+    // The key and session as every quern request sends them (http.ts), as
+    // one-off header settings: never written to the repository's config.
+    const settings = ["-c", "credential.helper=",
+      ...Object.entries(quernHeaders(server.apiKey))
+        .flatMap(([name, value]) => ["-c", `http.extraHeader=${name}: ${value}`])];
     if (server.fingerprint) {
       const cert = await fetchPinnedCert(server.url, server.fingerprint);
       writeFileSync(join(tmp, "server.pem"), cert.pem);
       settings.push("-c", `http.sslCAInfo=${join(tmp, "server.pem")}`,
                     "-c", `http.pinnedPubkey=sha256//${cert.spki}`);
     }
-    await git([...settings, "push", "--quiet", "--force",
-               `${server.url.replace(/\/+$/, "")}/git/${repo}.git`,
-               `${commit}:refs/heads/${SYNC_BRANCH}`], { cwd: root });
+    const remote = `${server.url.replace(/\/+$/, "")}/git/${repo}.git`;
+    try {
+      await git([...settings, "push", "--quiet", "--force", remote,
+                 `${commit}:refs/heads/${SYNC_BRANCH}`], { cwd: root });
+    } catch (e) {
+      // git says only "returned error: 403"; the server says why.
+      const why = await refusalReason(server, remote);
+      throw why ? new Error(`the server refused the push: ${why}`) : e;
+    }
     const inRepo = relative(root, path).split(/[\\/]/).filter(Boolean).join("/");
     return { project_path: `sandbox:${repo}/${SYNC_BRANCH}${inRepo ? `/${inRepo}` : ""}`,
              repo, commit };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/** Refuse, before sending anything, a tree the sandbox cannot build as it is:
+ * submodules, which it does not fetch, and LFS pointers, whose objects a plain
+ * push does not carry. `ls-files -s` lists mode 160000 for a submodule. */
+export function refuseWhatCannotBeSent(staged: string): void {
+  const submodules = staged.split("\n").filter((l) => l.startsWith("160000 "))
+    .map((l) => l.split("\t")[1]);
+  if (submodules.length) {
+    throw new Error(`this project has submodules (${submodules.slice(0, 5).join(", ")}), which ` +
+      "a remote quern's sandbox does not fetch: build it on the server's own disk instead");
+  }
+}
+
+/** Why the server refused a push to `remote`, in its own words, or undefined.
+ * A GET of info/refs is answered the way the push was -- 403, 413, 507 --
+ * with the reason as JSON `detail`. */
+export async function refusalReason(server: Server, remote: string): Promise<string | undefined> {
+  try {
+    const resp = await serverFetch(server, `${remote}/info/refs?service=git-receive-pack`,
+      { headers: quernHeaders(server.apiKey), signal: AbortSignal.timeout(10_000) });
+    if (resp.ok) return undefined;
+    const body = (await resp.json().catch(() => null)) as { detail?: unknown } | null;
+    const detail = body?.detail;
+    return `HTTP ${resp.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`;
+  } catch {
+    return undefined;
   }
 }

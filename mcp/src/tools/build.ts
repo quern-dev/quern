@@ -31,7 +31,7 @@ Builds once per required architecture — not once per device:
 
 Both architectures are built concurrently when the target list mixes physical and simulator devices.
 
-On a remote quern (use_remote), project_path is on that server's disk, not this machine's, and a client key may build only when the server's owner has set remote.client_builds; otherwise the call is refused with a 403 that says so.
+On a remote quern (use_remote), give project_path on THIS machine as usual: the project's working tree is sent with git to your own sandbox on that server (untracked files included, nothing in your repository changed) and built there; the answer says what was sent. It needs git here, the project in a git repository, no submodules or Git LFS, and the server's owner to allow client builds (remote.client_builds), else it says why. A project already on the server is named project_path="sandbox:<repo>/<branch>/<path>".
 
 Each checkout builds into its own DerivedData, under builds/ in quern's state directory (~/.quern unless QUERN_STATE_DIR moves it) and keyed by the project's path, scheme and platform -- never Xcode's default, nor another checkout's. So no -derivedDataPath is needed to keep two checkouts of one project, or this build and Xcode's, from colliding.
 

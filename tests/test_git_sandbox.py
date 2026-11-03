@@ -1,0 +1,380 @@
+"""Git sandboxes (#608): what a caller pushes, checked out to build.
+
+These run the real `git` -- local only, on files under tmp_path: the checkout's
+whole point is git's own behaviour (what `read-tree -m -u` writes, removes and
+leaves alone), which a fake would only restate. Nothing reaches the network;
+the end-to-end push goes to a server on loopback.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import socket
+import subprocess
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import uvicorn
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from server import config, sandboxes, visibility
+from server.api import git_sandbox
+
+pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+
+OWNER, ALICE = "owner", "client:alice"
+
+
+@pytest.fixture
+def root(tmp_path, monkeypatch):
+    base = tmp_path / "sandboxes"
+    monkeypatch.setattr(sandboxes, "root", lambda: base)
+    return base
+
+
+def _git(*args, cwd=None):
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True,
+                          text=True, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}).stdout
+
+
+def _commit(work: Path, files: dict, message="c") -> str:
+    for name, text in files.items():
+        p = work / name
+        if text is None:
+            p.unlink()
+            continue
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    _git("add", "-A", cwd=work)
+    _git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", message, cwd=work)
+    return _git("rev-parse", "HEAD", cwd=work).strip()
+
+
+def _push(work: Path, gitdir: Path, branch="main"):
+    _git("push", "-q", "--force", str(gitdir), f"HEAD:refs/heads/{branch}", cwd=work)
+
+
+@pytest.fixture
+def project(tmp_path):
+    work = tmp_path / "project"
+    work.mkdir()
+    _git("init", "-q", cwd=work)
+    return work
+
+
+class TestNames:
+    @pytest.mark.parametrize("name", ["App", "my-app_2.0", "a"])
+    def test_repo_names_taken(self, name):
+        assert sandboxes.check_repo(name) == name
+
+    @pytest.mark.parametrize("name", ["", ".hidden", "-x", "a/b", "..", "a..b", "x.git",
+                                      "a b", "a" * 65])
+    def test_repo_names_refused(self, name):
+        with pytest.raises(sandboxes.SandboxError):
+            sandboxes.check_repo(name)
+
+    @pytest.mark.parametrize("name", ["main", "feature/x", "quern-sync"])
+    def test_branch_names_taken(self, name):
+        assert sandboxes.check_branch(name) == name
+
+    @pytest.mark.parametrize("name", ["", "../x", "a//b", "a/", "x.lock", "a--b", ".x"])
+    def test_branch_names_refused(self, name):
+        with pytest.raises(sandboxes.SandboxError):
+            sandboxes.check_branch(name)
+
+    def test_each_principal_its_own_directory(self, root):
+        assert sandboxes.principal_dir(OWNER) == root / "owner"
+        assert sandboxes.principal_dir(ALICE) == root / "client-alice"
+
+
+class TestCheckout:
+    async def test_a_push_is_checked_out_and_a_second_writes_only_what_changed(
+            self, root, project):
+        gitdir = await sandboxes.ensure_repo(ALICE, "app")
+        _commit(project, {"keep.txt": "same\n", "gone/x.txt": "x\n", "edit.txt": "1\n"})
+        _push(project, gitdir)
+        assert [d["branch"] for d in await sandboxes.check_out(ALICE, "app")] == ["main"]
+        work = root / "client-alice" / "work" / "app" / "main"
+        assert (work / "gone" / "x.txt").read_text() == "x\n"
+        kept = (work / "keep.txt").stat().st_mtime_ns
+        time.sleep(0.05)
+
+        _commit(project, {"gone/x.txt": None, "edit.txt": "2\n", "new.txt": "n\n"})
+        _push(project, gitdir)
+        await sandboxes.check_out(ALICE, "app")
+        assert (work / "edit.txt").read_text() == "2\n"
+        assert (work / "new.txt").exists()
+        assert not (work / "gone").exists(), "a directory its files left goes too"
+        assert (work / "keep.txt").stat().st_mtime_ns == kept, "an unchanged file is untouched"
+
+    async def test_nothing_new_is_nothing_done(self, root, project):
+        gitdir = await sandboxes.ensure_repo(ALICE, "app")
+        _commit(project, {"a": "1"})
+        _push(project, gitdir)
+        await sandboxes.check_out(ALICE, "app")
+        assert await sandboxes.check_out(ALICE, "app") == []
+
+    async def test_a_branch_with_a_slash_has_its_own_checkout(self, root, project):
+        gitdir = await sandboxes.ensure_repo(ALICE, "app")
+        _commit(project, {"a": "1"})
+        _push(project, gitdir, "feature/x")
+        await sandboxes.check_out(ALICE, "app")
+        assert (root / "client-alice" / "work" / "app" / "feature--x" / "a").exists()
+        assert sandboxes.resolve(ALICE, "sandbox:app/feature/x/a").endswith("feature--x/a")
+
+    async def test_a_failed_checkout_leaves_no_marker_and_says_so_at_build(
+            self, root, project, monkeypatch):
+        gitdir = await sandboxes.ensure_repo(ALICE, "app")
+        _commit(project, {"a": "1"})
+        _push(project, gitdir)
+        await sandboxes.check_out(ALICE, "app")
+        _commit(project, {"a": "2"})
+        _push(project, gitdir)
+
+        real = sandboxes._git
+
+        async def failing(*args, env=None):
+            if "read-tree" in args:
+                raise sandboxes.SandboxError("git read-tree failed: boom", 500)
+            return await real(*args, env=env)
+        monkeypatch.setattr(sandboxes, "_git", failing)
+        done = await sandboxes.check_out(ALICE, "app")
+        assert done[0]["error"].endswith("boom")
+        with pytest.raises(sandboxes.SandboxError) as e:
+            sandboxes.resolve(ALICE, "sandbox:app/main/a")
+        assert e.value.status == 409 and "push it again" in str(e.value)
+
+
+class TestResolve:
+    @pytest.fixture
+    async def checked_out(self, root, project):
+        gitdir = await sandboxes.ensure_repo(ALICE, "app")
+        _commit(project, {"App.xcodeproj/project.pbxproj": "p"})
+        _push(project, gitdir)
+        await sandboxes.check_out(ALICE, "app")
+        return root / "client-alice" / "work" / "app" / "main"
+
+    async def test_a_path_in_the_checkout(self, checked_out):
+        assert sandboxes.resolve(ALICE, "sandbox:app/main/App.xcodeproj") == \
+            str(checked_out / "App.xcodeproj")
+
+    async def test_only_the_callers_own(self, checked_out):
+        with pytest.raises(sandboxes.SandboxError) as e:
+            sandboxes.resolve("client:bob", "sandbox:app/main/App.xcodeproj")
+        assert e.value.status == 404
+
+    @pytest.mark.parametrize("ref", ["sandbox:app/main/../../../etc",
+                                     "sandbox:app/main/App.xcodeproj/../.."])
+    async def test_walking_out_is_refused(self, checked_out, ref):
+        with pytest.raises(sandboxes.SandboxError, match="walks out"):
+            sandboxes.resolve(ALICE, ref)
+
+    async def test_a_symlink_out_is_refused(self, checked_out, tmp_path):
+        (checked_out / "out").symlink_to(tmp_path)
+        with pytest.raises(sandboxes.SandboxError, match="leaves its checkout"):
+            sandboxes.resolve(ALICE, "sandbox:app/main/out")
+
+    async def test_missing_things_are_404(self, checked_out):
+        for ref in ("sandbox:nope/main/x", "sandbox:app/main/missing", "sandbox:app/other/x"):
+            with pytest.raises(sandboxes.SandboxError) as e:
+                sandboxes.resolve(ALICE, ref)
+            assert e.value.status == 404, ref
+
+    async def test_a_build_counts_as_use(self, checked_out, root):
+        used = root / "client-alice" / "app.git" / "quern-last-used"
+        os.utime(used, (0, 0))
+        sandboxes.resolve(ALICE, "sandbox:app/main/App.xcodeproj")
+        assert used.stat().st_mtime > 1
+
+
+class TestPruneAndList:
+    async def test_revoked_keys_go_the_owner_stays(self, root):
+        await sandboxes.ensure_repo(ALICE, "a")
+        await sandboxes.ensure_repo("client:bob", "b")
+        await sandboxes.ensure_repo(OWNER, "o")
+        removed = sandboxes.prune(lambda who: who != ALICE, max_idle_days=14)
+        assert removed == ["client-alice"]
+        assert (root / "client-bob" / "b.git").exists() and (root / "owner" / "o.git").exists()
+
+    async def test_idle_repositories_go_unless_kept(self, root):
+        gitdir = await sandboxes.ensure_repo(ALICE, "old")
+        await sandboxes.ensure_repo(ALICE, "new")
+        os.utime(gitdir / "quern-last-used", (0, 0))
+        assert sandboxes.prune(lambda w: True, max_idle_days=0) == []
+        assert sandboxes.prune(lambda w: True, max_idle_days=14) == ["client-alice/old.git"]
+        assert (root / "client-alice" / "new.git").exists()
+
+    async def test_listing_and_deleting(self, root, project):
+        gitdir = await sandboxes.ensure_repo(ALICE, "app")
+        _commit(project, {"a": "1"})
+        _push(project, gitdir)
+        await sandboxes.check_out(ALICE, "app")
+        [repo] = sandboxes.listing(ALICE)
+        assert repo["repo"] == "app" and repo["bytes"] > 0
+        assert repo["branches"][0]["path"] == "sandbox:app/main"
+        assert sandboxes.listing("client:bob") == []
+        assert sandboxes.remove_repo(ALICE, "app") is True
+        assert sandboxes.listing(ALICE) == []
+        assert not (root / "client-alice" / "work" / "app").exists()
+        assert sandboxes.remove_repo(ALICE, "app") is False
+
+
+class TestSettings:
+    @pytest.mark.parametrize("raw, mb, days, noted", [
+        (None, 4096, 14, False),
+        ({"max_mb": 10, "max_idle_days": 0}, 10, 0, False),
+        ({"max_mb": 0}, 4096, 14, True),
+        ({"max_mb": "10", "max_idle_days": -1}, 4096, 14, True),
+        ({"max_mb": True}, 4096, 14, True),
+    ])
+    def test_values(self, monkeypatch, raw, mb, days, noted):
+        cfg = {} if raw is None else {"sandboxes": raw}
+        monkeypatch.setattr(config, "read_user_config", lambda strict=False: cfg)
+        got = config.sandbox_settings()
+        assert (got["max_bytes"], got["max_idle_days"]) == (mb * 2**20, days)
+        assert bool(got["note"]) is noted
+
+
+# -- the routes ----------------------------------------------------------------
+
+def _app():
+    app = FastAPI()
+    app.include_router(git_sandbox.router)
+    return app
+
+
+@pytest.fixture
+def caller(monkeypatch):
+    def set_(principal=OWNER):
+        monkeypatch.setattr(visibility, "current_caller", lambda: SimpleNamespace(
+            principal=principal, session="s1", is_owner=principal == OWNER))
+    set_()
+    return set_
+
+
+@pytest.fixture
+def builds(monkeypatch):
+    state = {"on": False}
+    monkeypatch.setattr(config, "client_builds", lambda: state["on"])
+    return state
+
+
+@pytest.fixture
+def limits(monkeypatch):
+    state = {"max_bytes": 2**30, "max_idle_days": 14, "min_free_bytes": 0, "note": None}
+    monkeypatch.setattr(config, "sandbox_settings", lambda: dict(state))
+    return state
+
+
+class TestRoutes:
+    def test_a_client_needs_client_builds(self, root, caller, builds, limits):
+        caller(ALICE)
+        c = TestClient(_app())
+        r = c.get("/git/app.git/info/refs", params={"service": "git-receive-pack"})
+        assert r.status_code == 403 and '"client_builds": true' in r.json()["detail"]
+        assert c.get("/api/v1/sandboxes").status_code == 403
+        builds["on"] = True
+        assert c.get("/git/app.git/info/refs",
+                     params={"service": "git-receive-pack"}).status_code == 200
+
+    def test_only_smart_http(self, root, caller, limits):
+        c = TestClient(_app())
+        assert c.get("/git/app.git/info/refs").status_code == 403
+        assert c.get("/git/app.git/info/refs", params={"service": "x"}).status_code == 403
+
+    def test_a_fetch_from_nothing_is_404_and_makes_nothing(self, root, caller, limits):
+        c = TestClient(_app())
+        r = c.get("/git/app.git/info/refs", params={"service": "git-upload-pack"})
+        assert r.status_code == 404 and not (root / "owner" / "app.git").exists()
+
+    @pytest.mark.parametrize("repo, status", [("app", 404), (".x.git", 400), ("a..b.git", 400)])
+    def test_bad_names(self, root, caller, limits, repo, status):
+        r = TestClient(_app()).get(f"/git/{repo}/info/refs",
+                                   params={"service": "git-receive-pack"})
+        assert r.status_code == status
+
+    def test_a_push_advert_makes_the_repository(self, root, caller, limits):
+        r = TestClient(_app()).get("/git/app.git/info/refs",
+                                   params={"service": "git-receive-pack"})
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "application/x-git-receive-pack-advertisement"
+        assert (root / "owner" / "app.git" / "HEAD").exists()
+
+    def test_at_the_cap_a_push_is_413(self, root, caller, limits):
+        (root / "owner").mkdir(parents=True)
+        (root / "owner" / "big").write_bytes(b"x" * 2048)
+        limits["max_bytes"] = 1024
+        r = TestClient(_app()).get("/git/app.git/info/refs",
+                                   params={"service": "git-receive-pack"})
+        assert r.status_code == 413 and "sandboxes.max_mb" in r.json()["detail"]
+
+    def test_a_declared_length_past_the_room_is_413(self, root, caller, limits):
+        limits["max_bytes"] = 1024
+        r = TestClient(_app()).post("/git/app.git/git-receive-pack", content=b"x" * 4096,
+                                    headers={"content-type":
+                                             "application/x-git-receive-pack-request"})
+        assert r.status_code == 413 and "left" in r.json()["detail"]
+
+    def test_under_the_free_space_floor_is_507(self, root, caller, limits, monkeypatch):
+        limits["min_free_bytes"] = 10 * 2**30
+        monkeypatch.setattr(sandboxes, "free_bytes", lambda: 2**20)
+        r = TestClient(_app()).get("/git/app.git/info/refs",
+                                   params={"service": "git-receive-pack"})
+        assert r.status_code == 507
+
+    def test_list_and_delete(self, root, caller, limits):
+        c = TestClient(_app())
+        c.get("/git/app.git/info/refs", params={"service": "git-receive-pack"})
+        assert [r["repo"] for r in c.get("/api/v1/sandboxes").json()["repos"]] == ["app"]
+        assert c.delete("/api/v1/sandboxes/app").status_code == 200
+        assert c.delete("/api/v1/sandboxes/app").status_code == 404
+        assert c.delete("/api/v1/sandboxes/..").status_code in (400, 404)
+
+
+class TestEndToEnd:
+    """A real `git push` through the HTTP stack: the CGI bridge, streaming,
+    and the checkout before the response ends."""
+
+    @pytest.fixture
+    def server(self, root, caller, limits):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        srv = uvicorn.Server(uvicorn.Config(_app(), host="127.0.0.1", port=port,
+                                            log_level="warning"))
+        thread = threading.Thread(target=srv.run, daemon=True)
+        thread.start()
+        deadline = time.time() + 10
+        while not srv.started and time.time() < deadline:
+            time.sleep(0.05)
+        yield f"http://127.0.0.1:{port}"
+        srv.should_exit = True
+        thread.join(5)
+
+    def test_push_then_build_path_then_clone_back(self, server, root, project, tmp_path):
+        _commit(project, {"App/main.swift": "print(1)\n", "README": "r\n"})
+        _git("push", "-q", f"{server}/git/app.git", "HEAD:refs/heads/quern-sync", cwd=project)
+        # Checked out before the push returned: no wait.
+        path = sandboxes.resolve(OWNER, "sandbox:app/quern-sync/App/main.swift")
+        assert Path(path).read_text() == "print(1)\n"
+        _git("clone", "-q", "-b", "quern-sync", f"{server}/git/app.git", str(tmp_path / "back"))
+        assert (tmp_path / "back" / "README").read_text() == "r\n"
+
+    def test_a_chunked_push_past_the_cap_is_cut_off(self, server, root, project, limits):
+        limits["max_bytes"] = 64 * 1024
+        # Incompressible, and big enough that git sends it chunked.
+        _commit(project, {"blob.bin": os.urandom(2 * 2**20).hex()})
+        r = subprocess.run(["git", "-c", "http.postBuffer=1024", "push",
+                            f"{server}/git/app.git", "HEAD:refs/heads/main"],
+                           cwd=project, capture_output=True, text=True)
+        assert r.returncode != 0
+        assert not (root / "owner" / "work" / "app" / "main").exists()
+        assert json.dumps(sandboxes.listing(OWNER))  # still readable
+

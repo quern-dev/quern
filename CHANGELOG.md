@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A remote client can build its own project (#608).** With `remote.client_builds` on (#606), `build_and_install` from another machine sends the project there itself:
+  - The MCP snapshots the working tree (untracked files included, nothing in the repository changed but new objects).
+  - It pushes the snapshot over git's smart HTTP into a sandbox of that key's own, with TLS pinned to the paired certificate.
+  - It builds the checkout, which stays at a stable path, so rebuilds are incremental.
+  - Sandboxes are capped per key (`sandboxes.max_mb`), keep the uploads' free-space floor, and are removed with a revoked key or after `sandboxes.max_idle_days`. `GET`/`DELETE /api/v1/sandboxes` list and remove them.
+  - Projects with submodules or Git LFS are refused with the reason, and so is a push the server refuses, which git alone reports only as an HTTP status.
+  - A reservation made as the MCP starts now waits briefly for its session to connect, instead of failing with "has no live connection".
 - **A server's owner can let paired clients build (#605).** `build_and_install` from a client key was always refused, because a build runs the project's code as the Mac's user. Setting `"remote": {"client_builds": true}` in `~/.quern/config.json` allows it. Quern installs the result only on devices the client's own session holds, and `gradle_args` and `java_home` stay the owner's, since an extra Gradle task such as `installDebug` would install on every connected device. The build itself still runs the project's scripts as the Mac's user. It's off unless literally `true`, and off when the config can't be read. Off, the refusal now names the setting rather than just saying owner-only. The project path is still read on the server's disk: quern doesn't copy source from the client.
 - **Profile an Android app: `start_profile` and `stop_profile` record it with perfetto (#245).** The same four tools as iOS, on an emulator or phone, without relaunching the app.
   - **Hangs are input the app left unanswered**, read from InputDispatcher's own per-window queue in the trace -- measured at 10,571.6 ms for a hang InputDispatcher put at 10,571.9 ms. An idle app's main thread also sleeps, so a sleeping thread is never read as a hang.
