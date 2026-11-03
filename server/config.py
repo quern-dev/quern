@@ -545,6 +545,37 @@ def builds_settings() -> dict:
             "note": "; ".join(notes) or None}
 
 
+#: When disk use is worth a warning, by default (#581): simulators and quern's
+#: stores together over this, or the disk with less than this free.
+DISK_DEFAULT_WARN_GB = 100
+DISK_DEFAULT_WARN_FREE_GB = 20
+
+
+def disk_settings() -> dict:
+    """The disk warnings from config.json's `disk` object:
+
+        {"disk": {"warn_gb": 100, "warn_free_gb": 20}}
+
+    0 turns either off. A value that is not a whole number of 0 or more reads
+    as the default, with a note. Raises ConfigUnreadable when config.json
+    cannot be read: no warning is better than one from settings nobody set."""
+    raw = read_user_config(strict=True).get("disk")
+    raw = raw if isinstance(raw, dict) else {}
+    notes = []
+
+    def whole(key: str, default: int) -> int:
+        value = raw.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            notes.append(f"config.json's disk.{key} is {value!r}, not a whole number of "
+                         f"0 or more: using {default}")
+            return default
+        return value
+
+    return {"warn_bytes": whole("warn_gb", DISK_DEFAULT_WARN_GB) * 1024 ** 3,
+            "warn_free_bytes": whole("warn_free_gb", DISK_DEFAULT_WARN_FREE_GB) * 1024 ** 3,
+            "note": "; ".join(notes) or None}
+
+
 #: What every kept profile may take together, by default (#245). An Animation
 #: Hitches trace measured 192 MB for 35 s, so this holds about ten of those.
 PROFILES_DEFAULT_MB = 2048

@@ -83,7 +83,8 @@ def _reason(e: BaseException) -> str:
 
 def _blank(name: str | None, url: str | None, label: str | None) -> dict:
     return {"name": name, "url": url, "label": label, "reachable": False, "version": None,
-            "version_matches": None, "devices": None, "free": None, "error": None}
+            "version_matches": None, "devices": None, "free": None, "error": None,
+            "disk": None, "disk_error": None}
 
 
 def _health(answer: Any) -> str:
@@ -151,7 +152,28 @@ def probe(remote: client.Remote, local_version: str | None,
         return out
     out["devices"] = devices
     out["free"] = sum(1 for d in devices if d["free"])
+    out["disk"], out["disk_error"] = _disk(remote, timeout)
     return out
+
+
+def _disk(remote: client.Remote, timeout: float) -> tuple[dict | None, str | None]:
+    """The remote's disk use (#581), or why it could not be read: a server
+    from before it answers 404, which is "not reported", not "nothing used"."""
+    try:
+        report = _get(remote, "/api/v1/system/disk", timeout)
+    except Exception as e:  # noqa: BLE001 -- the rest of the row still stands
+        return None, f"disk use could not be read: {_reason(e)}"
+    if not isinstance(report, dict):
+        return None, "disk use could not be read: not a report"
+    if report.get("measuring"):
+        return {"measuring": True}, None
+    disk = report.get("disk") if isinstance(report.get("disk"), dict) else {}
+    return {"used_bytes": report.get("used_bytes"),
+            "used_complete": report.get("used_complete"),
+            "free_bytes": disk.get("free_bytes"),
+            "total_bytes": disk.get("total_bytes"),
+            "warnings": report.get("warnings") or [],
+            "measured_at": report.get("measured_at")}, None
 
 
 def _local() -> client.Remote | dict:

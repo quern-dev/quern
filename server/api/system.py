@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from server.api.actions import logged_action
@@ -198,3 +198,29 @@ def _find_project_root() -> Path | None:
             break
         path = parent
     return None
+
+
+@router.get("/disk")
+async def disk_use(request: Request) -> dict:
+    """What the simulators and quern's stores take, and the disk's free space
+    (#581), from the last background measurement -- `measured_at` says when.
+    `measuring` until the first one finishes. A client key gets the sizes
+    without the owner's paths, and on a blind server without the largest
+    simulators, which name other keys' devices."""
+    from server import visibility
+
+    report = getattr(request.app.state, "disk_usage", None)
+    sweep = getattr(request.app.state, "build_store_sweep", None)
+    if report is None:
+        return {"measuring": True, "build_store_sweep": sweep}
+    caller = visibility.current_caller()
+    if not caller.is_owner:
+        stores = {}
+        for name, store in report["stores"].items():
+            kept = {k: v for k, v in store.items() if k != "path"}
+            if visibility.blind_for(caller):
+                kept.pop("largest", None)
+            stores[name] = kept
+        report = {**report, "stores": stores}
+        sweep = None
+    return {"measuring": False, **report, "build_store_sweep": sweep}

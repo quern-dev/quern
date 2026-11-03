@@ -1,0 +1,221 @@
+"""What quern's stores and the simulators take on disk (#581, part 3).
+
+A shared machine filled without anyone seeing it: 17 GB of simulator data
+across 44 simulators on romulus, 4.8 GB of build store, and nothing in quern
+said so. The owner should see 120 GB before it becomes 300.
+
+Measured in the background -- walking a simulator directory of tens of GB
+takes seconds to minutes -- and served from the last measurement, with its
+time. A store that could not be measured is reported as unknown, with why,
+never as empty: "could not tell" reading as "nothing there" is a false
+all-clear.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import os
+import plistlib
+import shutil
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from server import config as config_mod
+
+logger = logging.getLogger(__name__)
+
+#: Every simulator's data, whoever made it: quern does not create simulators,
+#: but what its clients install into them is what grows.
+#: QUERN_SIM_DEVICES_DIR redirects it, for tests: walking the real one takes
+#: seconds to minutes and reads someone's machine.
+SIM_DEVICES = Path(os.environ.get("QUERN_SIM_DEVICES_DIR")
+                   or Path.home() / "Library" / "Developer" / "CoreSimulator" / "Devices")
+
+#: How often the measurement is taken after the one at start.
+MEASURE_SECONDS = 15 * 60
+
+#: The largest simulators named in the report.
+LARGEST = 5
+
+
+def disk_size(path: Path) -> int:
+    """Bytes `path` takes on disk, symlinks not followed. Raises OSError when
+    `path` itself cannot be read; entries inside it that cannot be read count
+    as nothing -- an estimate, not an audit."""
+    total = 0
+    stack = [path]
+    first = True
+    while stack:
+        current = stack.pop()
+        try:
+            it = os.scandir(current)
+        except OSError:
+            if first:
+                raise
+            continue
+        first = False
+        with it:
+            for entry in it:
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                total += getattr(st, "st_blocks", 0) * 512 or st.st_size
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+    return total
+
+
+def _store(path: Path) -> dict:
+    """One store's size: 0 when it does not exist yet, unknown with the reason
+    when it exists and cannot be read."""
+    if not path.exists():
+        return {"path": str(path), "bytes": 0}
+    try:
+        return {"path": str(path), "bytes": disk_size(path)}
+    except OSError as e:
+        return {"path": str(path), "bytes": None, "error": str(e)}
+
+
+def _simulators(root: Path) -> dict:
+    out = _store(root)
+    if out["bytes"] is None or not root.exists():
+        return out
+    sizes = []
+    with contextlib.suppress(OSError):
+        for device in root.iterdir():
+            if not device.is_dir() or device.is_symlink():
+                continue
+            try:
+                size = disk_size(device)
+            except OSError:
+                continue
+            name = None
+            with contextlib.suppress(OSError, plistlib.InvalidFileException, ValueError):
+                info = plistlib.loads((device / "device.plist").read_bytes())
+                name = info.get("name") if isinstance(info, dict) else None
+            sizes.append({"udid": device.name, "name": name, "bytes": size})
+    sizes.sort(key=lambda d: -d["bytes"])
+    out["count"] = len(sizes)
+    out["largest"] = sizes[:LARGEST]
+    return out
+
+
+def measure(*, sim_devices: Path | None = None, config_dir: Path | None = None,
+            settings: dict | None = None, now: Callable[[], float] = time.time) -> dict:
+    """Measure every store now. Blocking: run it in a thread."""
+    config_dir = config_dir or config_mod.CONFIG_DIR
+    settings = settings or config_mod.disk_settings()
+    stores = {
+        "simulators": _simulators(sim_devices or SIM_DEVICES),
+        "builds": _store(config_dir / "builds"),
+        "recordings": _store(config_dir / "recordings"),
+        "profiles": _store(config_dir / "profiles"),
+        "uploads": _store(config_dir / "uploads"),
+    }
+    try:
+        usage = shutil.disk_usage(config_dir if config_dir.exists() else config_dir.parent)
+        free: int | None = usage.free
+        disk = {"total_bytes": usage.total, "free_bytes": usage.free}
+    except OSError as e:
+        free = None
+        disk = {"total_bytes": None, "free_bytes": None, "error": str(e)}
+    known = [s["bytes"] for s in stores.values() if s["bytes"] is not None]
+    used = sum(known)
+    unknown = [name for name, s in stores.items() if s["bytes"] is None]
+    warnings = []
+    if settings["warn_bytes"] and used > settings["warn_bytes"]:
+        warnings.append(f"simulators and quern's stores take {_gb(used)}, over "
+                        f"disk.warn_gb ({_gb(settings['warn_bytes'])})")
+    if settings["warn_free_bytes"] and free is not None and free < settings["warn_free_bytes"]:
+        warnings.append(f"{_gb(free)} free on the disk, under disk.warn_free_gb "
+                        f"({_gb(settings['warn_free_bytes'])})")
+    if unknown:
+        warnings.append(f"could not measure {', '.join(unknown)}: the total leaves "
+                        f"{'it' if len(unknown) == 1 else 'them'} out")
+    return {"measured_at": now(), "stores": stores, "used_bytes": used,
+            "used_complete": not unknown, "disk": disk, "warnings": warnings,
+            "note": settings.get("note")}
+
+
+def _gb(n: int) -> str:
+    return f"{n / 1024 ** 3:.1f} GB"
+
+
+def fetch(port: int, *, host: str = "127.0.0.1", timeout: float = 10.0) -> tuple[dict | None, str]:
+    """The running server's disk report, for the CLI; None and why when it
+    could not be asked -- distinct from a report, which may say "measuring"."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    try:
+        key = config_mod.API_KEY_FILE.read_text().strip()
+    except OSError as e:
+        return None, f"no API key at {config_mod.API_KEY_FILE}: {e}"
+    req = urllib.request.Request(f"http://{host}:{port}/api/v1/system/disk",
+                                 headers={"Authorization": f"Bearer {key}",
+                                          "X-Quern-Session": "cli"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        return None, f"the server answered {e.code}"
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return None, f"could not ask the server: {e}"
+    return (body, "") if isinstance(body, dict) else (None, "the server's answer was not a report")
+
+
+def report_lines(report: dict, *, now: float | None = None) -> list[str]:
+    """The report as indented terminal lines: what is used, free, the largest
+    simulators, warnings, and the build store's last sweep."""
+    now = time.time() if now is None else now
+    if report.get("measuring"):
+        return ["measuring (the first measurement runs at start and takes a while)"]
+    lines = [summary_line(report)]
+    sims = report["stores"].get("simulators", {})
+    if sims.get("largest"):
+        named = ", ".join(f"{d.get('name') or d['udid'][:8]} {_gb(d['bytes'])}"
+                          for d in sims["largest"][:3])
+        lines.append(f"largest simulators ({sims.get('count', '?')} in all): {named}")
+    lines += [f"! {w}" for w in report.get("warnings", [])]
+    age = max(0, int(now - report.get("measured_at", now)))
+    lines.append(f"measured {age // 60} min ago" if age >= 60 else "measured just now")
+    sweep = report.get("build_store_sweep")
+    if sweep:
+        removed = [d for d in sweep.get("removed", []) if d.get("ok")]
+        freed = sum(d.get("bytes", 0) for d in removed)
+        lines.append(f"build store: last sweep removed {len(removed)} DerivedData "
+                     f"({_gb(freed)})" if removed else "build store: last sweep removed nothing")
+    return lines
+
+
+def summary_line(report: dict) -> str:
+    """One line for a terminal: used, free, and warnings."""
+    s = report["stores"]
+    parts = [f"{name} {_gb(v['bytes'])}" if v["bytes"] is not None else f"{name} unknown"
+             for name, v in s.items()]
+    free = report["disk"].get("free_bytes")
+    line = (f"{_gb(report['used_bytes'])} used ({', '.join(parts)}); "
+            f"{_gb(free) + ' free' if free is not None else 'free space unknown'}")
+    return line
+
+
+async def run_forever(app: Any) -> None:
+    """Measure at start and every MEASURE_SECONDS after, into
+    `app.state.disk_usage`. Never raises."""
+    while True:
+        try:
+            report = await asyncio.to_thread(measure)
+            app.state.disk_usage = report
+            for warning in report["warnings"]:
+                logger.warning("Disk: %s", warning)
+        except config_mod.ConfigUnreadable as e:
+            logger.warning("Disk measurement skipped: %s", e)
+        except Exception:  # noqa: BLE001 -- the measurement must outlive one bad pass
+            logger.exception("Disk measurement failed")
+        await asyncio.sleep(MEASURE_SECONDS)

@@ -86,7 +86,7 @@ export function registerSystemTools(server: McpServer): void {
   );
 
   server.registerTool("list_remotes", {
-    description: `List the quern servers this agent could use -- this Mac's own (first, "local": true) and the remote ones this machine is paired with (quern connect) -- each asked now: whether it answers, its quern version (and whether it differs from this Mac's), and its devices -- each with name, device_family, os_version (e.g. "iOS 17.5"), device_type, state, and model where the remote reports one -- with which are free (not held by anyone), which this key holds (yours) and who holds the rest (held_by).
+    description: `List the quern servers this agent could use -- this Mac's own (first, "local": true) and the remote ones this machine is paired with (quern connect) -- each asked now: whether it answers, its quern version (and whether it differs from this Mac's), and its devices -- each with name, device_family, os_version (e.g. "iOS 17.5"), device_type, state, and model where the remote reports one -- with which are free (not held by anyone), which this key holds (yours) and who holds the rest (held_by). Also each one's disk use (disk: used_bytes, free_bytes, warnings), so a machine filling up is seen before it fills.
 
 The entry marked "current": true is the server this MCP talks to. Its devices are the ones you can use now: reserve one with reserve_devices(os_version="18.6", device_family="iPad", name=<name or model>), or by udid. To use a device on another server, switch to it first with use_remote(name=<its name>), then reserve it.
 
