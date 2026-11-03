@@ -320,6 +320,9 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("PUT", "/api/v1/system/channel"): _OWNER,
     ("POST", "/api/v1/system/update"): _OWNER,
     ("GET", "/api/v1/system/update-status"): _OWNER,
+    # Sizes for a client choosing where to run (#581); the route leaves out
+    # the owner's paths, and on a blind server the largest simulators.
+    ("GET", "/api/v1/system/disk"): _VIEW,
 }
 
 #: What a caller held to blind mode (#254, phase 2) gets from each route a
@@ -392,6 +395,7 @@ BLIND: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/proxy/bypass"): "hidden",
     ("GET", "/api/v1/proxy/intercept/held"): "hidden",
     ("GET", "/api/v1/system/channel"): "shared",
+    ("GET", "/api/v1/system/disk"): "filtered",
 }
 
 

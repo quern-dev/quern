@@ -330,3 +330,23 @@ def test_a_store_it_cannot_open_raises_and_one_inside_it_does_not(tmp_path):
         assert du.disk_size(store) >= 8192
     finally:
         (store / "locked").chmod(0o755)
+
+
+def test_doctor_says_disk_use_was_not_checked_without_a_server(monkeypatch, capsys):
+    from server import main
+
+    monkeypatch.setattr(main, "read_state", lambda: None)
+    main._report_disk()
+    out = capsys.readouterr().out
+    assert out.startswith("Disk:") and "not checked" in out and "no server running" in out
+
+
+def test_doctor_prints_the_servers_report(monkeypatch, capsys):
+    from server import main
+
+    monkeypatch.setattr(main, "read_state", lambda: {"server_port": 9999})
+    monkeypatch.setattr(main, "is_server_healthy", lambda port: True)
+    monkeypatch.setattr(du, "fetch", lambda port: (_report(), ""))
+    main._report_disk()
+    out = capsys.readouterr().out
+    assert "59.0 GB used" in out and "! 12.0 GB free on the disk" in out
