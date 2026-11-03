@@ -119,8 +119,9 @@ def test_one_used_in_the_last_hour_survives_the_cap():
     """A second server on the same ~/.quern builds without this one seeing
     its lock; its build's stamp is what keeps the cap off it."""
     now = 100 * DAY
-    found = _found(("building-elsewhere", now - 600), ("idle", now - 2 * 3600))
-    sizes = {Path("building-elsewhere"): 10, Path("idle"): 10}
+    found = _found(("newest", now - 60), ("building-elsewhere", now - 600),
+                   ("idle", now - 2 * 3600))
+    sizes = {Path("newest"): 10, Path("building-elsewhere"): 10, Path("idle"): 10}
     out = dr.plan(found, now=now, max_age_days=7, max_bytes=1, busy=lambda p: False,
                   size=_sizes(sizes))
     assert [d.path.name for d, _ in out] == ["idle"]
@@ -365,7 +366,7 @@ def test_the_cap_never_takes_the_most_recently_used():
     assert [d.path.name for d, _ in out] == ["older"]
 
 
-async def test_an_unreadable_config_skips_the_pass(monkeypatch):
+async def test_an_unreadable_config_skips_the_pass(monkeypatch, caplog):
     """Falling back to the defaults would turn on a retention its owner had
     turned off, on any pass that met a half-written config.json (review)."""
     from server import config
@@ -384,9 +385,10 @@ async def test_an_unreadable_config_skips_the_pass(monkeypatch):
 
     monkeypatch.setattr(dr, "sweep", sweep)
     monkeypatch.setattr(dr, "SWEEP_SECONDS", 0)
-    with pytest.raises(asyncio.CancelledError):
+    with caplog.at_level("WARNING", logger=dr.__name__), pytest.raises(asyncio.CancelledError):
         await dr.run_forever({}, unreadable)
     assert calls == [{"max_age_days": 0, "max_bytes": 0}], "skipped once, then the real setting"
+    assert "sweep skipped" in caplog.text and "failed" not in caplog.text
 
 
 def test_builds_settings_raises_on_an_unreadable_config(monkeypatch, tmp_path):
@@ -404,6 +406,6 @@ async def test_nothing_outside_the_store_is_removed_whatever_find_says(tmp_path,
     outside = _derived(tmp_path / "outside" / "Precious", age_days=300)
     store = tmp_path / "builds"
     store.mkdir()
-    monkeypatch.setattr(dr, "find", lambda base: [dr.Derived(outside, 0.0)])
+    monkeypatch.setattr(dr, "find", lambda base: [dr.Derived(outside, dr._last_used(outside))])
     assert await dr.sweep({}, base=store, max_age_days=7, max_bytes=0) == []
     assert outside.exists()
