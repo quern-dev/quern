@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import re
 import shutil
 from pathlib import Path
 
+from server.device._subprocess import communicate
 from server.models import (
     AppInfo,
     BootIncompleteError,
@@ -185,14 +185,12 @@ class AdbBackend:
             stderr=asyncio.subprocess.PIPE,
         )
         if timeout is None:
-            stdout, stderr = await proc.communicate()
+            stdout, stderr = await communicate(proc)
         else:
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+                stdout, stderr = await asyncio.wait_for(communicate(proc), timeout)
             except TimeoutError:
-                proc.kill()
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(proc.wait(), 1.0)
+                # communicate() has killed and reaped it.
                 # AdbTimeout, a DeviceError: a caller that must tell "adb was
                 # killed mid-way" from "adb refused" can, and others need not.
                 raise AdbTimeout(

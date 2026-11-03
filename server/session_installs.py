@@ -39,6 +39,7 @@ run again for that opening, whatever else on the device is retried.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import plistlib
 import re
@@ -322,10 +323,18 @@ async def after_install(app: Any, install: Install | None,
                 successor.added.add(bundle_id)
                 return {"hold_ended": True, "handed_over": [bundle_id], "to": held.session.id}
             return {"hold_ended": True, "left": [bundle_id]}
+        # Marked, as a release's clean-up is: a reservation during the
+        # uninstall would have it finish under the new hold (#598).
+        cleaning = getattr(registry, "cleaning", None)
         try:
-            await controller.uninstall_app(bundle_id, install.udid, set_active=False)
+            with cleaning([install.udid]) if cleaning else contextlib.nullcontext():
+                # Bounded: nobody can reserve the device until it returns.
+                await asyncio.wait_for(controller.uninstall_app(
+                    bundle_id, install.udid, set_active=False), TIMEOUT_S)
         except Exception as e:  # noqa: BLE001 -- reported on the answer
-            return {"hold_ended": True, "left": [bundle_id], "error": str(e) or type(e).__name__}
+            error = (f"did not finish within {TIMEOUT_S:g}s" if isinstance(e, TimeoutError)
+                     else str(e) or type(e).__name__)
+            return {"hold_ended": True, "left": [bundle_id], "error": error}
         return {"hold_ended": True, "removed": [bundle_id]}
     if added is not None and not added:
         if failed:

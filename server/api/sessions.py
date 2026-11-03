@@ -648,6 +648,11 @@ _PROXY_CLEAR_ATTEMPTS = 3
 #: not hold it (CodeRabbit). Above a healthy bounce.
 _PROXY_CLEAR_TIMEOUT_S = 45.0
 
+#: How long a release's shutdown of a simulator or emulator it booted may take.
+#: Bounded because nobody can reserve the device until it returns (#598):
+#: simctl and adb are otherwise awaited with no limit.
+_SHUTDOWN_TIMEOUT_S = 60.0
+
 
 async def _end_device_proxy(app: Any, registry: Any, session: Any, udid: str,
                             actions: list[dict]) -> None:
@@ -716,62 +721,77 @@ async def run_release_policies(app) -> list[dict]:
     if registry is None:
         return []
     actions = []
-    for session in registry.take_released():
-        start = len(actions)
-        ended: list[dict] = []
-        keyboards: list[dict] = []
-        try:
-            ended = await _end_client_work(app, registry, session)
-            # The keyboard typing replaced on each Android device it held
-            # (#513), put back before the device is freed below: freed first,
-            # a new session could reserve it and have its keyboard switched
-            # under it (CodeRabbit). A failure here does not keep the device
-            # unavailable -- the record is kept, and the idle sweep and the
-            # next start try again. None when nothing was replaced.
-            u2 = getattr(controller, "u2", None)
-            for udid in session.reservations if u2 is not None else ():
-                if registry.holder_of(udid) is not None:
-                    continue
-                try:
-                    restored = await u2.restore_keyboard(udid)
-                except Exception as e:  # noqa: BLE001 -- reported, never raised
-                    restored = {"udid": udid, "action": "keyboard_restored", "ok": False,
-                                "error": str(e)}
-                if restored is not None:
-                    keyboards.append(restored)
-        finally:
-            # Tolerant of an action with no udid: this block must not raise, or
-            # the drain and the retry below are skipped (CodeRabbit).
-            failed = {a.get("udid") for a in ended if not a.get("ok")} - {None}
-            # A device whose clean-up failed stays unavailable, and is tried
-            # again at the next sweep: freed, another key could reserve it
-            # while the previous client's rule still answered its traffic or
-            # its recording still filmed (CodeRabbit). Fails closed.
-            registry.drained([u for u in session.reservations if u not in failed])
-            if failed:
-                registry.retry_release(session, failed)
-        actions.extend(ended)
-        # An erase on release (#581) leaves a simulator it was to shut down
-        # shut down already.
-        erased = {a["udid"] for a in ended
-                  if a.get("action") == "erased" and a.get("ok") and not a.get("rebooted")}
-        for r in session.reservations.values():
-            if r.on_release != "shutdown_booted" or not r.booted_here or r.udid in erased:
-                continue
-            # Only if nobody reserved it again meanwhile.
-            if registry.holder_of(r.udid) is not None or controller is None:
+    released = registry.take_released()
+    # Nobody reserves their devices until all of this has run (#598): every
+    # session taken is marked before the first await, not each in its turn,
+    # or the later ones' devices were open while the earlier ones' ran.
+    cleaning = getattr(registry, "cleaning", None)
+    every = [u for session in released for u in session.reservations]
+    with cleaning(every) if cleaning else contextlib.nullcontext():
+        for session in released:
+            await _release_session(app, registry, controller, session, actions)
+    return actions
+
+
+async def _release_session(app: Any, registry: SessionRegistry, controller: Any,
+                           session: HeldSession, actions: list[dict]) -> None:
+    """One released session's policies: `run_release_policies`, per session."""
+    start = len(actions)
+    ended: list[dict] = []
+    keyboards: list[dict] = []
+    try:
+        ended = await _end_client_work(app, registry, session)
+        # The keyboard typing replaced on each Android device it held
+        # (#513), put back before the device is freed below: freed first,
+        # a new session could reserve it and have its keyboard switched
+        # under it (CodeRabbit). A failure here does not keep the device
+        # unavailable -- the record is kept, and the idle sweep and the
+        # next start try again. None when nothing was replaced.
+        u2 = getattr(controller, "u2", None)
+        for udid in session.reservations if u2 is not None else ():
+            if registry.holder_of(udid) is not None:
                 continue
             try:
-                await controller.shutdown(r.udid)
-                actions.append({"udid": r.udid, "action": "shutdown", "ok": True})
+                restored = await u2.restore_keyboard(udid)
             except Exception as e:  # noqa: BLE001 -- reported, never raised
-                logger.warning("Could not shut down %s on release: %s", r.udid, e)
-                actions.append({"udid": r.udid, "action": "shutdown", "ok": False,
-                                "error": str(e)})
-        actions.extend(keyboards)
-        for a in actions[start:]:
-            a["_session"] = session.id         # whose release it was; stripped before answering
-    return actions
+                restored = {"udid": udid, "action": "keyboard_restored", "ok": False,
+                            "error": str(e)}
+            if restored is not None:
+                keyboards.append(restored)
+    finally:
+        # Tolerant of an action with no udid: this block must not raise, or
+        # the drain and the retry below are skipped (CodeRabbit).
+        failed = {a.get("udid") for a in ended if not a.get("ok")} - {None}
+        # A device whose clean-up failed stays unavailable, and is tried
+        # again at the next sweep: freed, another key could reserve it
+        # while the previous client's rule still answered its traffic or
+        # its recording still filmed (CodeRabbit). Fails closed.
+        registry.drained([u for u in session.reservations if u not in failed])
+        if failed:
+            registry.retry_release(session, failed)
+    actions.extend(ended)
+    # An erase on release (#581) leaves a simulator it was to shut down
+    # shut down already.
+    erased = {a["udid"] for a in ended
+              if a.get("action") == "erased" and a.get("ok") and not a.get("rebooted")}
+    for r in session.reservations.values():
+        if r.on_release != "shutdown_booted" or not r.booted_here or r.udid in erased:
+            continue
+        # Only if nobody reserved it again meanwhile.
+        if registry.holder_of(r.udid) is not None or controller is None:
+            continue
+        try:
+            await asyncio.wait_for(controller.shutdown(r.udid), _SHUTDOWN_TIMEOUT_S)
+            actions.append({"udid": r.udid, "action": "shutdown", "ok": True})
+        except Exception as e:  # noqa: BLE001 -- reported, never raised
+            error = (f"did not finish within {_SHUTDOWN_TIMEOUT_S:g}s"
+                     if isinstance(e, TimeoutError) else str(e))
+            logger.warning("Could not shut down %s on release: %s", r.udid, error)
+            actions.append({"udid": r.udid, "action": "shutdown", "ok": False,
+                            "error": error})
+    actions.extend(keyboards)
+    for a in actions[start:]:
+        a["_session"] = session.id         # whose release it was; stripped before answering
 
 
 def _answerable(actions: list[dict], session_id: str, *, blind: bool) -> list[dict]:

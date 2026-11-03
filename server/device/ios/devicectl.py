@@ -8,6 +8,7 @@ import logging
 import tempfile
 from pathlib import Path
 
+from server.device._subprocess import communicate
 from server.device.ios._xcode import xcode_available
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 from server.tooling.tool_probe import probe_command
@@ -112,7 +113,7 @@ class DevicectlBackend:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout_bytes, stderr_bytes = await proc.communicate()
+        stdout_bytes, stderr_bytes = await communicate(proc)
 
         if proc.returncode != 0:
             if json_output:
