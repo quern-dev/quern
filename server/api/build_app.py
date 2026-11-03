@@ -202,21 +202,24 @@ async def _holding(dirs: Iterable[Path]) -> AsyncIterator[float]:
         if lock is None:
             lock = _DERIVED_LOCKS[path] = asyncio.Lock()
         locks.append((path, lock))
-    held: list[asyncio.Lock] = []
+    held: list[tuple[Path, asyncio.Lock]] = []
     started = time.monotonic()
     try:
         for path, lock in locks:
             if lock.locked():
                 logger.info("Waiting for another build into %s to finish", path)
             await lock.acquire()
-            held.append(lock)
+            held.append((path, lock))
             # Used now, for the build store's retention (#581).
             derived_retention.mark_used(path)
         yield time.monotonic() - started
     finally:
         # Only what was taken: a request cancelled while waiting for its
         # second directory still holds its first.
-        for lock in reversed(held):
+        for path, lock in reversed(held):
+            # And again as it is let go: a build of over an hour otherwise
+            # left a stamp the cap read as an hour old (CodeRabbit).
+            derived_retention.mark_used(path)
             lock.release()
 
 

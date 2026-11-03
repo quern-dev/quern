@@ -150,22 +150,24 @@ def plan(found: list[Derived], *, now: float, max_age_days: int, max_bytes: int,
     """What to remove, and why: past `max_age_days` (0: no limit), then the
     least recently used while the rest is over `max_bytes` (0: no cap), never
     the most recently used of all. A busy directory, or one used within
-    `min_idle_s`, is neither removed nor sized; it counts toward the cap as
-    nothing, since nothing can be done about it now."""
+    `min_idle_s`, is never removed, but its size counts toward the cap:
+    counted as nothing, the older caches stayed in a store over it."""
     out: list[tuple[Derived, str]] = []
     keep: list[Derived] = []
+    protected: list[Derived] = []
     newest = max((d.last_used for d in found), default=None)
     for d in found:
         if busy(d.path) or now - d.last_used < min_idle_s:
+            protected.append(d)
             continue
         if max_age_days and now - d.last_used > max_age_days * 86400:
             out.append((d, f"unused for {int((now - d.last_used) // 86400)} days"))
         else:
             keep.append(d)
     if max_bytes:
-        for d in keep:
+        for d in (*keep, *protected):
             d.size = size(d.path)
-        total = sum(d.size for d in keep)
+        total = sum(d.size for d in (*keep, *protected))
         for d in sorted(keep, key=lambda d: d.last_used):
             if total <= max_bytes or d.last_used == newest:
                 break
@@ -181,8 +183,13 @@ async def sweep(locks: Mapping[Path, asyncio.Lock], *, base: Path | None = None,
     failed. Never raises for one directory."""
     base = base or root()
     now = time.time() if now is None else now
+    done: list[dict] = []
     for leftover in await asyncio.to_thread(_leftovers, base):
-        await asyncio.to_thread(shutil.rmtree, leftover, True)
+        # Said when it fails again, as a first failure is: silent, it kept its
+        # space with nothing to show for it (CodeRabbit).
+        if errors := await asyncio.to_thread(_remove, leftover):
+            done.append({"path": str(leftover), "ok": False, "reason": "left by a failed delete",
+                         "error": f"still could not be deleted ({errors[0]})"})
 
     def busy(path: Path) -> bool:
         # Any lock on it, inside it or around it: a key that is not exactly
@@ -193,7 +200,6 @@ async def sweep(locks: Mapping[Path, asyncio.Lock], *, base: Path | None = None,
 
     chosen = await asyncio.to_thread(lambda: plan(
         find(base), now=now, max_age_days=max_age_days, max_bytes=max_bytes, busy=busy))
-    done: list[dict] = []
     for d, why in chosen:
         lock = locks.get(d.path)
         if lock is None:

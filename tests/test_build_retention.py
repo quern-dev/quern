@@ -415,3 +415,39 @@ async def test_nothing_outside_the_store_is_removed_whatever_find_says(tmp_path,
     monkeypatch.setattr(dr, "find", lambda base: [dr.Derived(outside, dr._last_used(outside))])
     assert await dr.sweep({}, base=store, max_age_days=7, max_bytes=0) == []
     assert outside.exists()
+
+
+def test_a_long_build_restamps_as_it_lets_go(tmp_path):
+    """Stamped only on taking the lock, a build of over an hour left a stamp
+    the cap read as an hour old (CodeRabbit)."""
+    from server.api import build_app as route
+
+    path = tmp_path / "P-1234567890" / "S" / "iphoneos"
+
+    async def long_build():
+        async with route._holding([path]):
+            hours_ago = time.time() - 2 * 3600
+            os.utime(path / dr.STAMP, (hours_ago, hours_ago))   # the build ran long
+
+    asyncio.run(long_build())
+    assert time.time() - (path / dr.STAMP).stat().st_mtime < 60
+
+
+def test_protected_directories_count_toward_the_cap():
+    """Counted as nothing, they left the older caches in a store over the cap
+    (CodeRabbit)."""
+    now = 100 * DAY
+    found = _found(("building", now - 600), ("idle", now - 3 * DAY))
+    sizes = {Path("building"): 20, Path("idle"): 10}
+    out = dr.plan(found, now=now, max_age_days=7, max_bytes=25, busy=lambda p: False,
+                  size=_sizes(sizes))
+    assert [d.path.name for d, _ in out] == ["idle"]
+
+
+async def test_a_leftover_that_still_cannot_be_deleted_is_reported(tmp_path, monkeypatch):
+    leftover = tmp_path / f"{dr._REMOVING}abcd1234"
+    leftover.mkdir()
+    monkeypatch.setattr(dr, "_remove", lambda p: ["blob: Operation not permitted"])
+    done = await dr.sweep({}, base=tmp_path, max_age_days=7, max_bytes=0)
+    assert done == [{"path": str(leftover), "ok": False, "reason": "left by a failed delete",
+                     "error": "still could not be deleted (blob: Operation not permitted)"}]
