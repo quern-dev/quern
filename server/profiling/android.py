@@ -373,8 +373,9 @@ select
   hex((select json_group_array(json_array(name, idx, value)) from stats
      where value > 0 and (severity = 'data_loss'
        or name in ('ftrace_cpu_overrun_end', 'traced_buf_chunks_overwritten')))) as loss,
-  hex((select json_group_array(json_array(ts, dur, present_type, jank_type)) from (
-     select f.ts as ts, f.dur as dur, f.present_type as present_type, f.jank_type as jank_type
+  hex((select json_group_array(json_array(ts, dur, present_type, jank_type, jank_tag)) from (
+     select f.ts as ts, f.dur as dur, f.present_type as present_type, f.jank_type as jank_type,
+       f.jank_tag as jank_tag
      from actual_frame_timeline_slice f left join process p using (upid)
      where p.name = '{package}' or f.layer_name glob 'TX - {package}/*'
      order by f.ts))) as ft,
@@ -452,84 +453,100 @@ def frames_from_durations(durations_ns: list[int]) -> dict | None:
 
 #: FrameTimeline's presentations of a frame that reached the display.
 PRESENTED = {"On-time Present": "on_time", "Late Present": "late", "Early Present": "early"}
-#: Jank causes that are the app's own: it was late with its frame, or queued
-#: frames faster than the display took them (Android's FrameTimeline docs).
-#: The rest -- SurfaceFlinger's deadlines, the display, a prediction error --
-#: are the system's.
-APP_CAUSES = ("App Deadline Missed", "Buffer Stuffing")
+#: Whose jank a frame is, by trace_processor's own reading of it (jank_tag),
+#: not by its causes: perfetto counts only App Deadline Missed and App
+#: Resynced Jitter as the app's, and a stuffed frame -- one queued behind
+#: others -- is smooth with added latency, not jank (review, against the
+#: v59.1 stdlib). The first version read Buffer Stuffing as the app's jank,
+#: and a Pixel 5's smooth scroll as 56 frames janky by its own fault.
+JANKY_TAGS = {"Self Jank": "app", "Other Jank": "system"}
+STUFFED_TAGS = ("Buffer Stuffing", "SurfaceFlinger Stuffing")
+SMOOTH_TAGS = ("No Jank", "Non-perceivable Jank")
+#: A frame that missed: late to the display, or never on it.
+MISSED = ("Late Present", "Dropped Frame")
 
 
-def _causes(jank_type: object) -> list[str] | None:
-    """A frame's jank causes, or None when FrameTimeline did not classify it.
-    It writes several as one comma-joined string ("Prediction Error, App
-    Deadline Missed", measured), and "None" for a frame on time."""
-    causes = [c.strip() for c in str(jank_type or "").split(",") if c.strip()]
-    if not causes or all("Unknown" in c or "Unspecified" in c for c in causes):
-        return None
-    return causes
+def _causes(jank_type: object) -> list[str]:
+    """FrameTimeline writes several causes as one string ("Prediction Error,
+    App Deadline Missed", measured), and "None" for a frame on time."""
+    return [c.strip() for c in str(jank_type or "").split(",")
+            if c.strip() and c.strip() != "None"]
 
 
 def jank_from_timeline(rows: list, start_ns: int) -> dict | None:
-    """The app's frames as SurfaceFlinger judged them: how many reached the
-    display on time, how many were janky and why, and the worst of them.
+    """The app's frames as SurfaceFlinger judged them: on time, late or
+    dropped; which were janky, whose fault, and why; and the worst of them.
 
-    Jank is a share of the frames FrameTimeline classified, with the
-    coverage beside it: a low rate over few classified frames does not make
-    a smooth run. And a frozen main thread draws nothing, so a hang leaves
-    no janky frames behind it -- measured, a 12 s hang on a Pixel 5 left a
-    gap and two late frames after it."""
+    A frame is janky when trace_processor tags it Self (the app's) or Other
+    (the system's) Jank, and also when it was late or dropped with no tag it
+    knows -- a missed frame without a reason is still missed, so it can
+    never read as smooth. A frozen main thread draws nothing, so a hang
+    leaves no janky frames behind it: measured, a 12 s hang on a Pixel 5
+    left a gap and two late frames after it."""
     if not rows:
         return None
     present = {"on_time": 0, "late": 0, "early": 0}
-    dropped = unknown = classified = janky = app_janky = 0
+    dropped = unknown = classified = janky = app_janky = stuffed = unexplained = cut = 0
     by_cause: dict[str, int] = {}
     durations: list[float] = []
     worst: list[dict] = []
-    for ts, dur, present_type, jank_type in rows:
+    for ts, dur, present_type, jank_type, jank_tag in rows:
         if present_type == "Dropped Frame":
             dropped += 1
-            continue
-        if present_type not in PRESENTED:
+        elif present_type in PRESENTED:
+            present[PRESENTED[present_type]] += 1
+            if dur is not None and dur >= 0:
+                durations.append(dur / 1e6)
+            else:
+                cut += 1                  # still on its way when the trace ended
+        else:
             unknown += 1
+        known = jank_tag in JANKY_TAGS or jank_tag in STUFFED_TAGS or jank_tag in SMOOTH_TAGS
+        classified += known
+        if jank_tag in STUFFED_TAGS and present_type != "Dropped Frame":
+            stuffed += 1
             continue
-        present[PRESENTED[present_type]] += 1
-        durations.append(dur / 1e6)
-        causes = _causes(jank_type)
-        if causes is None:
-            continue
-        classified += 1
-        causes = [c for c in causes if c != "None"]
-        if not causes:
+        whose = JANKY_TAGS.get(jank_tag)
+        if whose is None and (present_type == "Dropped Frame"
+                              or (not known and present_type in MISSED)):
+            whose = "unexplained"
+        if whose is None:
             continue
         janky += 1
-        if any(c in APP_CAUSES for c in causes):
-            app_janky += 1
+        app_janky += whose == "app"
+        unexplained += whose == "unexplained"
+        causes = _causes(jank_type) or [present_type]
         for c in causes:
             by_cause[c] = by_cause.get(c, 0) + 1
-        worst.append({"start_s": _rel(ts, start_ns), "duration_ms": round(dur / 1e6, 1),
-                      "present": present_type, "causes": causes})
+        worst.append({"start_s": _rel(ts, start_ns),
+                      "duration_ms": round(dur / 1e6, 1) if dur is not None and dur >= 0 else None,
+                      "present": present_type, "whose": whose, "causes": causes})
     presented = sum(present.values())
     ms = sorted(durations)
 
     def pct(p: float) -> float | None:
         return round(ms[min(len(ms) - 1, int(p * len(ms)))], 1) if ms else None
-    worst.sort(key=lambda f: -f["duration_ms"])
+    worst.sort(key=lambda f: -(f["duration_ms"] or 0))
     return {
         "frames": len(rows), "presented": presented, **present, "dropped": dropped,
-        "unknown_present": unknown, "classified": classified,
-        "classification_coverage_percent":
-            round(classified / presented * 100, 1) if presented else None,
-        "janky": janky, "jank_percent": round(janky / classified * 100, 1) if classified else None,
-        "app_janky": app_janky, "by_cause": dict(sorted(by_cause.items(), key=lambda kv: -kv[1])),
+        "unknown_present": unknown, "unfinished": cut,
+        "janky": janky, "jank_percent": round(janky / len(rows) * 100, 1),
+        "app_janky": app_janky, "system_janky": janky - app_janky - unexplained,
+        "unexplained_janky": unexplained, "stuffed": stuffed,
+        "classified": classified,
+        "classification_coverage_percent": round(classified / len(rows) * 100, 1),
+        "by_cause": dict(sorted(by_cause.items(), key=lambda kv: -kv[1])),
         "p50_ms": pct(0.5), "p90_ms": pct(0.9), "p99_ms": pct(0.99),
         "max_ms": round(ms[-1], 1) if ms else None,
         "janky_frames": worst[:10], "source": "trace: FrameTimeline",
         "measures": ("each frame the app gave the display, as SurfaceFlinger judged it against "
-                     "its deadline; duration is from the app starting the frame to its "
-                     "presentation"),
-        "note": ("a frozen main thread draws no frames, so a hang is in hangs, not here; "
-                 "app_janky counts frames the app itself was late with (App Deadline Missed, "
-                 "Buffer Stuffing), the rest of the jank is the system's")}
+                     "its deadline and trace_processor tagged it; duration is from the app "
+                     "starting the frame to its presentation"),
+        "note": ("jank_percent is janky frames of all the app's frames: Self Jank is the app's "
+                 "(app_janky), Other Jank the system's, and a late or dropped frame with no "
+                 "tag is unexplained_janky; stuffed frames were queued behind others -- added "
+                 "latency, not jank; a frozen main thread draws no frames, so a hang is in "
+                 "hangs, not here")}
 
 
 def cpu_from_threads(rows: list, span_ns: int) -> dict | None:

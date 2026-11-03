@@ -350,41 +350,66 @@ def _decoded():
 
 
 class TestJank:
-    def test_unclassified_frames_are_out_of_the_rate_and_in_the_coverage(self):
-        rows = [[0, 5e6, "On-time Present", "None"],
-                [1, 30e6, "Late Present", "App Deadline Missed"],
-                [2, 9e6, "On-time Present", "Unknown"],
-                [3, 9e6, "On-time Present", None],
-                [4, 9e6, "Dropped Frame", "Dropped Frame"],
-                [5, 9e6, "Unknown Present", "None"]]
-        ft = ad.jank_from_timeline(rows, 0)
-        assert (ft["frames"], ft["presented"], ft["dropped"], ft["unknown_present"]) == (6, 4, 1, 1)
-        assert (ft["classified"], ft["janky"]) == (2, 1)
-        assert ft["jank_percent"] == 50.0 and ft["classification_coverage_percent"] == 50.0
+    """Rows as the summary query reads them: ts, dur, present_type,
+    jank_type, and trace_processor's jank_tag."""
 
-    def test_the_apps_own_causes(self):
-        rows = [[0, 9e6, "Late Present", "Buffer Stuffing"],
-                [1, 9e6, "Late Present", "SurfaceFlinger CPU Deadline Missed"],
-                [2, 9e6, "Late Present", "Display HAL, App Deadline Missed"]]
+    def test_stuffing_is_latency_not_jank(self):
+        """Perfetto reads a stuffed frame as smooth with added latency; the
+        first version called a smooth scroll janky by the app's fault."""
+        rows = [[i, 9e6, "Late Present", "Buffer Stuffing", "Buffer Stuffing"] for i in range(100)]
         ft = ad.jank_from_timeline(rows, 0)
-        assert ft["janky"] == 3 and ft["app_janky"] == 2
-        assert ft["by_cause"]["Display HAL"] == 1 and ft["by_cause"]["Buffer Stuffing"] == 1
+        assert (ft["janky"], ft["jank_percent"], ft["app_janky"], ft["stuffed"]) == (0, 0.0, 0, 100)
 
-    def test_only_presented_frames_have_durations(self):
-        rows = [[0, 4e6, "On-time Present", "None"], [1, 100e6, "Dropped Frame", None]]
+    def test_whose_jank_is_trace_processors_tag(self):
+        rows = [[0, 9e6, "Late Present", "App Resynced Jitter", "Self Jank"],
+                [1, 9e6, "Late Present", "Display HAL, App Deadline Missed", "Self Jank"],
+                [2, 9e6, "Late Present", "SurfaceFlinger CPU Deadline Missed", "Other Jank"],
+                [3, 9e6, "On-time Present", "Non Animating", "Non-perceivable Jank"],
+                [4, 9e6, "On-time Present", "None", "No Jank"]]
         ft = ad.jank_from_timeline(rows, 0)
-        assert ft["max_ms"] == 4.0 and ft["jank_percent"] == 0.0
+        assert (ft["janky"], ft["app_janky"], ft["system_janky"]) == (3, 2, 1)
+        assert ft["by_cause"]["Display HAL"] == 1 and ft["by_cause"]["App Resynced Jitter"] == 1
+        assert ft["jank_percent"] == 60.0 and ft["classification_coverage_percent"] == 100.0
+
+    def test_a_missed_frame_without_a_tag_is_still_janky(self):
+        """Review: late frames tagged Unknown read as 0% jank."""
+        rows = [[i, 30e6, "Late Present", "Unknown Jank", None] for i in range(5)]
+        rows += [[5, 5e6, "On-time Present", "None", "No Jank"],
+                 [6, 5e6, "Dropped Frame", "Dropped Frame", None],
+                 [7, 5e6, "On-time Present", "Unknown", "Unspecified"]]
+        ft = ad.jank_from_timeline(rows, 0)
+        assert (ft["janky"], ft["unexplained_janky"], ft["dropped"]) == (6, 6, 1)
+        assert ft["jank_percent"] == 75.0 and ft["classification_coverage_percent"] == 12.5
+        assert ft["janky_frames"][0]["causes"] == ["Unknown Jank"]
+
+    def test_a_dropped_frame_is_janky_whatever_its_tag(self):
+        rows = [[0, 9e6, "Dropped Frame", "None", "No Jank"],
+                [1, 9e6, "Dropped Frame", "Buffer Stuffing", "Buffer Stuffing"]]
+        ft = ad.jank_from_timeline(rows, 0)
+        assert (ft["janky"], ft["stuffed"]) == (2, 0)
+        # With no cause given, what happened to it stands in.
+        assert [f["causes"] for f in ft["janky_frames"]] == [["Dropped Frame"], ["Buffer Stuffing"]]
+
+    def test_a_late_frame_trace_processor_calls_smooth_is_not_janky(self):
+        rows = [[0, 9e6, "Late Present", "None", "Non-perceivable Jank"]]
+        assert ad.jank_from_timeline(rows, 0)["janky"] == 0
+
+    def test_a_frame_cut_off_by_the_trace_has_no_duration(self):
+        """dur -1: still on its way when the trace ended (one in each Pixel 5 trace)."""
+        rows = [[0, 4e6, "On-time Present", "None", "No Jank"],
+                [1, -1, "Late Present", "App Deadline Missed", "Self Jank"]]
+        ft = ad.jank_from_timeline(rows, 0)
+        assert ft["unfinished"] == 1 and ft["max_ms"] == 4.0 and ft["p50_ms"] == 4.0
+        assert ft["janky_frames"][0]["duration_ms"] is None
 
     def test_the_worst_ten_longest_first(self):
-        rows = [[i * 10**9, (20 + i) * 1e6, "Late Present", "App Deadline Missed"]
+        rows = [[i * 10**9, (20 + i) * 1e6, "Late Present", "App Deadline Missed", "Self Jank"]
                 for i in range(12)]
         worst = ad.jank_from_timeline(rows, 0)["janky_frames"]
         assert [f["duration_ms"] for f in worst] == [31.0 - i for i in range(10)]
 
     def test_none_is_none(self):
         assert ad.jank_from_timeline([], 0) is None
-        ft = ad.jank_from_timeline([[0, 1e6, "Dropped Frame", None]], 0)
-        assert ft["jank_percent"] is None and ft["classification_coverage_percent"] is None
 
 
 class TestReducers:
@@ -501,12 +526,22 @@ class TestSummarize:
         nothing, and two frames after it were late."""
         ft = (await _summary(FakeTP(fixture="summary-a14")))["frame_timeline"]
         assert (ft["frames"], ft["presented"], ft["on_time"], ft["late"]) == (162, 162, 160, 2)
-        assert (ft["classified"], ft["janky"], ft["app_janky"]) == (162, 2, 1)
+        assert (ft["classified"], ft["janky"]) == (162, 2)
+        assert (ft["app_janky"], ft["system_janky"]) == (1, 1)
         assert ft["jank_percent"] == 1.2 and ft["classification_coverage_percent"] == 100.0
         assert ft["by_cause"] == {"Prediction Error": 2, "App Deadline Missed": 1}
         assert ft["janky_frames"][0] == {"start_s": 20.446, "duration_ms": 14.8,
-                                         "present": "Late Present",
+                                         "present": "Late Present", "whose": "app",
                                          "causes": ["Prediction Error", "App Deadline Missed"]}
+        assert ft["unfinished"] == 1
+
+    async def test_a_smooth_scroll_with_stuffed_frames(self):
+        """A Pixel 5's 20 s scroll, end to end through quern: 59 late frames,
+        56 of them stuffed -- latency, not jank -- and three the system's."""
+        ft = (await _summary(FakeTP(fixture="summary-stuffed")))["frame_timeline"]
+        assert (ft["frames"], ft["late"], ft["stuffed"]) == (1101, 59, 56)
+        assert (ft["janky"], ft["app_janky"], ft["system_janky"]) == (3, 0, 3)
+        assert ft["jank_percent"] == 0.3
 
     async def test_frames_whose_process_name_was_lost_are_the_apps_by_layer(self):
         """The Pixel 5's DISCARD trace lost its process names; the app's frames
