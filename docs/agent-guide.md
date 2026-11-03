@@ -446,7 +446,7 @@ Open real-time video windows to see what's happening on USB-connected physical d
 - Uninstall app: `uninstall_app`
 - List installed apps: `list_apps`
 - How hard an app is working: `get_performance` (CPU, memory, threads; Android frames; null with a reason when something can't be read)
-- Why the app froze or stuttered: `start_profile` (iOS: relaunches the app under Instruments, presets hangs, cpu, hitches, launch; Android: perfetto records without relaunching, presets hangs, frames, cpu -- its deep summary needs trace_processor, which quern downloads on first use and says so in the answer), drive the app, then `stop_profile` for hangs, hitches and hot functions -- on iOS each hang says whether the main thread was `blocked` or `busy`, and gives the stack it was blocked or busy in; `download_profile` for the trace itself
+- Why the app froze or stuttered: `start_profile` (iOS: relaunches the app under Instruments, presets hangs, cpu, hitches, launch; Android: perfetto records without relaunching, presets hangs, frames, cpu -- its deep summary needs trace_processor, which quern downloads on first use and says so in the answer), drive the app, then `stop_profile` for hangs, hitches and hot functions -- on iOS with Xcode 27.2, the ten longest hangs say whether the main thread was `blocked` or `busy`, and the longest three give the stack it was in; a blocked hang in a profile without System Call Trace has no stack (`stack_note` says why), and without triage `unavailable.triage` says why; `download_profile` for the trace itself
 - Screenshot: `take_screenshot`
 - Location: `set_location` (simulators only)
 - Permissions: `grant_permission` (simulators only)

@@ -698,7 +698,8 @@ class ProfileManager:
                 continue
             if isinstance(value, list):
                 summary[f"{section}_count"] = len(value)
-                value = value[:LIST_LIMIT]
+                if section != "hangs":              # cut after triage has read them
+                    value = value[:LIST_LIMIT]
             if section == "launch" and not value["phases"]:
                 summary["unavailable"]["launch"] = (
                     "the trace recorded no launch phases" + (
@@ -712,6 +713,16 @@ class ProfileManager:
         # triage needs both tables, and has something to say only about hangs.
         if summary.get("hangs") and {"potential-hangs", "time-profile"} <= set(toc["tables"]):
             await self._triage(profile, summary, process)
+        if summary.get("hangs") and len(summary["hangs"]) > LIST_LIMIT:
+            # triage reads the longest, which can be anywhere in the trace:
+            # keep those, then the earliest of the rest, in the trace's order.
+            hangs = summary["hangs"]
+            kept = {i for i, h in enumerate(hangs) if "tier" in h}
+            for i in range(len(hangs)):
+                if len(kept) >= LIST_LIMIT:
+                    break
+                kept.add(i)
+            summary["hangs"] = [h for i, h in enumerate(hangs) if i in kept]
         return summary
 
     async def _triage(self, profile: Profile, summary: dict, process: str | None) -> None:

@@ -638,6 +638,27 @@ class TestTriage:
         assert first["stack"] == SYSCALL_STACK and second["tier"] == "Severe Hang"
         assert "stack" not in second and shows == ["Profile: System Calls"]
 
+    async def test_the_list_is_cut_after_triage_keeping_what_it_read(self, state, monkeypatch):
+        """triage reads the longest, which can be past the cut: the 24.7 s
+        hang here, with the list cut to one."""
+        real = xt.parse_triage
+
+        def later_only(text):
+            triage = real(text)
+            return {**triage, "hangs": [h for h in triage["hangs"] if h["start_s"] > 20]}
+
+        monkeypatch.setattr(manager_mod.xt, "parse_triage", later_only)
+        monkeypatch.setattr(manager_mod, "LIST_LIMIT", 1)
+        summary, _ = await self._summary(monkeypatch, "toc=sim-syscall-toc,triage=sim-two-triage")
+        assert summary["hangs_count"] == 2 and summary["hangs_triaged"] == 1
+        [hang] = summary["hangs"]
+        assert hang["start_s"] == 24.726 and hang["tier"] == "Severe Hang"
+
+    async def test_a_cut_without_triage_keeps_the_earliest(self, state, monkeypatch):
+        monkeypatch.setattr(manager_mod, "LIST_LIMIT", 1)
+        summary, _ = await self._summary(monkeypatch, "toc=sim-syscall-toc")
+        assert summary["hangs_count"] == 2 and [h["start_s"] for h in summary["hangs"]] == [6.979]
+
     async def test_no_hangs_runs_no_triage(self, state, monkeypatch):
         summary, _ = await self._summary(monkeypatch,
                                          "empty=potential-hangs,triage=sim-syscall-triage")
