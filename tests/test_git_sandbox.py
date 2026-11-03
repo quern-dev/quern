@@ -458,24 +458,44 @@ class TestEndToEnd:
         [repo] = sandboxes.listing(OWNER)
         assert "expands to 8 MB" in repo["last_checkout"]["branches"][0]["error"]
 
-    def test_a_client_that_goes_away_leaves_no_process(self, server, root):
-        """A disconnect raised Starlette's ClientDisconnect, which escaped,
-        and the backend outlived the server (review)."""
+    def test_a_body_that_goes_quiet_does_not_hold_a_process(self, server, root, monkeypatch):
+        """A client that sends half a body and waits held an http-backend for
+        as long as it liked (review). A body that sends nothing for
+        BODY_IDLE_SECONDS is dropped, with the socket still open."""
+        monkeypatch.setattr(git_sandbox, "BODY_IDLE_SECONDS", 1)
+        started = []
+        real = git_sandbox.asyncio.create_subprocess_exec
+
+        async def recording(*args, **kwargs):
+            proc = await real(*args, **kwargs)
+            started.append(proc.pid)
+            return proc
+        monkeypatch.setattr(git_sandbox.asyncio, "create_subprocess_exec", recording)
+
+        def alive(pid: int) -> bool:
+            # Its process group: the backend and the receive-pack beneath it.
+            try:
+                os.killpg(pid, 0)
+                return True
+            except (ProcessLookupError, PermissionError):
+                return False
+
         def backends() -> int:
-            out = subprocess.run(["pgrep", "-f", str(root)], capture_output=True, text=True)
-            return len(out.stdout.split())
+            return sum(alive(p) for p in started)
         port = int(server.rsplit(":", 1)[1])
-        for _ in range(5):
-            s = socket.create_connection(("127.0.0.1", port))
+        s = socket.create_connection(("127.0.0.1", port))
+        try:
             s.sendall(b"POST /git/app.git/git-receive-pack HTTP/1.1\r\nHost: x\r\n"
                       b"Content-Type: application/x-git-receive-pack-request\r\n"
                       b"Content-Length: 1000\r\n\r\n0000")
-            time.sleep(0.2)
+            time.sleep(0.5)
+            assert backends() >= 1, "the push's backend never started: the test would be blind"
+            deadline = time.time() + 10
+            while backends() and time.time() < deadline:
+                time.sleep(0.2)
+            assert backends() == 0, "a quiet body still holds its backend"
+        finally:
             s.close()
-        deadline = time.time() + 10
-        while backends() and time.time() < deadline:
-            time.sleep(0.2)
-        assert backends() == 0
 
     def test_a_chunked_push_past_the_cap_is_cut_off(self, server, root, project, limits):
         limits["max_bytes"] = 64 * 1024
