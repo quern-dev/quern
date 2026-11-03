@@ -249,3 +249,38 @@ async def test_the_server_sweeps_its_own_build_store_at_start(monkeypatch):
         assert "build-store-sweep" in {t.get_name() for t in asyncio.all_tasks()}
         assert app.state.build_store_sweep["removed"][0]["path"] == str(stale)
     assert not stale.exists()
+
+
+def test_a_recent_stamp_beats_an_old_directory(tmp_path):
+    """Xcode leaves an old DerivedData's own times alone on an incremental
+    build; the stamp is what says it was just used."""
+    now = time.time()
+    path = _derived(tmp_path / "a", age_days=40, stamp=False, now=now)
+    (path / dr.STAMP).touch()
+    os.utime(path / dr.STAMP, (now - 2 * DAY, now - 2 * DAY))
+    assert abs(dr.find(tmp_path)[0].last_used - (now - 2 * DAY)) < 5
+
+
+async def test_a_build_that_took_it_after_the_plan_keeps_it(tmp_path):
+    """Planned while free, taken by a build before its turn to be removed."""
+    now = time.time()
+    path = _derived(tmp_path / "P-0123456789" / "S" / "iphoneos", age_days=30, now=now)
+
+    class TakenAfterThePlan(asyncio.Lock):
+        checks = 0
+
+        def locked(self):
+            TakenAfterThePlan.checks += 1
+            return TakenAfterThePlan.checks > 1          # free for the plan only
+
+    assert await dr.sweep({path: TakenAfterThePlan()}, base=tmp_path, max_age_days=7,
+                          max_bytes=0, now=now) == []
+    assert path.exists()
+
+
+async def test_emptying_the_store_keeps_the_store(tmp_path):
+    store = tmp_path / "builds"
+    _derived(store / "Only-0123456789" / "S" / "iphoneos", age_days=30)
+    (store / ".DS_Store").write_text("finder")
+    await dr.sweep({}, base=store, max_age_days=7, max_bytes=0)
+    assert store.is_dir() and not (store / "Only-0123456789").exists()
