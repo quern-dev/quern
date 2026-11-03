@@ -127,7 +127,7 @@ def _checkout_dir(principal: str, repo: str, branch: str) -> Path:
 
 async def check_out(principal: str, repo: str) -> list[dict]:
     """Bring every branch's checkout up to what was pushed. Each has its own
-    index, so `read-tree -m -u` touches only files that changed -- an untouched
+    index, so `read-tree --reset -u` touches only files that changed -- an untouched
     file keeps its timestamp, and an incremental build stays incremental --
     and removes files the new tree no longer has. A branch whose checkout
     fails is reported, and the others still go."""
@@ -149,19 +149,16 @@ async def check_out(principal: str, repo: str) -> list[dict]:
         if prev == sha:
             continue
         work = _checkout_dir(principal, repo, branch)
-        index = index_dir / branch.replace("/", _SEP)
-        env = {"GIT_INDEX_FILE": str(index)}
+        env = {"GIT_INDEX_FILE": str(index_dir / branch.replace("/", _SEP))}
         args = ["--git-dir", str(gitdir), "--work-tree", str(work)]
         # The marker goes first: a checkout that fails part-way must not be
         # read as the previous one on the next push.
         marker.unlink(missing_ok=True)
         try:
             work.mkdir(parents=True, exist_ok=True)
-            if prev and index.exists():
-                # Two-tree merge: only what changed between them is written.
-                await _git(*args, "read-tree", "-m", "-u", prev, sha, env=env)
-            else:
-                await _git(*args, "read-tree", "--reset", "-u", sha, env=env)
+            # With the branch's own index, -u rewrites only the files whose
+            # entries changed and removes those the tree no longer has.
+            await _git(*args, "read-tree", "--reset", "-u", sha, env=env)
         except (SandboxError, OSError) as e:
             logger.warning("sandbox %s/%s: checkout of %s failed: %s", principal, repo, branch, e)
             done.append({"branch": branch, "commit": sha, "error": str(e)})
