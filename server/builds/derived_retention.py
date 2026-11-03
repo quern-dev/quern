@@ -49,6 +49,10 @@ STAMP = ".quern-last-used"
 #: directory as it starts.
 MIN_IDLE_S = 3600
 
+#: How often a build holding its lock stamps its DerivedData again: well
+#: inside MIN_IDLE_S, so a long build never reads as idle to another server.
+STAMP_EVERY_S = 600
+
 #: How often the sweep runs after the one at start.
 SWEEP_SECONDS = 3600
 

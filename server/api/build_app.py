@@ -204,6 +204,7 @@ async def _holding(dirs: Iterable[Path]) -> AsyncIterator[float]:
         locks.append((path, lock))
     held: list[tuple[Path, asyncio.Lock]] = []
     started = time.monotonic()
+    heartbeat: asyncio.Task | None = None
     try:
         for path, lock in locks:
             if lock.locked():
@@ -212,8 +213,16 @@ async def _holding(dirs: Iterable[Path]) -> AsyncIterator[float]:
             held.append((path, lock))
             # Used now, for the build store's retention (#581).
             derived_retention.mark_used(path)
+        # And kept so while held: another quern on the same ~/.quern cannot
+        # see this lock, and a build longer than MIN_IDLE_S otherwise read
+        # as idle to its sweep (CodeRabbit).
+        heartbeat = asyncio.create_task(_keep_stamped([p for p, _ in held]))
         yield time.monotonic() - started
     finally:
+        if heartbeat is not None:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
         # Only what was taken: a request cancelled while waiting for its
         # second directory still holds its first.
         for path, lock in reversed(held):
@@ -221,6 +230,14 @@ async def _holding(dirs: Iterable[Path]) -> AsyncIterator[float]:
             # left a stamp the cap read as an hour old (CodeRabbit).
             derived_retention.mark_used(path)
             lock.release()
+
+
+async def _keep_stamped(paths: list[Path]) -> None:
+    """Stamp `paths` every STAMP_EVERY_S until cancelled."""
+    while True:
+        await asyncio.sleep(derived_retention.STAMP_EVERY_S)
+        for path in paths:
+            derived_retention.mark_used(path)
 
 
 async def _build(

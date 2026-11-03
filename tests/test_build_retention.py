@@ -451,3 +451,19 @@ async def test_a_leftover_that_still_cannot_be_deleted_is_reported(tmp_path, mon
     done = await dr.sweep({}, base=tmp_path, max_age_days=7, max_bytes=0)
     assert done == [{"path": str(leftover), "ok": False, "reason": "left by a failed delete",
                      "error": "still could not be deleted (blob: Operation not permitted)"}]
+
+
+async def test_a_build_keeps_its_stamp_fresh_while_it_holds_the_lock(tmp_path, monkeypatch):
+    """Another quern sharing ~/.quern cannot see the lock: a build longer
+    than MIN_IDLE_S read as idle to its sweep (CodeRabbit)."""
+    from server.api import build_app as route
+
+    monkeypatch.setattr(dr, "STAMP_EVERY_S", 0.05)
+    path = tmp_path / "P-1234567890" / "S" / "iphoneos"
+    async with route._holding([path]):
+        hours_ago = time.time() - 2 * 3600
+        os.utime(path / dr.STAMP, (hours_ago, hours_ago))
+        await asyncio.sleep(0.2)
+        assert time.time() - (path / dr.STAMP).stat().st_mtime < 60, "stamped while held"
+    pending = [t for t in asyncio.all_tasks() if t.get_coro().__name__ == "_keep_stamped"]
+    assert pending == [], "the heartbeat ends with the hold"
