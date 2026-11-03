@@ -45,8 +45,9 @@ Client keys guard against mistakes between cooperating users, not against a
 hostile one: a client installing an app on its own simulator runs that app as
 the Mac's user, and the simulator sandbox is not a security boundary. Builds
 are owner-only for that reason -- a build runs a project's scripts, and a
-Gradle build whatever arguments it is given -- but nothing here makes a client
-key safe to hand to someone you would not let use the Mac (#254).
+Gradle build whatever arguments it is given -- unless the owner opts clients in
+with `remote.client_builds` (#605), but nothing here makes a client key safe to
+hand to someone you would not let use the Mac (#254).
 """
 
 from __future__ import annotations
@@ -445,10 +446,14 @@ def _blind_kind(method: str, path: str) -> str:
 
 #: Owner-only routes the owner may open to client keys with a setting (#605),
 #: and the rule a client is held to when it is on. A build is a change to the
-#: devices it installs on: named (`udid`/`udids`) or the session's active one,
-#: and every one of them its own -- AccessMiddleware checks each name.
+#: devices quern installs it on: named (`udid`/`udids`) or the session's active
+#: one, and every one of them its own -- AccessMiddleware checks each name.
+#: `gradle_args` stays the owner's: an extra task such as `installDebug` makes
+#: Gradle itself install on every connected device, and `-p` builds another
+#: project (review). `java_home` names a path on the Mac.
 _OPT_IN = {("POST", "/api/v1/device/build-and-install")}
-_BUILD = _RESOLVED
+_BUILD = Rule(Access.CONTROL, "resolved",
+              owner_fields=frozenset({"gradle_args", "java_home"}))
 
 
 def _opt_in_route(method: str, path: str) -> bool:

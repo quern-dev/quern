@@ -21,6 +21,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
+from server import visibility
 from server.builds import build_records, gradle
 from server.builds import jdk as jdk_mod
 from server.device.android.adb import AdbTimeout
@@ -308,9 +309,13 @@ async def _default_android(controller) -> str:
     if len(booted) == 1:
         return await controller.resolve_udid(booted[0])
     if booted:
+        # A blind server does not name other keys' devices to a client, which
+        # since #605 can reach this by building (review).
+        which = ("one your session holds" if visibility.blind_for()
+                 else f"from {', '.join(booted)}")
         raise HTTPException(status_code=400,
                             detail=f"no device named, and {len(booted)} Android devices are "
-                                   f"booted: pass udid or udids from {', '.join(booted)}")
+                                   f"booted: pass udid or udids {which}")
     raise HTTPException(status_code=400,
                         detail="no device named, and no Android device or emulator is booted"
                                + (f" (the active device, {active}, is not one)"

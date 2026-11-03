@@ -1148,3 +1148,76 @@ def test_status_shows_the_address_the_api_answers_on(capsys, host, shown):
     daemon._print_status({"pid": 1, "server_host": host, "local_ip": "192.168.1.5",
                           "server_port": 9110, "proxy_enabled": False})
     assert f"http://{shown}:9110" in capsys.readouterr().out
+
+
+class TestClientBuildReviewFixes:
+    """Findings from the #605 review of client builds."""
+
+    URL = "/api/v1/device/build-and-install"
+
+    @pytest.fixture
+    def on(self, monkeypatch):
+        from server import config
+        monkeypatch.setattr(config, "client_builds", lambda: True)
+
+    @pytest.mark.parametrize("field, value", [
+        ("gradle_args", ["installDebug"]),       # Gradle would install on every device
+        ("gradle_args", ["-p", "/other/app"]),   # another project
+        ("java_home", "/Library/Java/x"),        # a path on the Mac
+    ])
+    def test_a_client_may_not_set_owner_fields(self, world, registry, on, field, value):
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        r = c.post(self.URL, headers=_h(alice),
+                   json={"project_path": "/p", "udid": "SIM-1", field: value})
+        assert r.status_code == 403 and field in r.json()["detail"], r.text
+
+    def test_the_owner_still_may(self, world, on):
+        c, *_ = world
+        r = c.post(self.URL, headers=_h(KEY),
+                   json={"project_path": "/p", "udid": "SIM-9", "gradle_args": ["--info"]})
+        assert r.status_code == 200, r.text
+
+    @pytest.mark.parametrize("udid, udids, want", [
+        (None, ["", "SIM-1"], ["SIM-1"]),
+        ("", ["", ""], []),                       # nothing named: the active device
+        ("SIM-1", ["SIM-1", "SIM-2", "SIM-2"], ["SIM-1", "SIM-2"]),
+        (None, None, []),
+    ])
+    def test_an_empty_udid_names_no_device(self, udid, udids, want):
+        from server.api.build_app import BuildAndInstallRequest, _requested_udids
+        body = BuildAndInstallRequest(project_path="/p", udid=udid, udids=udids)
+        assert _requested_udids(body) == want
+
+    def test_a_permission_error_reading_config_is_off_not_a_crash(self, monkeypatch):
+        from server import config
+
+        def denied(strict=False):
+            raise PermissionError(13, "Permission denied")
+        monkeypatch.setattr(config, "read_user_config", denied)
+        assert config.client_builds() is False
+
+    @pytest.mark.parametrize("blind, named", [(True, False), (False, True)])
+    async def test_a_blind_server_does_not_name_others_android_devices(
+            self, monkeypatch, blind, named):
+        from types import SimpleNamespace
+
+        from fastapi import HTTPException
+
+        from server import visibility
+        from server.api import build_android
+        from server.models import DeviceState, DeviceType
+
+        dev = lambda u: SimpleNamespace(udid=u, state=DeviceState.BOOTED,  # noqa: E731
+                                        device_type=DeviceType.ANDROID_EMULATOR)
+
+        class Ctl:
+            _active_udid = None
+
+            async def list_devices(self):
+                return [dev("emulator-5554"), dev("emulator-5556")]
+
+        monkeypatch.setattr(visibility, "blind_for", lambda caller=None: blind)
+        with pytest.raises(HTTPException) as e:
+            await build_android._default_android(Ctl())
+        assert ("emulator-5554" in e.value.detail) is named, e.value.detail

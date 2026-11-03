@@ -34,6 +34,19 @@ BUILD_TIMEOUT = 600  # seconds
 # ---------------------------------------------------------------------------
 
 
+def _requested_udids(body: BuildAndInstallRequest) -> list[str]:
+    """The devices a build names, `udid` then `udids`, once each.
+
+    An empty entry names no device. Kept, it resolved as "none given" and
+    auto-detected from every device on the Mac -- past the middleware, which
+    had already seen a real name beside it (review, #605)."""
+    out: list[str] = []
+    for u in [body.udid, *(body.udids or [])]:
+        if u and u not in out:
+            out.append(u)
+    return out
+
+
 class BuildAndInstallRequest(BaseModel):
     project_path: str
     scheme: str | None = None
@@ -421,13 +434,7 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
         raise HTTPException(status_code=400, detail=detail)
 
     # 3. Collect and resolve UDIDs
-    raw_udids: list[str] = []
-    if body.udid:
-        raw_udids.append(body.udid)
-    if body.udids:
-        for u in body.udids:
-            if u not in raw_udids:
-                raw_udids.append(u)
+    raw_udids = _requested_udids(body)
 
     if not raw_udids:
         # No UDIDs specified — auto-resolve single active device

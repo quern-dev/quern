@@ -460,10 +460,12 @@ def client_builds() -> bool:
     its own session holds, and names a project path on the Mac's disk.
 
     A config.json that cannot be read is off, so a broken file never hands
-    out builds."""
+    out builds. Nor does one quern may not read: `exists()` raises
+    PermissionError on a directory it cannot search, which reached the
+    middleware as a 500 (review)."""
     try:
         config = read_user_config(strict=True)
-    except ConfigUnreadable:
+    except OSError:          # ConfigUnreadable is one
         return False
     raw = config.get("remote")
     return isinstance(raw, dict) and raw.get("client_builds") is True
