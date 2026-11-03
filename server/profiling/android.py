@@ -319,6 +319,10 @@ def window_matches(track: str, package: str) -> tuple[bool, bool]:
     return (cut and package.startswith(window)), cut and package.startswith(window)
 
 
+#: A frame is `Choreographer#doFrame` on Android 10 and `Choreographer#doFrame
+#: <vsync id>` on 14 (measured), where its child "Choreographer#doFrame -
+#: resynced to ..." is not a frame of its own.
+#:
 #: The whole summary in one query, so trace_processor loads the trace once:
 #: each section was a load of its own, measured 1.7 s for 4.1 MB, so a 100 MB
 #: trace would have cost five loads of ~40 s. Each section is JSON, hex-encoded
@@ -336,7 +340,8 @@ select
   hex((select json_group_array(s.dur) from slice s
      join thread_track tt on s.track_id = tt.id join thread t using (utid)
      join process p using (upid)
-     where p.name = '{package}' and t.tid = p.pid and s.name = 'Choreographer#doFrame'))
+     where p.name = '{package}' and t.tid = p.pid
+       and (s.name = 'Choreographer#doFrame' or s.name glob 'Choreographer#doFrame [0-9]*')))
      as frames,
   hex((select json_group_array(json_array(tid, thread, ns)) from (
      select t.tid as tid, t.name as thread, sum(s.dur) as ns

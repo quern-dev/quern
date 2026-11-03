@@ -141,7 +141,12 @@ class FakeTP:
         return self.status()
 
     async def query(self, trace, sql):
-        assert "json_group_array" in sql, sql          # one query, one load of the trace
+        # The fixtures are trace_processor's answers to one query, saved beside
+        # them: a changed query with fixtures not re-read from the traces would
+        # test the old query's answers (android-summary.sql says how to re-read).
+        assert sql.strip() == (FIXTURES / "android-summary.sql").read_text().strip(), (
+            "SUMMARY_SQL changed: re-run it on the fixture traces and save it as "
+            "tests/fixtures/profiles/android-summary.sql")
         if self.fail:
             raise RuntimeError("trace_processor failed (exit -11): no output")
         return parse_csv(csv_fixture(self.fixture))
@@ -419,6 +424,14 @@ class TestSummarize:
         assert s["frames"]["source"] == "gfxinfo" and s["cpu"]["source"] == "/proc"
         assert s["slowest_slices"] is None and "trace_processor" in s["unavailable"]
         assert s["trace_processor"]["state"] == tp_state
+
+    async def test_android_14s_numbered_frames_are_frames(self):
+        """Android 14 names each `Choreographer#doFrame <vsync id>`: matched
+        by the bare name, a Pixel 5's 193 frames read as none, and the
+        summary said the trace had no frames (measured)."""
+        s = await _summary(FakeTP(fixture="summary-a14"))
+        assert s["frames"]["source"] == "trace" and s["frames"]["count"] == 193
+        assert "frames" not in s["unavailable"]
 
     async def test_a_trace_that_lost_data_says_so(self):
         """A Pixel 5's 25 s profile with the old DISCARD buffer: the trace
