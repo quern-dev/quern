@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from server.api.actions import logged_action
-from server.builds import build_records, gradle
+from server.builds import build_records, derived_retention, gradle
 from server.config import CONFIG_DIR
 from server.models import BuildRecord, BuildResult, DeviceError, DeviceType, EnvironmentProblem
 
@@ -210,6 +210,8 @@ async def _holding(dirs: Iterable[Path]) -> AsyncIterator[float]:
                 logger.info("Waiting for another build into %s to finish", path)
             await lock.acquire()
             held.append(lock)
+            # Used now, for the build store's retention (#581).
+            derived_retention.mark_used(path)
         yield time.monotonic() - started
     finally:
         # Only what was taken: a request cancelled while waiting for its
