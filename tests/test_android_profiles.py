@@ -194,6 +194,19 @@ class TestConfig:
         text = ad.config_text(ad.PRESETS[preset], PKG, 30)
         assert ('name: "android.surfaceflinger.frametimeline"' in text) is recorded
 
+    def test_the_recorded_time_is_capped_at_the_time_limit(self):
+        """A profile finished by a later server ended at its limit, not when
+        it was read (adoption)."""
+        p = manager_mod.Profile(id="prof_x", udid=SERIAL, platform="android", device=SERIAL,
+                    bundle_id=PKG, preset="hangs", time_limit_s=30,
+                    started_at="2026-11-03T10:00:00+00:00")
+        p.ended_at = "2026-11-03T12:00:00+00:00"
+        assert manager_mod._recorded_s(p) == 30
+        p.ended_at = "2026-11-03T10:00:12.500000+00:00"
+        assert manager_mod._recorded_s(p) == 12.5
+        p.ended_at = None
+        assert manager_mod._recorded_s(p) is None
+
     def test_the_hangs_preset_records_input(self):
         assert "input" in ad.PRESETS["hangs"].atrace and "input" not in ad.PRESETS["cpu"].atrace
 
@@ -442,14 +455,15 @@ class TestReducers:
         assert ad.frames_from_snapshots(first, two_ways)[0]["janky"] is None
 
 
-async def _summary(tp, logged=(None, "logcat was not captured"), preset="hangs"):
+async def _summary(tp, logged=(None, "logcat was not captured"), preset="hangs",
+                   expected_s=None):
     first = {"pid": 1, "ticks": 100, "uptime": 10.0,
              "frames": {"total_frames": 50, "janky_frames": 2, "janky_method": "legacy"}}
     last = {"pid": 1, "ticks": 150, "uptime": 20.0,
             "frames": {"total_frames": 80, "janky_frames": 5, "janky_method": "legacy"}}
     return await ad.summarize(preset=preset, package=PKG, trace=Path("/t"), first=first,
                               last=last, tp=tp, tp_status=tp.status().as_dict(),
-                              logged_hangs=logged)
+                              logged_hangs=logged, expected_s=expected_s)
 
 
 class TestSummarize:
@@ -525,8 +539,16 @@ class TestSummarize:
         assert "lower bounds" in s["trace_note"]
 
     async def test_a_whole_trace_reports_no_loss(self):
-        s = await _summary(FakeTP())
+        s = await _summary(FakeTP(), expected_s=25.0)        # the fixture's trace: 24.8 s
         assert "trace_data_loss" not in s and "trace_note" not in s
+
+    async def test_a_trace_that_stopped_early_says_so(self):
+        """perfetto's file limit stops a busy device's trace at ~130 s and no
+        stat says so (review): the span against the profile's does."""
+        s = await _summary(FakeTP(), expected_s=60.0)
+        [loss] = s["trace_data_loss"]
+        assert loss["stat"] == "trace ended early" and loss["value"] == 24.8
+        assert "24.8 s of a 60.0 s profile" in loss["detail"] and "lower bounds" in s["trace_note"]
 
     async def test_no_source_for_hangs_is_said_not_empty(self):
         s = await _summary(FakeTP("disabled"))

@@ -97,6 +97,17 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+
+def _recorded_s(profile: Profile) -> float | None:
+    """How long the profile ran: start to end, but never past its time limit
+    -- one finished by a later server ended long before it was read."""
+    try:
+        span = (datetime.fromisoformat(profile.ended_at or "")
+                - datetime.fromisoformat(profile.started_at)).total_seconds()
+    except ValueError:
+        return None
+    return min(span, profile.time_limit_s) if span > 0 else None
+
 def _root() -> Path:
     # Read at call time, so QUERN_STATE_DIR set by a test applies.
     return config_mod.CONFIG_DIR / "profiles"
@@ -621,7 +632,7 @@ class ProfileManager:
         summary = await ad.summarize(
             preset=profile.preset, package=profile.bundle_id, trace=profile.trace,
             first=first, last=last, tp=self.trace_processor, tp_status=status.as_dict(),
-            logged_hangs=logged)
+            logged_hangs=logged, expected_s=_recorded_s(profile))
         await asyncio.to_thread(_write_json_atomic, profile.summary_file, summary)
         profile.state = "finished"
 

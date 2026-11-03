@@ -53,6 +53,8 @@ FRAME_BUDGET_MS = 1000 / 60
 LIST_LIMIT = 50
 #: An adb call to the device: perfetto's own answers measured 0.2-0.3 s.
 ADB_TIMEOUT_S = 30.0
+#: A trace this much (or a tenth) shorter than its profile stopped early.
+TRACE_SHORT_S = 3.0
 #: Pulling the trace: 4.1 MB took 0.14 s; a 300 s profile can be 100+ MB.
 PULL_TIMEOUT_S = 300.0
 
@@ -326,6 +328,11 @@ def window_matches(track: str, package: str) -> tuple[bool, bool]:
     return (cut and package.startswith(window)), cut and package.startswith(window)
 
 
+#: Lost data is what trace_processor rates `data_loss`, and two it rates only
+#: `info` that are data lost all the same: the kernel's ftrace buffer
+#: overrunning, and the ring buffer overwriting chunks not yet written out
+#: (review).
+#:
 #: The app's FrameTimeline frames are its process's, or its layer's -- "TX -
 #: <package>/<activity>#n" -- for a trace that lost the process names: a
 #: Pixel 5's DISCARD trace had 1,355 of the app's frames with no process name.
@@ -364,7 +371,8 @@ select
      join thread t using (utid) join process p using (upid)
      where p.name = '{package}' order by s.dur desc limit 10))) as slices,
   hex((select json_group_array(json_array(name, idx, value)) from stats
-     where severity = 'data_loss' and value > 0)) as loss,
+     where value > 0 and (severity = 'data_loss'
+       or name in ('ftrace_cpu_overrun_end', 'traced_buf_chunks_overwritten')))) as loss,
   hex((select json_group_array(json_array(ts, dur, present_type, jank_type)) from (
      select f.ts as ts, f.dur as dur, f.present_type as present_type, f.jank_type as jank_type
      from actual_frame_timeline_slice f left join process p using (upid)
@@ -575,7 +583,7 @@ def cpu_from_snapshots(first: dict, last: dict) -> tuple[dict | None, str | None
 async def summarize(*, preset: str, package: str, trace: Path, first: dict, last: dict,
                     tp, tp_status: dict,
                     logged_hangs: tuple[list[dict] | None, str | None],
-                    ) -> dict:
+                    expected_s: float | None = None) -> dict:
     """The profile, section by section; null with the reason when unread.
 
     trace_processor failing is not the trace being bad: the summary falls
@@ -601,11 +609,19 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
 
     if read is not None:
         start_ns, end_ns = read["start_ts"] or 0, read["end_ts"] or 0
-        if read["loss"]:
-            # What trace_processor itself rates as data loss: the sections
-            # below are then read from a trace with holes in it.
-            summary["trace_data_loss"] = [{"stat": name if idx is None else f"{name}[{idx}]",
-                                           "value": value} for name, idx, value in read["loss"]]
+        loss = [{"stat": name if idx is None else f"{name}[{idx}]", "value": value}
+                 for name, idx, value in read["loss"]]
+        span_s = (end_ns - start_ns) / 1e9
+        if expected_s and expected_s - span_s > max(TRACE_SHORT_S, expected_s * 0.1):
+            # A trace that stops early says nothing in its stats: perfetto
+            # stops at max_file_size_bytes, which a busy device reaches in
+            # ~130 s (Pixel 5: 48 MB per 25 s), and a 300 s profile is allowed.
+            loss.append({"stat": "trace ended early", "value": round(span_s, 1),
+                         "detail": f"the trace covers {span_s:.1f} s of a {expected_s:.1f} s "
+                                   "profile; perfetto stops writing at its 256 MiB file limit"})
+        if loss:
+            # The sections below are then read from a trace with holes in it.
+            summary["trace_data_loss"] = loss
             summary["trace_note"] = (
                 "trace_processor says the trace lost data, so what it holds is incomplete: "
                 "counts read from it are lower bounds, and a gap is not proof of nothing "

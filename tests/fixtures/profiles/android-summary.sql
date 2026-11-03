@@ -23,7 +23,8 @@ select
      join thread t using (utid) join process p using (upid)
      where p.name = 'com.quern.probe' order by s.dur desc limit 10))) as slices,
   hex((select json_group_array(json_array(name, idx, value)) from stats
-     where severity = 'data_loss' and value > 0)) as loss,
+     where value > 0 and (severity = 'data_loss'
+       or name in ('ftrace_cpu_overrun_end', 'traced_buf_chunks_overwritten')))) as loss,
   hex((select json_group_array(json_array(ts, dur, present_type, jank_type)) from (
      select f.ts as ts, f.dur as dur, f.present_type as present_type, f.jank_type as jank_type
      from actual_frame_timeline_slice f left join process p using (upid)
