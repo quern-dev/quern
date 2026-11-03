@@ -30,6 +30,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from server import sandboxes, visibility
+from server.api.actions import logged_action
 from server.principal import label_of
 
 logger = logging.getLogger(__name__)
@@ -263,6 +264,7 @@ async def info_refs(request: Request, repo: str, service: str | None = None):
 
 
 @router.post("/git/{repo}/git-receive-pack")
+@logged_action("push_to_sandbox", category="build")
 async def receive_pack(request: Request, repo: str):
     return await _cgi(request, _repo(repo), "git-receive-pack", "git-receive-pack")
 
@@ -285,6 +287,7 @@ async def list_sandboxes() -> dict:
 
 
 @router.delete("/api/v1/sandboxes/{repo}")
+@logged_action("delete_sandbox", category="build")
 async def delete_sandbox(repo: str) -> dict:
     principal = _caller()
     try:
