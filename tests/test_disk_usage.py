@@ -315,3 +315,18 @@ async def test_the_server_measures_at_start(monkeypatch):
             await asyncio.sleep(0.05)
         assert "disk-measure" in {t.get_name() for t in asyncio.all_tasks()}
         assert app.state.disk_usage["stores"]["simulators"]["path"] == str(du.SIM_DEVICES)
+
+
+def test_a_store_it_cannot_open_raises_and_one_inside_it_does_not(tmp_path):
+    """The store itself unreadable is 'could not tell'; a file inside it that
+    cannot be read is an estimate's rounding."""
+    with pytest.raises(OSError):
+        du.disk_size(tmp_path / "gone")
+    store = tmp_path / "store"
+    (store / "locked").mkdir(parents=True)
+    (store / "file").write_bytes(b"x" * 8192)
+    (store / "locked").chmod(0)
+    try:
+        assert du.disk_size(store) >= 8192
+    finally:
+        (store / "locked").chmod(0o755)
