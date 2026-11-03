@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
+import signal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -40,7 +42,15 @@ router = APIRouter(tags=["git sandbox"])
 _SERVICES = {"git-upload-pack", "git-receive-pack"}
 
 #: Seconds between sweeps for revoked keys' and idle repositories.
-SWEEP_SECONDS = 600
+SWEEP_SECONDS = 60
+
+#: Seconds a push may go without sending a byte before it is dropped: a
+#: client that sends half a body and waits must not hold a process forever.
+BODY_IDLE_SECONDS = 60
+
+#: One push at a time per key: each is checked against the room left, and two
+#: at once would each be given all of it (review).
+_push_locks: dict[str, asyncio.Lock] = {}
 
 
 def _repo(name: str) -> str:
@@ -52,8 +62,19 @@ def _repo(name: str) -> str:
         raise HTTPException(e.status, str(e)) from None
 
 
-def _caller() -> str:
-    """The caller's principal, once it may use sandboxes at all."""
+def _key_stamp(request: Request, principal: str) -> str:
+    """Which key the caller is: "owner", or a client key's issue time."""
+    label = label_of(principal)
+    if label is None:
+        return "owner"
+    clients = getattr(request.app.state, "clients", None)
+    record = next((r for r in clients.records() if r.label == label), None) if clients else None
+    return record.created_at if record is not None else label
+
+
+def _caller(request: Request) -> str:
+    """The caller's principal, once it may use sandboxes at all, with its
+    sandbox bound to its key."""
     principal = visibility.current_caller().principal
     if label_of(principal) is not None:
         from server.config import client_builds
@@ -62,6 +83,10 @@ def _caller() -> str:
                 "git sandboxes are off for client keys on this server: what is pushed "
                 "is there to be built. Its owner can allow it with "
                 '"remote": {"client_builds": true} in ~/.quern/config.json'))
+    try:
+        sandboxes.bind(principal, _key_stamp(request, principal))
+    except sandboxes.SandboxError as e:
+        raise HTTPException(e.status, str(e)) from None
     return principal
 
 
@@ -87,10 +112,39 @@ def _room(principal: str) -> int:
 
 
 async def _cgi(request: Request, repo: str, tail: str, service: str) -> StreamingResponse:
-    principal = _caller()
+    principal = _caller(request)
+    if not (service == "git-receive-pack" and request.method == "POST"):
+        return await _run_cgi(request, principal, repo, tail, service)
+    # Held from before the room is measured until the push's response has
+    # been sent -- the checkout runs inside it -- and released on every path.
+    lock = _push_locks.setdefault(principal, asyncio.Lock())
+    await lock.acquire()
+    try:
+        response = await _run_cgi(request, principal, repo, tail, service)
+    except BaseException:
+        lock.release()
+        raise
+    inner = response.body_iterator
+
+    async def body():
+        try:
+            async for chunk in inner:
+                yield chunk
+        finally:
+            lock.release()
+    response.body_iterator = body()
+    return response
+
+
+async def _run_cgi(request: Request, principal: str, repo: str, tail: str,
+                   service: str) -> StreamingResponse:
     gitdir = sandboxes.principal_dir(principal) / f"{repo}.git"
     pushing = service == "git-receive-pack"
     room = None
+    if pushing and request.method == "POST" and request.headers.get("content-encoding"):
+        # git never compresses a push, and an inflated body would pass every
+        # size check made on the bytes received (review).
+        raise HTTPException(415, "a push's body is not accepted compressed")
     if pushing:
         room = await asyncio.to_thread(_room, principal)
         try:
@@ -123,15 +177,29 @@ async def _cgi(request: Request, repo: str, tail: str, service: str) -> Streamin
         env["HTTP_CONTENT_ENCODING"] = encoding
     if (protocol := request.headers.get("git-protocol")):
         env["GIT_PROTOCOL"] = protocol
+    if room is not None:
+        # git's own limit on the pack it will take, in receive-pack itself:
+        # the bytes counted here are the request's, and this is the pack's.
+        env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "receive.maxInputSize",
+                    "GIT_CONFIG_VALUE_0": str(max(room, 1))})
 
     try:
+        # Its own process group: http-backend runs receive-pack or
+        # upload-pack beneath it, and killing only the parent left them.
         proc = await asyncio.create_subprocess_exec(
             "git", "http-backend", env=env, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            start_new_session=True)
     except OSError as e:
         raise HTTPException(500, f"git http-backend could not start: {e}") from None
 
+    def kill() -> None:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)
+
     over_cap = asyncio.Event()
+    abandoned = asyncio.Event()
 
     # stderr is read as it comes: unread, a full pipe blocks the backend
     # mid-push, and the push never ends. The tail is kept for the log.
@@ -146,21 +214,30 @@ async def _cgi(request: Request, repo: str, tail: str, service: str) -> Streamin
 
     async def feed() -> None:
         sent = 0
+        stream = request.stream().__aiter__()
         try:
-            async for chunk in request.stream():
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(stream.__anext__(), BODY_IDLE_SECONDS)
+                except StopAsyncIteration:
+                    break
                 sent += len(chunk)
                 if room is not None and request.method == "POST" and sent > room:
                     # Chunked, so no length was declared: cut it off here. An
                     # unfinished push leaves only git's quarantine, which git
                     # removes.
                     over_cap.set()
-                    with contextlib.suppress(ProcessLookupError):
-                        proc.kill()
+                    kill()
                     return
                 proc.stdin.write(chunk)
                 await proc.stdin.drain()
-        except (ConnectionError, OSError):
-            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 -- a client gone, a body gone quiet, a pipe closed
+            # Starlette's ClientDisconnect is none of OSError's family, and
+            # escaping here left the backend running for ever (review).
+            abandoned.set()
+            kill()
         finally:
             with contextlib.suppress(OSError, ConnectionError):
                 proc.stdin.close()
@@ -182,9 +259,7 @@ async def _cgi(request: Request, repo: str, tail: str, service: str) -> Streamin
     reading = asyncio.create_task(read_out())
 
     def stop() -> None:
-        if proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
+        kill()
         for task in (feeding, reading, draining):
             task.cancel()
 
@@ -194,9 +269,12 @@ async def _cgi(request: Request, repo: str, tail: str, service: str) -> Streamin
     # receive-pack waiting for a pack that never came (found by a 2 MB push).
     try:
         await feeding
-    except asyncio.CancelledError:
+    except BaseException:
         stop()
         raise
+    if abandoned.is_set():
+        stop()
+        raise HTTPException(400, "the request's body stopped arriving")
     if over_cap.is_set():
         stop()
         raise HTTPException(413, f"this push grew past the {room // 2**20} MB the key's git "
@@ -243,11 +321,15 @@ async def _cgi(request: Request, repo: str, tail: str, service: str) -> Streamin
                     logger.warning("sandbox push %s/%s: http-backend exited %s: %s",
                                    principal, repo, rc, err)
                     return
+                from server.config import sandbox_settings
+                limits = sandbox_settings()
                 try:
-                    done = await sandboxes.check_out(principal, repo)
-                    logger.info("sandbox push %s/%s: %s", principal, repo, done)
+                    done = await sandboxes.check_out(principal, repo, limits["max_bytes"],
+                                                     limits["min_free_bytes"])
                 except sandboxes.SandboxError as e:
-                    logger.warning("sandbox push %s/%s: checkout failed: %s", principal, repo, e)
+                    done = [{"error": str(e)}]
+                sandboxes.record_checkout(principal, repo, done)
+                logger.info("sandbox push %s/%s: %s", principal, repo, done)
         finally:
             stop()
 
@@ -275,10 +357,10 @@ async def upload_pack(request: Request, repo: str):
 
 
 @router.get("/api/v1/sandboxes")
-async def list_sandboxes() -> dict:
+async def list_sandboxes(request: Request) -> dict:
     """The caller's own repositories, their branches and what they hold."""
     from server.config import sandbox_settings
-    principal = _caller()
+    principal = _caller(request)
     limits = sandbox_settings()
     repos = await asyncio.to_thread(sandboxes.listing, principal)
     return {"repos": repos, "max_bytes": limits["max_bytes"],
@@ -288,8 +370,8 @@ async def list_sandboxes() -> dict:
 
 @router.delete("/api/v1/sandboxes/{repo}")
 @logged_action("delete_sandbox", category="build")
-async def delete_sandbox(repo: str) -> dict:
-    principal = _caller()
+async def delete_sandbox(request: Request, repo: str) -> dict:
+    principal = _caller(request)
     try:
         existed = await asyncio.to_thread(sandboxes.remove_repo, principal, repo)
     except sandboxes.SandboxError as e:
@@ -302,19 +384,31 @@ async def delete_sandbox(repo: str) -> dict:
 async def sweep(app) -> None:
     """Revoked keys' sandboxes, and repositories idle too long, removed every
     SWEEP_SECONDS."""
-    from server import principal as principal_mod
     from server.config import sandbox_settings
 
-    def still_valid(who: str) -> bool:
-        label = principal_mod.label_of(who)
+    def key_of(who: str):
+        """The key `who` is now: its issue time; None when revoked; ... when
+        clients.json cannot be read, which is no evidence of anything."""
         clients = getattr(app.state, "clients", None)
-        return label is None or (clients is not None and clients.is_active(label))
+        label = label_of(who)
+        if clients is None or label is None:
+            return ...
+        try:
+            json.loads(clients.path.read_text())
+        except FileNotFoundError:
+            return None if label else ...
+        except (OSError, ValueError):
+            return ...
+        record = next((r for r in clients.records() if r.label == label), None)
+        if record is None or not record.active:
+            return None
+        return record.created_at
 
     while True:
         await asyncio.sleep(SWEEP_SECONDS)
         try:
             removed = await asyncio.to_thread(
-                sandboxes.prune, still_valid, sandbox_settings()["max_idle_days"])
+                sandboxes.prune, key_of, sandbox_settings()["max_idle_days"])
             if removed:
                 logger.info("Removed git sandbox(es): %s", ", ".join(removed))
         except Exception:  # noqa: BLE001 -- the sweep must outlive one bad pass

@@ -83,7 +83,7 @@ class TestNames:
     def test_branch_names_taken(self, name):
         assert sandboxes.check_branch(name) == name
 
-    @pytest.mark.parametrize("name", ["", "../x", "a//b", "a/", "x.lock", "a--b", ".x"])
+    @pytest.mark.parametrize("name", ["", "../x", "a//b", "a/", "x.lock", ".x"])
     def test_branch_names_refused(self, name):
         with pytest.raises(sandboxes.SandboxError):
             sandboxes.check_branch(name)
@@ -125,8 +125,55 @@ class TestCheckout:
         _commit(project, {"a": "1"})
         _push(project, gitdir, "feature/x")
         await sandboxes.check_out(ALICE, "app")
-        assert (root / "client-alice" / "work" / "app" / "feature--x" / "a").exists()
-        assert sandboxes.resolve(ALICE, "sandbox:app/feature/x/a").endswith("feature--x/a")
+        assert (root / "client-alice" / "work" / "app" / "feature%2Fx" / "a").exists()
+        assert sandboxes.resolve(ALICE, "sandbox:app/feature/x/a").endswith("feature%2Fx/a")
+
+    async def test_different_branches_never_share_a_checkout(self, root, project):
+        """`x-/y` and `x/-y` shared one under a plain substitution, and a
+        branch called `main.sha` took `main`'s marker for its index (review)."""
+        gitdir = await sandboxes.ensure_repo(ALICE, "app")
+        for branch, text in (("x-/y", "A"), ("x/-y", "B"), ("main", "M"), ("main.sha", "S")):
+            _commit(project, {"f": text})
+            _push(project, gitdir, branch)
+        done = await sandboxes.check_out(ALICE, "app")
+        assert all("error" not in d for d in done), done
+        for branch, text in (("x-/y", "A"), ("x/-y", "B"), ("main", "M"), ("main.sha", "S")):
+            assert Path(sandboxes.resolve(ALICE, f"sandbox:app/{branch}/f")).read_text() == text
+
+    async def test_branches_differing_only_in_case_are_refused_one(self, root, project):
+        gitdir = await sandboxes.ensure_repo(ALICE, "app")
+        sha = _commit(project, {"f": "1"})
+        _push(project, gitdir, "Main")
+        # git cannot write `main` beside `Main` on APFS itself (loose refs
+        # collide); a case-sensitive Linux disk can, so plant it packed.
+        with open(gitdir / "packed-refs", "a") as f:
+            f.write(f"{sha} refs/heads/main\n")
+        done = {d["branch"]: d for d in await sandboxes.check_out(ALICE, "app")}
+        assert sum("error" in d for d in done.values()) == 1
+        assert "only in case" in next(d["error"] for d in done.values() if "error" in d)
+
+    async def test_a_checkout_that_would_pass_the_cap_is_not_written(self, root, project):
+        """A pack of kilobytes can hold megabytes of zeros: the cap counts
+        what the checkout writes, not only what arrived (review)."""
+        gitdir = await sandboxes.ensure_repo(ALICE, "app")
+        _commit(project, {"zeros.bin": "\0" * (3 * 2**20)})
+        _push(project, gitdir)
+        done = await sandboxes.check_out(ALICE, "app", max_bytes=2**20)
+        assert done[0]["error"].startswith("app/main expands to 3 MB")
+        assert not (root / "client-alice" / "work" / "app" / "main" / "zeros.bin").exists()
+        with pytest.raises(sandboxes.SandboxError) as e:
+            sandboxes.resolve(ALICE, "sandbox:app/main/zeros.bin")
+        assert e.value.status == 409
+        assert (await sandboxes.check_out(ALICE, "app", max_bytes=2**30))[0].get("error") is None
+
+    async def test_nor_one_that_would_take_the_disk_under_its_floor(self, root, project,
+                                                                    monkeypatch):
+        gitdir = await sandboxes.ensure_repo(ALICE, "app")
+        _commit(project, {"f": "x" * 4096})
+        _push(project, gitdir)
+        monkeypatch.setattr(sandboxes, "free_bytes", lambda: 10_000)
+        done = await sandboxes.check_out(ALICE, "app", min_free_bytes=8_000)
+        assert "free space" in done[0]["error"]
 
     async def test_a_failed_checkout_leaves_no_marker_and_says_so_at_build(
             self, root, project, monkeypatch):
@@ -148,7 +195,7 @@ class TestCheckout:
         assert done[0]["error"].endswith("boom")
         with pytest.raises(sandboxes.SandboxError) as e:
             sandboxes.resolve(ALICE, "sandbox:app/main/a")
-        assert e.value.status == 409 and "push it again" in str(e.value)
+        assert e.value.status == 409 and "not checked out" in str(e.value)
 
 
 class TestResolve:
@@ -195,12 +242,28 @@ class TestResolve:
 
 class TestPruneAndList:
     async def test_revoked_keys_go_the_owner_stays(self, root):
-        await sandboxes.ensure_repo(ALICE, "a")
-        await sandboxes.ensure_repo("client:bob", "b")
-        await sandboxes.ensure_repo(OWNER, "o")
-        removed = sandboxes.prune(lambda who: who != ALICE, max_idle_days=14)
+        for who, repo in ((ALICE, "a"), ("client:bob", "b"), (OWNER, "o")):
+            sandboxes.bind(who, "k1")
+            await sandboxes.ensure_repo(who, repo)
+        removed = sandboxes.prune(lambda who: None if who == ALICE else "k1", max_idle_days=14)
         assert removed == ["client-alice"]
         assert (root / "client-bob" / "b.git").exists() and (root / "owner" / "o.git").exists()
+
+    async def test_could_not_tell_keeps_everything(self, root):
+        """An unreadable clients.json is no evidence of revocation (review)."""
+        sandboxes.bind(ALICE, "k1")
+        await sandboxes.ensure_repo(ALICE, "a")
+        assert sandboxes.prune(lambda who: ..., max_idle_days=14) == []
+        assert (root / "client-alice" / "a.git").exists()
+
+    async def test_a_label_issued_again_does_not_inherit_the_old_keys_sandbox(self, root):
+        sandboxes.bind(ALICE, "issued-monday")
+        await sandboxes.ensure_repo(ALICE, "secret")
+        assert sandboxes.prune(lambda who: "issued-friday", max_idle_days=14) == ["client-alice"]
+        sandboxes.bind(ALICE, "issued-monday")
+        await sandboxes.ensure_repo(ALICE, "secret")
+        sandboxes.bind(ALICE, "issued-friday")       # the new key's first request
+        assert sandboxes.listing(ALICE) == []
 
     async def test_idle_repositories_go_unless_kept(self, root):
         gitdir = await sandboxes.ensure_repo(ALICE, "old")
@@ -328,6 +391,14 @@ class TestRoutes:
                                    params={"service": "git-receive-pack"})
         assert r.status_code == 507
 
+    def test_a_compressed_push_is_refused(self, root, caller, limits):
+        """Inflated after every size check, it passed the cap 15 times over
+        in review. git never compresses a push."""
+        r = TestClient(_app()).post("/git/app.git/git-receive-pack", content=b"\x1f\x8b",
+                                    headers={"content-encoding": "gzip", "content-type":
+                                             "application/x-git-receive-pack-request"})
+        assert r.status_code == 415
+
     def test_list_and_delete(self, root, caller, limits):
         c = TestClient(_app())
         c.get("/git/app.git/info/refs", params={"service": "git-receive-pack"})
@@ -377,6 +448,34 @@ class TestEndToEnd:
                            cwd=project, capture_output=True, text=True, timeout=60)
         assert r.returncode == 0, r.stderr
         assert (root / "owner" / "work" / "app" / "main" / "blob.bin").stat().st_size == 2 * 2**20
+
+    def test_an_expanding_push_is_kept_out_of_the_checkout_and_says_why(
+            self, server, root, project, limits):
+        limits["max_bytes"] = 2**20
+        _commit(project, {"zeros.bin": "\0" * (8 * 2**20)})     # a tiny pack
+        _git("push", "-q", f"{server}/git/app.git", "HEAD:refs/heads/main", cwd=project)
+        assert not (root / "owner" / "work" / "app" / "main" / "zeros.bin").exists()
+        [repo] = sandboxes.listing(OWNER)
+        assert "expands to 8 MB" in repo["last_checkout"]["branches"][0]["error"]
+
+    def test_a_client_that_goes_away_leaves_no_process(self, server, root):
+        """A disconnect raised Starlette's ClientDisconnect, which escaped,
+        and the backend outlived the server (review)."""
+        def backends() -> int:
+            out = subprocess.run(["pgrep", "-f", str(root)], capture_output=True, text=True)
+            return len(out.stdout.split())
+        port = int(server.rsplit(":", 1)[1])
+        for _ in range(5):
+            s = socket.create_connection(("127.0.0.1", port))
+            s.sendall(b"POST /git/app.git/git-receive-pack HTTP/1.1\r\nHost: x\r\n"
+                      b"Content-Type: application/x-git-receive-pack-request\r\n"
+                      b"Content-Length: 1000\r\n\r\n0000")
+            time.sleep(0.2)
+            s.close()
+        deadline = time.time() + 10
+        while backends() and time.time() < deadline:
+            time.sleep(0.2)
+        assert backends() == 0
 
     def test_a_chunked_push_past_the_cap_is_cut_off(self, server, root, project, limits):
         limits["max_bytes"] = 64 * 1024

@@ -16,7 +16,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash, X509Certificate } from "node:crypto";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, relative, resolve } from "node:path";
 import { connect } from "node:tls";
@@ -59,11 +59,10 @@ function git(args: string[], opts: { cwd?: string; env?: Record<string, string> 
   }));
 }
 
-/** The remote's certificate as PEM, and the SHA-256 of its public key in the
- * form curl's pinnedPubkey takes -- after checking the certificate is the one
- * paired with. */
+/** The SHA-256 of the remote's public key, in the form curl's pinnedPubkey
+ * takes -- after checking its certificate is the one paired with. */
 export function fetchPinnedCert(url: string, fingerprint: string):
-    Promise<{ pem: string; spki: string }> {
+    Promise<{ spki: string }> {
   const u = new URL(url);
   return new Promise((ok, no) => {
     const socket = connect({ host: u.hostname, port: Number(u.port || 443),
@@ -75,18 +74,43 @@ export function fetchPinnedCert(url: string, fingerprint: string):
       if (presented !== fingerprint) return no(new PinMismatch(fingerprint, presented));
       const cert = new X509Certificate(raw);
       const spkiDer = cert.publicKey.export({ type: "spki", format: "der" });
-      ok({ pem: cert.toString(), spki: createHash("sha256").update(spkiDer).digest("base64") });
+      ok({ spki: createHash("sha256").update(spkiDer).digest("base64") });
     });
     socket.setTimeout(10_000, () => socket.destroy(new Error(`${u.host}: TLS timed out`)));
     socket.on("error", no);
   });
 }
 
-/** A repository name the server takes: what the checkout's folder is called. */
+/** A repository name the server takes: the checkout's folder name, and a
+ * short hash of where it is, so two projects both called App -- or two
+ * worktrees of one -- never share a sandbox, a checkout or its build
+ * (review). Stable for one checkout, so its builds stay incremental. */
 export function repoName(root: string): string {
   const name = basename(root).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[._-]+/, "")
-    .replace(/\.git$/, "").slice(0, 64);
-  return name || "project";
+    .replace(/\.git$/, "").slice(0, 55) || "project";
+  return `${name}-${createHash("sha256").update(root).digest("hex").slice(0, 8)}`;
+}
+
+/** git configuration for the push, as environment variables rather than
+ * `-c` arguments: arguments are in `ps` for anyone on the machine, and in
+ * the message of a git that fails without saying why; this machine's
+ * environment is not (review). The key and session are every quern
+ * request's (http.ts). A pinned remote is checked by its public key alone:
+ * its certificate names the addresses it was made for, and a tunnel or a
+ * new IP is still that server (review). Needs git 2.31 or later. */
+export function pushConfig(apiKey: string, spki?: string): Record<string, string> {
+  const pairs: [string, string][] = [
+    ["credential.helper", ""],
+    ...Object.entries(quernHeaders(apiKey))
+      .map(([name, value]): [string, string] => ["http.extraHeader", `${name}: ${value}`]),
+  ];
+  if (spki) pairs.push(["http.sslVerify", "false"], ["http.pinnedPubkey", `sha256//${spki}`]);
+  const env: Record<string, string> = { GIT_CONFIG_COUNT: String(pairs.length) };
+  pairs.forEach(([key, value], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = key;
+    env[`GIT_CONFIG_VALUE_${i}`] = value;
+  });
+  return env;
 }
 
 /** Push the working tree holding `projectPath` to the server's sandbox and say
@@ -143,26 +167,21 @@ export async function syncProject(server: Server, projectPath: string): Promise<
       { cwd: root, env });
 
     const repo = repoName(root);
-    // The key and session as every quern request sends them (http.ts), as
-    // one-off header settings: never written to the repository's config.
-    const settings = ["-c", "credential.helper=",
-      ...Object.entries(quernHeaders(server.apiKey))
-        .flatMap(([name, value]) => ["-c", `http.extraHeader=${name}: ${value}`])];
-    if (server.fingerprint) {
-      const cert = await fetchPinnedCert(server.url, server.fingerprint);
-      writeFileSync(join(tmp, "server.pem"), cert.pem);
-      settings.push("-c", `http.sslCAInfo=${join(tmp, "server.pem")}`,
-                    "-c", `http.pinnedPubkey=sha256//${cert.spki}`);
-    }
+    const spki = server.fingerprint
+      ? (await fetchPinnedCert(server.url, server.fingerprint)).spki : undefined;
     const remote = `${server.url.replace(/\/+$/, "")}/git/${repo}.git`;
     try {
-      await git([...settings, "push", "--quiet", "--force", remote,
-                 `${commit}:refs/heads/${SYNC_BRANCH}`], { cwd: root });
+      await git(["push", "--quiet", "--force", remote, `${commit}:refs/heads/${SYNC_BRANCH}`],
+                { cwd: root, env: pushConfig(server.apiKey, spki) });
     } catch (e) {
-      // git says only "returned error: 403"; the server says why.
-      const why = await refusalReason(server, remote);
+      // git says only "returned error: 403", or that the remote hung up when
+      // a push was cut off at the cap; the server says why.
+      const why = await refusalReason(server, remote) ?? await capNote(server);
       throw why ? new Error(`the server refused the push: ${why}`) : e;
     }
+    // A push can be taken and its checkout still refused -- it expanded past
+    // the cap -- so the outcome is read back, not assumed.
+    await confirmCheckout(server, repo, commit);
     const inRepo = relative(root, path).split(/[\\/]/).filter(Boolean).join("/");
     return { project_path: `sandbox:${repo}/${SYNC_BRANCH}${inRepo ? `/${inRepo}` : ""}`,
              repo, commit };
@@ -197,4 +216,44 @@ export async function refusalReason(server: Server, remote: string): Promise<str
   } catch {
     return undefined;
   }
+}
+
+interface SandboxListing {
+  repos?: { repo: string; bytes: number; branches: { branch: string; commit: string }[];
+            last_checkout?: { branches?: { branch?: string; error?: string }[] } | null }[];
+  max_bytes?: number;
+}
+
+async function listing(server: Server): Promise<SandboxListing | undefined> {
+  try {
+    const resp = await serverFetch(server, `${server.url.replace(/\/+$/, "")}/api/v1/sandboxes`,
+      { headers: quernHeaders(server.apiKey), signal: AbortSignal.timeout(10_000) });
+    return resp.ok ? (await resp.json()) as SandboxListing : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** What the key's sandboxes hold against their cap, when a push failed with
+ * nothing more said: a push cut off at the cap ends as "the remote end hung
+ * up", and by then nothing of it is held to explain it (review). */
+export async function capNote(server: Server): Promise<string | undefined> {
+  const got = await listing(server);
+  if (!got?.max_bytes || !got.repos) return undefined;
+  const held = got.repos.reduce((n, r) => n + r.bytes, 0);
+  return `the push did not complete; this key's sandboxes hold ${Math.round(held / 2 ** 20)} ` +
+    `MB of their ${Math.round(got.max_bytes / 2 ** 20)} MB cap (sandboxes.max_mb), and a push ` +
+    "that would pass it is cut off";
+}
+
+/** That the server checked out what was pushed, or why it did not. */
+export async function confirmCheckout(server: Server, repo: string, commit: string):
+    Promise<void> {
+  const got = await listing(server);
+  const entry = got?.repos?.find((r) => r.repo === repo);
+  if (!entry) return;     // could not be asked: the build says what it finds
+  if (entry.branches.some((b) => b.branch === SYNC_BRANCH && b.commit === commit)) return;
+  const why = entry.last_checkout?.branches?.find((b) => b.branch === SYNC_BRANCH)?.error;
+  throw new Error(`the project was sent, but the server did not check it out` +
+    (why ? `: ${why}` : ""));
 }
