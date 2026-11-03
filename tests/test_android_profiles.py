@@ -188,6 +188,12 @@ class TestConfig:
         # A DISCARD buffer capped the whole trace at its size (measured).
         assert "fill_policy: RING_BUFFER" in text and "flush_period_ms: 1000" in text
 
+    @pytest.mark.parametrize("preset, recorded", [("hangs", True), ("frames", True),
+                                                   ("cpu", False)])
+    def test_frame_timeline_is_recorded_for_frames(self, preset, recorded):
+        text = ad.config_text(ad.PRESETS[preset], PKG, 30)
+        assert ('name: "android.surfaceflinger.frametimeline"' in text) is recorded
+
     def test_the_hangs_preset_records_input(self):
         assert "input" in ad.PRESETS["hangs"].atrace and "input" not in ad.PRESETS["cpu"].atrace
 
@@ -330,6 +336,44 @@ def _decoded():
     return ad.decode_summary_row(row)
 
 
+class TestJank:
+    def test_unclassified_frames_are_out_of_the_rate_and_in_the_coverage(self):
+        rows = [[0, 5e6, "On-time Present", "None"],
+                [1, 30e6, "Late Present", "App Deadline Missed"],
+                [2, 9e6, "On-time Present", "Unknown"],
+                [3, 9e6, "On-time Present", None],
+                [4, 9e6, "Dropped Frame", "Dropped Frame"],
+                [5, 9e6, "Unknown Present", "None"]]
+        ft = ad.jank_from_timeline(rows, 0)
+        assert (ft["frames"], ft["presented"], ft["dropped"], ft["unknown_present"]) == (6, 4, 1, 1)
+        assert (ft["classified"], ft["janky"]) == (2, 1)
+        assert ft["jank_percent"] == 50.0 and ft["classification_coverage_percent"] == 50.0
+
+    def test_the_apps_own_causes(self):
+        rows = [[0, 9e6, "Late Present", "Buffer Stuffing"],
+                [1, 9e6, "Late Present", "SurfaceFlinger CPU Deadline Missed"],
+                [2, 9e6, "Late Present", "Display HAL, App Deadline Missed"]]
+        ft = ad.jank_from_timeline(rows, 0)
+        assert ft["janky"] == 3 and ft["app_janky"] == 2
+        assert ft["by_cause"]["Display HAL"] == 1 and ft["by_cause"]["Buffer Stuffing"] == 1
+
+    def test_only_presented_frames_have_durations(self):
+        rows = [[0, 4e6, "On-time Present", "None"], [1, 100e6, "Dropped Frame", None]]
+        ft = ad.jank_from_timeline(rows, 0)
+        assert ft["max_ms"] == 4.0 and ft["jank_percent"] == 0.0
+
+    def test_the_worst_ten_longest_first(self):
+        rows = [[i * 10**9, (20 + i) * 1e6, "Late Present", "App Deadline Missed"]
+                for i in range(12)]
+        worst = ad.jank_from_timeline(rows, 0)["janky_frames"]
+        assert [f["duration_ms"] for f in worst] == [31.0 - i for i in range(10)]
+
+    def test_none_is_none(self):
+        assert ad.jank_from_timeline([], 0) is None
+        ft = ad.jank_from_timeline([[0, 1e6, "Dropped Frame", None]], 0)
+        assert ft["jank_percent"] is None and ft["classification_coverage_percent"] is None
+
+
 class TestReducers:
     def test_the_hang_from_a_live_trace(self):
         d = _decoded()
@@ -413,7 +457,12 @@ class TestSummarize:
         s = await _summary(FakeTP())
         assert s["hangs_count"] == 1 and s["hangs_source"].startswith("trace")
         assert s["frames"]["source"] == "trace" and s["cpu"]["source"] == "trace"
-        assert len(s["slowest_slices"]) == 10 and s["unavailable"] == {}
+        assert len(s["slowest_slices"]) == 10
+        # The fixture is a Pixel 3 XL: Android 10 records no FrameTimeline.
+        assert s["frame_timeline"] is None
+        assert s["unavailable"] == {"frame_timeline": (
+            "the trace has no FrameTimeline frames at all: it needs Android 12 or later, "
+            "and a screen that changed")}
 
     @pytest.mark.parametrize("tp_state", ["missing", "downloading", "failed", "disabled",
                                           "unsupported"])
@@ -432,6 +481,40 @@ class TestSummarize:
         s = await _summary(FakeTP(fixture="summary-a14"))
         assert s["frames"]["source"] == "trace" and s["frames"]["count"] == 193
         assert "frames" not in s["unavailable"]
+
+    async def test_android_14_reports_jank_and_why(self):
+        """A Pixel 5 (Android 14) through a 12 s hang: the frozen thread drew
+        nothing, and two frames after it were late."""
+        ft = (await _summary(FakeTP(fixture="summary-a14")))["frame_timeline"]
+        assert (ft["frames"], ft["presented"], ft["on_time"], ft["late"]) == (162, 162, 160, 2)
+        assert (ft["classified"], ft["janky"], ft["app_janky"]) == (162, 2, 1)
+        assert ft["jank_percent"] == 1.2 and ft["classification_coverage_percent"] == 100.0
+        assert ft["by_cause"] == {"Prediction Error": 2, "App Deadline Missed": 1}
+        assert ft["janky_frames"][0] == {"start_s": 20.446, "duration_ms": 14.8,
+                                         "present": "Late Present",
+                                         "causes": ["Prediction Error", "App Deadline Missed"]}
+
+    async def test_frames_whose_process_name_was_lost_are_the_apps_by_layer(self):
+        """The Pixel 5's DISCARD trace lost its process names; the app's frames
+        still carry its layer, "TX - com.quern.probe/...#3220"."""
+        ft = (await _summary(FakeTP(fixture="summary-lossy")))["frame_timeline"]
+        assert ft["frames"] == 1355
+
+    async def test_the_cpu_preset_does_not_record_frames(self):
+        s = await _summary(FakeTP(fixture="summary-a14"), preset="cpu")
+        assert s["frame_timeline"] is None
+        assert s["unavailable"]["frame_timeline"] == "not recorded by the cpu preset"
+
+    async def test_other_apps_frames_are_not_the_apps(self, monkeypatch):
+        real = ad.decode_summary_row
+        monkeypatch.setattr(ad, "decode_summary_row", lambda row: {**real(row), "ft": []})
+        s = await _summary(FakeTP(fixture="summary-a14"))
+        assert "gave the display no frames" in s["unavailable"]["frame_timeline"]
+
+    async def test_without_trace_processor_no_frame_timeline(self):
+        s = await _summary(FakeTP("disabled"))
+        assert s["unavailable"]["frame_timeline"] == (
+            "read from the trace, which needs trace_processor")
 
     async def test_a_trace_that_lost_data_says_so(self):
         """A Pixel 5's 25 s profile with the old DISCARD buffer: the trace

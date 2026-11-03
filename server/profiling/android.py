@@ -64,17 +64,22 @@ class Preset:
     purpose: str
     atrace: tuple[str, ...]
     ftrace: tuple[str, ...]
+    #: SurfaceFlinger's FrameTimeline (Android 12+): each frame judged
+    #: against its deadline, with why it missed. Android 10 has no producer
+    #: for it, and perfetto records the rest as before (measured).
+    frame_timeline: bool = False
 
 
 PRESETS: dict[str, Preset] = {
     "hangs": Preset(
         "input the app left unanswered (hangs), its frames, its CPU, and its slowest work",
         ("input", "view", "am", "gfx"),
-        ("sched/sched_switch", "task/task_newtask", "task/task_rename")),
+        ("sched/sched_switch", "task/task_newtask", "task/task_rename"), frame_timeline=True),
     "frames": Preset(
-        "how long each frame took, and the frames that missed their deadline",
+        "how long each frame took, and the frames that missed their deadline, with why "
+        "(Android 12+)",
         ("gfx", "view", "input"),
-        ("sched/sched_switch", "task/task_newtask", "task/task_rename")),
+        ("sched/sched_switch", "task/task_newtask", "task/task_rename"), frame_timeline=True),
     "cpu": Preset(
         "where the app's CPU time went, by thread",
         ("view", "am"),
@@ -112,7 +117,9 @@ def config_text(preset: Preset, package: str, time_limit_s: int) -> str:
         'data_sources { config { name: "linux.ftrace" ftrace_config { '
         f'{events} {categories} atrace_apps: "{package}" }} }} }}\n'
         'data_sources { config { name: "linux.process_stats" process_stats_config { '
-        "scan_all_processes_on_start: true } } }\n")
+        "scan_all_processes_on_start: true } } }\n"
+        + ('data_sources { config { name: "android.surfaceflinger.frametimeline" } }\n'
+           if preset.frame_timeline else ""))
 
 
 # -- talking to the device ------------------------------------------------------
@@ -319,6 +326,10 @@ def window_matches(track: str, package: str) -> tuple[bool, bool]:
     return (cut and package.startswith(window)), cut and package.startswith(window)
 
 
+#: The app's FrameTimeline frames are its process's, or its layer's -- "TX -
+#: <package>/<activity>#n" -- for a trace that lost the process names: a
+#: Pixel 5's DISCARD trace had 1,355 of the app's frames with no process name.
+#:
 #: A frame is `Choreographer#doFrame` on Android 10 and `Choreographer#doFrame
 #: <vsync id>` on 14 (measured), where its child "Choreographer#doFrame -
 #: resynced to ..." is not a frame of its own.
@@ -353,14 +364,20 @@ select
      join thread t using (utid) join process p using (upid)
      where p.name = '{package}' order by s.dur desc limit 10))) as slices,
   hex((select json_group_array(json_array(name, idx, value)) from stats
-     where severity = 'data_loss' and value > 0)) as loss
+     where severity = 'data_loss' and value > 0)) as loss,
+  hex((select json_group_array(json_array(ts, dur, present_type, jank_type)) from (
+     select f.ts as ts, f.dur as dur, f.present_type as present_type, f.jank_type as jank_type
+     from actual_frame_timeline_slice f left join process p using (upid)
+     where p.name = '{package}' or f.layer_name glob 'TX - {package}/*'
+     order by f.ts))) as ft,
+  (select count(*) from actual_frame_timeline_slice) as ft_any
 """
 
 
 def decode_summary_row(row: dict) -> dict:
     """The one row SUMMARY_SQL gives, its hex sections decoded."""
-    out = {k: row.get(k) for k in ("start_ts", "end_ts", "procs")}
-    for key in ("wq", "frames", "cpu", "slices", "loss"):
+    out = {k: row.get(k) for k in ("start_ts", "end_ts", "procs", "ft_any")}
+    for key in ("wq", "frames", "cpu", "slices", "loss", "ft"):
         raw = row.get(key)
         out[key] = json.loads(bytes.fromhex(raw).decode()) if raw else []
     return out
@@ -425,6 +442,88 @@ def frames_from_durations(durations_ns: list[int]) -> dict | None:
             "measures": "Choreographer#doFrame on the app's main thread"}
 
 
+#: FrameTimeline's presentations of a frame that reached the display.
+PRESENTED = {"On-time Present": "on_time", "Late Present": "late", "Early Present": "early"}
+#: Jank causes that are the app's own: it was late with its frame, or queued
+#: frames faster than the display took them (Android's FrameTimeline docs).
+#: The rest -- SurfaceFlinger's deadlines, the display, a prediction error --
+#: are the system's.
+APP_CAUSES = ("App Deadline Missed", "Buffer Stuffing")
+
+
+def _causes(jank_type: object) -> list[str] | None:
+    """A frame's jank causes, or None when FrameTimeline did not classify it.
+    It writes several as one comma-joined string ("Prediction Error, App
+    Deadline Missed", measured), and "None" for a frame on time."""
+    causes = [c.strip() for c in str(jank_type or "").split(",") if c.strip()]
+    if not causes or all("Unknown" in c or "Unspecified" in c for c in causes):
+        return None
+    return causes
+
+
+def jank_from_timeline(rows: list, start_ns: int) -> dict | None:
+    """The app's frames as SurfaceFlinger judged them: how many reached the
+    display on time, how many were janky and why, and the worst of them.
+
+    Jank is a share of the frames FrameTimeline classified, with the
+    coverage beside it: a low rate over few classified frames does not make
+    a smooth run. And a frozen main thread draws nothing, so a hang leaves
+    no janky frames behind it -- measured, a 12 s hang on a Pixel 5 left a
+    gap and two late frames after it."""
+    if not rows:
+        return None
+    present = {"on_time": 0, "late": 0, "early": 0}
+    dropped = unknown = classified = janky = app_janky = 0
+    by_cause: dict[str, int] = {}
+    durations: list[float] = []
+    worst: list[dict] = []
+    for ts, dur, present_type, jank_type in rows:
+        if present_type == "Dropped Frame":
+            dropped += 1
+            continue
+        if present_type not in PRESENTED:
+            unknown += 1
+            continue
+        present[PRESENTED[present_type]] += 1
+        durations.append(dur / 1e6)
+        causes = _causes(jank_type)
+        if causes is None:
+            continue
+        classified += 1
+        causes = [c for c in causes if c != "None"]
+        if not causes:
+            continue
+        janky += 1
+        if any(c in APP_CAUSES for c in causes):
+            app_janky += 1
+        for c in causes:
+            by_cause[c] = by_cause.get(c, 0) + 1
+        worst.append({"start_s": _rel(ts, start_ns), "duration_ms": round(dur / 1e6, 1),
+                      "present": present_type, "causes": causes})
+    presented = sum(present.values())
+    ms = sorted(durations)
+
+    def pct(p: float) -> float | None:
+        return round(ms[min(len(ms) - 1, int(p * len(ms)))], 1) if ms else None
+    worst.sort(key=lambda f: -f["duration_ms"])
+    return {
+        "frames": len(rows), "presented": presented, **present, "dropped": dropped,
+        "unknown_present": unknown, "classified": classified,
+        "classification_coverage_percent":
+            round(classified / presented * 100, 1) if presented else None,
+        "janky": janky, "jank_percent": round(janky / classified * 100, 1) if classified else None,
+        "app_janky": app_janky, "by_cause": dict(sorted(by_cause.items(), key=lambda kv: -kv[1])),
+        "p50_ms": pct(0.5), "p90_ms": pct(0.9), "p99_ms": pct(0.99),
+        "max_ms": round(ms[-1], 1) if ms else None,
+        "janky_frames": worst[:10], "source": "trace: FrameTimeline",
+        "measures": ("each frame the app gave the display, as SurfaceFlinger judged it against "
+                     "its deadline; duration is from the app starting the frame to its "
+                     "presentation"),
+        "note": ("a frozen main thread draws no frames, so a hang is in hangs, not here; "
+                 "app_janky counts frames the app itself was late with (App Deadline Missed, "
+                 "Buffer Stuffing), the rest of the jank is the system's")}
+
+
 def cpu_from_threads(rows: list, span_ns: int) -> dict | None:
     if not rows:
         return None
@@ -484,8 +583,8 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
     result with its trace offered (review: it was failed, and the trace
     withheld)."""
     summary: dict = {"preset": preset, "platform": "android", "hangs": None, "frames": None,
-                     "cpu": None, "slowest_slices": None, "trace_processor": tp_status,
-                     "unavailable": {}}
+                     "frame_timeline": None, "cpu": None, "slowest_slices": None,
+                     "trace_processor": tp_status, "unavailable": {}}
     unavailable = summary["unavailable"]
     read = None
     if tp_status.get("state") == "installed":
@@ -530,6 +629,16 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
         summary["frames"] = frames_from_durations(read["frames"])
         if summary["frames"] is None:
             unavailable["frames"] = "the trace has no frames from the app's main thread"
+        if not PRESETS[preset].frame_timeline:
+            unavailable["frame_timeline"] = f"not recorded by the {preset} preset"
+        else:
+            summary["frame_timeline"] = jank_from_timeline(read["ft"], start_ns)
+            if summary["frame_timeline"] is None:
+                unavailable["frame_timeline"] = (
+                    "the app gave the display no frames during the profile (FrameTimeline "
+                    "recorded other apps')" if read["ft_any"] else
+                    "the trace has no FrameTimeline frames at all: it needs Android 12 or "
+                    "later, and a screen that changed")
         summary["cpu"] = cpu_from_threads(read["cpu"], end_ns - start_ns)
         if summary["cpu"] is None:
             unavailable["cpu"] = "the trace has no CPU time for the app"
@@ -538,6 +647,7 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
             unavailable["slowest_slices"] = "the trace has no slices from the app"
     else:
         unavailable["slowest_slices"] = "read from the trace, which needs trace_processor"
+        unavailable["frame_timeline"] = "read from the trace, which needs trace_processor"
 
     # What the device said, for whatever the trace did not answer.
     if summary["hangs"] is None:
