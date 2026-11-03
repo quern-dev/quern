@@ -227,6 +227,8 @@ async def disk_use(request: Request) -> dict:
             kept = {k: v for k, v in store.items() if k != "path"}
             if "error" in kept:
                 kept["error"] = "could not be read"
+            if "note" in kept:                       # names the entries it left out
+                kept["note"] = "some of it could not be read, and is left out"
             if visibility.blind_for(caller):
                 kept.pop("largest", None)
             stores[name] = kept

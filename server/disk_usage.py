@@ -47,10 +47,13 @@ class Stopped(Exception):
     """The server is stopping: the walk ends rather than hold up its exit."""
 
 
-def disk_size(path: Path, stop: threading.Event | None = None) -> int:
+def disk_size(path: Path, stop: threading.Event | None = None,
+              unreadable: list[str] | None = None) -> int:
     """Bytes `path` takes on disk, symlinks not followed. Raises OSError when
-    `path` itself cannot be read; entries inside it that cannot be read count
-    as nothing -- an estimate, not an audit. Raises Stopped once `stop` is
+    `path` itself cannot be read. An entry inside it that cannot be read is
+    left out and, when `unreadable` is given, named there -- so a caller can
+    say the total is partial rather than present it as complete (CodeRabbit).
+    One gone before it could be read is simply not there. Raises Stopped once `stop` is
     set: a walk of tens of GB runs in a thread nothing can cancel, and
     `quern stop` waited for it, then killed the server (review)."""
     total = 0
@@ -62,16 +65,20 @@ def disk_size(path: Path, stop: threading.Event | None = None) -> int:
         current = stack.pop()
         try:
             it = os.scandir(current)
-        except OSError:
+        except OSError as e:
             if first:
                 raise
+            if unreadable is not None and not isinstance(e, FileNotFoundError):
+                unreadable.append(f"{current}: {e.strerror or e}")
             continue
         first = False
         with it:
             for entry in it:
                 try:
                     st = entry.stat(follow_symlinks=False)
-                except OSError:
+                except OSError as e:
+                    if unreadable is not None and not isinstance(e, FileNotFoundError):
+                        unreadable.append(f"{entry.path}: {e.strerror or e}")
                     continue
                 total += getattr(st, "st_blocks", 0) * 512 or st.st_size
                 if entry.is_dir(follow_symlinks=False):
@@ -83,12 +90,18 @@ def _store(path: Path, stop: threading.Event | None = None) -> dict:
     """One store's size: 0 when it does not exist yet, unknown with the reason
     when it exists and cannot be read -- or when whether it exists cannot be
     told, which a parent that cannot be searched raises (review)."""
+    unreadable: list[str] = []
     try:
         if not path.exists():
             return {"path": str(path), "bytes": 0}
-        return {"path": str(path), "bytes": disk_size(path, stop)}
+        out = {"path": str(path), "bytes": disk_size(path, stop, unreadable)}
     except OSError as e:
         return {"path": str(path), "bytes": None, "error": str(e)}
+    if unreadable:
+        out["partial"] = True
+        out["note"] = (f"{len(unreadable)} entries could not be read and are left out "
+                       f"(first: {unreadable[0]})")
+    return out
 
 
 def _simulators(root: Path, stop: threading.Event | None = None) -> dict:
@@ -104,16 +117,18 @@ def _simulators(root: Path, stop: threading.Event | None = None) -> dict:
     total = 0
     sizes = []
     partial = False
+    unreadable: list[str] = []
     for entry in entries:
         try:
             st = entry.stat(follow_symlinks=False)
             total += getattr(st, "st_blocks", 0) * 512 or st.st_size
             if not entry.is_dir(follow_symlinks=False):
                 continue
-            size = disk_size(Path(entry.path), stop)
+            size = disk_size(Path(entry.path), stop, unreadable)
         except OSError:
             partial = True                       # gone mid-walk, or unreadable
             continue
+        partial = partial or bool(unreadable)
         total += size
         name = None
         with contextlib.suppress(OSError, plistlib.InvalidFileException, ValueError):

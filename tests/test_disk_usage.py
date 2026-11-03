@@ -64,10 +64,10 @@ def test_a_store_that_cannot_be_read_is_unknown_not_empty(tmp_path, monkeypatch)
     (tmp_path / "quern" / "recordings").mkdir(parents=True)
     real = du.disk_size
 
-    def unreadable(path, stop=None):
+    def unreadable(path, stop=None, unreadable=None):
         if path.name == "recordings":
             raise PermissionError("Operation not permitted")
-        return real(path, stop)
+        return real(path, stop, unreadable)
 
     monkeypatch.setattr(du, "disk_size", unreadable)
     report = _measure(tmp_path)
@@ -541,13 +541,54 @@ def test_a_simulator_read_in_part_makes_the_total_incomplete(tmp_path, monkeypat
     _sim(sims, "GONE", "gone mid-walk", 10_000)
     real = du.disk_size
 
-    def gone(path, stop=None):
+    def gone(path, stop=None, unreadable=None):
         if path.name == "GONE":
             raise FileNotFoundError(f"{path} disappeared")
-        return real(path, stop)
+        return real(path, stop, unreadable)
 
     monkeypatch.setattr(du, "disk_size", gone)
     report = _measure(tmp_path)
     assert report["stores"]["simulators"]["partial"] is True
     assert report["used_complete"] is False
     assert any("could not read all of simulators" in w for w in report["warnings"])
+
+
+def test_an_unreadable_entry_inside_a_store_makes_it_partial(tmp_path):
+    """Left out silently, the store's total read as complete (CodeRabbit)."""
+    store = tmp_path / "quern" / "recordings"
+    (store / "locked").mkdir(parents=True)
+    (store / "file").write_bytes(b"x" * 8192)
+    (store / "locked").chmod(0)
+    try:
+        report = _measure(tmp_path)
+    finally:
+        (store / "locked").chmod(0o755)
+    rec = report["stores"]["recordings"]
+    assert rec["partial"] is True and rec["bytes"] >= 8192 and "locked" in rec["note"]
+    assert report["used_complete"] is False
+    assert any("could not read all of recordings" in w for w in report["warnings"])
+
+
+def test_an_entry_gone_mid_walk_is_not_unreadable(tmp_path, monkeypatch):
+    store = tmp_path / "store"
+    (store / "gone").mkdir(parents=True)
+    real = du.os.scandir
+
+    def vanishing(path):
+        if str(path).endswith("/gone"):
+            raise FileNotFoundError(path)
+        return real(path)
+
+    monkeypatch.setattr(du.os, "scandir", vanishing)
+    unreadable: list[str] = []
+    du.disk_size(store, None, unreadable)
+    assert unreadable == []
+
+
+async def test_a_client_never_sees_the_unreadable_entries_names():
+    report = _report()
+    report["stores"]["builds"].update(
+        partial=True, note="1 entries could not be read and are left out "
+                           "(first: /Users/owner/.quern/builds/x: Permission denied)")
+    out = await _route(report, principal="client:a")
+    assert "/Users/owner" not in str(out) and out["stores"]["builds"]["partial"] is True
