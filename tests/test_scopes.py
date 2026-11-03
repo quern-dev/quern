@@ -311,6 +311,12 @@ def _app(registry, keys):
         the build path's readers do: only the middleware's precheck guards it."""
         return {"pressed": app.state.device_controller._active_udid}
 
+    @app.post("/api/v1/device/build-and-install")
+    async def build(request: Request):
+        body = await request.json()
+        return {"built": body.get("udids") or [body.get("udid")
+                                               or app.state.device_controller._active_udid]}
+
     @app.post("/api/v1/proxy/mocks")
     async def set_mock(request: Request):
         return {"rule": await request.json()}
@@ -621,6 +627,105 @@ def test_clients_cli_round_trip(monkeypatch, tmp_path, capsys):
     assert clients_cli.main(["add"]) == 2
     data = json.loads((tmp_path / "clients.json").read_text())
     assert data["clients"][0]["revoked_at"]
+
+
+class TestClientBuilds:
+    """Builds are the owner's unless the owner opts clients in (#605): a build
+    runs the project's code as the Mac's user. Opted in, a client builds only
+    onto devices its own session holds."""
+
+    URL = "/api/v1/device/build-and-install"
+
+    @pytest.fixture
+    def builds(self, monkeypatch):
+        state = {"on": False}
+        from server import config
+        monkeypatch.setattr(config, "client_builds", lambda: state["on"])
+        return state
+
+    def test_off_a_client_is_told_how_the_owner_turns_it_on(self, world, registry, builds):
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p", "udids": ["SIM-1"]})
+        assert r.status_code == 403
+        assert '"client_builds": true' in r.json()["detail"]
+
+    def test_on_a_client_builds_onto_a_device_it_holds(self, world, registry, builds):
+        builds["on"] = True
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p", "udids": ["SIM-1"]})
+        assert r.status_code == 200 and r.json() == {"built": ["SIM-1"]}, r.text
+
+    def test_on_a_free_device_is_still_refused(self, world, builds):
+        builds["on"] = True
+        c, _, alice, _ = world
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p", "udid": "SIM-9"})
+        assert r.status_code == 403, r.text
+
+    def test_on_every_device_in_the_list_must_be_its_own(self, world, registry, builds):
+        builds["on"] = True
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        _hold(registry, "bob:s1", "client:bob", "SIM-2")
+        r = c.post(self.URL, headers=_h(alice),
+                   json={"project_path": "/p", "udids": ["SIM-1", "SIM-2"]})
+        assert r.status_code == 423, r.text
+
+    def test_on_no_device_goes_to_its_held_active_device(self, world, registry, builds):
+        builds["on"] = True
+        c, app, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        app.state.device_controller.slots["alice:s1"] = "SIM-1"
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p"})
+        assert r.status_code == 200 and r.json() == {"built": ["SIM-1"]}, r.text
+
+    def test_on_no_device_and_nothing_active_is_refused(self, world, builds):
+        builds["on"] = True
+        c, _, alice, _ = world
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p"})
+        assert r.status_code == 403 and "reserve one first" in r.json()["detail"]
+
+    def test_the_owner_builds_whatever_the_setting(self, world, builds):
+        c, *_ = world
+        r = c.post(self.URL, headers=_h(KEY), json={"project_path": "/p", "udid": "SIM-9"})
+        assert r.status_code == 200, r.text
+
+    def test_the_table_still_says_owner(self):
+        """The setting widens one route at request time; the table, which
+        every other check reads, keeps the closed default."""
+        assert scopes.rule_for("POST", self.URL).access is scopes.Access.OWNER
+
+
+class TestClientBuildsSetting:
+    """`remote.client_builds`: off unless literally true."""
+
+    @pytest.mark.parametrize("remote, on", [
+        (None, False),
+        ({}, False),
+        ({"client_builds": True}, True),
+        ({"client_builds": "true"}, False),
+        ({"client_builds": 1}, False),
+        ({"client_builds": False}, False),
+        ("junk", False),
+    ])
+    def test_values(self, monkeypatch, remote, on):
+        from server import config
+        cfg = {} if remote is None else {"remote": remote}
+        monkeypatch.setattr(config, "read_user_config", lambda strict=False: cfg)
+        assert config.client_builds() is on
+
+    def test_an_unreadable_config_is_off(self, monkeypatch):
+        from server import config
+
+        def broken(strict=False):
+            raise config.ConfigUnreadable("bad json")
+        monkeypatch.setattr(config, "read_user_config", broken)
+        assert config.client_builds() is False
+
+    def test_it_is_a_known_remote_key(self):
+        from server import config
+        assert config._unused_remote_keys({"client_builds": True}) is None
 
 
 class TestRouteLevelOwnerChecks:

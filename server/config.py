@@ -420,7 +420,7 @@ def remote_settings() -> dict:
             "key_warning": _unused_remote_keys(raw)}
 
 
-_REMOTE_KEYS = ("enabled", "bind", "hosts", "client_viewer_links")
+_REMOTE_KEYS = ("enabled", "bind", "hosts", "client_viewer_links", "client_builds")
 
 
 def client_viewer_links() -> bool:
@@ -447,6 +447,26 @@ def client_viewer_links() -> bool:
     if "client_viewer_links" not in raw:
         return True
     return raw["client_viewer_links"] is True
+
+
+def client_builds() -> bool:
+    """Whether a client key may build and install (#605):
+    `remote.client_builds`, off unless literally true.
+
+    Off by default, unlike viewer links, because a build is code running as
+    the Mac's user: xcodebuild runs a project's build phases and plug-ins, and
+    Gradle whatever the build script says. An owner who turns it on is letting
+    every paired client do that. The client still builds only onto devices
+    its own session holds, and names a project path on the Mac's disk.
+
+    A config.json that cannot be read is off, so a broken file never hands
+    out builds."""
+    try:
+        config = read_user_config(strict=True)
+    except ConfigUnreadable:
+        return False
+    raw = config.get("remote")
+    return isinstance(raw, dict) and raw.get("client_builds") is True
 
 
 def _unused_remote_keys(raw: dict) -> str | None:

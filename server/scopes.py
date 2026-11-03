@@ -443,6 +443,19 @@ def _blind_kind(method: str, path: str) -> str:
                      "hidden") if found else "hidden"
 
 
+#: Owner-only routes the owner may open to client keys with a setting (#605),
+#: and the rule a client is held to when it is on. A build is a change to the
+#: devices it installs on: named (`udid`/`udids`) or the session's active one,
+#: and every one of them its own -- AccessMiddleware checks each name.
+_OPT_IN = {("POST", "/api/v1/device/build-and-install")}
+_BUILD = _RESOLVED
+
+
+def _opt_in_route(method: str, path: str) -> bool:
+    found = match(method, path)
+    return found is not None and (method.upper(), found[0]) in _OPT_IN
+
+
 def rule_for(method: str, path: str) -> Rule:
     """The rule for a request: unmapped is owner-only, closed by default."""
     found = match(method, path)
@@ -566,6 +579,16 @@ class ScopeMiddleware:
             # key. APIKeyMiddleware refuses these first; this is the backstop.
             await _deny(send, 401, "Invalid or missing API key")
             return
+        if rule.access is Access.OWNER and _opt_in_route(method, path):
+            from server.config import client_builds
+            if client_builds():
+                rule = _BUILD
+            else:
+                await _deny(send, 403, (
+                    f"{method} {path} is off for client keys on this server: a build runs "
+                    "the project's code as the Mac's user. Its owner can allow it with "
+                    '"remote": {"client_builds": true} in ~/.quern/config.json'))
+                return
         if rule.access is Access.OWNER:
             await _deny(send, 403, f"{method} {path} is owner-only: a client key cannot use it")
             return
