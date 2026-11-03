@@ -14,8 +14,8 @@ export function whenSwitched(fn: (() => Promise<unknown>) | null): void {
   afterSwitch = fn;
 }
 import { errorText, strictParams } from "./helpers.js";
-import { execFile } from "node:child_process";
-import { homedir } from "node:os";
+import { remoteList } from "../remote-status.js";
+import { readOwnVersion } from "../version.js";
 
 export function registerSystemTools(server: McpServer): void {
   server.registerTool(
@@ -406,10 +406,11 @@ export function matchingElsewhere(
  * the remotes could not be listed. */
 export async function elsewhereHint(
   criteria: ReserveCriteria, lead = "Not enough here", next = "reserve_devices",
+  list: () => Promise<unknown> = quernRemoteList,
 ): Promise<string> {
   let found;
   try {
-    found = matchingElsewhere(await quernRemoteList(), currentRemote() ?? LOCAL, criteria);
+    found = matchingElsewhere(await list(), currentRemote() ?? LOCAL, criteria);
   } catch {
     return "";
   }
@@ -437,37 +438,10 @@ export function markCurrent(data: unknown, current: string): unknown {
   return data;
 }
 
-/** `quern remote list --json`, from the quern CLI on this machine: the paired
- * remotes live in its ~/.quern/remotes.json, whichever server this MCP talks to.
- * It exits 1 when a remote could not be asked, and still prints the list. */
+/** The paired remotes and this Mac's own server, each asked now -- what
+ * `quern remote list --json --with-local` prints, without needing the quern
+ * CLI (#605): a machine with only the MCP installed lists them too. */
 export function quernRemoteList(): Promise<unknown> {
-  const candidates = ["quern", `${homedir()}/.local/bin/quern`];
-  const attempt = (i: number): Promise<unknown> => new Promise((resolve, reject) => {
-    execFile(candidates[i], ["remote", "list", "--json", "--with-local"], { timeout: 60_000 },
-      (err, stdout, stderr) => {
-        const out = String(stdout ?? "").trim();
-        if (out) {
-          try {
-            resolve(JSON.parse(out));
-            return;
-          } catch {
-            // not JSON: an older quern, or an error; fall through
-          }
-        }
-        const missing = err && (err as NodeJS.ErrnoException).code === "ENOENT";
-        const failure = new Error(missing
-          ? "the quern CLI is not installed on this machine, so its paired remotes cannot be listed"
-          : `quern remote list failed: ${String(stderr || err?.message || "no output").trim()}`);
-        if (i + 1 < candidates.length) {
-          // Not there, or an older quern on PATH that answers no --json:
-          // the installed wrapper may be newer. Its error wins only if it is
-          // there too (review).
-          attempt(i + 1).then(resolve, (next) => reject(
-            (next as Error).message.includes("not installed") && !missing ? failure : next));
-          return;
-        }
-        reject(failure);
-      });
-  });
-  return attempt(0);
+  const version = readOwnVersion();
+  return remoteList({ localVersion: version === "unknown" ? null : version });
 }

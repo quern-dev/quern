@@ -43,22 +43,9 @@ import { registerSystemTools, whenSwitched } from "./tools/system.js";
 import { registerRecordingTools } from "./tools/recordings.js";
 import { registerProfileTools } from "./tools/profiles.js";
 import { discoverServer } from "./config.js";
+import { readOwnVersion } from "./version.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-// Read our own version from package.json so the MCP handshake reports
-// the actual built version instead of a stale hardcoded value. The
-// package.json sits one dir above dist/index.js.
-function readOwnVersion(): string {
-  try {
-    const pkg = JSON.parse(
-      readFileSync(join(__dirname, "..", "package.json"), "utf-8"),
-    );
-    return typeof pkg.version === "string" ? pkg.version : "unknown";
-  } catch {
-    return "unknown";
-  }
-}
 
 const MCP_VERSION = readOwnVersion();
 

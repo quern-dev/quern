@@ -33,7 +33,7 @@ export function showFingerprint(hex: string): string {
   return "SHA256:" + (hex.match(/../g) ?? []).map((p) => p.toUpperCase()).join(":");
 }
 
-function normalise(value: string): string {
+export function normalise(value: string): string {
   let v = value.trim();
   if (v.toLowerCase().startsWith("sha256:")) v = v.slice(7);
   v = v.replaceAll(":", "").toLowerCase();
