@@ -12,7 +12,8 @@ and each changes the whole phone, not one app. So:
   lasts.** Measured on an iPhone 11 (iOS 26.7): a network profile ends the
   moment the connection that set it closes -- a set-and-close read back as
   active and was gone a second later -- while a thermal state outlives its
-  connection but not the process that set it. So each phone with a condition
+  connection but not the process that set it -- though after a `kill -9` one
+  was still on 3 s later, and gone by the next start. So each phone with a condition
   has one held connection, and a task that runs set, read and clear on it in
   turn and reads the device every `WATCH_S`: a condition that ends -- the
   tunnel dropping, a clear in Xcode -- is said, never shown as active. Other
@@ -70,8 +71,13 @@ def _path() -> Path:
     return config.CONFIG_DIR / _FILE
 
 
-class _Unreadable(Exception):
+class _Unreadable(DeviceError):
     """The record file exists and cannot be read: not the same as empty."""
+
+    def __init__(self, why: str) -> None:
+        super().__init__(f"quern's record of the conditions it set ({_path()}) cannot be "
+                         f"read ({why}), so it is not overwritten; move it aside to go on",
+                         tool="quern")
 
 
 class ConditionRecords:
@@ -129,6 +135,14 @@ class ConditionRecords:
 
     def get(self, udid: str) -> dict | None:
         return self.all().get(udid)
+
+    def readable(self) -> bool:
+        with self._lock:
+            try:
+                self._load()
+                return True
+            except _Unreadable:
+                return False
 
     def put(self, udid: str, record: dict) -> None:
         self._update(lambda r: r.__setitem__(udid, record))
@@ -265,6 +279,11 @@ class _Hold:
         #: Why it ended without a clear, when it did.
         self.ended: str | None = None
         self.cleared = False
+        #: The device itself said nothing is active: nothing is left on it.
+        self.gone = False
+        #: The device confirmed a condition set on it: only then can one have
+        #: ended. A hold that failed while opening set nothing.
+        self.held_one = False
 
     @property
     def live(self) -> bool:
@@ -296,6 +315,10 @@ async def _run_hold(hold: _Hold, ready: asyncio.Future,
         address = await asyncio.wait_for(_device_address(hold.udid), CALL_TIMEOUT_S)
         rsd = lib.RemoteServiceDiscoveryService(address)
         await asyncio.wait_for(rsd.connect(), CALL_TIMEOUT_S)
+        # Opening is bounded by whoever waits for `ready` (`_held`), which
+        # cancels this on a timeout: a step that hung would otherwise hold
+        # the phone's lock, and every set, clear and release behind it, for
+        # ever (review).
         async with lib.DvtProvider(rsd) as dvt:
             async with lib.ConditionInducer(dvt) as inducer:
                 ready.set_result(None)
@@ -329,33 +352,62 @@ async def _serve(hold: _Hold, inducer: Any) -> None:
         try:
             command, arg, future = await asyncio.wait_for(hold.queue.get(), WATCH_S)
         except TimeoutError:
-            _, active = await _read(inducer)   # raises when the connection is gone
+            # Raises when the connection is gone, and ends the hold.
+            _, active = await asyncio.wait_for(_read(inducer), CALL_TIMEOUT_S)
             if active is None:
                 hold.ended = "the device reports none active: it was cleared elsewhere"
+                hold.gone = True
                 return
             continue
         try:
-            if command == "set":
-                await inducer.set(arg)
-                _, active, ok = await _until(
-                    inducer, lambda a: a is not None and a.profile == arg)
-                if not ok:
-                    raise DeviceError(
-                        f"{hold.udid[:8]} did not report {arg} active within {CONFIRM_S:g}s"
-                        + (f" (it reports {active.profile})" if active else
-                           " (it reports none)"), tool="pymobiledevice3")
-                future.set_result(active)
-            elif command == "read":
-                future.set_result(await _read(inducer))
-            elif command == "clear":
-                future.set_result(await _clear_on(hold.udid, inducer))
-                hold.cleared = True
+            async with asyncio.timeout(CALL_TIMEOUT_S):
+                await _command(hold, inducer, command, arg, future)
+            if hold.cleared:
                 return                         # cleared: the connection can go
+        except TimeoutError:
+            # A connection that stopped answering cannot be trusted with the
+            # next command either: ended, and said.
+            hold.ended = f"{hold.udid[:8]} stopped answering ({command})"
+            if not future.done():
+                future.set_exception(DeviceError(
+                    f"{hold.udid[:8]} did not answer within {CALL_TIMEOUT_S:g}s",
+                    tool="pymobiledevice3"))
+            return
         except Exception as e:  # noqa: BLE001 -- the caller gets it
             if not future.done():
                 future.set_exception(_failure(hold.udid, f"{command} of the condition", e))
             # A clear that failed keeps the connection: closing it could
             # leave a thermal state on.
+
+
+async def _command(hold: _Hold, inducer: Any, command: str, arg: str | None,
+                   future: asyncio.Future) -> None:
+    """One command on the held connection; its answer, or its error, on `future`."""
+    if command == "set":
+        # The device refuses a set while any condition is active ("A condition
+        # is already active", measured), whatever pymobiledevice3 says: a
+        # replace is a clear, waited out, then the set.
+        _, before = await _read(inducer)
+        if before is not None and before.profile != arg:
+            await _clear_on(hold.udid, inducer)
+        elif before is not None:
+            hold.held_one = True
+            future.set_result(before)
+            return
+        await inducer.set(arg)
+        _, active, ok = await _until(inducer, lambda a: a is not None and a.profile == arg)
+        if not ok:
+            raise DeviceError(
+                f"{hold.udid[:8]} did not report {arg} active within {CONFIRM_S:g}s"
+                + (f" (it reports {active.profile})" if active else " (it reports none)"),
+                tool="pymobiledevice3")
+        hold.held_one = True
+        future.set_result(active)
+    elif command == "read":
+        future.set_result(await _read(inducer))
+    elif command == "clear":
+        future.set_result(await _clear_on(hold.udid, inducer))
+        hold.cleared = True
 
 
 # -- what callers use ----------------------------------------------------------
@@ -385,14 +437,30 @@ class ConditionKeeper:
     def _hold_ended(self, hold: _Hold) -> None:
         if self._holds.get(hold.udid) is hold:
             del self._holds[hold.udid]
-        if hold.cleared or not hold.ended or hold.ended == "the server stopped":
-            return
+        if hold.cleared or not hold.held_one or not hold.ended \
+                or hold.ended == "the server stopped":
+            return                     # cleared, never set anything, or shutting down
         record = self.records.get(hold.udid)
         profile = record.get("profile") if record else "the condition"
-        logger.warning("%s's %s, which quern set, ended: %s", hold.udid, profile, hold.ended)
-        self._ended[hold.udid] = f"{profile}, which quern set, ended: {hold.ended}"
-        with contextlib.suppress(_Unreadable):
-            self.records.drop(hold.udid)
+        kind = KINDS.get(record.get("group", "")) if record else None
+        if hold.gone or kind == NETWORK:
+            # Gone with it: the device said so, or a network profile, which
+            # ends with the connection that set it (measured).
+            logger.warning("%s's %s, which quern set, ended: %s", hold.udid, profile,
+                           hold.ended)
+            self._ended[hold.udid] = f"{profile}, which quern set, ended: {hold.ended}"
+            with contextlib.suppress(_Unreadable):
+                self.records.drop(hold.udid)
+            return
+        # A thermal or GPU state outlives its connection (measured): still on,
+        # most likely. The record is kept, so a clear, the hold ending and the
+        # server stopping all still undo it, on a connection of their own.
+        logger.warning("The connection holding %s's %s dropped (%s); it may still be on",
+                       hold.udid, profile, hold.ended)
+        self._ended[hold.udid] = (
+            f"the connection holding {profile} dropped ({hold.ended}); a thermal or GPU "
+            f"state outlives its connection, so it may still be on: clear_device_condition "
+            f"clears it, as the hold ending or the server stopping will")
 
     async def _held(self, udid: str) -> _Hold:
         if (hold := self._live(udid)) is not None:
@@ -401,7 +469,15 @@ class ConditionKeeper:
         ready: asyncio.Future = asyncio.get_running_loop().create_future()
         hold.task = asyncio.create_task(_run_hold(hold, ready, self._hold_ended))
         self._holds[udid] = hold
-        await ready
+        try:
+            await asyncio.wait_for(asyncio.shield(ready), CALL_TIMEOUT_S)
+        except TimeoutError:
+            hold.ended = f"{udid[:8]} did not answer within {CALL_TIMEOUT_S:g}s"
+            hold.task.cancel()
+            # Waited out, briefly: until it is done it still reads as live,
+            # and what comes next would ask it rather than the device.
+            await asyncio.wait({hold.task}, timeout=1.0)
+            raise DeviceError(hold.ended, tool="pymobiledevice3") from None
         return hold
 
     async def _read(self, udid: str) -> tuple[list[DeviceCondition], DeviceCondition | None]:
@@ -411,13 +487,16 @@ class ConditionKeeper:
     async def describe(self, udid: str) -> DeviceConditions:
         offered, active = await self._read(udid)
         out = self._describe(udid, offered, active)
-        if active is None:
-            out.note = self._ended.get(udid)
+        out.note = self._ended.get(udid)
         return out
 
     def _describe(self, udid: str, offered: list[DeviceCondition],
                   active: DeviceCondition | None) -> DeviceConditions:
         record = self.records.get(udid)
+        if active is not None and not self.records.readable():
+            # Who set it cannot be told: not "other", which would disown
+            # quern's own when its record is what failed (review).
+            return DeviceConditions(udid=udid, active=active, available=offered)
         if active is not None:
             ours = record is not None and record.get("profile") == active.profile
             active = active.model_copy(update={"set_by": "quern" if ours else "other",
@@ -442,6 +521,7 @@ class ConditionKeeper:
             if active is not None and active.profile != profile:
                 replaced = self._describe(udid, offered, active).active
             fresh = self._live(udid) is None
+            previous = self.records.get(udid)
             # Recorded before the device is asked: a server killed between
             # the two still leaves a record for the next one to clear.
             self.records.put(udid, {"profile": profile, "group": wanted.group,
@@ -452,16 +532,18 @@ class ConditionKeeper:
                 hold = await self._held(udid)
                 await hold.ask("set", profile)
             except BaseException:
-                await self._after_failed_set(udid, fresh)
+                await self._after_failed_set(udid, fresh, previous)
                 raise
             out = self._describe(udid, offered, wanted)
             out.replaced = replaced
             return out
 
-    async def _after_failed_set(self, udid: str, fresh: bool) -> None:
-        """A set that failed may or may not have landed: one on a connection
-        this call opened is undone on it, and the record is kept unless the
-        device then says nothing is active."""
+    async def _after_failed_set(self, udid: str, fresh: bool, previous: dict | None) -> None:
+        """A set that failed may or may not have landed. On a connection this
+        call opened, it is undone there. A replace that failed leaves quern's
+        earlier condition, so that record comes back, or it would read as
+        someone else's and never be cleared (review). The record is kept
+        while the device shows the one just asked for."""
         with contextlib.suppress(Exception):
             hold = self._live(udid)
             if fresh and hold is not None:
@@ -469,6 +551,8 @@ class ConditionKeeper:
             _, active = await self._read(udid)
             if active is None:
                 self.records.drop(udid)
+            elif previous is not None and active.profile == previous.get("profile"):
+                self.records.put(udid, previous)
 
     async def clear(self, udid: str) -> DeviceCondition | None:
         """Clear whatever is active, quern's or not, and the record."""
@@ -476,7 +560,12 @@ class ConditionKeeper:
             record = self.records.get(udid)
             hold = self._live(udid)
             cleared = await (hold.ask("clear") if hold is not None else clear_condition(udid))
-            self.records.drop(udid)
+            try:
+                self.records.drop(udid)
+            except _Unreadable as e:
+                # The phone is clear, which is what was asked; the record
+                # file is said in the log, not as a failed clear.
+                logger.warning("Cleared %s, but could not update the record: %s", udid, e)
             self._ended.pop(udid, None)
             if cleared is not None:
                 ours = record is not None and record.get("profile") == cleared.profile
@@ -486,23 +575,31 @@ class ConditionKeeper:
             return cleared
 
     async def clear_recorded(self, udid: str, *, session: str | None = None,
-                             principal: str | None = None) -> dict | None:
+                             principal: str | None = None,
+                             expect: dict | None = None) -> dict | None:
         """Undo what quern set here -- only that, and only if `session` or
-        `principal` (when given) set it. An action for the caller's report,
-        None when there was nothing of quern's to clear. Never raises."""
-        record = self.records.get(udid)
-        if record is None:
+        `principal` (when given) set it, or the record is still `expect`. An
+        action for the caller's report, None when there was nothing of quern's
+        to clear. Never raises."""
+        if self.records.get(udid) is None:
             return None
-        if session is not None or principal is not None:
-            # A hold ending: only what that session, or its key through another
-            # session, set. Someone else's condition is theirs to end.
-            mine = ((session is not None and record.get("session") == session)
-                    or (principal is not None and record.get("principal") == principal))
-            if not mine:
-                return None
-        action = {"udid": udid, "action": "condition_cleared", "profile": record.get("profile")}
+        action: dict = {"udid": udid, "action": "condition_cleared"}
         try:
             async with self._lock(udid):
+                # Read under the lock: one read before it raced a set waiting
+                # on it, and cleared what that set had just made (review).
+                record = self.records.get(udid)
+                if record is None or (expect is not None and record != expect):
+                    return None
+                if session is not None or principal is not None:
+                    # A hold ending: only what that session, or its key through
+                    # another session, set. Someone else's is theirs to end.
+                    mine = ((session is not None and record.get("session") == session)
+                            or (principal is not None
+                                and record.get("principal") == principal))
+                    if not mine:
+                        return None
+                action["profile"] = record.get("profile")
                 hold = self._live(udid)
                 _, active = await self._read(udid)
                 if active is not None and active.profile == record.get("profile"):
@@ -521,18 +618,34 @@ class ConditionKeeper:
         return action
 
     async def clear_all(self) -> list[dict]:
-        """Every condition quern holds or recorded, at once: shutdown."""
-        udids = set(self.records.all()) | set(self._holds)
-        results = await asyncio.gather(*(self.clear_recorded(u) for u in udids))
+        """Every condition quern holds or recorded, at once: shutdown. A hold
+        whose record is gone is still quern's, and cleared too."""
+        records = self.records.all()
+
+        async def one(udid: str) -> dict | None:
+            if udid in records:
+                return await self.clear_recorded(udid)
+            hold = self._live(udid)
+            if hold is None:
+                return None
+            action: dict = {"udid": udid, "action": "condition_cleared", "profile": None}
+            try:
+                await hold.ask("clear")
+                action["ok"] = True
+            except Exception as e:  # noqa: BLE001 -- reported, never raised
+                action.update(ok=False, error=str(e))
+            return action
+
+        results = await asyncio.gather(*(one(u) for u in set(records) | set(self._holds)))
         return [r for r in results if r is not None]
 
     async def clear_leftovers(self) -> list[dict]:
         """What a previous server recorded and this one has not touched since:
-        start-up. A record this server wrote is its own, not a leftover."""
-        current = self.records.all()
-        udids = [u for u, r in self._leftover.items() if current.get(u) == r]
-        self._leftover = {}
-        results = await asyncio.gather(*(self.clear_recorded(u) for u in udids))
+        start-up. A record this server wrote is its own, not a leftover -- and
+        is checked again under the phone's lock, so a set waiting there wins."""
+        leftover, self._leftover = self._leftover, {}
+        results = await asyncio.gather(*(self.clear_recorded(u, expect=r)
+                                         for u, r in leftover.items()))
         return [r for r in results if r is not None]
 
 

@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Induced conditions on a physical iPhone: `set_device_condition`, `clear_device_condition` and `get_device_condition` (#245).** Put the phone on a slow or lossy network -- 3G, Edge, 100% loss, high-latency DNS, and the rest of its Network Link profiles -- to see how an app copes; thermal and GPU states too, with `allow_performance`, since they slow the whole phone. Each changes the whole phone, not one app.
   - **The device is asked, never assumed.** A set answers once the phone reports the condition active, a clear once it reports none, and `get_device_condition` reads the phone, so one set in Xcode shows too (`set_by: "other"`). `list_devices` shows the ones quern set.
   - **Quern holds the connection a condition needs.** Measured on an iPhone 11 (iOS 26.7): a network profile ends the moment the connection that set it closes. So quern keeps one open per phone for as long as the condition lasts, and reads the phone every 10 s, so a condition that ends -- the tunnel dropping, a clear in Xcode -- is said rather than shown as active.
-  - **What quern set, quern undoes:** when asked, when the hold that set it ends, and when the server stops. A server that dies takes its conditions with it (measured, `kill -9` included); a record written before each set lets the next start clear one an OS kept.
+  - **What quern set, quern undoes:** when asked, when the hold that set it ends, and when the server stops. A server that dies ends its network conditions at once and its thermal ones soon after -- one was still on 3 s after a `kill -9`, and gone by the next start -- and a record written before each set lets the next start clear whatever is left.
+  - **The device refuses a set while any condition is active** ("A condition is already active", whatever pymobiledevice3's docs say), so a replace clears the last one first.
 
 ## [0.26.0-beta.1] - 2026-11-04
 

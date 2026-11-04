@@ -35,6 +35,7 @@ class Phone:
         self.clears_never = False
         self.set_never = False
         self.set_error: Exception | None = None
+        self.lands_then_fails = False   # set_error raised after the set landed
         self.connections = 0
         self.order: list[str] = []
         self.set_on = None          # the connection that set what is active
@@ -86,11 +87,18 @@ class FakeInducer:
 
     async def set(self, profile):
         self.phone.order.append("set")
-        if self.phone.set_error:
+        if self.phone.set_error and not self.phone.lands_then_fails:
             raise self.phone.set_error
+        if self.phone.active() is not None:
+            # As the device answers (measured), not as pymobiledevice3 says.
+            raise RuntimeError("DTXNsError: DTConditionInducerSupportService (code 3, "
+                               "user_info={'NSLocalizedDescription': 'A condition is "
+                               "already active.'})")
         if not self.phone.set_never:
             self.phone.enable(profile)
             self.phone.set_on = self
+        if self.phone.set_error:
+            raise self.phone.set_error
 
     async def clear(self):
         self.pending_clear = self.phone.clear_after
@@ -206,6 +214,25 @@ class TestSet:
                                principal=None, session=None)
         assert phone.order == []
 
+    async def test_a_replace_clears_first(self, phone):
+        """The device refuses a set while one is active; quern's own held
+        condition is cleared, waited out, then the new one set."""
+        k = keeper()
+        await k.set(UDID, "SlowNetworkHighLatencyDNS", allow_performance=False,
+                    principal=None, session=None)
+        out = await k.set(UDID, "ThermalFair", allow_performance=True, principal=None,
+                          session=None)
+        assert phone.active() == ("ThermalCondition", "ThermalFair")
+        assert out.replaced.profile == "SlowNetworkHighLatencyDNS"
+
+    async def test_setting_the_one_active_is_no_change(self, phone):
+        k = keeper()
+        await k.set(UDID, "SlowNetwork3G", allow_performance=False, principal=None,
+                    session=None)
+        out = await k.set(UDID, "SlowNetwork3G", allow_performance=False, principal=None,
+                          session=None)
+        assert out.active.profile == "SlowNetwork3G" and out.replaced is None
+
     async def test_replacing_one_set_elsewhere_says_so(self, phone):
         phone.enable("SlowNetworkLTE")              # set in Xcode, say
         out = await keeper().set(UDID, "SlowNetwork3G", allow_performance=False,
@@ -224,8 +251,7 @@ class TestSet:
     async def test_a_set_that_fails_after_landing_is_undone(self, phone):
         """On the connection that set it, which this call opened: nothing of
         a failed set is left on the phone, or in the records."""
-        phone.set_error = RuntimeError("the channel closed")
-        phone.enable("ThermalFair")                 # it landed before failing
+        phone.set_error, phone.lands_then_fails = RuntimeError("the channel closed"), True
         with pytest.raises(DeviceError, match="channel closed"):
             await keeper().set(UDID, "ThermalFair", allow_performance=True,
                                principal=None, session=None)
@@ -233,8 +259,7 @@ class TestSet:
         assert cond.ConditionRecords().get(UDID) is None
 
     async def test_a_failed_set_whose_undo_fails_keeps_the_record(self, phone):
-        phone.set_error = RuntimeError("the channel closed")
-        phone.enable("ThermalFair")
+        phone.set_error, phone.lands_then_fails = RuntimeError("the channel closed"), True
         phone.clears_never = True
         with pytest.raises(DeviceError):
             await keeper().set(UDID, "ThermalFair", allow_performance=True,
@@ -481,3 +506,267 @@ async def test_concurrent_sets_take_turns(phone):
         k.set(UDID, "SlowNetworkEdge", allow_performance=False, principal=None, session=None))
     assert phone.active()[1] in ("SlowNetwork3G", "SlowNetworkEdge")
     assert cond.ConditionRecords().get(UDID)["profile"] == phone.active()[1]
+
+
+# -- review of the first version ------------------------------------------------
+
+async def _until_ended(k, udid=UDID):
+    for _ in range(100):
+        if k._live(udid) is None:
+            return
+        await asyncio.sleep(0.02)
+
+
+class TestReview:
+    async def test_a_dropped_hold_keeps_a_thermal_state_to_clear(self, phone, monkeypatch):
+        """A thermal state outlives its connection (measured): the hold
+        dropping does not end it, so its record stays for a clear to use."""
+        monkeypatch.setattr(cond, "WATCH_S", 0.02)
+        k = keeper()
+        await k.set(UDID, "ThermalFair", allow_performance=True, principal="client:a",
+                    session="s1")
+        phone.list_error = ConnectionResetError("tunnel gone")
+        await _until_ended(k)
+        phone.list_error = None
+        assert phone.active() == ("ThermalCondition", "ThermalFair")
+        out = await k.describe(UDID)
+        assert out.active.set_by == "quern" and "may still be on" in out.note
+        action = await k.clear_recorded(UDID, session="s1", principal="client:a")
+        assert action["ok"] and phone.active() is None
+
+    async def test_a_network_condition_goes_with_its_dropped_hold(self, phone, monkeypatch):
+        monkeypatch.setattr(cond, "WATCH_S", 0.02)
+        k = keeper()
+        await k.set(UDID, "SlowNetwork3G", allow_performance=False, principal=None,
+                    session=None)
+        phone.list_error = ConnectionResetError("tunnel gone")
+        await _until_ended(k)
+        assert cond.ConditionRecords().get(UDID) is None
+
+    async def test_a_connection_that_hangs_opening_does_not_wedge_the_phone(
+            self, phone, monkeypatch):
+        monkeypatch.setattr(cond, "CALL_TIMEOUT_S", 0.2)
+        entered = []
+        enter = FakeInducer.__aenter__
+
+        async def hang(self):
+            # The hold's connection only: the read before it works. (A first
+            # version hung every one, so the read's own bound fired and the
+            # hold was never opened.)
+            entered.append(1)
+            if len(entered) == 2:
+                await asyncio.sleep(30)
+            return await enter(self)
+        monkeypatch.setattr(FakeInducer, "__aenter__", hang)
+        k = keeper()
+        with pytest.raises(DeviceError, match="did not answer"):
+            await asyncio.wait_for(k.set(UDID, "SlowNetwork3G", allow_performance=False,
+                                         principal=None, session=None), 2)
+        assert len(entered) >= 2                     # the hold was what hung
+        # The lock is free again: the next call is not stuck behind it.
+        assert await asyncio.wait_for(k.clear_recorded(UDID), 2) is None
+        assert k._live(UDID) is None
+
+    async def test_a_command_that_hangs_ends_the_hold(self, phone, monkeypatch):
+        k = keeper()
+        await k.set(UDID, "SlowNetwork3G", allow_performance=False, principal=None,
+                    session=None)
+        monkeypatch.setattr(cond, "CALL_TIMEOUT_S", 0.2)
+
+        async def hang(self):
+            await asyncio.sleep(30)
+        monkeypatch.setattr(FakeInducer, "list", hang)
+        with pytest.raises(DeviceError, match="did not answer"):
+            await asyncio.wait_for(k.describe(UDID), 2)
+        await _until_ended(k)
+        assert k._live(UDID) is None
+
+    async def test_a_leftover_check_does_not_clear_a_set_waiting_on_the_lock(self, phone):
+        """Start-up clears in the background; a set on the same phone at the
+        same moment must win (review: it was cleared and its record dropped)."""
+        cond.ConditionRecords().put(UDID, {"profile": "ThermalFair", "session": None,
+                                           "principal": "owner"})
+        k = keeper()
+        await asyncio.gather(
+            k.set(UDID, "SlowNetwork3G", allow_performance=False, principal=None,
+                  session=None),
+            k.clear_leftovers())
+        assert phone.active() == ("SlowNetworkCondition", "SlowNetwork3G")
+        assert cond.ConditionRecords().get(UDID)["profile"] == "SlowNetwork3G"
+
+    async def test_a_leftover_changed_since_start_is_not_one(self, phone):
+        """The filter the first test of it could not fail: the record was
+        there at start, and this server replaced it before the clean-up ran."""
+        cond.ConditionRecords().put(UDID, {"profile": "ThermalFair", "session": None,
+                                           "principal": "owner"})
+        k = keeper()
+        await k.set(UDID, "SlowNetwork3G", allow_performance=False, principal=None,
+                    session=None)
+        assert await k.clear_leftovers() == []
+        assert phone.active() == ("SlowNetworkCondition", "SlowNetwork3G")
+
+    async def test_a_failed_replace_keeps_querns_earlier_condition(self, phone):
+        k = keeper()
+        await k.set(UDID, "ThermalFair", allow_performance=True, principal="client:a",
+                    session="s1")
+        # The replace's clear does not land: ThermalFair stays on, quern's.
+        phone.clears_never = True
+        with pytest.raises(DeviceError):
+            await k.set(UDID, "ThermalSerious", allow_performance=True,
+                        principal="client:a", session="s1")
+        assert cond.ConditionRecords().get(UDID)["profile"] == "ThermalFair"
+        assert (await k.describe(UDID)).active.set_by == "quern"
+        phone.clears_never = False
+        assert (await k.clear_recorded(UDID, session="s1"))["ok"]
+        assert phone.active() is None
+
+    async def test_a_replace_whose_set_fails_leaves_nothing(self, phone):
+        """Its clear landed, so nothing of quern's is left to record."""
+        k = keeper()
+        await k.set(UDID, "ThermalFair", allow_performance=True, principal=None, session=None)
+        phone.set_never = True
+        with pytest.raises(DeviceError):
+            await k.set(UDID, "ThermalSerious", allow_performance=True, principal=None,
+                        session=None)
+        assert phone.active() is None and cond.ConditionRecords().get(UDID) is None
+
+    async def test_a_hold_that_failed_opening_says_nothing_ended(self, phone, monkeypatch):
+        """Only the hold's own connection fails: the read before it and the
+        one after it work. (A first version of this test failed the read, so
+        never reached the hold, and passed against the bug.)"""
+        calls = []
+
+        async def connect(self):
+            calls.append(1)
+            if len(calls) == 2:
+                raise OSError("no route")
+        monkeypatch.setattr(FakeRsd, "connect", connect)
+        k = keeper()
+        with pytest.raises(DeviceError, match="no route"):
+            await k.set(UDID, "SlowNetwork3G", allow_performance=False, principal=None,
+                        session=None)
+        assert len(calls) >= 2                       # the hold was tried
+        assert (await k.describe(UDID)).note is None
+
+    async def test_asking_a_dying_hold_fails_fast(self, phone):
+        """Not after CALL_TIMEOUT_S: its queue is drained as it closes."""
+        k = keeper()
+        await k.set(UDID, "SlowNetwork3G", allow_performance=False, principal=None,
+                    session=None)
+        hold = k._live(UDID)
+        hold.task.cancel()
+        with pytest.raises(DeviceError):
+            await asyncio.wait_for(hold.ask("read"), 1)
+
+    async def test_shutdown_clears_a_hold_whose_record_is_gone(self, phone):
+        k = keeper()
+        await k.set(UDID, "ThermalFair", allow_performance=True, principal=None, session=None)
+        cond.ConditionRecords().drop(UDID)
+        results = await k.clear_all()
+        assert [r["ok"] for r in results] == [True] and phone.active() is None
+
+    async def test_an_unreadable_record_file(self, phone, tmp_path):
+        k = keeper()
+        (tmp_path / "device-conditions.json").write_text("{not json")
+        with pytest.raises(DeviceError, match="cannot be read"):
+            await k.set(UDID, "SlowNetwork3G", allow_performance=False, principal=None,
+                        session=None)
+        assert phone.order == []                     # the device was not asked
+        phone.enable("ThermalFair")
+        # Who set it cannot be told: not "other".
+        assert (await k.describe(UDID)).active.set_by is None
+        # And a clear that worked is not reported as failing.
+        assert (await k.clear(UDID)).profile == "ThermalFair" and phone.active() is None
+
+
+class TestReleaseBySameKey:
+    async def test_another_session_of_the_same_key_ending_clears_it(self, phone,
+                                                                   monkeypatch):
+        """The release passes the key too: a condition set through one of its
+        sessions ends when the key no longer holds the phone."""
+        from server import session_installs
+        from server.api import sessions as sessions_api
+
+        k = keeper()
+        await k.set(UDID, "SlowNetwork3G", allow_performance=False, principal="client:a",
+                    session="s-other")
+        monkeypatch.setattr(sessions_api, "_end_device_proxy", AsyncMock())
+        monkeypatch.setattr(session_installs, "end_for_release", AsyncMock())
+        app = SimpleNamespace(state=SimpleNamespace(
+            landmark_registry=None, proxy_adapter=None, recordings=None, mock_owners={},
+            conditions=k))
+        session = SimpleNamespace(id="s1", principal="client:a", reservations={UDID: None},
+                                  opened_at=None)
+        actions = await sessions_api._end_client_work(
+            app, SimpleNamespace(holder_of=lambda u: None), session)
+        assert any(a.get("action") == "condition_cleared" and a["ok"] for a in actions)
+        assert phone.active() is None
+
+
+# -- the routes ------------------------------------------------------------------
+
+@pytest.fixture
+def api(phone):
+    from httpx import ASGITransport, AsyncClient
+
+    from server.config import ServerConfig
+    from server.device.controller import DeviceController
+    from server.main import create_app
+
+    app = create_app(config=ServerConfig(api_key="test-key-12345"),
+                     enable_oslog=False, enable_crash=False, enable_proxy=False)
+    ctrl = DeviceController()
+    ctrl.resolve_udid = AsyncMock(return_value=UDID)
+    ctrl._ensure_device_type_cached = AsyncMock()
+    ctrl._is_physical = lambda u: True
+    app.state.device_controller = ctrl
+    app.state.conditions = keeper()
+    http = AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
+                       headers={"Authorization": "Bearer test-key-12345"})
+    return http, ctrl, app
+
+
+class TestRoutes:
+    async def test_reading_resolves_as_a_read(self, api):
+        http, ctrl, _ = api
+        async with http:
+            r = await http.get("/api/v1/device/condition", params={"udid": UDID})
+        assert r.status_code == 200 and r.json()["active"] is None
+        assert ctrl.resolve_udid.await_args.kwargs["set_active"] is False
+
+    async def test_setting_and_clearing_resolve_as_writes(self, api, phone):
+        http, ctrl, _ = api
+        async with http:
+            r = await http.post("/api/v1/device/condition",
+                                json={"udid": UDID, "profile": "SlowNetwork3G"})
+            assert r.status_code == 200 and r.json()["active"]["set_by"] == "quern"
+            assert ctrl.resolve_udid.await_args.kwargs["set_active"] is True
+            r = await http.delete("/api/v1/device/condition", params={"udid": UDID})
+        assert r.status_code == 200 and r.json()["cleared"]["profile"] == "SlowNetwork3G"
+        assert ctrl.resolve_udid.await_args.kwargs["set_active"] is True
+        assert phone.active() is None
+
+    async def test_thermal_without_the_flag_is_a_400(self, api):
+        http, _, _ = api
+        async with http:
+            r = await http.post("/api/v1/device/condition",
+                                json={"udid": UDID, "profile": "ThermalSerious"})
+        assert r.status_code == 400 and "allow_performance" in r.json()["detail"]
+
+    async def test_not_a_physical_iphone(self, api):
+        http, ctrl, _ = api
+        ctrl._is_physical = lambda u: False
+        async with http:
+            r = await http.get("/api/v1/device/condition", params={"udid": UDID})
+        assert r.status_code == 400 and "not a physical iPhone" in r.json()["detail"]
+
+    async def test_list_devices_shows_querns(self, api):
+        from server.api.device import _with_conditions
+
+        _, _, app = api
+        await app.state.conditions.set(UDID, "SlowNetwork3G", allow_performance=False,
+                                       principal=None, session=None)
+        out = _with_conditions(SimpleNamespace(app=app), [{"udid": UDID}, {"udid": "other"}])
+        assert out[0]["condition"]["profile"] == "SlowNetwork3G"
+        assert "condition" not in out[1]
+        await app.state.conditions.clear(UDID)

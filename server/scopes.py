@@ -354,8 +354,6 @@ BLIND: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/device/app/performance"): "device",
     ("GET", "/api/v1/device/app/thread-stacks"): "device",
     ("GET", "/api/v1/device/condition"): "device",
-    ("POST", "/api/v1/device/condition"): "device",
-    ("DELETE", "/api/v1/device/condition"): "device",
     ("GET", "/api/v1/device/app/state/plist"): "device",
     ("GET", "/api/v1/device/app/state/plist/diff"): "device",
     ("GET", "/api/v1/device/hinge"): "device",

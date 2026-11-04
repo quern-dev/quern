@@ -569,11 +569,11 @@ Physical iPhones only: simulators and Android have no such channel.`,
   });
 
   server.registerTool("set_device_condition", {
-    description: `Put a physical iPhone in an induced condition, such as a slow or lossy network, to see how an app copes. It changes the whole phone, not one app, and only one condition is active at a time: setting one replaces the last, and replaced says what that was.
+    description: `Put a physical iPhone in an induced condition, such as a slow or lossy network, to see how an app copes. It changes the whole phone, not one app, and only one condition is active at a time: setting one clears the last first, and replaced says what that was.
 
 profile is one of the identifiers get_device_condition lists, such as SlowNetwork3G, SlowNetworkEdgeBad, SlowNetwork100PctLoss or SlowNetworkHighLatencyDNS. Thermal and GPU states (ThermalFair, ThermalSerious, GPUPerformanceStateMin...) change how the whole phone performs, so they need allow_performance: true.
 
-The answer is the condition as the device reports it active, not as asked for. Quern undoes what it set: when you call clear_device_condition, when the hold that set it ends (release_devices, or the session expiring), and when the server stops; a quern server that dies takes its conditions with it. Until then the phone stays in it, so clear it when done. 100% packet loss can cut the phone off from quern itself if it is reached over the network rather than USB.`,
+The answer is the condition as the device reports it active, not as asked for. Quern undoes what it set: when you call clear_device_condition, when the hold that set it ends (release_devices, or the session expiring), and when the server stops. One quern held ends with it if the server dies -- a network condition at once, a thermal state soon after (still on 3 s after a kill -9 in one test) -- and the next start clears any left. Until then the phone stays in it, so clear it when done. 100% packet loss can cut the phone off from quern itself if it is reached over the network rather than USB.`,
     inputSchema: strictParams({
       profile: z
         .string()

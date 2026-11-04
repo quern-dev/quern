@@ -2064,8 +2064,8 @@ class DeviceConditions(BaseModel):
     available: list[DeviceCondition] = Field(default_factory=list)
     #: On a set that replaced another: what was active before.
     replaced: DeviceCondition | None = None
-    #: With none active: why the one quern set ended without being cleared --
-    #: the connection holding it dropped, or it was cleared elsewhere.
+    #: Why the condition quern set ended, or may have, without a clear: the
+    #: connection holding it dropped, or it was cleared elsewhere.
     note: str | None = None
 
 
