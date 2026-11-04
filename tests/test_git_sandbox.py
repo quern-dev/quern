@@ -233,6 +233,33 @@ class TestResolve:
                 sandboxes.resolve(ALICE, ref)
             assert e.value.status == 404, ref
 
+    @pytest.mark.parametrize("above", ["client-alice", ".", ".."])
+    async def test_a_gradle_root_is_never_looked_for_above_the_checkout(
+            self, checked_out, root, above):
+        """A sandbox path with no settings.gradle of its own is not a Gradle
+        project, whatever the owner keeps above it (review)."""
+        from server.builds import gradle
+        owner = (root / above).resolve()
+        (owner / "settings.gradle").write_text("")
+        (owner / "gradlew").write_text("")
+        (checked_out / "lib").mkdir()
+        assert not gradle.is_gradle_project(str(checked_out / "lib"))
+        with pytest.raises(gradle.GradleProjectError, match="not in a Gradle project"):
+            gradle.find_project(str(checked_out / "lib"))
+
+    async def test_a_module_in_the_checkout_finds_its_root(self, checked_out):
+        from server.builds import gradle
+        (checked_out / "settings.gradle").write_text("")
+        (checked_out / "gradlew").write_text("")
+        (checked_out / "app").mkdir()
+        (checked_out / "app" / "build.gradle").write_text("")
+        assert gradle.find_project(str(checked_out / "app")).root == checked_out.resolve()
+
+    async def test_a_path_in_no_checkout_stops_at_the_sandboxes(self, checked_out, root, tmp_path):
+        assert sandboxes.checkout_of(root / "client-alice" / "app.git") == root.resolve()
+        assert sandboxes.checkout_of(checked_out / "App.xcodeproj") == checked_out.resolve()
+        assert sandboxes.checkout_of(tmp_path) is None
+
     async def test_a_build_counts_as_use(self, checked_out, root):
         used = root / "client-alice" / "app.git" / "quern-last-used"
         os.utime(used, (0, 0))

@@ -666,7 +666,7 @@ class TestClientBuilds:
         builds["on"] = True
         c, _, alice, _ = world
         r = c.post(self.URL, headers=_h(alice), json={"project_path": SANDBOX, "udid": "SIM-9"})
-        assert r.status_code == 403, r.text
+        assert r.status_code == 403 and r.json()["detail"]["udid"] == "SIM-9", r.text
 
     def test_on_every_device_in_the_list_must_be_its_own(self, world, registry, builds):
         builds["on"] = True

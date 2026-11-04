@@ -77,6 +77,20 @@ def principal_dir(principal: str) -> Path:
     return root() / (OWNER_DIR if label is None else f"{CLIENT_PREFIX}{label}")
 
 
+def checkout_of(path: Path) -> Path | None:
+    """The sandbox checkout `path` is in, or None for a path outside them all.
+    A path in the sandboxes but in no checkout (a bare repository) answers
+    the sandboxes' own directory, which nothing may search above either."""
+    base = Path(os.path.realpath(root()))
+    try:
+        parts = Path(os.path.realpath(path)).relative_to(base).parts
+    except ValueError:
+        return None
+    if len(parts) >= 4 and parts[1] == "work":
+        return base.joinpath(*parts[:4])
+    return base
+
+
 def check_repo(name: str) -> str:
     """`name`, or SandboxError: a repository name a URL or path can carry."""
     if not _REPO.match(name) or name.endswith(".git") or ".." in name:
