@@ -650,8 +650,10 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
             summary["trace_data_loss"] = loss
             summary["trace_note"] = (
                 "the trace lost data (trace_data_loss says how), so what it holds is "
-                "incomplete: counts read from it are lower bounds, and a gap is not proof "
-                "of nothing happening")
+                "incomplete: counts read from it are mostly lower bounds, but a lost "
+                "input-queue reset can join two short waits into one hang that did not "
+                "happen; percentiles may be off either way, and a gap is not proof of "
+                "nothing happening")
         if not read["procs"]:
             unavailable["app"] = f"{package} did not run during the profile"
         if preset == "cpu":
@@ -734,7 +736,7 @@ def _why_short(span_s: float, expected_s: float, trace: Path, limit: int | None,
         # The size says the file is full, not that being full is what ended
         # it: a stop from elsewhere can land on a full file (CodeRabbit).
         return (f"{said}: its file is at perfetto's {limit // 2**20} MiB file limit, so "
-                f"it most likely stopped there; config.json's "
+                f"it most likely stopped there; raising config.json's "
                 f"{setting or 'profiles.android_max_trace_mb'} raises the limit")
     return (f"{said}, and its file ({size // 2**20 if size is not None else '?'} MiB) is "
             "short of perfetto's file limit, so the trace does not say why")

@@ -611,6 +611,7 @@ class TestSummarize:
         assert {d["stat"] for d in s["trace_data_loss"]} == {
             "config_write_into_file_discard[0]", "traced_buf_patches_failed[0]"}
         assert "lower bounds" in s["trace_note"]
+        assert "one hang that did not happen" in s["trace_note"]      # not only too low
 
     async def test_a_whole_trace_reports_no_loss(self):
         s = await _summary(FakeTP(), expected_s=25.0)        # the fixture's trace: 24.8 s
@@ -881,7 +882,9 @@ class TestManager:
         (2048, 64, "profiles.android_max_trace_mb"),
         # A store smaller than one trace: the trace is held to the store, or
         # it is kept over budget (CodeRabbit).
-        (40, 40, "profiles.max_mb")])
+        (40, 40, "profiles.max_mb"),
+        # Equal: raising either alone changes nothing, so both are named.
+        (64, 64, "profiles.max_mb and profiles.android_max_trace_mb")])
     async def test_the_configured_file_limit_reaches_perfetto_and_the_record(
             self, state, store_mb, limit_mb, setting):
         adb = FakeAdb()

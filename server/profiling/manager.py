@@ -400,6 +400,10 @@ class ProfileManager:
         if settings["max_bytes"] < trace_bytes:
             first["max_trace_bytes"], first["max_trace_setting"] = (
                 settings["max_bytes"], "profiles.max_mb")
+        elif settings["max_bytes"] == trace_bytes:
+            # Both bind: raising either alone leaves the limit where it is.
+            first["max_trace_bytes"], first["max_trace_setting"] = (
+                trace_bytes, "profiles.max_mb and profiles.android_max_trace_mb")
         else:
             first["max_trace_bytes"], first["max_trace_setting"] = (
                 trace_bytes, "profiles.android_max_trace_mb")
