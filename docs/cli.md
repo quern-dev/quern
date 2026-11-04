@@ -17,7 +17,7 @@ quern restart                # Stop + start
 quern status                 # Show PID, URL, uptime, tool availability, disk use
 quern url                    # Print the server's base URL, for scripts
 quern env                    # Print shell exports: eval "$(quern env)"
-quern doctor                 # Diagnostics: device tools, venv, tool versions, service health, MCP clients
+quern doctor                 # Diagnostics: device tools, venv, tool versions, service health, MCP clients, disk use
 quern doctor --fix           # ...and reconcile the venv with pyproject.toml (venv only)
 quern capture-env            # Write an environment report to attach to a bug report
 quern help                   # Show the command list
@@ -53,7 +53,7 @@ quern connect URL --code CODE   # On that machine: pair, and remember the server
 quern connect URL --key KEY --fingerprint SHA256   # ...or remember one whose key was issued by hand
 quern remote status          # The remote listener here: its address and certificate
 quern remote rotate-cert     # A new certificate for it; every client pairs again
-quern remote list [--json] [--no-check] [--devices] [--with-local]   # The remote querns this machine is paired with, each asked now: up or down, version, free devices; --devices lists each one (OS, model, state, who holds it); --with-local lists this Mac's server first
+quern remote list [--json] [--no-check] [--devices] [--with-local]   # The remote querns this machine is paired with, each asked now: up or down, version, free devices, disk use; --devices lists each one (OS, model, state, who holds it); --with-local lists this Mac's server first
 quern remote forget NAME     # Forget one
 quern set-update-check [on|off]
                              # Show or set the automatic daily update check
@@ -93,7 +93,7 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | `active-device.json` | The active device set via `resolve_device` — its UDID, name and type — persists across stop/start so you don't have to re-resolve after every restart, and is what the Quern app reads. Each agent session's own active device is kept here too, under `sessions`, for a day of inactivity (#254) |
 | `cert-state.json` | Per-device certificate installation state, including per-SSID Wi-Fi proxy configs — persists across restarts |
 | `device-pool.json` | Device pool state (simctl cache) — persists across restarts |
-| `config.json` | Local capture processes, update channel, the automatic-update-check and certificate-install settings, and the sessions, remote listener, viewer and upload settings |
+| `config.json` | Local capture processes, update channel, the automatic-update-check and certificate-install settings, and the sessions (including `client_release` / `owner_release`), remote listener, viewer, upload, `builds` (`max_age_days`, `max_gb`), `disk` (`warn_gb`, `warn_free_gb`) and `profiles` (`max_mb`, `trace_processor`, `android_max_trace_mb`) settings |
 | `remotes.json` | The remote quern servers this machine is paired with (0600): read by `quern remote list`, `QUERN_REMOTE` and `use_remote` |
 | `session-proxies.json` | Running session proxies' pids (`add_session_capture`), so a crashed server's leftovers are stopped at the next start |
 | `session-hold-<id>.log` | The log of a `quern session hold --background` |
@@ -102,6 +102,9 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | `last-update.json` | What `quern update` last did — updated, nothing to do, or failed |
 | `installed-by-setup.json` | Packages installed by `quern setup` — used by `quern uninstall` |
 | `tool-sites.json` | Where `quern setup` found each external tool, so a later run can tell a moved install from a missing one |
+| `builds/` | iOS DerivedData, one per project, scheme and platform; pruned at start and hourly (`builds.max_age_days`, `builds.max_gb`) |
+| `profiles/` | Kept profiles (`.trace` bundles, perfetto traces), sharing `profiles.max_mb`; the oldest finished ones make room |
+| `bin/` | Binaries quern fetches or builds for itself, such as `trace_processor_shell-<version>` for Android profiles (SHA-256 checked) |
 | `build-records/` | One directory per build (`<build id>/record.json`), plus a device build's dSYMs, so a crash can be symbolised against the binary that produced it |
 | `crashes/` | Crash reports the watcher collects; a phone's own pulls go in `crashes/devices/<device id>/` so two devices' reports cannot be confused |
 | `api-key` | Persistent API key |
