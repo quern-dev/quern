@@ -570,6 +570,7 @@ class TestSummarize:
                                          "present": "Late Present", "whose": "app",
                                          "causes": ["Prediction Error", "App Deadline Missed"]}
         assert ft["unfinished"] == 1
+        assert "frames just after it may be late" in ft["note"]       # not "no janky frames"
 
     async def test_a_smooth_scroll_with_stuffed_frames(self):
         """A Pixel 5's 20 s scroll, end to end through quern: 59 late frames,
@@ -627,7 +628,7 @@ class TestSummarize:
         trace.write_bytes(b"x" * 1000)
         s = await _summary(FakeTP(), expected_s=60.0, trace=trace, max_trace_bytes=1000)
         [loss] = s["trace_data_loss"]
-        assert "reached perfetto's 0 MiB file limit" in loss["detail"]
+        assert "at perfetto's 0 MiB file limit" in loss["detail"]
         assert "profiles.android_max_trace_mb" in loss["detail"]
         s = await _summary(FakeTP(), expected_s=60.0, trace=trace, max_trace_bytes=4000)
         assert "does not say why" in s["trace_data_loss"][0]["detail"]

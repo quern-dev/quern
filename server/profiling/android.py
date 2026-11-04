@@ -552,8 +552,9 @@ def jank_from_timeline(rows: list, start_ns: int) -> dict | None:
         "note": ("jank_percent is janky frames of all the app's frames: Self Jank is the app's "
                  "(app_janky), Other Jank the system's, and a late or dropped frame with no "
                  "tag is unexplained_janky; stuffed frames were queued behind others -- added "
-                 "latency, not jank; a frozen main thread draws no frames, so a hang is in "
-                 "hangs, not here")}
+                 "latency, not jank; a frozen main thread draws no frames while frozen, so "
+                 "the hang itself is in hangs, and the frames just after it may be late "
+                 "and counted here")}
 
 
 def cpu_from_threads(rows: list, span_ns: int) -> dict | None:
@@ -728,8 +729,11 @@ def _why_short(span_s: float, expected_s: float, trace: Path, limit: int | None)
     except OSError:
         size = None
     if limit and size is not None and size >= limit * FULL_FILE:
-        return (f"{said}: it reached perfetto's {limit // 2**20} MiB file limit, which "
-                "config.json's profiles.android_max_trace_mb raises")
+        # The size says the file is full, not that being full is what ended
+        # it: a stop from elsewhere can land on a full file (CodeRabbit).
+        return (f"{said}: its file is at perfetto's {limit // 2**20} MiB file limit, so "
+                "it most likely stopped there; config.json's profiles.android_max_trace_mb "
+                "raises the limit")
     return (f"{said}, and its file ({size // 2**20 if size is not None else '?'} MiB) is "
             "short of perfetto's file limit, so the trace does not say why")
 
