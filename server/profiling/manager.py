@@ -97,6 +97,23 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+
+def _recorded_s(profile: Profile, recording_at: str | None = None) -> float | None:
+    """How long the profile ran: from when it was recording (else its start)
+    to its end, but never past its time limit -- one finished by a later
+    server ended long before it was read. One nobody stopped was to run its
+    whole limit: perfetto ending sooner by itself (a `perfetto --stop` from
+    another shell, a crash) ends it near the trace's end, which would hide
+    the cut (CodeRabbit)."""
+    if profile.stop_reason == "time_limit":
+        return float(profile.time_limit_s)
+    try:
+        span = (datetime.fromisoformat(profile.ended_at or "")
+                - datetime.fromisoformat(recording_at or profile.started_at)).total_seconds()
+    except ValueError:
+        return None
+    return min(span, profile.time_limit_s) if span > 0 else None
+
 def _root() -> Path:
     # Read at call time, so QUERN_STATE_DIR set by a test applies.
     return config_mod.CONFIG_DIR / "profiles"
@@ -373,6 +390,23 @@ class ProfileManager:
         trace_processor starts here, while it records, not at the stop."""
         device = self._device(profile)
         first = await device.snapshot(profile.bundle_id)
+        # Recorded with the start, so the summary judges the trace by the
+        # limit it was written under, not by today's config.
+        settings = self.settings()
+        trace_bytes = settings.get("android_max_trace_bytes", ad.MAX_TRACE_BYTES)
+        # Never past the whole store's budget: one trace over it is kept, and
+        # the store stays over until the next start (CodeRabbit). Which one
+        # binds is kept too, so the summary names the setting that raises it.
+        if settings["max_bytes"] < trace_bytes:
+            first["max_trace_bytes"], first["max_trace_setting"] = (
+                settings["max_bytes"], "profiles.max_mb")
+        elif settings["max_bytes"] == trace_bytes:
+            # Both bind: raising either alone leaves the limit where it is.
+            first["max_trace_bytes"], first["max_trace_setting"] = (
+                trace_bytes, "profiles.max_mb and profiles.android_max_trace_mb")
+        else:
+            first["max_trace_bytes"], first["max_trace_setting"] = (
+                trace_bytes, "profiles.android_max_trace_mb")
         await asyncio.to_thread(_write_json_atomic, profile.start_file, first)
         self.trace_processor.ensure()
         # Recorded before perfetto is asked, as an xctrace is at spawn: a
@@ -382,12 +416,18 @@ class ProfileManager:
         await self._save()
         try:
             await device.start(profile.id, profile.bundle_id, preset, profile.time_limit_s,
-                               profile.log)
+                               profile.log, first["max_trace_bytes"])
         except ad.StartFailed as e:
             raise ProfileError(str(e), 502) from e
         except (OSError, TimeoutError) as e:
             raise ProfileError(f"perfetto could not be started on {profile.device}: {e!r}",
                                502) from e
+        # When perfetto said it was recording: what a trace's span is held to,
+        # not started_at, which is before the snapshot and the device's start
+        # (CodeRabbit). Without it only a stop at the time limit is judged.
+        first["recording_at"] = _now()
+        with contextlib.suppress(OSError):
+            await asyncio.to_thread(_write_json_atomic, profile.start_file, first)
 
     async def _spawn(self, profile: Profile, preset: xt.Preset) -> None:
         cmd = xt.record_command(self.xctrace, profile.device, preset, profile.time_limit_s,
@@ -608,6 +648,13 @@ class ProfileManager:
         except (OSError, ValueError):
             first = {"unavailable": {"cpu": "the reading at the start was lost",
                                      "frames": "the reading at the start was lost"}}
+        # Without when perfetto began -- the record unreadable, or its second
+        # write lost -- a stop's time runs from the request, setup and all,
+        # and could read as a trace ended early: only a profile that ran its
+        # limit is still held to it (CodeRabbit).
+        recording_at = first.get("recording_at")
+        expected_s = (_recorded_s(profile, recording_at)
+                      if recording_at or profile.stop_reason == "time_limit" else None)
         status = await self.trace_processor.wait(TP_WAIT_S)
         logged: tuple[list[dict] | None, str | None] = (
             None, "InputDispatcher's reports are read from logcat, which this server cannot")
@@ -621,7 +668,7 @@ class ProfileManager:
         summary = await ad.summarize(
             preset=profile.preset, package=profile.bundle_id, trace=profile.trace,
             first=first, last=last, tp=self.trace_processor, tp_status=status.as_dict(),
-            logged_hangs=logged)
+            logged_hangs=logged, expected_s=expected_s)
         await asyncio.to_thread(_write_json_atomic, profile.summary_file, summary)
         profile.state = "finished"
 
