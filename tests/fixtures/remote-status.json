@@ -1,5 +1,5 @@
 {
-  "_comment": "Device-list answers and the rows quern remote list makes of them. Read by tests/test_remote_status_fixture.py (server/remote/status.py) and mcp/test/remote-status.test.mjs (mcp/src/remote-status.ts), so the CLI's list and the MCP's cannot drift (#605). A case with \"rows\": null must be refused, never read as no devices. `entries` are remotes.json entries and what loading them gives ({file} is the file's path); `reasons` are why a server could not be asked; `health` are /health answers and the version read from them (null: refused).",
+  "_comment": "Device-list answers and the rows quern remote list makes of them. Read by tests/test_remote_status_fixture.py (server/remote/status.py) and mcp/test/remote-status.test.mjs (mcp/src/remote-status.ts), so the CLI's list and the MCP's cannot drift (#605). A case with \"rows\": null must be refused, never read as no devices. `entries` are remotes.json entries and what loading them gives ({file} is the file's path); `reasons` are why a server could not be asked; `health` are /health answers and the version read from them (null: refused). `disk` are /api/v1/system/disk answers and the row's disk and disk_error made of them (#581).",
   "cases": [
     {
       "name": "free, held by this key's label, held by another, held with this_key, android",
@@ -469,6 +469,215 @@
     {
       "answer": "ok",
       "version": null
+    }
+  ],
+  "disk": [
+    {
+      "answer": {
+        "used_bytes": 100,
+        "used_complete": true,
+        "disk": {
+          "free_bytes": 50,
+          "total_bytes": 200
+        },
+        "warnings": [
+          "low"
+        ],
+        "measured_at": 1.5,
+        "stores": {}
+      },
+      "disk": {
+        "used_bytes": 100,
+        "used_complete": true,
+        "free_bytes": 50,
+        "total_bytes": 200,
+        "warnings": [
+          "low"
+        ],
+        "measured_at": 1.5
+      },
+      "error": null
+    },
+    {
+      "answer": {
+        "measuring": true,
+        "used_bytes": 1
+      },
+      "disk": {
+        "measuring": true
+      },
+      "error": null
+    },
+    {
+      "answer": {
+        "error": "boom"
+      },
+      "disk": null,
+      "error": "disk use could not be measured there: boom"
+    },
+    {
+      "answer": {
+        "used_bytes": 100,
+        "used_complete": true,
+        "disk": {
+          "free_bytes": 50,
+          "total_bytes": 200
+        },
+        "warnings": [
+          "low"
+        ],
+        "measured_at": 1.5,
+        "stores": {},
+        "error": "partial"
+      },
+      "disk": {
+        "used_bytes": 100,
+        "used_complete": true,
+        "free_bytes": 50,
+        "total_bytes": 200,
+        "warnings": [
+          "low"
+        ],
+        "measured_at": 1.5
+      },
+      "error": null
+    },
+    {
+      "answer": {
+        "used_bytes": 100,
+        "used_complete": true,
+        "disk": {
+          "free_bytes": 50,
+          "total_bytes": 200
+        },
+        "warnings": "lowlow",
+        "measured_at": 1.5,
+        "stores": {}
+      },
+      "disk": null,
+      "error": "disk use could not be read: its warnings are not a list"
+    },
+    {
+      "answer": {
+        "used_bytes": 100,
+        "used_complete": true,
+        "disk": {
+          "free_bytes": 50,
+          "total_bytes": 200
+        },
+        "warnings": null,
+        "measured_at": 1.5,
+        "stores": {}
+      },
+      "disk": {
+        "used_bytes": 100,
+        "used_complete": true,
+        "free_bytes": 50,
+        "total_bytes": 200,
+        "warnings": [],
+        "measured_at": 1.5
+      },
+      "error": null
+    },
+    {
+      "answer": {
+        "used_bytes": 100,
+        "used_complete": true,
+        "disk": {
+          "free_bytes": 50,
+          "total_bytes": 200
+        },
+        "warnings": [
+          "low"
+        ],
+        "measured_at": 1.5,
+        "stores": {},
+        "last_error": "stat failed"
+      },
+      "disk": {
+        "used_bytes": 100,
+        "used_complete": true,
+        "free_bytes": 50,
+        "total_bytes": 200,
+        "warnings": [
+          "low",
+          "the latest measurement failed: stat failed"
+        ],
+        "measured_at": 1.5
+      },
+      "error": null
+    },
+    {
+      "answer": {
+        "used_bytes": 100,
+        "used_complete": true,
+        "disk": {
+          "error": "statvfs"
+        },
+        "warnings": [
+          "low"
+        ],
+        "measured_at": 1.5,
+        "stores": {}
+      },
+      "disk": {
+        "used_bytes": 100,
+        "used_complete": true,
+        "free_bytes": null,
+        "total_bytes": null,
+        "warnings": [
+          "low",
+          "free space could not be measured: statvfs"
+        ],
+        "measured_at": 1.5
+      },
+      "error": null
+    },
+    {
+      "answer": {
+        "used_bytes": 100,
+        "used_complete": true,
+        "disk": "x",
+        "warnings": [
+          "low"
+        ],
+        "measured_at": 1.5,
+        "stores": {}
+      },
+      "disk": {
+        "used_bytes": 100,
+        "used_complete": true,
+        "free_bytes": null,
+        "total_bytes": null,
+        "warnings": [
+          "low"
+        ],
+        "measured_at": 1.5
+      },
+      "error": null
+    },
+    {
+      "answer": {
+        "used_bytes": 7
+      },
+      "disk": {
+        "used_bytes": 7,
+        "used_complete": null,
+        "free_bytes": null,
+        "total_bytes": null,
+        "warnings": [],
+        "measured_at": null
+      },
+      "error": null
+    },
+    {
+      "answer": [
+        "not",
+        "a",
+        "report"
+      ],
+      "disk": null,
+      "error": "disk use could not be read: not a report"
     }
   ]
 }

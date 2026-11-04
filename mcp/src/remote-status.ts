@@ -49,7 +49,7 @@ export class HttpStatus extends Error {
 
 function blank(name: string | null, url: string | null, label: string | null): Row {
   return { name, url, label, reachable: false, version: null, version_matches: null,
-           devices: null, free: null, error: null };
+           devices: null, free: null, error: null, disk: null, disk_error: null };
 }
 
 /** The remotes in remotes.json: {} when there is no file, and a thrown error
@@ -208,10 +208,57 @@ export function devices(answer: unknown, label = ""): Row[] {
   });
 }
 
+/** A server's disk use (#581), or why it could not be read: a server from
+ * before it answers 404, which is "not reported", not "nothing used". As
+ * status.py's _disk, which a fixture case pins. */
+async function disk(target: Target, timeoutMs: number): Promise<[Row | null, string | null]> {
+  let report: unknown;
+  try {
+    report = await get(target, "/api/v1/system/disk", timeoutMs);
+  } catch (e) {
+    return [null, `disk use could not be read: ${reason(e)}`];
+  }
+  return diskRow(report);
+}
+
+/** A /system/disk answer as the row's `disk` and `disk_error`. */
+export function diskRow(report: unknown): [Row | null, string | null] {
+  if (!report || typeof report !== "object" || Array.isArray(report)) {
+    return [null, "disk use could not be read: not a report"];
+  }
+  const r = report as Record<string, unknown>;
+  if (truthy(r.measuring)) return [{ measuring: true }, null];
+  const stores = r.stores;
+  if (truthy(r.error) && !(stores && typeof stores === "object" && !Array.isArray(stores))) {
+    return [null, `disk use could not be measured there: ${pyStr(r.error)}`];
+  }
+  const d = (r.disk && typeof r.disk === "object" && !Array.isArray(r.disk)
+    ? r.disk : {}) as Record<string, unknown>;
+  const warnings = truthy(r.warnings) ? r.warnings : [];
+  if (!Array.isArray(warnings)) {
+    return [null, "disk use could not be read: its warnings are not a list"];
+  }
+  return [{
+    used_bytes: r.used_bytes ?? null,
+    used_complete: r.used_complete ?? null,
+    free_bytes: d.free_bytes ?? null,
+    total_bytes: d.total_bytes ?? null,
+    warnings: [
+      ...warnings,
+      ...(truthy(r.last_error) ? [`the latest measurement failed: ${pyStr(r.last_error)}`] : []),
+      ...(truthy(d.error) ? [`free space could not be measured: ${pyStr(d.error)}`] : []),
+    ],
+    measured_at: r.measured_at ?? null,
+  }, null];
+}
+
 /** One server's state now. Never throws: one server's odd answer must not
  * cost the list every other server. version_matches is set by the caller,
- * against this machine's version. */
-export async function probe(target: Target, timeoutMs = TIMEOUT_MS): Promise<Row> {
+ * against this machine's version. `answered` is handed the row before its
+ * disk use is asked, so a deadline that falls during that third read keeps
+ * the version and devices already read. */
+export async function probe(target: Target, timeoutMs = TIMEOUT_MS,
+                            answered?: (row: Row) => void): Promise<Row> {
   const out = blank(target.name, target.url, target.label);
   let version: string;
   try {
@@ -228,6 +275,14 @@ export async function probe(target: Target, timeoutMs = TIMEOUT_MS): Promise<Row
     out.free = list.filter((d) => d.free).length;
   } catch (e) {
     out.error = `devices could not be listed: ${reason(e)}`;
+    return out;
+  }
+  answered?.({ ...out, disk_error: "disk use did not answer in time" });
+  try {
+    [out.disk, out.disk_error] = await disk(target, timeoutMs);
+  } catch (e) {
+    out.disk = null;
+    out.disk_error = `disk use could not be read: ${reason(e)}`;
   }
   return out;
 }
@@ -315,12 +370,15 @@ export async function remoteList(
     if (!isTarget(t)) return t;
     const late = { ...blank(t.name, t.url, t.label),
                    error: `not answering (no complete answer within ${Math.round(deadlineMs / 1000)}s)` };
+    // The latest the probe has answered, so a deadline during the disk read
+    // keeps the version and devices (status.py's _probe_all).
+    let partial: Row | undefined;
     let timer: NodeJS.Timeout | undefined;
     const deadline = new Promise<Row>((resolve) => {
-      timer = setTimeout(() => resolve(late), Math.max(0, ends - Date.now()));
+      timer = setTimeout(() => resolve(partial ?? late), Math.max(0, ends - Date.now()));
     });
     try {
-      const row = await Promise.race([probe(t, timeoutMs), deadline]);
+      const row = await Promise.race([probe(t, timeoutMs, (r) => { partial = r; }), deadline]);
       // status.py asks this Mac's server for its health before listing it,
       // and reads any failure as not running -- never a remote's row.
       if ((t as { isLocal?: boolean }).isLocal && !row.reachable) {

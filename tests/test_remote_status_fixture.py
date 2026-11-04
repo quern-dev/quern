@@ -57,6 +57,13 @@ def test_reasons(case):
     assert status._reason(e) == case["text"]
 
 
+@pytest.mark.parametrize("case", FIXTURE["disk"],
+                         ids=[json.dumps(c["answer"])[:40] for c in FIXTURE["disk"]])
+def test_disk(case, monkeypatch):
+    monkeypatch.setattr(status, "_get", lambda remote, path, timeout: case["answer"])
+    assert status._disk(None, 1.0) == (case["disk"], case["error"])
+
+
 @pytest.mark.parametrize("case", FIXTURE["health"],
                          ids=[json.dumps(c["answer"]) for c in FIXTURE["health"]])
 def test_health(case):

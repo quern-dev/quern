@@ -10,7 +10,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { devices, health, HttpStatus, loadTarget, probe, readRemotes, reason, remoteList, Unexpected }
+import { devices, diskRow, health, HttpStatus, loadTarget, probe, readRemotes, reason, remoteList,
+  Unexpected }
   from "../dist/remote-status.js";
 import { execFile } from "node:child_process";
 
@@ -31,6 +32,12 @@ for (const c of FIXTURE.reasons) {
   test(`shared fixture, reason: ${c.text.slice(0, 30)}`, () => {
     const e = c.http ? new HttpStatus(c.http) : new Unexpected(c.unexpected);
     assert.equal(reason(e), c.text);
+  });
+}
+
+for (const c of FIXTURE.disk) {
+  test(`shared fixture, disk: ${JSON.stringify(c.answer).slice(0, 40)}`, () => {
+    assert.deepEqual(diskRow(c.answer), [c.disk, c.error]);
   });
 }
 
@@ -138,6 +145,54 @@ test("health answered but devices failed: reachable, devices null, and why", asy
     assert.equal(row.devices, null);
     assert.equal(row.free, null);
     assert.equal(row.error, "devices could not be listed: HTTP 500");
+  } finally {
+    await s.close();
+  }
+});
+
+test("disk use is read after the devices; a server from before it says not reported (#581)", async () => {
+  const report = { used_bytes: 9, used_complete: true, disk: { free_bytes: 5, total_bytes: 20 },
+                   warnings: [], measured_at: 2, stores: {} };
+  const s = await fake({ ...OK, "/api/v1/system/disk": [200, report] });
+  const old = await fake(OK);
+  try {
+    const row = await probe(target(s.url));
+    assert.deepEqual(row.disk, { used_bytes: 9, used_complete: true, free_bytes: 5,
+                                 total_bytes: 20, warnings: [], measured_at: 2 });
+    assert.equal(row.disk_error, null);
+    assert.equal(row.error, null);
+    const before = await probe(target(old.url));
+    assert.equal(before.disk, null);
+    assert.equal(before.disk_error, "disk use could not be read: HTTP 404");
+    assert.equal(before.free, 1, "the rest of the row still stands");
+  } finally {
+    await s.close();
+    await old.close();
+  }
+});
+
+test("devices that could not be listed: disk is not asked", async () => {
+  const s = await fake({ "/health": OK["/health"], "/api/v1/device/list": [500, { detail: "x" }] });
+  try {
+    const row = await probe(target(s.url));
+    assert.equal(row.disk, null);
+    assert.equal(row.disk_error, null);
+    assert.ok(!s.seen.some((r) => r.path === "/api/v1/system/disk"));
+  } finally {
+    await s.close();
+  }
+});
+
+test("a deadline during the disk read keeps the version and devices", async () => {
+  const s = await fake({ ...OK, "/api/v1/system/disk": () => {} });   // never answers
+  try {
+    const out = await remoteList({ file: remotesFile(), timeoutMs: 5000, deadlineMs: 400,
+                                   localServer: () => target(s.url) });
+    const row = out.remotes[0];
+    assert.equal(row.reachable, true);
+    assert.equal(row.free, 1);
+    assert.equal(row.disk, null);
+    assert.equal(row.disk_error, "disk use did not answer in time");
   } finally {
     await s.close();
   }
