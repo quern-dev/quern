@@ -568,3 +568,34 @@ def test_free_space_that_could_not_be_measured_says_why(monkeypatch):
     [row] = status.statuses("0.25.0")
     assert row["disk_error"] is None and row["disk"]["free_bytes"] is None
     assert row["disk"]["warnings"] == ["free space could not be measured: could not be read"]
+
+
+def test_an_odd_disk_answer_costs_only_the_disk_part(monkeypatch):
+    """A truthy non-list `warnings` raised out of probe, which never raises,
+    and the row read as not answering in time (CodeRabbit)."""
+    records = {"studio": {"url": "https://studio.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": DEVICES,
+                           "/api/v1/system/disk": {"used_bytes": 5, "warnings": "x"}})
+    [row] = status.statuses("0.25.0")
+    assert row["reachable"] is True and row["free"] == 2 and row["error"] is None
+    assert row["disk"] is None and "warnings are not a list" in row["disk_error"]
+
+
+def test_a_disk_read_that_raises_never_leaves_probe(monkeypatch):
+    """probe() never raises: whatever reading the disk answer throws is that
+    row's disk_error, not a row stuck at "did not answer in time"."""
+    records = {"studio": {"url": "https://studio.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": DEVICES})
+
+    def broken(remote, timeout):
+        raise KeyError("used_bytes")
+
+    monkeypatch.setattr(status, "_disk", broken)
+    [row] = status.statuses("0.25.0")
+    assert row["reachable"] is True and row["free"] == 2
+    assert row["disk"] is None and "could not be read" in row["disk_error"]
+    assert "in time" not in row["disk_error"]

@@ -158,7 +158,10 @@ def probe(remote: client.Remote, local_version: str | None,
     out["free"] = sum(1 for d in devices if d["free"])
     if answered:
         answered({**out, "disk_error": "disk use did not answer in time"})
-    out["disk"], out["disk_error"] = _disk(remote, timeout)
+    try:
+        out["disk"], out["disk_error"] = _disk(remote, timeout)
+    except Exception as e:  # noqa: BLE001 -- an odd disk answer costs the disk part only
+        out["disk"], out["disk_error"] = None, f"disk use could not be read: {_reason(e)}"
     return out
 
 
@@ -176,13 +179,16 @@ def _disk(remote: client.Remote, timeout: float) -> tuple[dict | None, str | Non
     if report.get("error") and not isinstance(report.get("stores"), dict):
         return None, f"disk use could not be measured there: {report['error']}"
     disk = report.get("disk") if isinstance(report.get("disk"), dict) else {}
+    warnings = report.get("warnings") or []
+    if not isinstance(warnings, list):   # a list was concatenated onto it (CodeRabbit)
+        return None, "disk use could not be read: its warnings are not a list"
     return {"used_bytes": report.get("used_bytes"),
             "used_complete": report.get("used_complete"),
             "free_bytes": disk.get("free_bytes"),
             "total_bytes": disk.get("total_bytes"),
             # Said, so a free space missing is not left without a reason
             # (CodeRabbit). A warning, not disk_error: that says disk is null.
-            "warnings": (report.get("warnings") or []) + (
+            "warnings": warnings + (
                 [f"the latest measurement failed: {report['last_error']}"]
                 if report.get("last_error") else []) + (
                 [f"free space could not be measured: {disk['error']}"]
