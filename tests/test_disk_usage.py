@@ -59,6 +59,17 @@ def test_each_store_is_measured_and_the_largest_simulators_are_named(tmp_path):
     assert report["used_complete"] is True and report["disk"]["free_bytes"] > 0
 
 
+def test_the_git_sandboxes_are_a_store_and_count_toward_the_total(tmp_path):
+    """Clients' sandboxes (#608) are what client builds grow, at up to 4 GB a
+    key: left out, the warning over disk.warn_gb would not see them."""
+    work = tmp_path / "quern" / "sandboxes" / "client-alice" / "work" / "app" / "main"
+    work.mkdir(parents=True)
+    (work / "x").write_bytes(b"y" * 70_000)
+    report = _measure(tmp_path)
+    assert report["stores"]["sandboxes"]["bytes"] >= 70_000
+    assert report["used_bytes"] >= 70_000
+
+
 def test_a_store_that_cannot_be_read_is_unknown_not_empty(tmp_path, monkeypatch):
     """Could not tell is not nothing there: a false all-clear otherwise."""
     (tmp_path / "quern" / "recordings").mkdir(parents=True)
