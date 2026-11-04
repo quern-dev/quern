@@ -704,3 +704,32 @@ def test_simulators_on_another_disk_warn_when_that_disk_fills(tmp_path, monkeypa
     monkeypatch.setattr(du.os, "stat", real_stat)   # the same disk: one warning at most
     report = du.measure(sim_devices=sims, config_dir=home, settings=settings)
     assert not [w for w in report["warnings"] if "simulators' disk" in w]
+
+
+def test_a_simulators_disk_that_cannot_be_checked_says_so(tmp_path, monkeypatch):
+    """A failed check read as "the same disk", so free space looked fine
+    (CodeRabbit). No simulators at all is not a failure."""
+    sims, home = tmp_path / "Devices", tmp_path / "quern"
+    home.mkdir()
+    settings = {"warn_bytes": 0, "warn_free_bytes": 20 * 1024 ** 3}
+    said = "could not check free space on the simulators' disk"
+    assert said not in du.measure(sim_devices=sims, config_dir=home,
+                                  settings=settings)["warnings"]   # no simulators
+    sims.mkdir()
+    real_stat, real_usage = du.os.stat, du.shutil.disk_usage
+
+    def stat(path, *a, **k):
+        st = real_stat(path, *a, **k)
+        if Path(path) == sims:   # on another disk
+            return du.os.stat_result((st.st_mode, st.st_ino, st.st_dev + 1) + tuple(st)[3:])
+        return st
+
+    def usage(path):
+        if Path(path) == sims:
+            raise PermissionError("denied")
+        return real_usage(path)
+
+    monkeypatch.setattr(du.os, "stat", stat)
+    monkeypatch.setattr(du.shutil, "disk_usage", usage)
+    report = du.measure(sim_devices=sims, config_dir=home, settings=settings)
+    assert said in report["warnings"] and str(sims) not in " ".join(report["warnings"])

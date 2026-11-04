@@ -182,8 +182,11 @@ def measure(*, sim_devices: Path | None = None, config_dir: Path | None = None,
     # Simulators moved to another disk (a symlinked CoreSimulator) fill that
     # one, which `disk` does not measure (CodeRabbit). Not named: clients
     # see warnings, and the path is the owner's.
-    sim_free = _free_elsewhere(sim_devices, config_dir)
-    if settings["warn_free_bytes"] and sim_free is not None \
+    sim_free, sim_unknown = _free_elsewhere(sim_devices, config_dir)
+    if sim_unknown:
+        # Could not tell is said, never read as "the same disk" (CodeRabbit).
+        warnings.append("could not check free space on the simulators' disk")
+    elif settings["warn_free_bytes"] and sim_free is not None \
             and sim_free < settings["warn_free_bytes"]:
         warnings.append(f"{_gb(sim_free)} free on the simulators' disk, under "
                         f"disk.warn_free_gb ({_gb(settings['warn_free_bytes'])})")
@@ -198,15 +201,18 @@ def measure(*, sim_devices: Path | None = None, config_dir: Path | None = None,
             "note": settings.get("note")}
 
 
-def _free_elsewhere(path: Path, home: Path) -> int | None:
-    """Free bytes on `path`'s filesystem when it is not `home`'s; None when
-    they are the same one, or either cannot be read."""
+def _free_elsewhere(path: Path, home: Path) -> tuple[int | None, bool]:
+    """(free bytes on `path`'s filesystem, could not tell). Free is None when
+    it is `home`'s filesystem or `path` does not exist (no simulators); could
+    not tell is True when `path` exists and its disk could not be checked."""
     try:
+        if not path.exists():
+            return None, False
         if os.stat(path).st_dev == os.stat(home if home.exists() else home.parent).st_dev:
-            return None
-        return shutil.disk_usage(path).free
+            return None, False
+        return shutil.disk_usage(path).free, False
     except OSError:
-        return None
+        return None, True
 
 
 def _gb(n: int) -> str:
