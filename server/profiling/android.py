@@ -53,6 +53,14 @@ FRAME_BUDGET_MS = 1000 / 60
 LIST_LIMIT = 50
 #: An adb call to the device: perfetto's own answers measured 0.2-0.3 s.
 ADB_TIMEOUT_S = 30.0
+#: The trace file's limit when config.json does not set one
+#: (profiles.android_max_trace_mb).
+MAX_TRACE_BYTES = 256 * 2**20
+#: A trace file this close to its limit reached it: perfetto stops before
+#: the packet that would cross it.
+FULL_FILE = 0.98
+#: A trace this much (or a tenth) shorter than its profile stopped early.
+TRACE_SHORT_S = 3.0
 #: Pulling the trace: 4.1 MB took 0.14 s; a 300 s profile can be 100+ MB.
 PULL_TIMEOUT_S = 300.0
 
@@ -64,17 +72,22 @@ class Preset:
     purpose: str
     atrace: tuple[str, ...]
     ftrace: tuple[str, ...]
+    #: SurfaceFlinger's FrameTimeline (Android 12+): each frame judged
+    #: against its deadline, with why it missed. Android 10 has no producer
+    #: for it, and perfetto records the rest as before (measured).
+    frame_timeline: bool = False
 
 
 PRESETS: dict[str, Preset] = {
     "hangs": Preset(
         "input the app left unanswered (hangs), its frames, its CPU, and its slowest work",
         ("input", "view", "am", "gfx"),
-        ("sched/sched_switch", "task/task_newtask", "task/task_rename")),
+        ("sched/sched_switch", "task/task_newtask", "task/task_rename"), frame_timeline=True),
     "frames": Preset(
-        "how long each frame took, and the frames that missed their deadline",
+        "how long each frame took, and the frames that missed their deadline, with why "
+        "(Android 12+)",
         ("gfx", "view", "input"),
-        ("sched/sched_switch", "task/task_newtask", "task/task_rename")),
+        ("sched/sched_switch", "task/task_newtask", "task/task_rename"), frame_timeline=True),
     "cpu": Preset(
         "where the app's CPU time went, by thread",
         ("view", "am"),
@@ -91,21 +104,31 @@ def remote_trace(profile_id: str) -> str:
     return f"{REMOTE_DIR}/quern-{profile_id}.pftrace"
 
 
-def config_text(preset: Preset, package: str, time_limit_s: int) -> str:
+def config_text(preset: Preset, package: str, time_limit_s: int,
+                max_file_bytes: int = MAX_TRACE_BYTES) -> str:
     """perfetto's text config: streamed to its file, ended by its own time
-    limit, with the app's atrace so its own slices are recorded."""
+    limit, with the app's atrace so its own slices are recorded.
+
+    A ring buffer, flushed every second. A DISCARD buffer stops taking data
+    once it has filled, even while it is being written out, so it capped the
+    whole trace at its 32 MiB: measured on a Pixel 5 (Android 14), a 25 s
+    profile kept 19 s, and trace_processor named the config as data loss.
+    The same profile with this one kept all 25 s and reported none."""
     events = " ".join(f'ftrace_events: "{e}"' for e in preset.ftrace)
     categories = " ".join(f'atrace_categories: "{c}"' for c in preset.atrace)
     return (
-        "buffers { size_kb: 32768 fill_policy: DISCARD }\n"
+        "buffers { size_kb: 32768 fill_policy: RING_BUFFER }\n"
         "write_into_file: true\n"
         "file_write_period_ms: 1000\n"
-        "max_file_size_bytes: 268435456\n"
+        "flush_period_ms: 1000\n"
+        f"max_file_size_bytes: {max_file_bytes}\n"
         f"duration_ms: {time_limit_s * 1000}\n"
         'data_sources { config { name: "linux.ftrace" ftrace_config { '
         f'{events} {categories} atrace_apps: "{package}" }} }} }}\n'
         'data_sources { config { name: "linux.process_stats" process_stats_config { '
-        "scan_all_processes_on_start: true } } }\n")
+        "scan_all_processes_on_start: true } } }\n"
+        + ('data_sources { config { name: "android.surfaceflinger.frametimeline" } }\n'
+           if preset.frame_timeline else ""))
 
 
 # -- talking to the device ------------------------------------------------------
@@ -158,10 +181,10 @@ class Device:
         self._turn = asyncio.Lock()
 
     async def start(self, profile_id: str, package: str, preset: Preset,
-                    time_limit_s: int, log: Path) -> None:
+                    time_limit_s: int, log: Path, max_file_bytes: int = MAX_TRACE_BYTES) -> None:
         """Start the detached session, and confirm it is running: perfetto's
         exit status is the request, `--is_detached` is the outcome."""
-        cfg = config_text(preset, package, time_limit_s).encode()
+        cfg = config_text(preset, package, time_limit_s, max_file_bytes).encode()
         rc, out, err = await self.run(
             self.serial, "shell",
             f"perfetto --detach={session_key(profile_id)} --txt -c - "
@@ -312,6 +335,19 @@ def window_matches(track: str, package: str) -> tuple[bool, bool]:
     return (cut and package.startswith(window)), cut and package.startswith(window)
 
 
+#: Lost data is what trace_processor rates `data_loss`, and two it rates only
+#: `info` that are data lost all the same: the kernel's ftrace buffer
+#: overrunning, and the ring buffer overwriting chunks not yet written out
+#: (review).
+#:
+#: The app's FrameTimeline frames are its process's, or its layer's -- "TX -
+#: <package>/<activity>#n" -- for a trace that lost the process names: a
+#: Pixel 5's DISCARD trace had 1,355 of the app's frames with no process name.
+#:
+#: A frame is `Choreographer#doFrame` on Android 10 and `Choreographer#doFrame
+#: <vsync id>` on 14 (measured), where its child "Choreographer#doFrame -
+#: resynced to ..." is not a frame of its own.
+#:
 #: The whole summary in one query, so trace_processor loads the trace once:
 #: each section was a load of its own, measured 1.7 s for 4.1 MB, so a 100 MB
 #: trace would have cost five loads of ~40 s. Each section is JSON, hex-encoded
@@ -329,7 +365,8 @@ select
   hex((select json_group_array(s.dur) from slice s
      join thread_track tt on s.track_id = tt.id join thread t using (utid)
      join process p using (upid)
-     where p.name = '{package}' and t.tid = p.pid and s.name = 'Choreographer#doFrame'))
+     where p.name = '{package}' and t.tid = p.pid
+       and (s.name = 'Choreographer#doFrame' or s.name glob 'Choreographer#doFrame [0-9]*')))
      as frames,
   hex((select json_group_array(json_array(tid, thread, ns)) from (
      select t.tid as tid, t.name as thread, sum(s.dur) as ns
@@ -339,14 +376,24 @@ select
      select s.name as name, t.name as thread, s.dur as dur, s.ts as ts
      from slice s join thread_track tt on s.track_id = tt.id
      join thread t using (utid) join process p using (upid)
-     where p.name = '{package}' order by s.dur desc limit 10))) as slices
+     where p.name = '{package}' order by s.dur desc limit 10))) as slices,
+  hex((select json_group_array(json_array(name, idx, value)) from stats
+     where value > 0 and (severity = 'data_loss'
+       or name in ('ftrace_cpu_overrun_end', 'traced_buf_chunks_overwritten')))) as loss,
+  hex((select json_group_array(json_array(ts, dur, present_type, jank_type, jank_tag)) from (
+     select f.ts as ts, f.dur as dur, f.present_type as present_type, f.jank_type as jank_type,
+       f.jank_tag as jank_tag
+     from actual_frame_timeline_slice f left join process p using (upid)
+     where p.name = '{package}' or f.layer_name glob 'TX - {package}/*'
+     order by f.ts))) as ft,
+  (select count(*) from actual_frame_timeline_slice) as ft_any
 """
 
 
 def decode_summary_row(row: dict) -> dict:
     """The one row SUMMARY_SQL gives, its hex sections decoded."""
-    out = {k: row.get(k) for k in ("start_ts", "end_ts", "procs")}
-    for key in ("wq", "frames", "cpu", "slices"):
+    out = {k: row.get(k) for k in ("start_ts", "end_ts", "procs", "ft_any")}
+    for key in ("wq", "frames", "cpu", "slices", "loss", "ft"):
         raw = row.get(key)
         out[key] = json.loads(bytes.fromhex(raw).decode()) if raw else []
     return out
@@ -411,6 +458,105 @@ def frames_from_durations(durations_ns: list[int]) -> dict | None:
             "measures": "Choreographer#doFrame on the app's main thread"}
 
 
+#: FrameTimeline's presentations of a frame that reached the display.
+PRESENTED = {"On-time Present": "on_time", "Late Present": "late", "Early Present": "early"}
+#: Whose jank a frame is, by trace_processor's own reading of it (jank_tag),
+#: not by its causes: perfetto counts only App Deadline Missed and App
+#: Resynced Jitter as the app's, and a stuffed frame -- one queued behind
+#: others -- is smooth with added latency, not jank (review, against the
+#: v59.1 stdlib). The first version read Buffer Stuffing as the app's jank,
+#: and a Pixel 5's smooth scroll as 56 frames janky by its own fault.
+JANKY_TAGS = {"Self Jank": "app", "Other Jank": "system"}
+STUFFED_TAGS = ("Buffer Stuffing", "SurfaceFlinger Stuffing")
+SMOOTH_TAGS = ("No Jank", "Non-perceivable Jank")
+#: A frame that missed: late to the display, or never on it.
+MISSED = ("Late Present", "Dropped Frame")
+
+
+def _causes(jank_type: object) -> list[str]:
+    """FrameTimeline writes several causes as one string ("Prediction Error,
+    App Deadline Missed", measured), and "None" for a frame on time."""
+    return [c.strip() for c in str(jank_type or "").split(",")
+            if c.strip() and c.strip() != "None"]
+
+
+def jank_from_timeline(rows: list, start_ns: int) -> dict | None:
+    """The app's frames as SurfaceFlinger judged them: on time, late or
+    dropped; which were janky, whose fault, and why; and the worst of them.
+
+    A frame is janky when trace_processor tags it Self (the app's) or Other
+    (the system's) Jank, and also when it was late or dropped with no tag it
+    knows -- a missed frame without a reason is still missed, so it can
+    never read as smooth. A frozen main thread draws nothing, so a hang
+    leaves no janky frames behind it: measured, a 12 s hang on a Pixel 5
+    left a gap and two late frames after it."""
+    if not rows:
+        return None
+    present = {"on_time": 0, "late": 0, "early": 0}
+    dropped = unknown = classified = janky = app_janky = stuffed = unexplained = cut = 0
+    by_cause: dict[str, int] = {}
+    durations: list[float] = []
+    worst: list[dict] = []
+    for ts, dur, present_type, jank_type, jank_tag in rows:
+        if present_type == "Dropped Frame":
+            dropped += 1
+        elif present_type in PRESENTED:
+            present[PRESENTED[present_type]] += 1
+            if dur is not None and dur >= 0:
+                durations.append(dur / 1e6)
+            else:
+                cut += 1                  # still on its way when the trace ended
+        else:
+            unknown += 1
+        known = jank_tag in JANKY_TAGS or jank_tag in STUFFED_TAGS or jank_tag in SMOOTH_TAGS
+        classified += known
+        if jank_tag in STUFFED_TAGS and present_type != "Dropped Frame":
+            stuffed += 1
+            continue
+        whose = JANKY_TAGS.get(jank_tag)
+        if whose is None and (present_type == "Dropped Frame"
+                              or (not known and present_type in MISSED)):
+            whose = "unexplained"
+        if whose is None:
+            continue
+        janky += 1
+        app_janky += whose == "app"
+        unexplained += whose == "unexplained"
+        causes = _causes(jank_type) or [present_type]
+        for c in causes:
+            by_cause[c] = by_cause.get(c, 0) + 1
+        worst.append({"start_s": _rel(ts, start_ns),
+                      "duration_ms": round(dur / 1e6, 1) if dur is not None and dur >= 0 else None,
+                      "present": present_type, "whose": whose, "causes": causes})
+    presented = sum(present.values())
+    ms = sorted(durations)
+
+    def pct(p: float) -> float | None:
+        return round(ms[min(len(ms) - 1, int(p * len(ms)))], 1) if ms else None
+    worst.sort(key=lambda f: -(f["duration_ms"] or 0))
+    return {
+        "frames": len(rows), "presented": presented, **present, "dropped": dropped,
+        "unknown_present": unknown, "unfinished": cut,
+        "janky": janky, "jank_percent": round(janky / len(rows) * 100, 1),
+        "app_janky": app_janky, "system_janky": janky - app_janky - unexplained,
+        "unexplained_janky": unexplained, "stuffed": stuffed,
+        "classified": classified,
+        "classification_coverage_percent": round(classified / len(rows) * 100, 1),
+        "by_cause": dict(sorted(by_cause.items(), key=lambda kv: -kv[1])),
+        "p50_ms": pct(0.5), "p90_ms": pct(0.9), "p99_ms": pct(0.99),
+        "max_ms": round(ms[-1], 1) if ms else None,
+        "janky_frames": worst[:10], "source": "trace: FrameTimeline",
+        "measures": ("each frame the app gave the display, as SurfaceFlinger judged it against "
+                     "its deadline and trace_processor tagged it; duration is from the app "
+                     "starting the frame to its presentation"),
+        "note": ("jank_percent is janky frames of all the app's frames: Self Jank is the app's "
+                 "(app_janky), Other Jank the system's, and a late or dropped frame with no "
+                 "tag is unexplained_janky; stuffed frames were queued behind others -- added "
+                 "latency, not jank; a frozen main thread draws no frames while frozen, so "
+                 "the hang itself is in hangs, and the frames just after it may be late "
+                 "and counted here")}
+
+
 def cpu_from_threads(rows: list, span_ns: int) -> dict | None:
     if not rows:
         return None
@@ -462,7 +608,7 @@ def cpu_from_snapshots(first: dict, last: dict) -> tuple[dict | None, str | None
 async def summarize(*, preset: str, package: str, trace: Path, first: dict, last: dict,
                     tp, tp_status: dict,
                     logged_hangs: tuple[list[dict] | None, str | None],
-                    ) -> dict:
+                    expected_s: float | None = None) -> dict:
     """The profile, section by section; null with the reason when unread.
 
     trace_processor failing is not the trace being bad: the summary falls
@@ -470,8 +616,8 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
     result with its trace offered (review: it was failed, and the trace
     withheld)."""
     summary: dict = {"preset": preset, "platform": "android", "hangs": None, "frames": None,
-                     "cpu": None, "slowest_slices": None, "trace_processor": tp_status,
-                     "unavailable": {}}
+                     "frame_timeline": None, "cpu": None, "slowest_slices": None,
+                     "trace_processor": tp_status, "unavailable": {}}
     unavailable = summary["unavailable"]
     read = None
     if tp_status.get("state") == "installed":
@@ -488,6 +634,26 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
 
     if read is not None:
         start_ns, end_ns = read["start_ts"] or 0, read["end_ts"] or 0
+        loss = [{"stat": name if idx is None else f"{name}[{idx}]", "value": value}
+                 for name, idx, value in read["loss"]]
+        span_s = (end_ns - start_ns) / 1e9
+        if expected_s and expected_s - span_s > max(TRACE_SHORT_S, expected_s * 0.1):
+            # A trace that stops early says nothing in its stats: perfetto
+            # stops at max_file_size_bytes, which a busy device reaches in
+            # ~130 s (Pixel 5: 48 MB per 25 s), and a 300 s profile is allowed.
+            loss.append({"stat": "trace ended early", "value": round(span_s, 1),
+                         "detail": _why_short(span_s, expected_s, trace,
+                                              first.get("max_trace_bytes"),
+                                              first.get("max_trace_setting"))})
+        if loss:
+            # The sections below are then read from a trace with holes in it.
+            summary["trace_data_loss"] = loss
+            summary["trace_note"] = (
+                "the trace lost data (trace_data_loss says how), so what it holds is "
+                "incomplete: counts read from it are mostly lower bounds, but a lost "
+                "input-queue reset can join two short waits into one hang that did not "
+                "happen; percentiles may be off either way, and a gap is not proof of "
+                "nothing happening")
         if not read["procs"]:
             unavailable["app"] = f"{package} did not run during the profile"
         if preset == "cpu":
@@ -507,6 +673,16 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
         summary["frames"] = frames_from_durations(read["frames"])
         if summary["frames"] is None:
             unavailable["frames"] = "the trace has no frames from the app's main thread"
+        if not PRESETS[preset].frame_timeline:
+            unavailable["frame_timeline"] = f"not recorded by the {preset} preset"
+        else:
+            summary["frame_timeline"] = jank_from_timeline(read["ft"], start_ns)
+            if summary["frame_timeline"] is None:
+                unavailable["frame_timeline"] = (
+                    "the app gave the display no frames during the profile (FrameTimeline "
+                    "recorded other apps')" if read["ft_any"] else
+                    "the trace has no FrameTimeline frames at all: it needs Android 12 or "
+                    "later, and a screen that changed")
         summary["cpu"] = cpu_from_threads(read["cpu"], end_ns - start_ns)
         if summary["cpu"] is None:
             unavailable["cpu"] = "the trace has no CPU time for the app"
@@ -515,6 +691,7 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
             unavailable["slowest_slices"] = "the trace has no slices from the app"
     else:
         unavailable["slowest_slices"] = "read from the trace, which needs trace_processor"
+        unavailable["frame_timeline"] = "read from the trace, which needs trace_processor"
 
     # What the device said, for whatever the trace did not answer.
     if summary["hangs"] is None:
@@ -544,6 +721,25 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
             unavailable.setdefault("cpu", why)
     return summary
 
+
+
+def _why_short(span_s: float, expected_s: float, trace: Path, limit: int | None,
+               setting: str | None = None) -> str:
+    """Why a trace covers less than its profile, as far as the file can say:
+    one that reached perfetto's file limit stopped there."""
+    said = f"the trace covers {span_s:.1f} s of a {expected_s:.1f} s profile"
+    try:
+        size = trace.stat().st_size
+    except OSError:
+        size = None
+    if limit and size is not None and size >= limit * FULL_FILE:
+        # The size says the file is full, not that being full is what ended
+        # it: a stop from elsewhere can land on a full file (CodeRabbit).
+        return (f"{said}: its file is at perfetto's {limit // 2**20} MiB file limit, so "
+                f"it most likely stopped there; raising config.json's "
+                f"{setting or 'profiles.android_max_trace_mb'} raises the limit")
+    return (f"{said}, and its file ({size // 2**20 if size is not None else '?'} MiB) is "
+            "short of perfetto's file limit, so the trace does not say why")
 
 def _why_not(status: dict) -> str:
     state, detail = status.get("state"), status.get("detail")
