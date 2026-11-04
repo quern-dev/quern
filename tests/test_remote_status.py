@@ -552,3 +552,19 @@ def test_a_disk_read_in_time_replaces_the_partial_row(monkeypatch):
                            "/api/v1/system/disk": {"measuring": True}})
     [row] = status.statuses("0.25.0")
     assert row["disk"] == {"measuring": True} and row["disk_error"] is None
+
+
+def test_free_space_that_could_not_be_measured_says_why(monkeypatch):
+    """disk.error was dropped: free space read as missing for no reason
+    (CodeRabbit)."""
+    records = {"studio": {"url": "https://studio.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": DEVICES,
+                           "/api/v1/system/disk": {
+                               "used_bytes": 5, "used_complete": True, "warnings": [],
+                               "disk": {"total_bytes": None, "free_bytes": None,
+                                        "error": "could not be read"}}})
+    [row] = status.statuses("0.25.0")
+    assert row["disk_error"] is None and row["disk"]["free_bytes"] is None
+    assert row["disk"]["warnings"] == ["free space could not be measured: could not be read"]

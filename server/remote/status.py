@@ -180,9 +180,13 @@ def _disk(remote: client.Remote, timeout: float) -> tuple[dict | None, str | Non
             "used_complete": report.get("used_complete"),
             "free_bytes": disk.get("free_bytes"),
             "total_bytes": disk.get("total_bytes"),
+            # Said, so a free space missing is not left without a reason
+            # (CodeRabbit). A warning, not disk_error: that says disk is null.
             "warnings": (report.get("warnings") or []) + (
                 [f"the latest measurement failed: {report['last_error']}"]
-                if report.get("last_error") else []),
+                if report.get("last_error") else []) + (
+                [f"free space could not be measured: {disk['error']}"]
+                if disk.get("error") else []),
             "measured_at": report.get("measured_at")}, None
 
 

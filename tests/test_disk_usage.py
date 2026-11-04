@@ -615,3 +615,41 @@ def test_the_cli_never_hands_the_owner_key_to_a_proxy(monkeypatch, tmp_path):
     monkeypatch.setattr(http.client.HTTPConnection, "connect", connect)
     report, _ = du.fetch(1, host="studio.lan")
     assert report is None and dialed == ["studio.lan"]
+
+
+def test_the_cli_does_not_follow_a_redirect_with_the_owner_key(monkeypatch, tmp_path):
+    """urllib carries the Authorization header to wherever a 3xx points
+    (CodeRabbit)."""
+    import http.server
+    import threading
+
+    from server import config
+
+    (tmp_path / "key").write_text("k")
+    monkeypatch.setattr(config, "API_KEY_FILE", tmp_path / "key")
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append((self.path, self.headers.get("Authorization")))
+            if self.path.startswith("/api/"):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{port}/elsewhere")
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        report, reason = du.fetch(port, timeout=5)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert report is None and "302" in reason
+    assert [path for path, _ in seen] == ["/api/v1/system/disk"]

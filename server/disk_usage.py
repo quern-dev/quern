@@ -208,9 +208,13 @@ def fetch(port: int, *, host: str = "127.0.0.1", timeout: float = 10.0) -> tuple
     req = urllib.request.Request(f"http://{host}:{port}/api/v1/system/disk",
                                  headers={"Authorization": f"Bearer {key}",
                                           "X-Quern-Session": "cli"})
-    # Never through a proxy from the environment, which would be handed the
-    # owner's key (CodeRabbit).
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    class NoRedirects(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None   # the 3xx is then an HTTPError, said below
+
+    # Never through a proxy from the environment, nor after a redirect: either
+    # would be handed the owner's key (CodeRabbit).
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirects())
     try:
         with opener.open(req, timeout=timeout) as resp:
             body = json.loads(resp.read() or b"{}")
