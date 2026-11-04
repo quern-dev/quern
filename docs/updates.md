@@ -26,7 +26,7 @@ Setting the channel only writes `~/.quern/config.json` — nothing changes until
 any version that already satisfies a constraint alone, so a venv drifts arbitrarily
 far behind while every declared floor stays satisfied. Every dependency floor quern
 declares is a `>=` and none is near what currently ships — `pymobiledevice3` sits
-three majors above its own — so "satisfies the constraint" says very little about how
+two majors above its own — so "satisfies the constraint" says very little about how
 current the venv is.
 
 Starting the server stays non-eager: it compares two mtimes, and invokes pip only when

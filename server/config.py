@@ -602,28 +602,77 @@ def sandbox_settings() -> dict:
             "note": "; ".join(notes) or None}
 
 
+#: When disk use is worth a warning, by default (#581): simulators and quern's
+#: stores together over this, or the disk with less than this free.
+DISK_DEFAULT_WARN_GB = 100
+DISK_DEFAULT_WARN_FREE_GB = 20
+
+
+def disk_settings() -> dict:
+    """The disk warnings from config.json's `disk` object:
+
+        {"disk": {"warn_gb": 100, "warn_free_gb": 20}}
+
+    0 turns either off. A value that is not a whole number of 0 or more reads
+    as the default, with a note. Raises ConfigUnreadable when config.json
+    cannot be read: no warning is better than one from settings nobody set."""
+    raw = read_user_config(strict=True).get("disk")
+    raw = raw if isinstance(raw, dict) else {}
+    notes = []
+
+    def whole(key: str, default: int) -> int:
+        value = raw.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            notes.append(f"config.json's disk.{key} is {value!r}, not a whole number of "
+                         f"0 or more: using {default}")
+            return default
+        return value
+
+    return {"warn_bytes": whole("warn_gb", DISK_DEFAULT_WARN_GB) * 1024 ** 3,
+            "warn_free_bytes": whole("warn_free_gb", DISK_DEFAULT_WARN_FREE_GB) * 1024 ** 3,
+            "note": "; ".join(notes) or None}
+
+
 #: What every kept profile may take together, by default (#245). An Animation
 #: Hitches trace measured 192 MB for 35 s, so this holds about ten of those.
 PROFILES_DEFAULT_MB = 2048
+#: The largest trace perfetto writes for one Android profile, and the range
+#: it may be set in. perfetto stops writing there, so a profile longer than
+#: this holds ends early: a Pixel 5 wrote 48 MB per 25 s, reaching 256 MiB in
+#: about 130 s of the 300 s a profile may run. Raising it costs the phone's
+#: storage while recording, the profile budget above, and trace_processor's
+#: time and memory reading it.
+PROFILES_DEFAULT_ANDROID_TRACE_MB = 256
+PROFILES_ANDROID_TRACE_MB_RANGE = (32, 2048)
 
 
 def profile_settings() -> dict:
-    """The profile store's limit from config.json's `profiles` object:
+    """The profile store's limits from config.json's `profiles` object:
 
-        {"profiles": {"max_mb": 2048}}
+        {"profiles": {"max_mb": 2048, "android_max_trace_mb": 256}}
 
     `max_mb` is what the kept profiles may take together; the oldest finished
-    ones are removed to make room before a new one starts. A value that is
-    not a whole number of megabytes above 0 reads as the default, with a note."""
+    ones are removed to make room before a new one starts.
+    `android_max_trace_mb` is the largest trace perfetto writes for one
+    Android profile, from 32 to 2048. A value that is not a whole number of
+    megabytes in range reads as the default, with a note."""
     raw = read_user_config().get("profiles")
     raw = raw if isinstance(raw, dict) else {}
+    notes = []
     value = raw.get("max_mb", PROFILES_DEFAULT_MB)
-    note = None
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        note = (f"config.json's profiles.max_mb is {value!r}, not a whole number of megabytes "
-                f"above 0: using {PROFILES_DEFAULT_MB}")
+        notes.append(f"config.json's profiles.max_mb is {value!r}, not a whole number of "
+                     f"megabytes above 0: using {PROFILES_DEFAULT_MB}")
         value = PROFILES_DEFAULT_MB
-    return {"max_bytes": value * 1024 * 1024, "note": note}
+    trace = raw.get("android_max_trace_mb", PROFILES_DEFAULT_ANDROID_TRACE_MB)
+    low, high = PROFILES_ANDROID_TRACE_MB_RANGE
+    if isinstance(trace, bool) or not isinstance(trace, int) or not low <= trace <= high:
+        notes.append(f"config.json's profiles.android_max_trace_mb is {trace!r}, not a whole "
+                     f"number of megabytes from {low} to {high}: using "
+                     f"{PROFILES_DEFAULT_ANDROID_TRACE_MB}")
+        trace = PROFILES_DEFAULT_ANDROID_TRACE_MB
+    return {"max_bytes": value * 1024 * 1024, "android_max_trace_bytes": trace * 1024 * 1024,
+            "note": "; ".join(notes) or None}
 
 
 def get_auto_install_cert() -> bool:

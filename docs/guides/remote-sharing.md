@@ -71,6 +71,6 @@ Apps a session installs on a device it holds (`install_app`, `build_and_install`
 
 The release's answer lists what was done (`installs_removed`, `erased`). A device the same key still holds through another session, or the same session name opened again, is handed over (`installs_handed_over`) rather than cleaned under it. A clean-up that fails is tried again at the next sweep, up to three times, and then given up on and said. If the device's apps can't be listed before a client's install, the install is refused (503) rather than made, since its release couldn't tell what to remove. An install still running when the hold ends removes its app as it finishes, and its answer says so (`hold_ended`). If the device is held again by then, it isn't touched: the app goes on the new session's record if that session is the same key's, and is left if it is another key's.
 
-## Planned
+## Disk use and the build store
 
-- **Bounding the build store and showing disk use** -- the rest of [#581](https://github.com/quern-dev/quern/issues/581).
+The build store is bounded: a DerivedData unused for `builds.max_age_days` (default 7) is removed, then the least recently used while the store is over `builds.max_gb` (default 20), never one a build is using. What the simulators and quern's stores take, and the disk's free space, show in `quern status`, `quern doctor` and each paired machine's row in `quern remote list` / `list_remotes`, with a warning over `disk.warn_gb` (default 100) or under `disk.warn_free_gb` free (default 20). See `GET /api/v1/system/disk` in the [API reference](https://github.com/quern-dev/quern/blob/main/docs/api-reference.md).

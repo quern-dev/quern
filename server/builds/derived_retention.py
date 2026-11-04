@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 import re
 import shutil
 import sys
@@ -127,25 +126,15 @@ def _last_used(path: Path) -> float:
 
 
 def disk_size(path: Path) -> int:
-    """Bytes `path` takes on disk, symlinks not followed. Unreadable entries
-    count as nothing: an estimate, not an audit."""
-    total = 0
-    stack = [path]
-    while stack:
-        current = stack.pop()
-        try:
-            with os.scandir(current) as it:
-                for entry in it:
-                    try:
-                        st = entry.stat(follow_symlinks=False)
-                    except OSError:
-                        continue
-                    total += getattr(st, "st_blocks", 0) * 512 or st.st_size
-                    if entry.is_dir(follow_symlinks=False):
-                        stack.append(Path(entry.path))
-        except OSError:
-            continue
-    return total
+    """Bytes `path` takes on disk, symlinks not followed -- the walk the disk
+    report uses (`server.disk_usage`), with a directory that cannot be read
+    counted as nothing: an estimate, not an audit."""
+    from server import disk_usage
+
+    try:
+        return disk_usage.disk_size(path)
+    except OSError:
+        return 0
 
 
 def plan(found: list[Derived], *, now: float, max_age_days: int, max_bytes: int,

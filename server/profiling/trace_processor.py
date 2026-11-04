@@ -271,6 +271,11 @@ class TraceProcessor:
         return parse_csv(out.decode(errors="replace"))
 
 
+#: The largest field parse_csv reads. trace_processor's output is in memory
+#: already; this only lifts csv's own limit, which is far below it.
+FIELD_LIMIT = 256 * 2**20
+
+
 def parse_csv(text: str) -> list[dict]:
     """trace_processor's `-q` output: CSV with a quoted header, values quoted
     or bare, `[NULL]` for null. The last result only, as it prints it."""
@@ -278,6 +283,12 @@ def parse_csv(text: str) -> list[dict]:
              or ln.startswith("-") or ln.startswith("[")]
     if not lines:
         return []
+    # One summary section is one field, and the input-queue counters of every
+    # window on the device run past csv's default 128 KiB: 300 KB measured
+    # for 25 s on a Pixel 5 (Android 14), and the whole summary failed. No
+    # field can be longer than the text, so that bound holds for any trace
+    # the file-size setting allows (CodeRabbit).
+    csv.field_size_limit(max(csv.field_size_limit(), FIELD_LIMIT, len(text)))
     rows = list(csv.reader(io.StringIO("\n".join(lines))))
     header, body = rows[0], rows[1:]
     out = []

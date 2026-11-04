@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from server import config as config_mod
 from server.models import LogEntry, LogLevel, LogSource
 from server.profiling import android as ad
 from server.profiling import manager as manager_mod
@@ -45,6 +46,7 @@ class FakeAdb:
     def __init__(self):
         self.sessions: dict[str, bool] = {}       # key -> running
         self.calls: list[str] = []
+        self.config: bytes | None = None
         self.busy_stops = 0                        # stops refused as busy before one lands
         self.start_rc = 0
         self.start_said = "perfetto_cmd.cc:658 Connected to the Perfetto traced service, TTL: 60s"
@@ -81,6 +83,7 @@ class FakeAdb:
         if "--detach=" in cmd:
             key = cmd.split("--detach=")[1].split()[0]
             assert stdin and b"duration_ms" in stdin
+            self.config = stdin
             if self.start_rc == 0:
                 self.sessions[key] = self.confirm
                 self.remote.add(cmd.split(" -o ")[1].strip())
@@ -124,9 +127,10 @@ class FakeAdb:
 class FakeTP:
     """trace_processor with its real answers, by query."""
 
-    def __init__(self, state="installed", fail: set[str] = frozenset()):
+    def __init__(self, state="installed", fail: set[str] = frozenset(), fixture="summary"):
         self._state = state
         self.fail = fail
+        self.fixture = fixture
         self.ensured = 0
 
     def status(self):
@@ -140,10 +144,15 @@ class FakeTP:
         return self.status()
 
     async def query(self, trace, sql):
-        assert "json_group_array" in sql, sql          # one query, one load of the trace
+        # The fixtures are trace_processor's answers to one query, saved beside
+        # them: a changed query with fixtures not re-read from the traces would
+        # test the old query's answers (android-summary.sql says how to re-read).
+        assert sql.strip() == (FIXTURES / "android-summary.sql").read_text().strip(), (
+            "SUMMARY_SQL changed: re-run it on the fixture traces and save it as "
+            "tests/fixtures/profiles/android-summary.sql")
         if self.fail:
             raise RuntimeError("trace_processor failed (exit -11): no output")
-        return parse_csv(csv_fixture("summary"))
+        return parse_csv(csv_fixture(self.fixture))
 
 
 @pytest.fixture
@@ -178,7 +187,61 @@ class TestConfig:
         text = ad.config_text(ad.PRESETS[preset], PKG, 45)
         assert text.count("{") == text.count("}")
         assert "duration_ms: 45000" in text and f'atrace_apps: "{PKG}"' in text
-        assert "write_into_file: true" in text            # streamed, not a ring buffer
+        assert "write_into_file: true" in text            # streamed to its file
+        # A DISCARD buffer capped the whole trace at its size (measured).
+        assert "fill_policy: RING_BUFFER" in text and "flush_period_ms: 1000" in text
+
+    @pytest.mark.parametrize("preset, recorded", [("hangs", True), ("frames", True),
+                                                   ("cpu", False)])
+    def test_frame_timeline_is_recorded_for_frames(self, preset, recorded):
+        text = ad.config_text(ad.PRESETS[preset], PKG, 30)
+        assert ('name: "android.surfaceflinger.frametimeline"' in text) is recorded
+
+    def test_the_recorded_time_is_capped_at_the_time_limit(self):
+        """A profile finished by a later server ended at its limit, not when
+        it was read (adoption)."""
+        p = manager_mod.Profile(id="prof_x", udid=SERIAL, platform="android", device=SERIAL,
+                    bundle_id=PKG, preset="hangs", time_limit_s=30,
+                    started_at="2026-11-03T10:00:00+00:00")
+        p.ended_at = "2026-11-03T12:00:00+00:00"
+        assert manager_mod._recorded_s(p) == 30
+        p.ended_at = "2026-11-03T10:00:12.500000+00:00"
+        assert manager_mod._recorded_s(p) == 12.5
+        # From when perfetto said it was recording, not from the request: the
+        # snapshot and the device's start come between (CodeRabbit).
+        assert manager_mod._recorded_s(p, "2026-11-03T10:00:02.500000+00:00") == 10.0
+        p.ended_at = None
+        assert manager_mod._recorded_s(p) is None
+
+    @pytest.mark.parametrize("reason, expected", [
+        ("time_limit", 30.0), ("stopped", 12.5), ("killed", 12.5), ("server_restart", 12.5)])
+    def test_a_profile_nobody_stopped_was_to_run_its_whole_limit(self, reason, expected):
+        """perfetto stopped from another shell, or crashed, ends the profile
+        near the trace's end; held to that, the cut reads as a whole trace
+        (CodeRabbit)."""
+        p = manager_mod.Profile(id="prof_x", udid=SERIAL, platform="android", device=SERIAL,
+                    bundle_id=PKG, preset="hangs", time_limit_s=30,
+                    started_at="2026-11-03T10:00:00+00:00")
+        p.ended_at, p.stop_reason = "2026-11-03T10:00:12.500000+00:00", reason
+        assert manager_mod._recorded_s(p) == expected
+
+    def test_the_file_limit_is_the_one_asked_for(self):
+        assert "max_file_size_bytes: 268435456" in ad.config_text(ad.PRESETS["hangs"], PKG, 30)
+        assert "max_file_size_bytes: 1048576" in ad.config_text(ad.PRESETS["hangs"], PKG, 30,
+                                                                 2**20)
+
+    @pytest.mark.parametrize("raw, mb, noted", [
+        ({}, 256, False), ({"android_max_trace_mb": 1024}, 1024, False),
+        ({"android_max_trace_mb": 31}, 256, True), ({"android_max_trace_mb": 2049}, 256, True),
+        ({"android_max_trace_mb": True}, 256, True), ({"android_max_trace_mb": "512"}, 256, True),
+        ({"android_max_trace_mb": 32}, 32, False), ({"android_max_trace_mb": 2048}, 2048, False)])
+    def test_the_file_limit_setting(self, monkeypatch, raw, mb, noted):
+        monkeypatch.setattr(config_mod, "read_user_config", lambda: {"profiles": raw})
+        got = config_mod.profile_settings()
+        assert got["android_max_trace_bytes"] == mb * 2**20
+        assert (got["note"] is not None) is noted
+        if noted:
+            assert "android_max_trace_mb" in got["note"]
 
     def test_the_hangs_preset_records_input(self):
         assert "input" in ad.PRESETS["hangs"].atrace and "input" not in ad.PRESETS["cpu"].atrace
@@ -322,11 +385,74 @@ def _decoded():
     return ad.decode_summary_row(row)
 
 
+class TestJank:
+    """Rows as the summary query reads them: ts, dur, present_type,
+    jank_type, and trace_processor's jank_tag."""
+
+    def test_stuffing_is_latency_not_jank(self):
+        """Perfetto reads a stuffed frame as smooth with added latency; the
+        first version called a smooth scroll janky by the app's fault."""
+        rows = [[i, 9e6, "Late Present", "Buffer Stuffing", "Buffer Stuffing"] for i in range(100)]
+        ft = ad.jank_from_timeline(rows, 0)
+        assert (ft["janky"], ft["jank_percent"], ft["app_janky"], ft["stuffed"]) == (0, 0.0, 0, 100)
+
+    def test_whose_jank_is_trace_processors_tag(self):
+        rows = [[0, 9e6, "Late Present", "App Resynced Jitter", "Self Jank"],
+                [1, 9e6, "Late Present", "Display HAL, App Deadline Missed", "Self Jank"],
+                [2, 9e6, "Late Present", "SurfaceFlinger CPU Deadline Missed", "Other Jank"],
+                [3, 9e6, "On-time Present", "Non Animating", "Non-perceivable Jank"],
+                [4, 9e6, "On-time Present", "None", "No Jank"]]
+        ft = ad.jank_from_timeline(rows, 0)
+        assert (ft["janky"], ft["app_janky"], ft["system_janky"]) == (3, 2, 1)
+        assert ft["by_cause"]["Display HAL"] == 1 and ft["by_cause"]["App Resynced Jitter"] == 1
+        assert ft["jank_percent"] == 60.0 and ft["classification_coverage_percent"] == 100.0
+
+    def test_a_missed_frame_without_a_tag_is_still_janky(self):
+        """Review: late frames tagged Unknown read as 0% jank."""
+        rows = [[i, 30e6, "Late Present", "Unknown Jank", None] for i in range(5)]
+        rows += [[5, 5e6, "On-time Present", "None", "No Jank"],
+                 [6, 5e6, "Dropped Frame", "Dropped Frame", None],
+                 [7, 5e6, "On-time Present", "Unknown", "Unspecified"]]
+        ft = ad.jank_from_timeline(rows, 0)
+        assert (ft["janky"], ft["unexplained_janky"], ft["dropped"]) == (6, 6, 1)
+        assert ft["jank_percent"] == 75.0 and ft["classification_coverage_percent"] == 12.5
+        assert ft["janky_frames"][0]["causes"] == ["Unknown Jank"]
+
+    def test_a_dropped_frame_is_janky_whatever_its_tag(self):
+        rows = [[0, 9e6, "Dropped Frame", "None", "No Jank"],
+                [1, 9e6, "Dropped Frame", "Buffer Stuffing", "Buffer Stuffing"]]
+        ft = ad.jank_from_timeline(rows, 0)
+        assert (ft["janky"], ft["stuffed"]) == (2, 0)
+        # With no cause given, what happened to it stands in.
+        assert [f["causes"] for f in ft["janky_frames"]] == [["Dropped Frame"], ["Buffer Stuffing"]]
+
+    def test_a_late_frame_trace_processor_calls_smooth_is_not_janky(self):
+        rows = [[0, 9e6, "Late Present", "None", "Non-perceivable Jank"]]
+        assert ad.jank_from_timeline(rows, 0)["janky"] == 0
+
+    def test_a_frame_cut_off_by_the_trace_has_no_duration(self):
+        """dur -1: still on its way when the trace ended (one in each Pixel 5 trace)."""
+        rows = [[0, 4e6, "On-time Present", "None", "No Jank"],
+                [1, -1, "Late Present", "App Deadline Missed", "Self Jank"]]
+        ft = ad.jank_from_timeline(rows, 0)
+        assert ft["unfinished"] == 1 and ft["max_ms"] == 4.0 and ft["p50_ms"] == 4.0
+        assert ft["janky_frames"][0]["duration_ms"] is None
+
+    def test_the_worst_ten_longest_first(self):
+        rows = [[i * 10**9, (20 + i) * 1e6, "Late Present", "App Deadline Missed", "Self Jank"]
+                for i in range(12)]
+        worst = ad.jank_from_timeline(rows, 0)["janky_frames"]
+        assert [f["duration_ms"] for f in worst] == [31.0 - i for i in range(10)]
+
+    def test_none_is_none(self):
+        assert ad.jank_from_timeline([], 0) is None
+
+
 class TestReducers:
     def test_the_hang_from_a_live_trace(self):
         d = _decoded()
         [hang] = ad.hangs_from_counters(d["wq"], PKG, d["start_ts"], d["end_ts"])
-        assert hang["duration_ms"] == pytest.approx(10635.4, abs=0.1)
+        assert hang["duration_ms"] == pytest.approx(10159.7, abs=0.1)
         assert hang["window"].startswith("com.quern.probe/") and "note" not in hang
 
     def test_a_hang_with_more_input_queued_is_still_one_hang(self):
@@ -390,14 +516,17 @@ class TestReducers:
         assert ad.frames_from_snapshots(first, two_ways)[0]["janky"] is None
 
 
-async def _summary(tp, logged=(None, "logcat was not captured"), preset="hangs"):
-    first = {"pid": 1, "ticks": 100, "uptime": 10.0,
+async def _summary(tp, logged=(None, "logcat was not captured"), preset="hangs",
+                   expected_s=None, trace=Path("/t"), max_trace_bytes=None,
+                   max_trace_setting=None):
+    first = {"pid": 1, "ticks": 100, "uptime": 10.0, "max_trace_bytes": max_trace_bytes,
+             "max_trace_setting": max_trace_setting,
              "frames": {"total_frames": 50, "janky_frames": 2, "janky_method": "legacy"}}
     last = {"pid": 1, "ticks": 150, "uptime": 20.0,
             "frames": {"total_frames": 80, "janky_frames": 5, "janky_method": "legacy"}}
-    return await ad.summarize(preset=preset, package=PKG, trace=Path("/t"), first=first,
+    return await ad.summarize(preset=preset, package=PKG, trace=trace, first=first,
                               last=last, tp=tp, tp_status=tp.status().as_dict(),
-                              logged_hangs=logged)
+                              logged_hangs=logged, expected_s=expected_s)
 
 
 class TestSummarize:
@@ -405,7 +534,12 @@ class TestSummarize:
         s = await _summary(FakeTP())
         assert s["hangs_count"] == 1 and s["hangs_source"].startswith("trace")
         assert s["frames"]["source"] == "trace" and s["cpu"]["source"] == "trace"
-        assert len(s["slowest_slices"]) == 10 and s["unavailable"] == {}
+        assert len(s["slowest_slices"]) == 10
+        # The fixture is a Pixel 3 XL: Android 10 records no FrameTimeline.
+        assert s["frame_timeline"] is None
+        assert s["unavailable"] == {"frame_timeline": (
+            "the trace has no FrameTimeline frames at all: it needs Android 12 or later, "
+            "and a screen that changed")}
 
     @pytest.mark.parametrize("tp_state", ["missing", "downloading", "failed", "disabled",
                                           "unsupported"])
@@ -416,6 +550,94 @@ class TestSummarize:
         assert s["frames"]["source"] == "gfxinfo" and s["cpu"]["source"] == "/proc"
         assert s["slowest_slices"] is None and "trace_processor" in s["unavailable"]
         assert s["trace_processor"]["state"] == tp_state
+
+    async def test_android_14s_numbered_frames_are_frames(self):
+        """Android 14 names each `Choreographer#doFrame <vsync id>`: matched
+        by the bare name, a Pixel 5's 193 frames read as none, and the
+        summary said the trace had no frames (measured)."""
+        s = await _summary(FakeTP(fixture="summary-a14"))
+        assert s["frames"]["source"] == "trace" and s["frames"]["count"] == 193
+        assert "frames" not in s["unavailable"]
+
+    async def test_android_14_reports_jank_and_why(self):
+        """A Pixel 5 (Android 14) through a 12 s hang: the frozen thread drew
+        nothing, and two frames after it were late."""
+        ft = (await _summary(FakeTP(fixture="summary-a14")))["frame_timeline"]
+        assert (ft["frames"], ft["presented"], ft["on_time"], ft["late"]) == (162, 162, 160, 2)
+        assert (ft["classified"], ft["janky"]) == (162, 2)
+        assert (ft["app_janky"], ft["system_janky"]) == (1, 1)
+        assert ft["jank_percent"] == 1.2 and ft["classification_coverage_percent"] == 100.0
+        assert ft["by_cause"] == {"Prediction Error": 2, "App Deadline Missed": 1}
+        assert ft["janky_frames"][0] == {"start_s": 20.446, "duration_ms": 14.8,
+                                         "present": "Late Present", "whose": "app",
+                                         "causes": ["Prediction Error", "App Deadline Missed"]}
+        assert ft["unfinished"] == 1
+        assert "frames just after it may be late" in ft["note"]       # not "no janky frames"
+
+    async def test_a_smooth_scroll_with_stuffed_frames(self):
+        """A Pixel 5's 20 s scroll, end to end through quern: 59 late frames,
+        56 of them stuffed -- latency, not jank -- and three the system's."""
+        ft = (await _summary(FakeTP(fixture="summary-stuffed")))["frame_timeline"]
+        assert (ft["frames"], ft["late"], ft["stuffed"]) == (1101, 59, 56)
+        assert (ft["janky"], ft["app_janky"], ft["system_janky"]) == (3, 0, 3)
+        assert ft["jank_percent"] == 0.3
+
+    async def test_frames_whose_process_name_was_lost_are_the_apps_by_layer(self):
+        """The Pixel 5's DISCARD trace lost its process names; the app's frames
+        still carry its layer, "TX - com.quern.probe/...#3220"."""
+        ft = (await _summary(FakeTP(fixture="summary-lossy")))["frame_timeline"]
+        assert ft["frames"] == 1355
+
+    async def test_the_cpu_preset_does_not_record_frames(self):
+        s = await _summary(FakeTP(fixture="summary-a14"), preset="cpu")
+        assert s["frame_timeline"] is None
+        assert s["unavailable"]["frame_timeline"] == "not recorded by the cpu preset"
+
+    async def test_other_apps_frames_are_not_the_apps(self, monkeypatch):
+        real = ad.decode_summary_row
+        monkeypatch.setattr(ad, "decode_summary_row", lambda row: {**real(row), "ft": []})
+        s = await _summary(FakeTP(fixture="summary-a14"))
+        assert "gave the display no frames" in s["unavailable"]["frame_timeline"]
+
+    async def test_without_trace_processor_no_frame_timeline(self):
+        s = await _summary(FakeTP("disabled"))
+        assert s["unavailable"]["frame_timeline"] == (
+            "read from the trace, which needs trace_processor")
+
+    async def test_a_trace_that_lost_data_says_so(self):
+        """A Pixel 5's 25 s profile with the old DISCARD buffer: the trace
+        stopped at 19 s, and trace_processor named it as data loss."""
+        s = await _summary(FakeTP(fixture="summary-lossy"))
+        assert {d["stat"] for d in s["trace_data_loss"]} == {
+            "config_write_into_file_discard[0]", "traced_buf_patches_failed[0]"}
+        assert "lower bounds" in s["trace_note"]
+        assert "one hang that did not happen" in s["trace_note"]      # not only too low
+
+    async def test_a_whole_trace_reports_no_loss(self):
+        s = await _summary(FakeTP(), expected_s=25.0)        # the fixture's trace: 24.8 s
+        assert "trace_data_loss" not in s and "trace_note" not in s
+
+    async def test_a_trace_that_stopped_early_says_so(self):
+        """perfetto's file limit stops a busy device's trace at ~130 s and no
+        stat says so (review): the span against the profile's does."""
+        s = await _summary(FakeTP(), expected_s=60.0)
+        [loss] = s["trace_data_loss"]
+        assert loss["stat"] == "trace ended early" and loss["value"] == 24.8
+        assert "24.8 s of a 60.0 s profile" in loss["detail"] and "lower bounds" in s["trace_note"]
+        assert "does not say why" in loss["detail"]
+
+    async def test_a_trace_at_its_file_limit_says_which_setting_raises_it(self, tmp_path):
+        trace = tmp_path / "profile.pftrace"
+        trace.write_bytes(b"x" * 1000)
+        s = await _summary(FakeTP(), expected_s=60.0, trace=trace, max_trace_bytes=1000)
+        [loss] = s["trace_data_loss"]
+        assert "at perfetto's 0 MiB file limit" in loss["detail"]
+        assert "profiles.android_max_trace_mb" in loss["detail"]
+        s = await _summary(FakeTP(), expected_s=60.0, trace=trace, max_trace_bytes=1000,
+                           max_trace_setting="profiles.max_mb")
+        assert "config.json's profiles.max_mb raises" in s["trace_data_loss"][0]["detail"]
+        s = await _summary(FakeTP(), expected_s=60.0, trace=trace, max_trace_bytes=4000)
+        assert "does not say why" in s["trace_data_loss"][0]["detail"]
 
     async def test_no_source_for_hangs_is_said_not_empty(self):
         s = await _summary(FakeTP("disabled"))
@@ -633,10 +855,52 @@ class TestParseCsv:
     def test_nothing(self):
         assert parse_csv("") == [] and parse_csv("Query executed in 0 ms\n") == []
 
+    def test_a_field_past_csvs_default_limit(self):
+        """Measured: the wq section was 300 KB on a Pixel 5, and csv's 128 KiB
+        default failed the whole summary."""
+        big = "5B" * 200_000
+        assert parse_csv(f'"wq","n"\n"{big}",1\n') == [{"wq": big, "n": 1}]
+
+    def test_a_field_past_the_fixed_limit_is_still_read(self, monkeypatch):
+        """No fixed size holds for every trace the file-size setting allows;
+        the text's own length always does (CodeRabbit)."""
+        import csv
+        before = csv.field_size_limit()
+        monkeypatch.setattr(tpm, "FIELD_LIMIT", 10)
+        csv.field_size_limit(10)
+        try:
+            big = "5B" * 1000
+            assert parse_csv(f'"wq","n"\n"{big}",1\n') == [{"wq": big, "n": 1}]
+        finally:
+            csv.field_size_limit(before)
+
 
 # ── the manager ──────────────────────────────────────────────────────────────
 
 class TestManager:
+    @pytest.mark.parametrize("store_mb, limit_mb, setting", [
+        (2048, 64, "profiles.android_max_trace_mb"),
+        # A store smaller than one trace: the trace is held to the store, or
+        # it is kept over budget (CodeRabbit).
+        (40, 40, "profiles.max_mb"),
+        # Equal: raising either alone changes nothing, so both are named.
+        (64, 64, "profiles.max_mb and profiles.android_max_trace_mb")])
+    async def test_the_configured_file_limit_reaches_perfetto_and_the_record(
+            self, state, store_mb, limit_mb, setting):
+        adb = FakeAdb()
+        m = ProfileManager(settings=lambda: {"max_bytes": store_mb * 2**20,
+                                             "android_max_trace_bytes": 64 * 2**20},
+                           adb=adb, trace_processor=FakeTP(), logged_hangs=None)
+        profile, _ = await _start(m)
+        assert f"max_file_size_bytes: {limit_mb * 2**20}\n".encode() in adb.config
+        record = json.loads(profile.start_file.read_text())
+        assert (record["max_trace_bytes"], record["max_trace_setting"]) == (
+            limit_mb * 2**20, setting)
+        # Written once perfetto confirmed the session, after the request.
+        assert record["recording_at"] > profile.started_at
+        async with asyncio.timeout(10):
+            await m.stop(profile.id)
+
     async def test_start_stop_summary(self, state):
         adb, tp = FakeAdb(), FakeTP()
         m = _manager(adb, tp)
@@ -647,6 +911,7 @@ class TestManager:
             profile = await m.stop(profile.id)
         assert (profile.state, profile.stop_reason) == ("finished", "stopped")
         s = profile.summary()
+        assert not s.get("trace_data_loss")      # stopped when asked: not cut short
         assert s["platform"] == "android" and s["hangs_count"] == 1
         assert profile.view()["files"] == ["summary.json", "perfetto.log", "profile.pftrace"]
         assert profile.trace.read_bytes() == adb.pull_bytes
@@ -659,6 +924,39 @@ class TestManager:
         adb.sessions[ad.session_key(profile.id)] = False          # perfetto's own limit
         await _done(profile)
         assert (profile.state, profile.stop_reason) == ("finished", "time_limit")
+        # Ended by itself 5 s short of its limit (the fixture's trace is
+        # 24.8 s): a `perfetto --stop` from another shell, or a crash, reads
+        # the same, and the cut is said (CodeRabbit).
+        loss = profile.summary()["trace_data_loss"]
+        assert [x["stat"] for x in loss] == ["trace ended early"] and loss[0]["value"] == 24.8
+
+    @pytest.mark.parametrize("lost", ["record", "recording_at"])
+    @pytest.mark.parametrize("by_itself", [True, False])
+    async def test_a_lost_start_record_measures_no_stop_from_the_request(self, state,
+                                                                         by_itself, lost):
+        """With start.json unreadable there is no recording_at, and a stop's
+        time from the request counts setup too: held to it, a whole trace read
+        as ended early. One that ran its limit is still held to the limit
+        (CodeRabbit)."""
+        adb = FakeAdb()
+        m = _manager(adb)
+        profile, _ = await _start(m, limit=120)
+        if lost == "record":
+            profile.start_file.unlink()
+        else:                     # its second write, with recording_at, failed
+            record = json.loads(profile.start_file.read_text())
+            del record["recording_at"]
+            profile.start_file.write_text(json.dumps(record))
+        # A minute of "setup": the 24.8 s fixture trace is well short of it.
+        profile.started_at = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+        if by_itself:
+            adb.sessions[ad.session_key(profile.id)] = False
+            await _done(profile)
+        else:
+            async with asyncio.timeout(10):
+                profile = await m.stop(profile.id)
+        loss = profile.summary().get("trace_data_loss") or []
+        assert ([x["stat"] for x in loss] == ["trace ended early"]) is by_itself
 
     async def test_a_stop_while_the_watch_polls_lands(self, state):
         """Live: the stop got exit 2 from the race and the profile recorded on

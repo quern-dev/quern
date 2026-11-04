@@ -810,6 +810,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     builds_task = asyncio.create_task(derived_retention.run_forever(
         _DERIVED_LOCKS, _builds_settings, _record_build_sweep), name="build-store-sweep")
 
+    # What the simulators and quern's stores take (#581): measured in the
+    # background, at start and every 15 minutes, for /api/v1/system/disk.
+    from server import disk_usage as _disk_usage
+
+    app.state.disk_usage = None
+    disk_task = asyncio.create_task(_disk_usage.run_forever(app), name="disk-measure")
+
     # The LAN viewer (#449), opt-in. Started after the recordings it serves.
     from server.config import viewer_settings as _viewer_settings
     from server.viewer.listener import start_viewer
@@ -880,7 +887,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     for task in (
         watchdog_task, update_check_task, network_monitor_task,
         sim_bridge_resync_task, mcp_clients_task, sim_tls_task, sessions_task,
-        uploads_task, builds_task, sandboxes_task,
+        uploads_task, builds_task, sandboxes_task, disk_task,
     ):
         if task and not task.done():
             task.cancel()
@@ -1743,6 +1750,13 @@ def _cmd_status(args: argparse.Namespace) -> None:
             for name, ok in sorted(tools_data["tools"].items())
         )
         print(f"  Tools:      {line}")
+    from server import disk_usage
+
+    report, reason = disk_usage.fetch(port)
+    lines = disk_usage.report_lines(report) if report is not None else [f"not checked: {reason}"]
+    print(f"  Disk:       {lines[0]}")
+    for extra in lines[1:]:
+        print(f"              {extra}")
     sys.exit(0)
 
 
@@ -1977,6 +1991,21 @@ def _report_held_sessions() -> None:
             print(f"  ✓ {s['id']}: live, holding {devices}")
 
 
+def _report_disk() -> None:
+    """What the simulators and quern's stores take (#581). Diagnostic only: a
+    full disk is reported, not a doctor failure."""
+    from server import disk_usage
+
+    print("Disk:")
+    state = read_state()
+    port = state.get("server_port", DEFAULT_SERVER_PORT) if state else None
+    report, reason = (disk_usage.fetch(port) if port and is_server_healthy(port)
+                      else (None, "no server running (start it with `quern start`)"))
+    for line in (disk_usage.report_lines(report) if report is not None
+                 else [f"? not checked — {reason}"]):
+        print(f"  {line}")
+
+
 def _cmd_doctor(args: argparse.Namespace) -> None:
     """Diagnostics: device tools, venv, tool versions, service health. Read-only,
     except that it records the MCP client finding the Quern app shows.
@@ -2014,6 +2043,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
             print(f"  {'✓' if ok else '✗'} {name}")
 
     _report_held_sessions()
+    _report_disk()
     _report_bind()
     repaired = _report_python_deps(fix)
     _report_external_tools(fix)
