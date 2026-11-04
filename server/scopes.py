@@ -84,8 +84,8 @@ class Rule:
     access: Access
     device: Device = None
     #: For `named`: the fields the route scopes by, one of which must name a device.
-    #: For `resolved`: the only fields that name one, when the route reads
-    #: fewer than every device key -- any other names nothing to the route.
+    #: For `resolved`: the only body fields that name one, when the route reads
+    #: fewer than every device key -- any other, and any query, names nothing.
     keys: tuple[str, ...] = ()
     owner_fields: frozenset[str] = frozenset()
 
@@ -678,10 +678,14 @@ class ScopeMiddleware:
             return 403, (f"{method} {path} without {' or '.join(rule.keys)} acts on every "
                          "device: owner-only. Name a device your session holds.")
         # Only what the route reads names a device: a build reads udid and
-        # udids, so a `serial` it ignores would otherwise skip the check below
-        # and leave the route to pick a device (CodeRabbit).
-        keys = frozenset(rule.keys) if rule.keys else device_access.DEVICE_KEYS
-        if device_access._named_devices(scope.get("query_string", b""), body, keys):
+        # udids from its body, so a `serial`, or a udid in the query, would
+        # otherwise skip the check below and leave the route to pick a device
+        # (CodeRabbit).
+        if rule.keys:
+            named = device_access._named_devices(b"", body, frozenset(rule.keys))
+        else:
+            named = device_access._named_devices(scope.get("query_string", b""), body)
+        if named:
             return None
         return await self._no_device(scope, rule)
 

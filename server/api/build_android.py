@@ -304,14 +304,19 @@ async def _default_android(controller) -> str:
                                                     f"could not be read: {e}") from e
     booted = [d.udid for d in devices if d.state == DeviceState.BOOTED
               and d.device_type in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE)]
+    if visibility.blind_for():
+        # Chosen among the caller's own: another key's, picked here, was
+        # refused by name -- its id in the 403 (CodeRabbit).
+        from server import device_access
+        booted = [u for u in booted if not device_access.why_not(u)]
     if active in booted:
         return await controller.resolve_udid(active)
     if len(booted) == 1:
         return await controller.resolve_udid(booted[0])
     if booted:
         # A blind server does not name other keys' devices to a client, which
-        # since #605 can reach this by building (review), nor say how many
-        # there are (CodeRabbit).
+        # since #605 can reach this by building (review). These are the
+        # caller's own, but the count is said of none (CodeRabbit).
         if visibility.blind_for():
             raise HTTPException(status_code=400,
                                 detail="no device named, and more than one Android device is "
