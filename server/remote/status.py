@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 from server.remote import client
@@ -131,9 +132,12 @@ def _devices(answer: Any, label: str = "") -> list[dict]:
 
 
 def probe(remote: client.Remote, local_version: str | None,
-          timeout: float = TIMEOUT_SECONDS) -> dict:
+          timeout: float = TIMEOUT_SECONDS, *,
+          answered: Callable[[dict], None] | None = None) -> dict:
     """One remote's state now. Never raises: one remote's odd answer must not
-    cost the list every other remote (review)."""
+    cost the list every other remote (review). `answered` is handed the row
+    before its disk use is asked, so a deadline that falls during that third
+    read keeps the version and devices already read (CodeRabbit)."""
     out = _blank(remote.name, remote.url, remote.label)
     try:
         version = _health(_get(remote, "/health", timeout))
@@ -152,6 +156,8 @@ def probe(remote: client.Remote, local_version: str | None,
         return out
     out["devices"] = devices
     out["free"] = sum(1 for d in devices if d["free"])
+    if answered:
+        answered({**out, "disk_error": "disk use did not answer in time"})
     out["disk"], out["disk_error"] = _disk(remote, timeout)
     return out
 
@@ -234,10 +240,12 @@ def _probe_all(remotes: list[client.Remote], local_version: str | None, timeout:
     results: dict[int, dict] = {}
     lock = threading.Lock()
 
-    def run(i: int, remote: client.Remote) -> None:
-        row = probe(remote, local_version, timeout)
+    def keep(i: int, row: dict) -> None:
         with lock:
             results[i] = row
+
+    def run(i: int, remote: client.Remote) -> None:
+        keep(i, probe(remote, local_version, timeout, answered=lambda row: keep(i, row)))
 
     threads = [threading.Thread(target=run, args=(i, r), daemon=True)
                for i, r in enumerate(remotes)]

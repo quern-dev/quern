@@ -208,8 +208,11 @@ def fetch(port: int, *, host: str = "127.0.0.1", timeout: float = 10.0) -> tuple
     req = urllib.request.Request(f"http://{host}:{port}/api/v1/system/disk",
                                  headers={"Authorization": f"Bearer {key}",
                                           "X-Quern-Session": "cli"})
+    # Never through a proxy from the environment, which would be handed the
+    # owner's key (CodeRabbit).
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             body = json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
         return None, f"the server answered {e.code}"

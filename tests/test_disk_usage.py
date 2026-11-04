@@ -527,7 +527,7 @@ def test_a_misbehaving_server_is_reported_not_raised(monkeypatch, tmp_path):
     def bad(*a, **k):
         raise http.client.BadStatusLine("garbage")
 
-    monkeypatch.setattr("urllib.request.urlopen", bad)
+    monkeypatch.setattr("urllib.request.OpenerDirector.open", bad)
     report, reason = du.fetch(1)
     assert report is None and "could not ask" in reason
     assert du.report_lines({"measuring": False})[0].startswith("not measured")
@@ -592,3 +592,26 @@ async def test_a_client_never_sees_the_unreadable_entries_names():
                            "(first: /Users/owner/.quern/builds/x: Permission denied)")
     out = await _route(report, principal="client:a")
     assert "/Users/owner" not in str(out) and out["stores"]["builds"]["partial"] is True
+
+
+def test_the_cli_never_hands_the_owner_key_to_a_proxy(monkeypatch, tmp_path):
+    """A proxy from the environment would be sent the owner's key (CodeRabbit)."""
+    import http.client
+
+    from server import config
+
+    (tmp_path / "key").write_text("k")
+    monkeypatch.setattr(config, "API_KEY_FILE", tmp_path / "key")
+    monkeypatch.setenv("http_proxy", "http://proxy.invalid:3128")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:3128")
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.setenv("NO_PROXY", "")
+    dialed = []
+
+    def connect(self):
+        dialed.append(self.host)
+        raise OSError("stop")
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", connect)
+    report, _ = du.fetch(1, host="studio.lan")
+    assert report is None and dialed == ["studio.lan"]

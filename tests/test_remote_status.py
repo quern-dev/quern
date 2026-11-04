@@ -255,10 +255,10 @@ def test_a_remote_that_never_finishes_is_reported_at_the_deadline(monkeypatch):
     release = threading.Event()
     real_probe = status.probe
 
-    def probe(remote, version, timeout):
+    def probe(remote, version, timeout, **kw):
         if remote.name == "slow":
             release.wait(10)                       # stuck mid-answer
-        return real_probe(remote, version, timeout)
+        return real_probe(remote, version, timeout, **kw)
 
     monkeypatch.setattr(status, "probe", probe)
     _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
@@ -452,7 +452,7 @@ def test_entries_that_share_a_name_keep_their_own_answers(monkeypatch):
         name=status.LOCAL, url="http://127.0.0.1:9110", fingerprint="", key="owner",
         label="this Mac"))
 
-    def fake_probe(remote, local_version, timeout):
+    def fake_probe(remote, local_version, timeout, **kw):
         row = status._blank(remote.name, remote.url, remote.label)
         if remote.fingerprint:
             row["error"] = "not reachable (refused)"
@@ -476,7 +476,7 @@ def test_the_deadline_counts_the_local_lookup(monkeypatch):
         time.sleep(0.4)
         return {**status._blank("local", None, "this Mac"), "local": True, "error": "x"}
 
-    def slow_probe(remote, local_version, timeout):
+    def slow_probe(remote, local_version, timeout, **kw):
         time.sleep(0.4)
         return {**status._blank(remote.name, remote.url, remote.label), "reachable": True}
 
@@ -517,3 +517,38 @@ def test_an_android_devices_ca_install_is_listed_when_the_remote_says():
         {"udid": "SIM", "name": "iPhone", "device_type": "simulator"}]})
     assert out[0]["ca_install"] == "automatic"
     assert "ca_install" not in out[1]
+
+
+def test_a_slow_disk_read_keeps_the_rest_of_the_row(monkeypatch):
+    """Three reads of 4s each outlast the 10s list: one slow disk read cost
+    the version and devices already read (CodeRabbit)."""
+    import threading
+
+    records = {"studio": {"url": "https://studio.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    release = threading.Event()
+    answers = {"/health": {"status": "ok", "version": "0.25.0"}, "/api/v1/device/list": DEVICES}
+
+    def fake_get(remote, path, timeout):
+        if path == "/api/v1/system/disk":
+            release.wait(10)                       # stuck mid-answer
+            return {"measuring": True}
+        return answers[path]
+
+    monkeypatch.setattr(status, "_get", fake_get)
+    try:
+        [row] = status.statuses("0.25.0", deadline=0.3)
+    finally:
+        release.set()
+    assert row["reachable"] is True and row["free"] == 2 and row["error"] is None
+    assert row["disk"] is None and "in time" in row["disk_error"]
+
+
+def test_a_disk_read_in_time_replaces_the_partial_row(monkeypatch):
+    records = {"studio": {"url": "https://studio.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": DEVICES,
+                           "/api/v1/system/disk": {"measuring": True}})
+    [row] = status.statuses("0.25.0")
+    assert row["disk"] == {"measuring": True} and row["disk_error"] is None
