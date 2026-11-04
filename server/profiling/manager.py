@@ -68,6 +68,13 @@ EXPORTS_MAX = 5
 STOP_WAIT_S = 240.0
 #: Hangs and hitches listed in a summary; the count says how many there were.
 LIST_LIMIT = 50
+#: Hangs triage reads in detail (longest first), and how many of those get
+#: their main thread's stack -- each a further `xctrace show`, ~1 s.
+TRIAGE_LIMIT = 10
+TRIAGE_STACKS = 3
+#: triage and the potential-hangs table place a hang at the same start
+#: (measured, to the millisecond); this much apart is the same hang.
+TRIAGE_MATCH_S = 0.05
 #: How long an Android profile's summary waits for trace_processor still
 #: downloading before it says what the device reported instead.
 TP_WAIT_S = 30.0
@@ -237,6 +244,13 @@ def _records_into(command: str | None, trace: Path) -> bool:
     reused pid never passes for the profile's process."""
     return bool(command) and "xctrace" in command and f" --output {trace} " in f" {command} "
 
+
+
+def _why(e: BaseException) -> str:
+    """An exception in words; a timeout's own str() is empty."""
+    if isinstance(e, TimeoutError):
+        return f"xctrace did not answer within {EXPORT_TIMEOUT_S:.0f} s"
+    return str(e) or type(e).__name__
 
 class ProfileManager:
     def __init__(self, xctrace: tuple[str, ...] = ("xcrun", "xctrace"),
@@ -622,19 +636,23 @@ class ProfileManager:
     # -- summarising -----------------------------------------------------------
 
     async def _export(self, trace: Path, schema: str | None) -> str:
-        cmd = xt.export_command(self.xctrace, trace, schema)
+        return await self._run_xctrace(xt.export_command(self.xctrace, trace, schema))
+
+    async def _run_xctrace(self, cmd: list[str]) -> str:
+        """One xctrace reading command: its output, or ProfileError with its words."""
+        verb = f"xctrace {cmd[len(self.xctrace)]}"
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         except OSError as e:
-            raise ProfileError(f"xctrace export could not be run: {e}", 500) from e
+            raise ProfileError(f"{verb} could not be run: {e}", 500) from e
         try:
             out, err = await asyncio.wait_for(proc.communicate(), EXPORT_TIMEOUT_S)
         except BaseException:
             await asyncio.shield(_end(proc))
             raise
         if proc.returncode != 0:
-            raise ProfileError(f"xctrace export failed: {err.decode(errors='replace').strip()}"
+            raise ProfileError(f"{verb} failed: {err.decode(errors='replace').strip()}"
                                f" (exit {proc.returncode})", 500)
         return out.decode(errors="replace")
 
@@ -680,7 +698,8 @@ class ProfileManager:
                 continue
             if isinstance(value, list):
                 summary[f"{section}_count"] = len(value)
-                value = value[:LIST_LIMIT]
+                if section != "hangs":              # cut after triage has read them
+                    value = value[:LIST_LIMIT]
             if section == "launch" and not value["phases"]:
                 summary["unavailable"]["launch"] = (
                     "the trace recorded no launch phases" + (
@@ -691,7 +710,104 @@ class ProfileManager:
                 value["note"] = (f"no CPU samples from {process or 'the app'}: Time Profiler "
                                  "samples running threads only, so an idle or blocked app has none")
             summary[section] = value
+        # triage needs both tables, and has something to say only about hangs.
+        if summary.get("hangs") and {"potential-hangs", "time-profile"} <= set(toc["tables"]):
+            await self._triage(profile, summary, process)
+        if summary.get("hangs") and len(summary["hangs"]) > LIST_LIMIT:
+            # triage reads the longest, which can be anywhere in the trace:
+            # keep those, then the earliest of the rest, in the trace's order.
+            hangs = summary["hangs"]
+            kept = {i for i, h in enumerate(hangs) if "tier" in h}
+            for i in range(len(hangs)):
+                if len(kept) >= LIST_LIMIT:
+                    break
+                kept.add(i)
+            summary["hangs"] = [h for i, h in enumerate(hangs) if i in kept]
         return summary
+
+    async def _triage(self, profile: Profile, summary: dict, process: str | None) -> None:
+        """Apple's reading of each hang, onto the hangs already listed:
+        `xctrace triage --style hangs` (Xcode 27.2) for its tier, the main
+        thread's CPU and the system calls it made; then, for the longest
+        few, the main thread's heaviest stack over the hang -- of its system
+        calls when it was blocked, of its CPU samples when it was busy.
+
+        Blocked or busy is the first thing to know about a hang (Apple's
+        xctrace skill says to establish it before anything else): a busy
+        hang is in the CPU profile, a blocked one is not -- the thread is
+        not running, so Time Profiler has nothing -- and is in the system
+        call it waited in. Measured on the probe: CPU 0.0%, and
+        `DiagViewController.hang()` -> `sleepForTimeInterval:` ->
+        `__semwait_signal`, 12.00 s."""
+        try:
+            triage = xt.parse_triage(await self._run_xctrace(
+                xt.triage_command(self.xctrace, profile.trace, TRIAGE_LIMIT)))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 -- the hangs above stand without it
+            summary["unavailable"]["triage"] = (
+                f"xctrace triage could not read the hangs: {_why(e)}. triage is in Xcode 27.2 "
+                "and later; the hangs above are Instruments' own list")
+            return
+        summary["hang_tiers"] = triage["tiers"]
+        stacks = matched = 0
+        for read in triage["hangs"]:
+            hang = next((h for h in summary["hangs"]
+                         if h.get("start_s") is not None and read["start_s"] is not None
+                         and abs(h["start_s"] - read["start_s"]) < TRIAGE_MATCH_S), None)
+            if hang is None:
+                continue
+            matched += 1
+            hang["tier"] = read["tier"]
+            hang["main_thread_cpu"] = read["main_thread_cpu"]
+            hang["nature"] = xt.nature(read["main_thread_cpu"])
+            # Whether there are system calls to read is triage's to say, per
+            # hang, not the TOC's: an iPhone hitches trace has a syscall table
+            # and triage reads "N/A" for every one of its hangs (measured).
+            syscalls_recorded = read["system_calls"] is not None
+            if syscalls_recorded:
+                hang["system_calls"] = read["system_calls"][:5]
+            else:
+                hang["system_calls"] = None
+                hang["system_calls_note"] = (
+                    "triage had no system calls to read for it: the profile did not record "
+                    "System Call Trace (the hangs preset records it now)")
+            if stacks >= TRIAGE_STACKS or not read["window"]:
+                continue
+            if hang["nature"] == "blocked" and not syscalls_recorded:
+                # Its CPU samples are from the moments around the hang when
+                # the thread did run: a stack from them reads as an answer and
+                # is noise (measured -- the run loop, not the sleep).
+                hang["stack_note"] = ("blocked, so its CPU samples cannot show where it waited; "
+                                      "System Call Trace would (the hangs preset records it now)")
+                continue
+            stacks += 1
+            blocked = hang["nature"] in ("blocked", "mixed") and syscalls_recorded
+            calltree = "Profile: System Calls" if blocked else "Profile"
+            window = read["window"]
+            try:
+                stack = xt.parse_heaviest(await self._run_xctrace(xt.calltree_command(
+                    self.xctrace, profile.trace, window["track"], calltree,
+                    window["start_ns"], window["duration_ns"])), process)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 -- one hang's stack never sinks the rest
+                hang["stack_note"] = f"its {calltree} call tree could not be read: {_why(e)}"
+                continue
+            if stack is None:
+                hang["stack_note"] = (
+                    "no CPU samples on the main thread over the hang: it was not running"
+                    if calltree == "Profile" else "no system calls on the main thread over it")
+            else:
+                hang["stack"] = stack
+                hang["stack_from"] = "system calls" if blocked else "CPU samples"
+        summary["hangs_triaged"] = matched
+        if not matched:
+            # Output it could not parse reads as no hangs at all: say so,
+            # rather than leave it looking like triage had nothing to add.
+            summary["unavailable"]["triage"] = (
+                f"xctrace triage read {len(triage['hangs'])} hangs, and none of them is one "
+                "listed above")
 
     # -- disk ------------------------------------------------------------------
 
