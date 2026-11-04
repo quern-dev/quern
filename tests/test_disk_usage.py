@@ -653,3 +653,20 @@ def test_the_cli_does_not_follow_a_redirect_with_the_owner_key(monkeypatch, tmp_
         server.server_close()
     assert report is None and "302" in reason
     assert [path for path, _ in seen] == ["/api/v1/system/disk"]
+
+
+def test_a_total_that_leaves_something_out_reads_as_a_floor():
+    """Printed as a plain total with only a `!`, a partial count read as the
+    whole (CodeRabbit)."""
+    from server.remote_cli import _status_line
+
+    disk = {"used_bytes": 5 * 1024 ** 3, "free_bytes": 10 * 1024 ** 3, "warnings": []}
+    row = {"name": "studio", "reachable": True, "version": "0.25.0", "devices": [], "free": 0}
+    assert _status_line({**row, "disk": {**disk, "used_complete": False}}).endswith(
+        ", disk at least 5.0 GB used / 10.0 GB free")
+    assert _status_line({**row, "disk": {**disk, "used_complete": True}}).endswith(
+        ", disk 5.0 GB used / 10.0 GB free")
+    report = {"used_bytes": 5 * 1024 ** 3, "stores": {"builds": {"bytes": 5 * 1024 ** 3}},
+              "disk": {"free_bytes": 10 * 1024 ** 3}}
+    assert du.summary_line({**report, "used_complete": False}).startswith("at least 5.0 GB used")
+    assert du.summary_line({**report, "used_complete": True}).startswith("5.0 GB used")

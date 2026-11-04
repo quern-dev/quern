@@ -209,7 +209,8 @@ def fetch(port: int, *, host: str = "127.0.0.1", timeout: float = 10.0) -> tuple
                                  headers={"Authorization": f"Bearer {key}",
                                           "X-Quern-Session": "cli"})
     class NoRedirects(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
+        def redirect_request(self, req: urllib.request.Request, fp: Any, code: int, msg: str,
+                             headers: Any, newurl: str) -> None:
             return None   # the 3xx is then an HTTPError, said below
 
     # Never through a proxy from the environment, nor after a redirect: either
@@ -260,7 +261,9 @@ def summary_line(report: dict) -> str:
     parts = [f"{name} {_gb(v['bytes'])}" if v["bytes"] is not None else f"{name} unknown"
              for name, v in s.items()]
     free = report["disk"].get("free_bytes")
-    line = (f"{_gb(report['used_bytes'])} used ({', '.join(parts)}); "
+    # A total that leaves something out is a floor, and says so (CodeRabbit).
+    floor = "at least " if report.get("used_complete") is False else ""
+    line = (f"{floor}{_gb(report['used_bytes'])} used ({', '.join(parts)}); "
             f"{_gb(free) + ' free' if free is not None else 'free space unknown'}")
     return line
 
