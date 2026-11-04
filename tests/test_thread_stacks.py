@@ -7,6 +7,7 @@ waiting in its run loop.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import struct
 from pathlib import Path
@@ -100,6 +101,38 @@ Total number in stack (recursive counted multiple times):
         assert (t.samples_on_stack, t.samples) == (700, 1000)
         assert t.frames[0].app and not t.frames[-1].app
 
+    def test_a_busy_thread_merges_its_innermost_pcs(self):
+        """A spinning thread's leaf, as sample writes it (measured):
+        `mach_absolute_time  (in libsystem_kernel.dylib) + 108,112,...
+        [0x19aadd0f8,0x19aadd0fc,...]`, on 133 of its 629 samples."""
+        text = (FIXTURES / "mac-sample-busy.txt").read_text()
+        main = ts.parse_sample(text)[0]
+        top = main.frames[0]
+        assert (top.image, top.symbol, top.symbol_offset) == (
+            "libsystem_kernel.dylib", "mach_absolute_time", 108)
+        assert (main.samples_on_stack, main.samples) == (133, 629)
+        assert all(f.image for f in main.frames)
+
+    def test_a_debug_dylib_is_the_apps_code(self):
+        """Since Xcode 16 a Debug build's code is in `<App>.debug.dylib` (review)."""
+        text = """Call graph:
+    9 Thread_1   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 9 start  (in dyld) + 1  [0x1]
+    +   9 ContentView.body.getter  (in MyApp.debug.dylib) + 4  [0x2]
+"""
+        [t] = ts.parse_sample(text, app_image="MyApp")
+        assert [f.app for f in t.frames] == [True, False]
+
+    def test_a_tie_takes_the_first_child(self):
+        """sample sorts children heaviest first: on a tie, the first listed."""
+        text = """Call graph:
+    10 Thread_1   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 10 start  (in dyld) + 1  [0x1]
+    +   5 first()  (in App) + 1  [0x2]
+    +   5 second()  (in App) + 1  [0x3]
+"""
+        assert ts.parse_sample(text)[0].frames[0].symbol == "first()"
+
     def test_no_call_graph_is_no_threads(self):
         assert ts.parse_sample("Sampling process 1 for 1 second\n") == []
 
@@ -148,6 +181,25 @@ class TestSimulator:
         main = out.threads[0]
         assert len(main.frames) == 3 and main.frames_cut == 13
         assert main.frames[0].symbol == "mach_msg2_trap"      # innermost kept
+
+    async def test_the_main_thread_comes_first(self, monkeypatch):
+        """sample lists the main thread first; the answer must not depend on it."""
+        text = sample_text()
+        graph = text.index("Call graph:\n") + len("Call graph:\n")
+        body = text[graph:].split("\n\n", 1)[0].splitlines()
+        threads, cur = [], []
+        for line in body:
+            if line.startswith("    ") and line[4].isdigit() and cur:
+                threads.append(cur)
+                cur = []
+            cur.append(line)
+        threads.append(cur)
+        reordered = text[:graph] + "\n".join(sum(threads[1:] + threads[:1], [])) + "\n\n"
+        fake_sample(monkeypatch, reordered)
+        out = await ts.simulator_stacks(FakeSimctl([49423]), SIM, APP,
+                                        all_threads=True, max_frames=40)
+        assert out.threads[0].main and out.threads[0].queue == ts.MAIN_QUEUE
+        assert sum(t.main for t in out.threads) == 1
 
     async def test_not_running_runs_nothing(self, monkeypatch):
         calls = fake_sample(monkeypatch, sample_text())
@@ -238,6 +290,18 @@ def atos_names(argv):
 
 
 class TestReadShot:
+    def test_integer_keys_as_pymobiledevice3_gives_them(self):
+        """The fixture went through JSON, which made its keys strings;
+        pymobiledevice3 hands over ints. Both, found by the task's own pid."""
+        raw = stackshot()
+        raw["task_snapshots"] = {int(k): v for k, v in raw["task_snapshots"].items()}
+        assert len(ts.read_shot(raw, 2745, DEVICE).threads) == 3
+
+    def test_found_by_its_own_pid_under_another_key(self):
+        raw = stackshot()
+        raw["task_snapshots"] = {77: raw["task_snapshots"]["2745"]}
+        assert ts.read_shot(raw, 2745, DEVICE) is not None
+
     def test_the_apps_threads_images_and_cache(self):
         shot = ts.read_shot(stackshot(), 2745, DEVICE)
         assert [t[0] for t in shot.threads] == [1511172, 1511183, 1511193]
@@ -255,6 +319,28 @@ class TestReadShot:
 
     def test_an_app_not_in_it(self):
         assert ts.read_shot(stackshot(), 1, DEVICE) is None
+
+
+class TestIndexCache:
+    async def test_a_file_added_deep_in_the_tree_rebuilds_it(self, device_support):
+        """Xcode extracts into nested folders, and the top folder's mtime does
+        not move when one fills: an index built mid-copy must not stick (review)."""
+        symbols = ts.device_support_dir(*DEVICE)
+        assert len(await ts._index(symbols)) == 2
+        late = symbols / "usr" / "lib" / "system" / "libdispatch.dylib"
+        late.write_bytes(macho(0x1_9000_0000, 0x10000))
+        assert len(await ts._index(symbols)) == 3
+
+    async def test_an_unchanged_tree_is_not_read_again(self, device_support, monkeypatch):
+        symbols = ts.device_support_dir(*DEVICE)
+        await ts._index(symbols)
+        monkeypatch.setattr(ts, "build_index", lambda _: pytest.fail("rebuilt"))
+        assert len(await ts._index(symbols)) == 2
+
+    async def test_an_empty_index_is_not_kept(self, tmp_path, monkeypatch):
+        (tmp_path / "Symbols").mkdir()
+        assert await ts._index(tmp_path / "Symbols") == []
+        assert str(tmp_path / "Symbols") not in ts._INDEX
 
 
 class TestIndex:
@@ -335,14 +421,17 @@ class TestSymbolicateShot:
         entry = next(s for s in symbols if s.image == "QuernProbe")
         assert entry.frames_resolved == 3 and entry.source == "spotlight"
 
-    async def test_an_app_image_with_no_dsym_says_so(self, device_support):
+    async def test_an_image_with_no_dsym_is_not_called_the_apps(self, device_support):
+        """Without a dSYM nothing says an image outside the cache is the
+        app's: dyld or an injected library would read as the app (review)."""
         threads, symbols = await ts.symbolicate_shot(
             self._shot(), FakeFinder(atos=atos_names), APP)
-        app = [f for f in threads[0].frames if f.app]
-        assert app and all(not f.symbol for f in app)
-        assert app[0].image == f"{APP} image 99a58e82" and app[0].offset == 0x20264
-        entry = next(s for s in symbols if s.image == app[0].image)
+        own = [f for f in threads[0].frames if f.image == "image 99a58e82"]
+        assert len(own) == 3 and all(not f.symbol and not f.app for f in own)
+        assert own[0].offset == 0x20264
+        entry = next(s for s in symbols if s.image == "image 99a58e82")
         assert entry.frames_resolved == 0 and "no dSYM" in entry.note
+        assert "not marked app" in entry.note
 
     async def test_a_stripped_function_is_no_name(self, device_support):
         """atos names what the OS stripped by its own address: measured in
@@ -355,6 +444,53 @@ class TestSymbolicateShot:
         assert cf and all(not f.symbol for f in cf)
         entry = next(s for s in symbols if s.image == "CoreFoundation")
         assert entry.frames_resolved == 0 and "strips" in entry.note
+
+    async def test_an_apps_innermost_frame_is_looked_up_as_itself(self, device_support,
+                                                                   tmp_path):
+        """Only the innermost frame is the instruction itself; an app frame
+        there must not be asked for a byte early (review)."""
+        dwarf = tmp_path / "App.dSYM" / "Contents" / "Resources" / "DWARF" / "QuernProbe"
+        dwarf.parent.mkdir(parents=True)
+        dwarf.write_bytes(macho(0x1_0000_0000, 0x100000))
+        finder = FakeFinder(
+            found={"99A58E82-7B7F-367F-8033-98296C641D77": str(dwarf)},
+            atos=lambda argv: (0, "f (in QuernProbe) + 1\n" * (len(argv) - 8), "")
+            if "QuernProbe" in argv[3] else atos_names(argv))
+        shot = self._shot()
+        base = shot.images[0][0]
+        shot.threads = [(1, "", ts.MAIN_QUEUE, [base + 0x2000, base + 0x3000])]
+        await ts.symbolicate_shot(shot, finder, APP)
+        [call] = [c for c in finder.calls if "QuernProbe" in c[3]]
+        assert call[-2:] == [hex(base + 0x2000), hex(base + 0x3000 - 1)]
+
+    async def test_a_frame_past_an_images_end_is_not_put_in_it(self, device_support,
+                                                                tmp_path):
+        """Known from its dSYM, an image's end bounds it: memory past it --
+        code made at run time -- is in no image, and said (review)."""
+        dwarf = tmp_path / "App.dSYM" / "Contents" / "Resources" / "DWARF" / "QuernProbe"
+        dwarf.parent.mkdir(parents=True)
+        dwarf.write_bytes(macho(0x1_0000_0000, 0x100000))
+        finder = FakeFinder(found={"99A58E82-7B7F-367F-8033-98296C641D77": str(dwarf),
+                                   "4E35B543-655F-3A1A-B4B1-3E9E096A5117": str(dwarf)},
+                            atos=atos_names)
+        shot = self._shot()
+        top = shot.images[-1][0]
+        shot.threads = [(1, "", ts.MAIN_QUEUE, [top + 0x4DD1_4000])]
+        threads, symbols = await ts.symbolicate_shot(shot, finder, APP)
+        frame = threads[0].frames[0]
+        assert frame.image == "" and not frame.app
+        [note] = [s for s in symbols if s.image == ""]
+        assert note.frames_total == 1 and "no image" in note.note
+
+    async def test_frames_outside_a_partial_index_are_said(self, device_support):
+        """DeviceSupport present but short of an image the stack passes
+        through: those frames are counted, with why (review)."""
+        (device_support / "iPhone12,1 26.7 (23H24)" / "Symbols" / "System" / "Library"
+         / "Frameworks" / "CoreFoundation").unlink()
+        threads, symbols = await ts.symbolicate_shot(
+            self._shot(), FakeFinder(atos=atos_names), APP)
+        [note] = [s for s in symbols if s.image == "dyld_shared_cache"]
+        assert note.frames_total >= 3 and "incomplete" in note.note
 
     async def test_atos_failing_leaves_the_frames_unnamed(self, device_support):
         finder = FakeFinder(atos=lambda argv: (1, "", "atos: cannot load"))
@@ -372,6 +508,7 @@ class TestSymbolicateShot:
 
 class FakeTap:
     error: Exception | None = None
+    shot: dict | None = None
 
     def __init__(self, dvt, config):
         pass
@@ -389,7 +526,7 @@ class FakeTap:
     async def get_stackshot(self, timeout):
         if FakeTap.error:
             raise FakeTap.error
-        return stackshot()
+        return FakeTap.shot or stackshot()
 
 
 class FakeRsd:
@@ -422,7 +559,7 @@ class FakeService:
 @pytest.fixture
 def phone(monkeypatch):
     knobs = SimpleNamespace(pid=2745)
-    FakeTap.error = None
+    FakeTap.error, FakeTap.shot = None, None
     monkeypatch.setattr(performance, "_device_address", AsyncMock(return_value=("fd::1", 1)))
     monkeypatch.setattr(ts, "_pmd3", lambda: SimpleNamespace(
         RemoteServiceDiscoveryService=FakeRsd, DvtProvider=FakeService,
@@ -484,6 +621,38 @@ class TestDevice:
         with pytest.raises(DeviceError, match="kernel profiler is in use"):
             await ts.device_stacks(PHONE, APP, FakeFinder(), all_threads=False,
                                    max_frames=40)
+
+    async def test_no_stackshot_in_time_says_so(self, phone):
+        class ExtractingStackshotError(Exception):
+            pass
+        FakeTap.error = ExtractingStackshotError("timed out waiting for stackshot data")
+        with pytest.raises(DeviceError, match="sent no stackshot within 20s"):
+            await ts.device_stacks(PHONE, APP, FakeFinder(), all_threads=False,
+                                   max_frames=40)
+
+    async def test_a_device_that_never_answers(self, phone, monkeypatch):
+        monkeypatch.setattr(ts, "_STACKSHOT_TIMEOUT_S", 0.0)
+        monkeypatch.setattr(ts, "_DEVICE_SLACK_S", 0.05)
+
+        async def never(self, timeout):
+            await asyncio.sleep(5)
+        monkeypatch.setattr(FakeTap, "get_stackshot", never)
+        with pytest.raises(DeviceError, match="did not answer within 0.05s"):
+            await ts.device_stacks(PHONE, APP, FakeFinder(), all_threads=False,
+                                   max_frames=40)
+
+    async def test_without_a_main_queue_the_lowest_thread_is_main(self, phone,
+                                                                  device_support):
+        """A shot whose threads carry no queue label: the task's first."""
+        raw = stackshot()
+        for th in raw["task_snapshots"]["2745"]["thread_snapshots"].values():
+            th.pop("dispatch_queue_label", None)
+        monkeypatch_shot = raw
+        FakeTap.shot = monkeypatch_shot
+        out = await ts.device_stacks(PHONE, APP, FakeFinder(atos=atos_names),
+                                     all_threads=True, max_frames=40)
+        assert [t.id for t in out.threads][0] == 1511172 and out.threads[0].main
+        assert [t.main for t in out.threads] == [True, False, False]
 
     async def test_any_other_failure_is_a_device_error(self, phone):
         FakeTap.error = ValueError("bad payload")

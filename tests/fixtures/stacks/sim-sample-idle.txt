@@ -1,0 +1,73 @@
+Analysis of sampling QuernProbe (pid 49423) every 1 millisecond
+Process:         QuernProbe [49423]
+Path:            /Users/USER/Library/Developer/CoreSimulator/Devices/F5AF3736-C05F-493F-AA52-CA883B13B18C/data/Containers/Bundle/Application/76C7BF09-2189-4724-9A27-608616471014/QuernProbe.app/QuernProbe
+Load Address:    0x100a98000
+Identifier:      com.quern.probe
+Version:         1.0 (1)
+Code Type:       ARM64
+Platform:        iOS Simulator
+Parent Process:  launchd_sim [83626]
+Target Type:     live task (Roots Present)
+
+Date/Time:       2026-11-04 12:23:35.293 -0800
+Launch Time:     2026-11-04 12:23:29.335 -0800
+OS Version:      macOS 27.0.1 (26A434)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         23.1M
+Physical footprint (peak):  25.1M
+Idle exit:                  untracked
+----
+
+Call graph:
+    804 Thread_178997863   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 804 start  (in dyld) + 6688  [0x100bb1e80]
+    +   804 start_sim  (in dyld_sim) + 20  [0x100e293d4]
+    +     804 main  (in QuernProbe) + 28  [0x100ab53a8]
+    +       804 static AppDelegate.$main()  (in QuernProbe) + 32  [0x100ab5240]
+    +         804 static UIApplicationDelegate.main()  (in QuernProbe) + 128  [0x100ab52cc]
+    +           804 ???  (in UIKitCore)  load address 0x184e00000 + 0x228f88  [0x185028f88]
+    +             804 UIApplicationMain  (in UIKitCore) + 124  [0x185c62f84]
+    +               804 -[UIApplication _run]  (in UIKitCore) + 796  [0x185c5ebb8]
+    +                 804 GSEventRunModal  (in GraphicsServices) + 164  [0x19101fd00]
+    +                   804 CFRunLoopRunSpecific  (in CoreFoundation) + 536  [0x180422b98]
+    +                     804 __CFRunLoopRun  (in CoreFoundation) + 1148  [0x180423450]
+    +                       804 __CFRunLoopServiceMachPort  (in CoreFoundation) + 156  [0x180428a70]
+    +                         804 mach_msg  (in libsystem_kernel.dylib) + 20  [0x100cecedc]
+    +                           804 mach_msg_overwrite  (in libsystem_kernel.dylib) + 484  [0x100cf4c58]
+    +                             804 mach_msg2_internal  (in libsystem_kernel.dylib) + 72  [0x100cfe0e4]
+    +                               804 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x100cecb5c]
+    804 Thread_178997903
+    + 804 start_wqthread  (in libsystem_pthread.dylib) + 8  [0x100ee1a7c]
+    +   804 _pthread_wqthread  (in libsystem_pthread.dylib) + 364  [0x100ee2cc8]
+    +     804 __workq_kernreturn  (in libsystem_kernel.dylib) + 8  [0x100cee68c]
+    804 Thread_178997914
+    + 804 start_wqthread  (in libsystem_pthread.dylib) + 8  [0x100ee1a7c]
+    +   804 _pthread_wqthread  (in libsystem_pthread.dylib) + 364  [0x100ee2cc8]
+    +     804 __workq_kernreturn  (in libsystem_kernel.dylib) + 8  [0x100cee68c]
+    804 Thread_178997918
+    + 804 start_wqthread  (in libsystem_pthread.dylib) + 8  [0x100ee1a7c]
+    +   804 _pthread_wqthread  (in libsystem_pthread.dylib) + 364  [0x100ee2cc8]
+    +     804 __workq_kernreturn  (in libsystem_kernel.dylib) + 8  [0x100cee68c]
+    804 Thread_178997926: com.apple.uikit.eventfetch-thread
+      804 thread_start  (in libsystem_pthread.dylib) + 8  [0x100ee1a88]
+        804 _pthread_start  (in libsystem_pthread.dylib) + 104  [0x100ee6680]
+          804 __NSThread__start__  (in Foundation) + 716  [0x180f35148]
+            804 -[UIEventFetcher threadMain]  (in UIKitCore) + 408  [0x185d0c774]
+              804 -[NSRunLoop(NSRunLoop) runUntilDate:]  (in Foundation) + 60  [0x180f0e5ac]
+                804 -[NSRunLoop(NSRunLoop) runMode:beforeDate:]  (in Foundation) + 208  [0x180f0e38c]
+                  804 CFRunLoopRunSpecific  (in CoreFoundation) + 536  [0x180422b98]
+                    804 __CFRunLoopRun  (in CoreFoundation) + 1148  [0x180423450]
+                      804 __CFRunLoopServiceMachPort  (in CoreFoundation) + 156  [0x180428a70]
+                        804 mach_msg  (in libsystem_kernel.dylib) + 20  [0x100cecedc]
+                          804 mach_msg_overwrite  (in libsystem_kernel.dylib) + 484  [0x100cf4c58]
+                            804 mach_msg2_internal  (in libsystem_kernel.dylib) + 72  [0x100cfe0e4]
+                              804 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x100cecb5c]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        __workq_kernreturn  (in libsystem_kernel.dylib)        2412
+        mach_msg2_trap  (in libsystem_kernel.dylib)        1608
+

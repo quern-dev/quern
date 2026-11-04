@@ -83,11 +83,15 @@ _THREAD = re.compile(
     r"(?:\s{2,}DispatchQueue_\d+:\s+(?P<queue>.*?)\s+\((?:serial|concurrent)\))?\s*$")
 #: `start  (in dyld) + 6688  [0x100bb1e80]`, and the forms around it:
 #: `???  (in UIKitCore)  load address 0x184e00000 + 0x228f88  [0x185028f88]`,
-#: a trailing `  File.swift:12`, and a frame with no image at all.
+#: a trailing `  File.swift:12`, and a frame with no image at all. A busy
+#: thread's innermost frame merges the PCs it was caught at --
+#: `mach_absolute_time  (in libsystem_kernel.dylib) + 108,112,...
+#: [0x19aadd0f8,0x19aadd0fc,...]` (measured) -- and keeps the first offset.
 _FRAME = re.compile(
-    r"^(?P<sym>.*?)  \(in (?P<img>[^)]*)\)(?:\s+\+\s+(?P<off>\d+))?"
+    r"^(?P<sym>.*?)  \(in (?P<img>[^)]*)\)(?:\s+\+\s+(?P<off>\d+)(?:,\d+)*(?:,\.\.\.)?)?"
     r"(?:\s+load address 0x[0-9a-fA-F]+ \+ 0x(?P<loff>[0-9a-fA-F]+))?"
-    r"\s+\[0x[0-9a-fA-F]+(?:,0x[0-9a-fA-F]+)*\](?:\s+(?P<file>\S.*?):(?P<line>\d+))?\s*$")
+    r"\s+\[0x[0-9a-fA-F]+(?:,0x[0-9a-fA-F]+)*(?:,\.\.\.)?\]"
+    r"(?:\s+(?P<file>\S.*?):(?P<line>\d+))?\s*$")
 #: A tree line: guide characters, then the sample count at the node's depth.
 _NODE = re.compile(r"^(?P<lead>[ +|:!]*?)(?P<count>\d+) (?P<text>\S.*)$")
 
@@ -155,8 +159,11 @@ def parse_sample(text: str, app_image: str = "") -> list[StackThread]:
             node = max(node.children, key=lambda n: n.count)
             path.append(node)
         frames = [_sample_frame(n.text) for n in reversed(path)]
+        # Since Xcode 16 a Debug build's code is in `<App>.debug.dylib`, and
+        # the executable only loads it (ENABLE_DEBUG_DYLIB).
+        mine = {app_image, f"{app_image}.debug.dylib"} if app_image else set()
         for f in frames:
-            f.app = bool(app_image) and f.image == app_image
+            f.app = f.image in mine
         threads.append(StackThread(
             id=int(m["id"]), name=m["name"] or "", queue=m["queue"] or "",
             main=(m["queue"] or "") == MAIN_QUEUE, frames=frames,
@@ -238,7 +245,13 @@ class Shot:
 def read_shot(raw: dict, pid: int, device: tuple[str, str, str]) -> Shot | None:
     """The app's part of a parsed stackshot, or None when it is not in it."""
     tasks = raw.get("task_snapshots") or {}
-    task = tasks.get(pid) if pid in tasks else tasks.get(str(pid))
+    # By the task's own pid, which it carries: the dict's keys were the pids
+    # in every shot read (ints from pymobiledevice3, strings once through
+    # JSON), but nothing promises they stay so.
+    task = next((t for t in tasks.values() if isinstance(t, dict)
+                 and (t.get("task_snapshot") or {}).get("ts_pid") == pid), None)
+    if task is None:
+        task = tasks.get(pid, tasks.get(str(pid)))
     if task is None:
         return None
     threads = []
@@ -295,6 +308,10 @@ async def take_stackshot(uuid: str, bundle_id: str) -> tuple[int | None, dict | 
     except DeviceError:
         raise
     except Exception as e:  # pymobiledevice3 raises its own hierarchy
+        if type(e).__name__ == "ExtractingStackshotError":
+            # pymobiledevice3's own timeout, not asyncio's.
+            raise DeviceError(f"{uuid[:8]} sent no stackshot within {_STACKSHOT_TIMEOUT_S:g}s "
+                              f"({e})", tool="pymobiledevice3") from e
         if "kperf" in str(e).lower():
             # One kernel profiler per device: an Instruments or xctrace
             # recording holds it, quern's own profiles included.
@@ -342,8 +359,10 @@ async def device_stacks(
 
 # -- symbolicating a stackshot -----------------------------------------------
 
-#: DeviceSupport folder -> (its mtime, the sorted __TEXT ranges of its images).
-_INDEX: dict[str, tuple[int, list[tuple[int, int, str]]]] = {}
+#: DeviceSupport folder -> (its tree's signature, the sorted __TEXT ranges of
+#: its images).
+_INDEX: dict[str, tuple[tuple[int, int], list[tuple[int, int, str]]]] = {}
+_INDEX_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 def device_support_dir(product_type: str, version: str, build: str,
@@ -408,19 +427,34 @@ def build_index(symbols: Path) -> list[tuple[int, int, str]]:
     return index
 
 
+def tree_signature(symbols: Path) -> tuple[int, int]:
+    """(files, newest folder mtime) under `symbols`. Xcode extracts a device's
+    symbols into nested folders, so a file it adds changes its own folder's
+    mtime and none of its parents': the top folder's alone would keep an
+    index built mid-copy for the server's life (review)."""
+    files, newest = 0, 0
+    for root, _dirs, names in os.walk(symbols):
+        files += len(names)
+        with contextlib.suppress(OSError):
+            newest = max(newest, os.stat(root).st_mtime_ns)
+    return files, newest
+
+
 async def _index(symbols: Path) -> list[tuple[int, int, str]]:
     key = str(symbols)
-    try:
-        mtime = (await asyncio.to_thread(symbols.stat)).st_mtime_ns
-    except OSError:
-        return []
-    cached = _INDEX.get(key)
-    if cached is not None and cached[0] == mtime:
-        return cached[1]
-    index = await asyncio.to_thread(build_index, symbols)
-    if index:                                 # an empty one is asked again next time
-        _INDEX[key] = (mtime, index)
-    return index
+    # One build per folder at a time: the first request after a start builds
+    # it, and any others that arrive meanwhile take its result.
+    async with _INDEX_LOCKS.setdefault(key, asyncio.Lock()):
+        signature = await asyncio.to_thread(tree_signature, symbols)
+        cached = _INDEX.get(key)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        index = await asyncio.to_thread(build_index, symbols)
+        if index:                             # an empty one is asked again next time
+            _INDEX[key] = (signature, index)
+        else:
+            _INDEX.pop(key, None)
+        return index
 
 
 _BARE_ADDRESS = re.compile(r"0x[0-9a-fA-F]+")
@@ -460,10 +494,17 @@ async def symbolicate_shot(
     def back(i: int) -> int:
         return 0 if i == 0 else 1
 
+    # The app's own images are looked up first: a dSYM found says how far
+    # its image reaches, so a frame past its end is not put in it.
+    images: dict[int, _AppImage] = {}
+    for base, uuid in shot.images:
+        images[base] = await _look_up(base, uuid, finder, read)
+    bases = sorted(images)
+
     threads: list[StackThread] = []
     app_todo: dict[int, list[tuple[CrashFrame, int]]] = {}       # load address -> frames
     sys_todo: dict[str, list[tuple[CrashFrame, int, int]]] = {}  # image path -> frames
-    unplaced = 0
+    in_cache_unindexed = outside = 0
     for tid, name, queue, lrs in shot.threads:
         frames = []
         for i, lr in enumerate(lrs):
@@ -474,51 +515,85 @@ async def symbolicate_shot(
                 if hit is None:
                     frame.image = "dyld_shared_cache"
                     frame.offset = lr - shot.cache_base
-                    unplaced += 1
+                    in_cache_unindexed += 1
                 else:
                     frame.image, frame.offset = Path(hit[2]).name, unslid - hit[0]
                     sys_todo.setdefault(hit[2], []).append((frame, unslid - back(i), back(i)))
             else:
-                owner = [base for base, _ in shot.images if base <= lr]
-                if owner:
-                    frame.app = True
-                    frame.offset = lr - owner[-1]
-                    app_todo.setdefault(owner[-1], []).append((frame, i))
+                at = bisect.bisect_right(bases, lr) - 1
+                image = images[bases[at]] if at >= 0 else None
+                if image is not None and (image.size is None or lr - image.base < image.size):
+                    frame.image, frame.app = image.name, image.app
+                    frame.offset = lr - image.base
+                    app_todo.setdefault(image.base, []).append((frame, i))
                 else:
-                    unplaced += 1
+                    outside += 1
             frames.append(frame)
         threads.append(StackThread(id=tid, name=name, queue=queue,
                                    main=queue == MAIN_QUEUE, frames=frames))
 
     for base, todo in app_todo.items():
-        symbols.append(await _app_image(base, dict(shot.images)[base], todo, finder, read,
-                                        bundle_id))
+        symbols.append(await _app_image(images[base], todo, finder, read))
     for path, todo in sys_todo.items():
         symbols.append(await _system_image(Path(path), todo, finder))
-    if ds_note:
-        symbols.append(ImageSymbols(image="dyld_shared_cache", uuid=shot.cache_uuid,
-                                    frames_total=unplaced, note=ds_note))
+    if in_cache_unindexed:
+        symbols.append(ImageSymbols(
+            image="dyld_shared_cache", uuid=shot.cache_uuid, frames_total=in_cache_unindexed,
+            note=ds_note or (
+                f"{in_cache_unindexed} frames are in the shared cache but in none of the images "
+                f"in {device_support_dir(*shot.device)}: the folder may be incomplete -- Xcode "
+                f"copies it the first time the device is used, and a copy can be cut short")))
+    if outside:
+        symbols.append(ImageSymbols(
+            image="", frames_total=outside,
+            note=f"{outside} frames are in no image the stackshot lists: code made at run "
+                 f"time, or an address past the end of an image"))
     return threads, symbols
 
 
-async def _app_image(base: int, uuid: str, todo: list[tuple[CrashFrame, int]],
-                     finder: symbolicate.SymbolFinder, read: symbolicate.Read,
-                     bundle_id: str) -> ImageSymbols:
-    """One of the app's images, the way a crash's is: by UUID, through the
-    crash symbolicator."""
+@dataclass
+class _AppImage:
+    """One of the task's own (non-cache) images, after its symbols were looked for."""
+
+    base: int
+    uuid: str
+    name: str
+    #: Its __TEXT size from the dSYM; None when no dSYM was found.
+    size: int | None
+    #: Code the app was built from: a dSYM for it was found on this Mac.
+    #: Without one nothing says it is the app's rather than any other image
+    #: loaded outside the shared cache.
+    app: bool
+    found: bool
+
+
+async def _look_up(base: int, uuid: str, finder: symbolicate.SymbolFinder,
+                   read: symbolicate.Read) -> _AppImage:
     lookup = await finder.find(uuid, read)
-    name = Path(lookup.found.dwarf).name if lookup.found else f"{bundle_id} image {uuid[:8]}"
+    if lookup.found is None:
+        return _AppImage(base, uuid, f"image {uuid[:8]}", None, False, False)
+    dwarf = Path(lookup.found.dwarf)
+    text = await asyncio.to_thread(_text_range, str(dwarf))
+    return _AppImage(base, uuid, dwarf.name, text[1] if text else None, True, True)
+
+
+async def _app_image(image: _AppImage, todo: list[tuple[CrashFrame, int]],
+                     finder: symbolicate.SymbolFinder, read: symbolicate.Read) -> ImageSymbols:
+    """One of the task's own images, the way a crash's is: by UUID, through
+    the crash symbolicator."""
     frames = [f for f, _ in todo]
-    for f in frames:
-        f.image = name
-    image = CrashImage(name=name, uuid=uuid, base=base, arch="arm64")
-    exact = {(name, f.offset) for f, i in todo if i == 0}
-    entry = ImageSymbols(image=name, uuid=symbolicate.normalise_uuid(uuid) or uuid,
-                         frames_total=len({f.offset for f in frames}))
+    crash_image = CrashImage(name=image.name, uuid=image.uuid, base=image.base, arch="arm64")
+    exact = {(image.name, f.offset) for f, i in todo if i == 0}
+    entry = ImageSymbols(image=image.name, uuid=symbolicate.normalise_uuid(image.uuid)
+                         or image.uuid, frames_total=len({f.offset for f in frames}))
     try:
-        await symbolicate._one_image(image, frames, exact, entry, finder, read)
+        await symbolicate._one_image(crash_image, frames, exact, entry, finder, read)
     except Exception as e:  # noqa: BLE001 -- the stacks are still stacks
         entry.note = f"symbolication failed: {type(e).__name__}: {e}"
+    if not image.found:
+        entry.note = (entry.note + "; " if entry.note else "") + (
+            "without its dSYM nothing says whether this is the app's own code or another "
+            "image loaded outside the shared cache, so its frames are not marked app")
     return entry
 
 
