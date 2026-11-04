@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0-beta.1] - 2026-11-04
+
 ### Added
 - **Android profiles say which frames were janky, and why (#245).** On Android 12 and later, the `hangs` and `frames` presets record SurfaceFlinger's FrameTimeline, and the summary's `frame_timeline` judges each frame the app gave the display: on time, late, early or dropped; the jank rate, split by trace_processor's own tags into the app's fault, the system's, and missed frames with no reason given; stuffed frames apart, as added latency rather than jank; the causes (`by_cause`); and the ten worst frames. It is the app's own frames, not the whole display's. Measured on a Pixel 5 (Android 14), end to end: a 20 s scroll had 59 late frames, 56 of them stuffed and three the system's jank, none the app's; through a 12 s hang, no frames during it -- a frozen thread draws nothing -- and two late after it, one the app's. Android 10 records none and says so; perfetto takes the config there unchanged.
 - **Each iOS hang says what the main thread was doing (#245).** With Xcode 27.2, `stop_profile` reads the hangs with `xctrace triage`: the ten longest each get their tier, the main thread's CPU, `nature` -- `blocked` or `busy`, the first thing to know about a hang -- the system calls they waited in, and, for the longest three, the main thread's heaviest stack over each, from the app's own frames down. On an iPhone 11 hitches profile, triage placed all ten of 25 hangs and named the busy one's `ScrollViewController.tableView(_:cellForRowAt:)`, in 11.7 s. Measured on the probe's 12 s sleep: blocked, `semwait_signal` 12.00 s, `DiagViewController.hang()` → `+[NSThread sleepForTimeInterval:]` → `__semwait_signal`.
@@ -1031,7 +1033,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.25.0...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.1...main
+[0.26.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.1
 [0.25.0]: https://github.com/quern-dev/quern/releases/tag/v0.25.0
 [0.25.0-beta.6]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.6
 [0.25.0-beta.5]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.5
