@@ -1999,6 +1999,47 @@ class PerformanceSnapshot(BaseModel):
     unavailable: dict[str, str] = Field(default_factory=dict)
 
 
+class StackThread(BaseModel):
+    """One thread of an app, innermost frame first (#245, phase 5)."""
+
+    id: int
+    name: str = ""
+    #: The libdispatch queue it was serving, where the source says:
+    #: `com.apple.main-thread` for the main thread.
+    queue: str = ""
+    main: bool = False
+    frames: list[CrashFrame] = Field(default_factory=list)
+    #: The thread's stack was deeper than `frames`: the outermost were cut.
+    frames_cut: int = 0
+    #: Simulator only: `sample` reads every thread about once a millisecond,
+    #: and `frames` is the path it was on most. These say how often it was
+    #: there out of all its samples -- a hung thread is on one path in all of
+    #: them, a busy one splits its time.
+    samples_on_stack: int | None = None
+    samples: int | None = None
+
+
+class ThreadStacks(BaseModel):
+    """What an app's threads are doing right now (#245, phase 5)."""
+
+    udid: str
+    bundle_id: str
+    platform: Literal["ios_simulator", "ios_device", "android"]
+    #: Null when it was not checked (Android, which cannot be read anyway).
+    running: bool | None
+    pid: int | None = None
+    #: `sample` (a simulator app is a Mac process, read for ~1 s) or
+    #: `stackshot` (one instant, through the device's Instruments channel).
+    source: Literal["sample", "stackshot"] | None = None
+    #: The main thread first; only it unless all threads were asked for.
+    #: Null with the reason in `unavailable` when they could not be read.
+    threads: list[StackThread] | None = None
+    thread_count: int | None = None
+    #: How each image's frames were symbolicated, as for a crash.
+    symbols: list[ImageSymbols] = Field(default_factory=list)
+    unavailable: dict[str, str] = Field(default_factory=dict)
+
+
 class StartProfileRequest(BaseModel):
     """Request body for POST /api/v1/profiles (#245)."""
 

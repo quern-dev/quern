@@ -1,0 +1,128 @@
+{
+ "shared_cache_dyld_load_info": {
+  "imageLoadAddress": 215121920,
+  "imageUUID": "a0c64eb3-49c0-387e-8df7-d752639bac09",
+  "imageSlidBaseAddress": 6657572864
+ },
+ "task_snapshots": {
+  "2745": {
+   "task_snapshot": {
+    "ts_pid": 2745,
+    "ts_p_comm": "QuernProbe"
+   },
+   "dyld_load_info": [
+    {
+     "imageLoadAddress": 4330471424,
+     "imageUUID": "99a58e82-7b7f-367f-8033-98296c641d77"
+    },
+    {
+     "imageLoadAddress": 4331585536,
+     "imageUUID": "4e35b543-655f-3a1a-b4b1-3e9e096a5117"
+    }
+   ],
+   "thread_snapshots": {
+    "1511172": {
+     "dispatch_queue_label": "com.apple.main-thread",
+     "user_stack_frames": [
+      {
+       "lr": 9655930068
+      },
+      {
+       "lr": 9655943724
+      },
+      {
+       "lr": 9655943288
+      },
+      {
+       "lr": 6713619380
+      },
+      {
+       "lr": 6713398032
+      },
+      {
+       "lr": 6713394508
+      },
+      {
+       "lr": 9498186904
+      },
+      {
+       "lr": 6811129456
+      },
+      {
+       "lr": 6810517848
+      },
+      {
+       "lr": 6812666532
+      },
+      {
+       "lr": 4330603108
+      },
+      {
+       "lr": 4330602968
+      },
+      {
+       "lr": 4330603328
+      },
+      {
+       "lr": 6658759708
+      },
+      {
+       "lr": 0
+      }
+     ]
+    },
+    "1511183": {
+     "user_stack_frames": [
+      {
+       "lr": 9655929472
+      },
+      {
+       "lr": 8317266112
+      }
+     ]
+    },
+    "1511193": {
+     "pth_name": "com.apple.uikit.eventfetch-thread",
+     "user_stack_frames": [
+      {
+       "lr": 9655930068
+      },
+      {
+       "lr": 9655943724
+      },
+      {
+       "lr": 9655943288
+      },
+      {
+       "lr": 6713619380
+      },
+      {
+       "lr": 6713398032
+      },
+      {
+       "lr": 6713394508
+      },
+      {
+       "lr": 6665448688
+      },
+      {
+       "lr": 6665448408
+      },
+      {
+       "lr": 6810889900
+      },
+      {
+       "lr": 6665988372
+      },
+      {
+       "lr": 8317281336
+      },
+      {
+       "lr": 8317266124
+      }
+     ]
+    }
+   }
+  }
+ }
+}
