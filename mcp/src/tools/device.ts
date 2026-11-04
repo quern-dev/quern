@@ -547,6 +547,77 @@ all_threads returns every thread, the main one first; thread_count is how many t
     }
   });
 
+  server.registerTool("get_device_condition", {
+    description: `The induced condition a physical iPhone is in, as the device itself reports it, and every condition it offers: Network Link profiles (100% loss, 3G, Edge, LTE, high-latency DNS...), thermal states and GPU performance states.
+
+active is null when none is. A condition quern set says set_by: "quern" with set_at; one set some other way, such as Xcode's Devices window, says set_by: "other". list_devices shows the ones quern set without asking the device.
+
+Physical iPhones only: simulators and Android have no such channel.`,
+    inputSchema: strictParams({
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ udid }) => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/device/condition", { udid });
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: errorText(e) }], isError: true };
+    }
+  });
+
+  server.registerTool("set_device_condition", {
+    description: `Put a physical iPhone in an induced condition, such as a slow or lossy network, to see how an app copes. It changes the whole phone, not one app, and only one condition is active at a time: setting one replaces the last, and replaced says what that was.
+
+profile is one of the identifiers get_device_condition lists, such as SlowNetwork3G, SlowNetworkEdgeBad, SlowNetwork100PctLoss or SlowNetworkHighLatencyDNS. Thermal and GPU states (ThermalFair, ThermalSerious, GPUPerformanceStateMin...) change how the whole phone performs, so they need allow_performance: true.
+
+The answer is the condition as the device reports it active, not as asked for. Quern undoes what it set: when you call clear_device_condition, when the hold that set it ends (release_devices, or the session expiring), and when the server stops; a quern server that dies takes its conditions with it. Until then the phone stays in it, so clear it when done. 100% packet loss can cut the phone off from quern itself if it is reached over the network rather than USB.`,
+    inputSchema: strictParams({
+      profile: z
+        .string()
+        .min(1)
+        .describe("The condition to set, as get_device_condition lists it: e.g. SlowNetwork3G"),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+      allow_performance: z
+        .boolean()
+        .optional()
+        .describe("Allow a thermal or GPU state, which slows the whole phone (default false)"),
+    }),
+  }, async ({ profile, udid, allow_performance }) => {
+    try {
+      const data = await apiRequest("POST", "/api/v1/device/condition", undefined, {
+        profile,
+        udid,
+        allow_performance,
+      });
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: errorText(e) }], isError: true };
+    }
+  });
+
+  server.registerTool("clear_device_condition", {
+    description: `Clear a physical iPhone's induced condition, whoever set it, and wait until the device reports none active. cleared is what was active, null when nothing was.`,
+    inputSchema: strictParams({
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ udid }) => {
+    try {
+      const data = await apiRequest("DELETE", "/api/v1/device/condition", { udid });
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: errorText(e) }], isError: true };
+    }
+  });
+
   server.registerTool("take_screenshot", {
     description: `Capture a screenshot from a simulator or physical device. Returns the image as base64-encoded data, or saves to disk when save_path is provided.`,
     inputSchema: strictParams({

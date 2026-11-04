@@ -2038,6 +2038,45 @@ class ThreadStacks(BaseModel):
     #: How each image's frames were symbolicated, as for a crash.
     symbols: list[ImageSymbols] = Field(default_factory=list)
     unavailable: dict[str, str] = Field(default_factory=dict)
+class DeviceCondition(BaseModel):
+    """One condition a physical iPhone can be put in (#245, phase 6)."""
+
+    #: What set_device_condition takes: `SlowNetwork3G`, `ThermalFair`.
+    profile: str
+    #: The device's group for it: `SlowNetworkCondition`, `ThermalCondition`,
+    #: `GPUPerformanceState`.
+    group: str
+    kind: Literal["network", "thermal", "gpu", "other"]
+    name: str = ""
+    description: str = ""
+    #: On an active one: `quern` when quern set it (and when), `other` when
+    #: something else did -- Xcode's Devices window, say.
+    set_by: Literal["quern", "other"] | None = None
+    set_at: str | None = None
+
+
+class DeviceConditions(BaseModel):
+    """A physical iPhone's induced condition, as the device reports it."""
+
+    udid: str
+    #: Null when none is active: the device was asked, and said so.
+    active: DeviceCondition | None = None
+    available: list[DeviceCondition] = Field(default_factory=list)
+    #: On a set that replaced another: what was active before.
+    replaced: DeviceCondition | None = None
+    #: With none active: why the one quern set ended without being cleared --
+    #: the connection holding it dropped, or it was cleared elsewhere.
+    note: str | None = None
+
+
+class SetDeviceConditionRequest(BaseModel):
+    """Request body for POST /api/v1/device/condition (#245, phase 6)."""
+
+    profile: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_.-]+$")
+    udid: str | None = None
+    #: Thermal and GPU states change how the whole phone performs, not only
+    #: its network: set only when asked for.
+    allow_performance: bool = False
 
 
 class StartProfileRequest(BaseModel):

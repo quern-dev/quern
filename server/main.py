@@ -235,6 +235,16 @@ def _log_keyboards(actions: list[dict], when: str) -> None:
                            "again", a["udid"], a.get("ime"), when, a.get("error"))
 
 
+def _log_conditions(actions: list[dict], when: str) -> None:
+    for a in actions:
+        if a.get("ok"):
+            logger.info("Cleared %s's %s %s%s", a["udid"], a.get("profile"), when,
+                        f" (it was {a['already']} already)" if a.get("already") else "")
+        else:
+            logger.warning("Could not clear %s's %s %s: %s; the next start tries again",
+                           a["udid"], a.get("profile"), when, a.get("error"))
+
+
 def _adb_path(app: FastAPI) -> str | None:
     controller = getattr(app.state, "device_controller", None)
     adb = getattr(controller, "adb", None)
@@ -427,6 +437,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from server.profiling.manager import ProfileManager
     if note := profile_settings()["note"]:
         logger.warning(note)
+    from server.device.ios.conditions import ConditionKeeper
+
+    app.state.conditions = ConditionKeeper()
     from server.profiling import android as android_profiles
     # adb is the controller's, looked up per call: the controller is made
     # later in startup, and a profile resumed before then is still asked about.
@@ -662,6 +675,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # An Android keyboard an earlier process replaced and never put back,
         # because it crashed or was killed (#513). Last: it waits on devices.
         _log_keyboards(await device_controller.u2.restore_keyboards(), "at startup")
+        # A phone left in a network or thermal condition by a server that
+        # crashed or was killed before it could clear it (#245).
+        _log_conditions(await app.state.conditions.clear_leftovers(), "at startup")
 
     app.state._warmup_task = asyncio.create_task(_warmup_devices())
 
@@ -844,6 +860,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     keyboards_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await keyboards_task
+    # The phones' induced conditions (#245) clear alongside, inside the same
+    # 4s: a clear takes about a second and a half. One cut short keeps its
+    # record, and the next start clears it.
+    exit_by = asyncio.get_running_loop().time() + 4.0
+    conditions_at_exit = asyncio.create_task(app.state.conditions.clear_all())
     controller_at_exit = getattr(app.state, "device_controller", None)
     if controller_at_exit is not None:
         try:
@@ -851,6 +872,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 controller_at_exit.u2.restore_keyboards(), 4.0), "at shutdown")
         except Exception:  # noqa: BLE001 -- shutdown must carry on regardless
             logger.warning("Could not put back the Android keyboards", exc_info=True)
+    try:
+        _log_conditions(await asyncio.wait_for(
+            conditions_at_exit, max(0.1, exit_by - asyncio.get_running_loop().time())),
+            "at shutdown")
+    except Exception:  # noqa: BLE001 -- shutdown must carry on regardless
+        logger.warning("Could not clear the phones' induced conditions", exc_info=True)
 
     # Sessions end with the server; a reconnect will be told so (4404).
     from server import device_access as _device_access

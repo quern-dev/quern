@@ -1,0 +1,145 @@
+[
+ {
+  "profiles": [
+   {
+    "name": "100% packet loss",
+    "identifier": "SlowNetwork100PctLoss",
+    "description": "Name: 100% Loss Scenario\nDownlink Bandwidth: 0 Mbps\nDownlink Latency: 0 ms\nDownlink Packet Loss Ratio: 100%\nUplink Bandwidth: 0 Mbps\nUplink Latency: 0 ms\nUplink Packet Loss Ratio: 100%"
+   },
+   {
+    "name": "Very poor network",
+    "identifier": "SlowNetworkVeryBadNetwork",
+    "description": "Name: Very Bad Network Scenario\nDownlink Bandwidth: 1 Mbps\nDownlink Latency: 500 ms\nDownlink Packet Loss Ratio: 10%\nUplink Bandwidth: 1 Mbps\nUplink Latency: 500 ms\nUplink Packet Loss Ratio: 10%"
+   },
+   {
+    "name": "Edge Network - poor",
+    "identifier": "SlowNetworkEdgeBad",
+    "description": "Name: Bad EDGE Scenario\nDownlink Bandwidth: 0.24 Mbps\nDownlink Latency: 400 ms\nDownlink Packet Loss Ratio: 1%\nUplink Bandwidth: 0.2 Mbps\nUplink Latency: 400 ms\nUplink Packet Loss Ratio: 1%"
+   },
+   {
+    "name": "Edge Network - average",
+    "identifier": "SlowNetworkEdgeAverage",
+    "description": "Name: Average EDGE Scenario\nDownlink Bandwidth: 0.24 Mbps\nDownlink Latency: 400 ms\nDownlink Packet Loss Ratio: 0.042%\nUplink Bandwidth: 0.2 Mbps\nUplink Latency: 400 ms\nUplink Packet Loss Ratio: 0.042%"
+   },
+   {
+    "name": "Edge Network - good",
+    "identifier": "SlowNetworkEdgeGood",
+    "description": "Name: Good EDGE Scenario\nDownlink Bandwidth: 0.25 Mbps\nDownlink Latency: 350 ms\nDownlink Packet Loss Ratio: 0.004%\nUplink Bandwidth: 0.2 Mbps\nUplink Latency: 350 ms\nUplink Packet Loss Ratio: 0.004%"
+   },
+   {
+    "name": "Edge Network - best",
+    "identifier": "SlowNetworkEdge",
+    "description": "Name: Nominal EDGE Scenario\nDownlink Bandwidth: 0.24 Mbps\nDownlink Latency: 400 ms\nDownlink Packet Loss Ratio: 0%\nUplink Bandwidth: 0.2 Mbps\nUplink Latency: 400 ms\nUplink Packet Loss Ratio: 0%"
+   },
+   {
+    "name": "2G Network - poor",
+    "identifier": "SlowNetwork2GRural",
+    "description": "Name: 2G Rural Scenario\nDownlink Bandwidth: 0.02 Mbps\nDownlink Latency: 650 ms\nDownlink Packet Loss Ratio: 2%\nUplink Bandwidth: 0.018 Mbps\nUplink Latency: 650 ms\nUplink Packet Loss Ratio: 2%"
+   },
+   {
+    "name": "2G Network - better",
+    "identifier": "SlowNetwork2GUrban",
+    "description": "Name: 2G Urban Scenario\nDownlink Bandwidth: 0.035 Mbps\nDownlink Latency: 650 ms\nDownlink Packet Loss Ratio: 0%\nUplink Bandwidth: 0.032 Mbps\nUplink Latency: 650 ms\nUplink Packet Loss Ratio: 0%"
+   },
+   {
+    "name": "3G Network - average",
+    "identifier": "SlowNetwork3GAverage",
+    "description": "Name: Average 3G Scenario\nDownlink Bandwidth: 0.78 Mbps\nDownlink Latency: 100 ms\nDownlink Packet Loss Ratio: 0.025%\nUplink Bandwidth: 0.33 Mbps\nUplink Latency: 100 ms\nUplink Packet Loss Ratio: 0.025%"
+   },
+   {
+    "name": "3G Network - good",
+    "identifier": "SlowNetwork3GGood",
+    "description": "Name: Good 3G Scenario\nDownlink Bandwidth: 0.85 Mbps\nDownlink Latency: 90 ms\nDownlink Packet Loss Ratio: 0.008%\nUplink Bandwidth: 0.42 Mbps\nUplink Latency: 90 ms\nUplink Packet Loss Ratio: 0.008%"
+   },
+   {
+    "name": "3G Network - best",
+    "identifier": "SlowNetwork3G",
+    "description": "Name: Nominal 3G Scenario\nDownlink Bandwidth: 0.78 Mbps\nDownlink Latency: 100 ms\nDownlink Packet Loss Ratio: 0%\nUplink Bandwidth: 0.33 Mbps\nUplink Latency: 100 ms\nUplink Packet Loss Ratio: 0%"
+   },
+   {
+    "name": "LTE Network",
+    "identifier": "SlowNetworkLTE",
+    "description": "Name: Nominal LTE Scenario\nDownlink Bandwidth: 50 Mbps\nDownlink Latency: 50 ms\nDownlink Packet Loss Ratio: 0%\nUplink Bandwidth: 10 Mbps\nUplink Latency: 50 ms\nUplink Packet Loss Ratio: 0%"
+   },
+   {
+    "name": "WiFi Network",
+    "identifier": "SlowNetworkWiFi",
+    "description": "Name: Nominal Wi-Fi Scenario\nDownlink Bandwidth: 40 Mbps\nDownlink Latency: 1 ms\nDownlink Packet Loss Ratio: 0%\nUplink Bandwidth: 33 Mbps\nUplink Latency: 1 ms\nUplink Packet Loss Ratio: 0%"
+   },
+   {
+    "name": "WiFi Network (802.11ac)",
+    "identifier": "SlowNetworkWiFi80211AC",
+    "description": "Name: Nominal Wi-Fi 802.11ac Scenario\nDownlink Bandwidth: 250 Mbps\nDownlink Latency: 1 ms\nDownlink Packet Loss Ratio: 0%\nUplink Bandwidth: 100 Mbps\nUplink Latency: 1 ms\nUplink Packet Loss Ratio: 0%"
+   },
+   {
+    "name": "DSL Network",
+    "identifier": "SlowNetworkDSL",
+    "description": "Name: Digital Subscriber Line Scenario\nDownlink Bandwidth: 2 Mbps\nDownlink Latency: 5 ms\nDownlink Packet Loss Ratio: 0.05%\nUplink Bandwidth: 0.256 Mbps\nUplink Latency: 5 ms\nUplink Packet Loss Ratio: 0.05%"
+   },
+   {
+    "name": "High Latency DNS",
+    "identifier": "SlowNetworkHighLatencyDNS",
+    "description": "Name: High Latency DNS Scenario\nDNS Delay: 3000 ms"
+   }
+  ],
+  "profilesSorted": true,
+  "identifier": "SlowNetworkCondition",
+  "isDestructive": false,
+  "isInternal": false,
+  "activeProfile": "",
+  "name": "Network Link",
+  "isActive": false
+ },
+ {
+  "profiles": [
+   {
+    "name": "Fair",
+    "identifier": "ThermalFair",
+    "description": "The system behaves as though under slightly elevated thermal state"
+   },
+   {
+    "name": "Serious",
+    "identifier": "ThermalSerious",
+    "description": "The system behaves as though under a high thermal state. At this state, the app should reduce usage of the CPU, GPU and any I/O (such as networking or Bluetooth)."
+   },
+   {
+    "name": "Critical",
+    "identifier": "ThermalCritical",
+    "description": "The system behaves as though there is significant thermal impact. At this state, the app should reduce usage of the CPU, GPU and any I/O to minimal levels for user interactions."
+   }
+  ],
+  "profilesSorted": true,
+  "identifier": "ThermalCondition",
+  "isDestructive": false,
+  "isInternal": false,
+  "activeProfile": "",
+  "name": "Thermal State",
+  "isActive": false
+ },
+ {
+  "profiles": [
+   {
+    "name": "Minimum",
+    "identifier": "GPUPerformanceStateMin",
+    "description": "Set GPU Performance State to minimum level. GPU workloads will run at minimum performance state."
+   },
+   {
+    "name": "Medium",
+    "identifier": "GPUPerformanceStateMid",
+    "description": "Set GPU Performance State to medium level. GPU workloads will attempt to run at medium performance state unless thermally throttled."
+   },
+   {
+    "name": "Maximum",
+    "identifier": "GPUPerformanceStateMax",
+    "description": "Set GPU Performance State to maximum level. GPU workloads will attempt to run at maximum performance state unless thermally throttled."
+   }
+  ],
+  "profilesSorted": true,
+  "identifier": "GPUPerformanceState",
+  "isDestructive": false,
+  "isInternal": false,
+  "activeProfile": "",
+  "name": "GPU Performance State",
+  "isActive": false
+ }
+]
