@@ -29,6 +29,8 @@ def _no_slow_sections(monkeypatch):
     # the ones that print sections, or the rest read the developer's real
     # state and call their real server (CodeRabbit).
     monkeypatch.setattr("server.main._report_held_sessions", lambda: None)
+    # Asks the running server for its disk report (#581), likewise.
+    monkeypatch.setattr("server.main._report_disk", lambda: None)
     monkeypatch.setattr("server.main._report_bind", lambda: None)
     monkeypatch.setattr("server.main._report_node", lambda: True)
     monkeypatch.setattr("server.main._report_mcp_registrations", lambda: True)

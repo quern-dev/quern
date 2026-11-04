@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from server.api.actions import logged_action
@@ -198,3 +198,45 @@ def _find_project_root() -> Path | None:
             break
         path = parent
     return None
+
+
+@router.get("/disk")
+async def disk_use(request: Request) -> dict:
+    """What the simulators and quern's stores take, and the disk's free space
+    (#581), from the last background measurement -- `measured_at` says when.
+    `measuring` until the first one finishes; `error` when it failed, and
+    `last_error` beside an older report when a later one did. A client key
+    gets the sizes without the owner's paths, the errors' details (which name
+    them) or the build store's sweep, and on a blind server without the
+    largest simulators, which name other keys' devices."""
+    from server import visibility
+
+    caller = visibility.current_caller()
+    owner = caller.is_owner
+    report = getattr(request.app.state, "disk_usage", None)
+    failed = getattr(request.app.state, "disk_usage_error", None)
+    sweep = getattr(request.app.state, "build_store_sweep", None) if owner else None
+    failure = (failed["error"] if owner else "the measurement failed") if failed else None
+    if report is None:
+        if failure:
+            return {"measuring": False, "error": failure, "build_store_sweep": sweep}
+        return {"measuring": True, "build_store_sweep": sweep}
+    if not owner:
+        stores = {}
+        for name, store in report["stores"].items():
+            kept = {k: v for k, v in store.items() if k != "path"}
+            if "error" in kept:
+                kept["error"] = "could not be read"
+            if "note" in kept:                       # names the entries it left out
+                kept["note"] = "some of it could not be read, and is left out"
+            if visibility.blind_for(caller):
+                kept.pop("largest", None)
+            stores[name] = kept
+        disk = dict(report.get("disk") or {})
+        if "error" in disk:
+            disk["error"] = "could not be read"
+        report = {**report, "stores": stores, "disk": disk, "note": None}
+    out = {"measuring": False, **report, "build_store_sweep": sweep}
+    if failure:
+        out["last_error"] = failure
+    return out

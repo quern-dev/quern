@@ -12,6 +12,9 @@ import pytest
 # a running server's state file.
 _test_state_dir = tempfile.mkdtemp(prefix="quern-test-")
 os.environ["QUERN_STATE_DIR"] = _test_state_dir
+# The simulators' data, which the disk measurement walks (#581): tens of GB
+# of the real machine's, in a background thread of every server a test starts.
+os.environ["QUERN_SIM_DEVICES_DIR"] = tempfile.mkdtemp(prefix="quern-test-sims-")
 
 
 #: Everything on the real machine that quern installs, writes or removes.
