@@ -4,7 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { discoverServer } from "../config.js";
 import { apiRequest } from "../http.js";
-import { pathsAreRemote } from "../remote-paths.js";
+import { mustUpload } from "../remote-paths.js";
 import { syncProject, type Synced } from "../sandbox-sync.js";
 import { reportProgress, type HandlerExtra, type RunningBuild } from "./build-progress.js";
 import { strictParams, errorText } from "./helpers.js";
@@ -126,10 +126,11 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
     });
     try {
       const body: Record<string, unknown> = { project_path, configuration };
-      // On another machine the project is not on the server's disk: send it to
-      // this key's git sandbox there and build that (#605, prototype).
+      // On another machine the project is not on the server's disk, and a
+      // client key may build only its own sandbox: send it to this key's git
+      // sandbox there and build that (#608).
       let synced: Synced | undefined;
-      if (!project_path.startsWith("sandbox:") && await pathsAreRemote(discoverServer())) {
+      if (!project_path.startsWith("sandbox:") && await mustUpload(discoverServer())) {
         synced = await syncProject(discoverServer(), project_path);
         body.project_path = synced.project_path;
       }

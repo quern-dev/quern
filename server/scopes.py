@@ -457,7 +457,9 @@ def _blind_kind(method: str, path: str) -> str:
 #: one, and every one of them its own -- AccessMiddleware checks each name.
 #: `gradle_args` stays the owner's: an extra task such as `installDebug` makes
 #: Gradle itself install on every connected device, and `-p` builds another
-#: project (review). `java_home` names a path on the Mac.
+#: project (review). `java_home` names a path on the Mac. And `project_path`
+#: must be a `sandbox:` path, what the client itself pushed (#608): any other
+#: project on the Mac is the owner's, and building it runs its scripts.
 _OPT_IN = {("POST", "/api/v1/device/build-and-install")}
 _BUILD = Rule(Access.CONTROL, "resolved",
               owner_fields=frozenset({"gradle_args", "java_home"}))
@@ -515,6 +517,17 @@ def _fields(query: bytes, body: bytes) -> dict[str, bool]:
                 if value not in (None, "", False, [], {}):
                     found[key] = True
     return found
+
+
+def _sandbox_project(body: bytes) -> bool:
+    """Whether a build's JSON body names a `sandbox:` project_path. Anything
+    else -- no body, not JSON, not a string -- is not one."""
+    try:
+        data = json.loads(body) if body else None
+    except (ValueError, UnicodeDecodeError):
+        return False
+    value = data.get("project_path") if isinstance(data, dict) else None
+    return isinstance(value, str) and value.startswith("sandbox:")
 
 
 def _ends_on_revoke(scope: Scope, who: str, receive: Receive) -> Receive:
@@ -662,6 +675,10 @@ class ScopeMiddleware:
         if given:
             return 403, (f"{', '.join(given)} on {method} {path} is owner-only: it names a "
                          "path on the Mac or changes what every caller shares")
+        if rule is _BUILD and not _sandbox_project(body):
+            return 403, ("a client key builds only what it pushed to its own sandbox: "
+                         "project_path must be sandbox:<repo>/<branch>/<path in the repo>. "
+                         "quern's MCP sends a local project there itself (#608)")
         if rule.device == "resolved-read":
             if device_access._named_devices(scope.get("query_string", b""), body):
                 return None

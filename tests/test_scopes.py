@@ -629,10 +629,15 @@ def test_clients_cli_round_trip(monkeypatch, tmp_path, capsys):
     assert data["clients"][0]["revoked_at"]
 
 
+#: A project a client pushed to its own git sandbox (#608): the only kind it builds.
+SANDBOX = "sandbox:app/quern-sync"
+
+
 class TestClientBuilds:
     """Builds are the owner's unless the owner opts clients in (#605): a build
     runs the project's code as the Mac's user. Opted in, a client builds only
-    onto devices its own session holds."""
+    what it pushed to its own sandbox (#608), onto devices its own session
+    holds."""
 
     URL = "/api/v1/device/build-and-install"
 
@@ -646,7 +651,7 @@ class TestClientBuilds:
     def test_off_a_client_is_told_how_the_owner_turns_it_on(self, world, registry, builds):
         c, _, alice, _ = world
         _hold(registry, "alice:s1", "client:alice", "SIM-1")
-        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p", "udids": ["SIM-1"]})
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": SANDBOX, "udids": ["SIM-1"]})
         assert r.status_code == 403
         assert '"client_builds": true' in r.json()["detail"]
 
@@ -654,13 +659,13 @@ class TestClientBuilds:
         builds["on"] = True
         c, _, alice, _ = world
         _hold(registry, "alice:s1", "client:alice", "SIM-1")
-        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p", "udids": ["SIM-1"]})
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": SANDBOX, "udids": ["SIM-1"]})
         assert r.status_code == 200 and r.json() == {"built": ["SIM-1"]}, r.text
 
     def test_on_a_free_device_is_still_refused(self, world, builds):
         builds["on"] = True
         c, _, alice, _ = world
-        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p", "udid": "SIM-9"})
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": SANDBOX, "udid": "SIM-9"})
         assert r.status_code == 403, r.text
 
     def test_on_every_device_in_the_list_must_be_its_own(self, world, registry, builds):
@@ -669,7 +674,7 @@ class TestClientBuilds:
         _hold(registry, "alice:s1", "client:alice", "SIM-1")
         _hold(registry, "bob:s1", "client:bob", "SIM-2")
         r = c.post(self.URL, headers=_h(alice),
-                   json={"project_path": "/p", "udids": ["SIM-1", "SIM-2"]})
+                   json={"project_path": SANDBOX, "udids": ["SIM-1", "SIM-2"]})
         assert r.status_code == 423, r.text
 
     def test_on_no_device_goes_to_its_held_active_device(self, world, registry, builds):
@@ -677,18 +682,46 @@ class TestClientBuilds:
         c, app, alice, _ = world
         _hold(registry, "alice:s1", "client:alice", "SIM-1")
         app.state.device_controller.slots["alice:s1"] = "SIM-1"
-        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p"})
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": SANDBOX})
         assert r.status_code == 200 and r.json() == {"built": ["SIM-1"]}, r.text
 
     def test_on_no_device_and_nothing_active_is_refused(self, world, builds):
         builds["on"] = True
         c, _, alice, _ = world
-        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p"})
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": SANDBOX})
         assert r.status_code == 403 and "reserve one first" in r.json()["detail"]
 
     def test_the_owner_builds_whatever_the_setting(self, world, builds):
         c, *_ = world
         r = c.post(self.URL, headers=_h(KEY), json={"project_path": "/p", "udid": "SIM-9"})
+        assert r.status_code == 200, r.text
+
+    @pytest.mark.parametrize("body", [
+        {"project_path": "/Users/owner/App"},          # a project on the Mac
+        {"project_path": "/p", "x": "sandbox:app"},     # the prefix elsewhere
+        {"project_path": " sandbox:app"},               # not at the start
+        {"project_path": ["sandbox:app"]},              # not a string
+    ])
+    def test_on_a_client_builds_only_its_sandbox(self, world, registry, builds, body):
+        builds["on"] = True
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        r = c.post(self.URL, headers=_h(alice), json={**body, "udid": "SIM-1"})
+        assert r.status_code == 403 and "sandbox:<repo>" in r.json()["detail"], r.text
+
+    def test_on_a_body_that_is_not_json_is_refused(self, world, registry, builds):
+        builds["on"] = True
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        r = c.post(self.URL, headers={**_h(alice), "content-type": "application/json"},
+                   content=b"{not json")
+        assert r.status_code == 403 and "sandbox:<repo>" in r.json()["detail"], r.text
+
+    def test_the_owner_builds_a_path_on_the_mac(self, world, builds):
+        builds["on"] = True
+        c, *_ = world
+        r = c.post(self.URL, headers=_h(KEY),
+                   json={"project_path": "/Users/owner/App", "udid": "SIM-9"})
         assert r.status_code == 200, r.text
 
     def test_the_table_still_says_owner(self):
@@ -1169,7 +1202,7 @@ class TestClientBuildReviewFixes:
         c, _, alice, _ = world
         _hold(registry, "alice:s1", "client:alice", "SIM-1")
         r = c.post(self.URL, headers=_h(alice),
-                   json={"project_path": "/p", "udid": "SIM-1", field: value})
+                   json={"project_path": SANDBOX, "udid": "SIM-1", field: value})
         assert r.status_code == 403 and field in r.json()["detail"], r.text
 
     def test_the_owner_still_may(self, world, on):
