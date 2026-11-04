@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 from server.remote import client
@@ -83,7 +84,8 @@ def _reason(e: BaseException) -> str:
 
 def _blank(name: str | None, url: str | None, label: str | None) -> dict:
     return {"name": name, "url": url, "label": label, "reachable": False, "version": None,
-            "version_matches": None, "devices": None, "free": None, "error": None}
+            "version_matches": None, "devices": None, "free": None, "error": None,
+            "disk": None, "disk_error": None}
 
 
 def _health(answer: Any) -> str:
@@ -130,9 +132,12 @@ def _devices(answer: Any, label: str = "") -> list[dict]:
 
 
 def probe(remote: client.Remote, local_version: str | None,
-          timeout: float = TIMEOUT_SECONDS) -> dict:
+          timeout: float = TIMEOUT_SECONDS, *,
+          answered: Callable[[dict], None] | None = None) -> dict:
     """One remote's state now. Never raises: one remote's odd answer must not
-    cost the list every other remote (review)."""
+    cost the list every other remote (review). `answered` is handed the row
+    before its disk use is asked, so a deadline that falls during that third
+    read keeps the version and devices already read (CodeRabbit)."""
     out = _blank(remote.name, remote.url, remote.label)
     try:
         version = _health(_get(remote, "/health", timeout))
@@ -151,7 +156,44 @@ def probe(remote: client.Remote, local_version: str | None,
         return out
     out["devices"] = devices
     out["free"] = sum(1 for d in devices if d["free"])
+    if answered:
+        answered({**out, "disk_error": "disk use did not answer in time"})
+    try:
+        out["disk"], out["disk_error"] = _disk(remote, timeout)
+    except Exception as e:  # noqa: BLE001 -- an odd disk answer costs the disk part only
+        out["disk"], out["disk_error"] = None, f"disk use could not be read: {_reason(e)}"
     return out
+
+
+def _disk(remote: client.Remote, timeout: float) -> tuple[dict | None, str | None]:
+    """The remote's disk use (#581), or why it could not be read: a server
+    from before it answers 404, which is "not reported", not "nothing used"."""
+    try:
+        report = _get(remote, "/api/v1/system/disk", timeout)
+    except Exception as e:  # noqa: BLE001 -- the rest of the row still stands
+        return None, f"disk use could not be read: {_reason(e)}"
+    if not isinstance(report, dict):
+        return None, "disk use could not be read: not a report"
+    if report.get("measuring"):
+        return {"measuring": True}, None
+    if report.get("error") and not isinstance(report.get("stores"), dict):
+        return None, f"disk use could not be measured there: {report['error']}"
+    disk = report.get("disk") if isinstance(report.get("disk"), dict) else {}
+    warnings = report.get("warnings") or []
+    if not isinstance(warnings, list):   # a list was concatenated onto it (CodeRabbit)
+        return None, "disk use could not be read: its warnings are not a list"
+    return {"used_bytes": report.get("used_bytes"),
+            "used_complete": report.get("used_complete"),
+            "free_bytes": disk.get("free_bytes"),
+            "total_bytes": disk.get("total_bytes"),
+            # Said, so a free space missing is not left without a reason
+            # (CodeRabbit). A warning, not disk_error: that says disk is null.
+            "warnings": warnings + (
+                [f"the latest measurement failed: {report['last_error']}"]
+                if report.get("last_error") else []) + (
+                [f"free space could not be measured: {disk['error']}"]
+                if disk.get("error") else []),
+            "measured_at": report.get("measured_at")}, None
 
 
 def _local() -> client.Remote | dict:
@@ -208,10 +250,12 @@ def _probe_all(remotes: list[client.Remote], local_version: str | None, timeout:
     results: dict[int, dict] = {}
     lock = threading.Lock()
 
-    def run(i: int, remote: client.Remote) -> None:
-        row = probe(remote, local_version, timeout)
+    def keep(i: int, row: dict) -> None:
         with lock:
             results[i] = row
+
+    def run(i: int, remote: client.Remote) -> None:
+        keep(i, probe(remote, local_version, timeout, answered=lambda row: keep(i, row)))
 
     threads = [threading.Thread(target=run, args=(i, r), daemon=True)
                for i, r in enumerate(remotes)]

@@ -263,7 +263,22 @@ def _status_line(r: dict) -> str:
     devices = r["devices"]
     booted = sum(1 for d in devices if d.get("state") == "booted")
     return (f"{head} up  {version}  {len(devices)} devices ({booted} booted), "
-            f"{r.get('free')} free")
+            f"{r.get('free')} free{_disk_part(r)}")
+
+
+def _disk_part(r: dict) -> str:
+    """`, disk 52.3 GB used / 120.0 GB free`, with a `!` when it warns (#581),
+    and `at least` before a total that leaves something out (CodeRabbit)."""
+    disk = r.get("disk")
+    if not isinstance(disk, dict):
+        return ", disk use not reported" if r.get("disk_error") else ""
+    if disk.get("measuring"):
+        return ", disk being measured"
+    gb = lambda n: f"{n / 1024 ** 3:.1f} GB" if isinstance(n, int) else "?"  # noqa: E731
+    warn = " !" if disk.get("warnings") else ""
+    floor = "at least " if disk.get("used_complete") is False else ""
+    return (f", disk {floor}{gb(disk.get('used_bytes'))} used / "
+            f"{gb(disk.get('free_bytes'))} free{warn}")
 
 
 def main(command: str, args: list[str]) -> int:

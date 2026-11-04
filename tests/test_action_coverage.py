@@ -77,6 +77,7 @@ _NOT_ACTIONS: frozenset[str] = frozenset({
     "system.py:update_status",
     "trace.py:get_trace",
     "system.py:get_channel",
+    "system.py:disk_use",          # reads the last measurement; changes nothing
 })
 """Routes that deliberately emit nothing.
 
