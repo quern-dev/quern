@@ -18,7 +18,7 @@ A failed build gives Gradle's reason: compile errors with file and line (Kotlin,
 
 Builds often read environment variables (a version suffix from JOB_NAME, a signing password), and a daemon started from the menu bar does not see your shell's exports. The response's env_vars lists the variables the build scripts read and which were unset; pass env={...} to set them for this build.
 
-A long build reports progress while it runs (the Gradle task it is on and the time so far) to a client that asks for progress notifications.
+A long build reports progress while it runs (the Gradle task it is on and the time so far) to a client that asks for progress notifications. On a blind remote quern a client key can't read the build's progress, so it gets only the time so far.
 
 iOS:
 
