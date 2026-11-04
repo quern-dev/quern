@@ -84,6 +84,8 @@ class Rule:
     access: Access
     device: Device = None
     #: For `named`: the fields the route scopes by, one of which must name a device.
+    #: For `resolved`: the only fields that name one, when the route reads
+    #: fewer than every device key -- any other names nothing to the route.
     keys: tuple[str, ...] = ()
     owner_fields: frozenset[str] = frozenset()
 
@@ -456,7 +458,7 @@ def _blind_kind(method: str, path: str) -> str:
 #: Gradle itself install on every connected device, and `-p` builds another
 #: project (review). `java_home` names a path on the Mac.
 _OPT_IN = {("POST", "/api/v1/device/build-and-install")}
-_BUILD = Rule(Access.CONTROL, "resolved",
+_BUILD = Rule(Access.CONTROL, "resolved", ("udid", "udids"),
               owner_fields=frozenset({"gradle_args", "java_home"}))
 
 
@@ -675,7 +677,11 @@ class ScopeMiddleware:
                 return None
             return 403, (f"{method} {path} without {' or '.join(rule.keys)} acts on every "
                          "device: owner-only. Name a device your session holds.")
-        if device_access._named_devices(scope.get("query_string", b""), body):
+        # Only what the route reads names a device: a build reads udid and
+        # udids, so a `serial` it ignores would otherwise skip the check below
+        # and leave the route to pick a device (CodeRabbit).
+        keys = frozenset(rule.keys) if rule.keys else device_access.DEVICE_KEYS
+        if device_access._named_devices(scope.get("query_string", b""), body, keys):
             return None
         return await self._no_device(scope, rule)
 

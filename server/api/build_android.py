@@ -310,12 +310,15 @@ async def _default_android(controller) -> str:
         return await controller.resolve_udid(booted[0])
     if booted:
         # A blind server does not name other keys' devices to a client, which
-        # since #605 can reach this by building (review).
-        which = ("one your session holds" if visibility.blind_for()
-                 else f"from {', '.join(booted)}")
+        # since #605 can reach this by building (review), nor say how many
+        # there are (CodeRabbit).
+        if visibility.blind_for():
+            raise HTTPException(status_code=400,
+                                detail="no device named, and more than one Android device is "
+                                       "booted: pass udid or udids, one your session holds")
         raise HTTPException(status_code=400,
                             detail=f"no device named, and {len(booted)} Android devices are "
-                                   f"booted: pass udid or udids {which}")
+                                   f"booted: pass udid or udids from {', '.join(booted)}")
     raise HTTPException(status_code=400,
                         detail="no device named, and no Android device or emulator is booted"
                                + (f" (the active device, {active}, is not one)"

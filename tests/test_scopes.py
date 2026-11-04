@@ -686,6 +686,20 @@ class TestClientBuilds:
         r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p"})
         assert r.status_code == 403 and "reserve one first" in r.json()["detail"]
 
+    @pytest.mark.parametrize("where", ["query", "body"])
+    def test_on_a_device_key_the_build_ignores_names_nothing(self, world, registry, builds, where):
+        """A build reads udid and udids. A `serial` it ignores must not stand in
+        for one, or the route picks the device itself (CodeRabbit)."""
+        builds["on"] = True
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        if where == "query":
+            r = c.post(self.URL, headers=_h(alice), params={"serial": "SIM-1"},
+                       json={"project_path": "/p"})
+        else:
+            r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p", "serial": "SIM-1"})
+        assert r.status_code == 403 and "reserve one first" in r.json()["detail"], r.text
+
     def test_the_owner_builds_whatever_the_setting(self, world, builds):
         c, *_ = world
         r = c.post(self.URL, headers=_h(KEY), json={"project_path": "/p", "udid": "SIM-9"})
@@ -1221,3 +1235,4 @@ class TestClientBuildReviewFixes:
         with pytest.raises(HTTPException) as e:
             await build_android._default_android(Ctl())
         assert ("emulator-5554" in e.value.detail) is named, e.value.detail
+        assert ("2 Android" in e.value.detail) is named, "a blind client is not told the count"
