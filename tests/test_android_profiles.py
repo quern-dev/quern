@@ -930,9 +930,10 @@ class TestManager:
         loss = profile.summary()["trace_data_loss"]
         assert [x["stat"] for x in loss] == ["trace ended early"] and loss[0]["value"] == 24.8
 
+    @pytest.mark.parametrize("lost", ["record", "recording_at"])
     @pytest.mark.parametrize("by_itself", [True, False])
     async def test_a_lost_start_record_measures_no_stop_from_the_request(self, state,
-                                                                         by_itself):
+                                                                         by_itself, lost):
         """With start.json unreadable there is no recording_at, and a stop's
         time from the request counts setup too: held to it, a whole trace read
         as ended early. One that ran its limit is still held to the limit
@@ -940,7 +941,12 @@ class TestManager:
         adb = FakeAdb()
         m = _manager(adb)
         profile, _ = await _start(m, limit=120)
-        profile.start_file.unlink()
+        if lost == "record":
+            profile.start_file.unlink()
+        else:                     # its second write, with recording_at, failed
+            record = json.loads(profile.start_file.read_text())
+            del record["recording_at"]
+            profile.start_file.write_text(json.dumps(record))
         # A minute of "setup": the 24.8 s fixture trace is well short of it.
         profile.started_at = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
         if by_itself:

@@ -424,7 +424,7 @@ class ProfileManager:
                                502) from e
         # When perfetto said it was recording: what a trace's span is held to,
         # not started_at, which is before the snapshot and the device's start
-        # (CodeRabbit). Without it the summary falls back to started_at.
+        # (CodeRabbit). Without it only a stop at the time limit is judged.
         first["recording_at"] = _now()
         with contextlib.suppress(OSError):
             await asyncio.to_thread(_write_json_atomic, profile.start_file, first)
@@ -645,15 +645,16 @@ class ProfileManager:
                 return
         try:
             first = json.loads(profile.start_file.read_text())
-            expected_s = _recorded_s(profile, first.get("recording_at"))
         except (OSError, ValueError):
             first = {"unavailable": {"cpu": "the reading at the start was lost",
                                      "frames": "the reading at the start was lost"}}
-            # Without when perfetto began, a stop's time runs from the request,
-            # setup and all, and could read as a trace ended early: only a
-            # profile that ran its limit is still held to it (CodeRabbit).
-            expected_s = (float(profile.time_limit_s) if profile.stop_reason == "time_limit"
-                          else None)
+        # Without when perfetto began -- the record unreadable, or its second
+        # write lost -- a stop's time runs from the request, setup and all,
+        # and could read as a trace ended early: only a profile that ran its
+        # limit is still held to it (CodeRabbit).
+        recording_at = first.get("recording_at")
+        expected_s = (_recorded_s(profile, recording_at)
+                      if recording_at or profile.stop_reason == "time_limit" else None)
         status = await self.trace_processor.wait(TP_WAIT_S)
         logged: tuple[list[dict] | None, str | None] = (
             None, "InputDispatcher's reports are read from logcat, which this server cannot")
