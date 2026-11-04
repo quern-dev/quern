@@ -796,6 +796,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     keyboards_task = asyncio.create_task(_restore_idle_keyboards(), name="keyboard-sweep")
 
+    # The build store's DerivedData (#581): unused for builds.max_age_days, or
+    # beyond builds.max_gb, removed -- at start, then hourly.
+    from server.api.build_app import _DERIVED_LOCKS
+    from server.builds import derived_retention
+    from server.config import builds_settings as _builds_settings
+
+    app.state.build_store_sweep = None
+
+    def _record_build_sweep(done: list[dict]) -> None:
+        app.state.build_store_sweep = {"at": time.time(), "removed": done}
+
+    builds_task = asyncio.create_task(derived_retention.run_forever(
+        _DERIVED_LOCKS, _builds_settings, _record_build_sweep), name="build-store-sweep")
+
     # The LAN viewer (#449), opt-in. Started after the recordings it serves.
     from server.config import viewer_settings as _viewer_settings
     from server.viewer.listener import start_viewer
@@ -866,7 +880,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     for task in (
         watchdog_task, update_check_task, network_monitor_task,
         sim_bridge_resync_task, mcp_clients_task, sim_tls_task, sessions_task,
-        uploads_task, sandboxes_task,
+        uploads_task, builds_task, sandboxes_task,
     ):
         if task and not task.done():
             task.cancel()

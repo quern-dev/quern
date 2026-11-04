@@ -532,6 +532,41 @@ def upload_settings() -> dict:
             "note": "; ".join(notes) or None}
 
 
+#: How long an iOS DerivedData in ~/.quern/builds may go unused, and what the
+#: store may take in all, by default (#581).
+BUILDS_DEFAULT_MAX_AGE_DAYS = 7
+BUILDS_DEFAULT_MAX_GB = 20
+
+
+def builds_settings() -> dict:
+    """The build store's retention from config.json's `builds` object:
+
+        {"builds": {"max_age_days": 7, "max_gb": 20}}
+
+    A DerivedData unused for `max_age_days` is removed, then the least
+    recently used while the rest is over `max_gb`. 0 turns either off. A value
+    that is not a whole number of 0 or more reads as the default, with a note."""
+    # Strict: a config.json that cannot be read raises ConfigUnreadable, and
+    # the sweep skips its pass. The defaults instead would turn on a retention
+    # its owner turned off, on any pass that met a half-written file.
+    raw = read_user_config(strict=True).get("builds")
+    raw = raw if isinstance(raw, dict) else {}
+    notes = []
+
+    def whole(key: str, default: int) -> int:
+        value = raw.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            notes.append(f"config.json's builds.{key} is {value!r}, not a whole number of "
+                         f"0 or more: using {default}")
+            return default
+        return value
+
+    max_age_days = whole("max_age_days", BUILDS_DEFAULT_MAX_AGE_DAYS)
+    max_gb = whole("max_gb", BUILDS_DEFAULT_MAX_GB)
+    return {"max_age_days": max_age_days, "max_bytes": max_gb * 1024 ** 3,
+            "note": "; ".join(notes) or None}
+
+
 #: What one key's git sandboxes may hold together, and how long a repository
 #: may go unused before it is removed (#608).
 SANDBOX_DEFAULT_MB = 4096
