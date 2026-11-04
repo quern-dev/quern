@@ -643,7 +643,8 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
             # ~130 s (Pixel 5: 48 MB per 25 s), and a 300 s profile is allowed.
             loss.append({"stat": "trace ended early", "value": round(span_s, 1),
                          "detail": _why_short(span_s, expected_s, trace,
-                                              first.get("max_trace_bytes"))})
+                                              first.get("max_trace_bytes"),
+                                              first.get("max_trace_setting"))})
         if loss:
             # The sections below are then read from a trace with holes in it.
             summary["trace_data_loss"] = loss
@@ -720,7 +721,8 @@ async def summarize(*, preset: str, package: str, trace: Path, first: dict, last
 
 
 
-def _why_short(span_s: float, expected_s: float, trace: Path, limit: int | None) -> str:
+def _why_short(span_s: float, expected_s: float, trace: Path, limit: int | None,
+               setting: str | None = None) -> str:
     """Why a trace covers less than its profile, as far as the file can say:
     one that reached perfetto's file limit stopped there."""
     said = f"the trace covers {span_s:.1f} s of a {expected_s:.1f} s profile"
@@ -732,8 +734,8 @@ def _why_short(span_s: float, expected_s: float, trace: Path, limit: int | None)
         # The size says the file is full, not that being full is what ended
         # it: a stop from elsewhere can land on a full file (CodeRabbit).
         return (f"{said}: its file is at perfetto's {limit // 2**20} MiB file limit, so "
-                "it most likely stopped there; config.json's profiles.android_max_trace_mb "
-                "raises the limit")
+                f"it most likely stopped there; config.json's "
+                f"{setting or 'profiles.android_max_trace_mb'} raises the limit")
     return (f"{said}, and its file ({size // 2**20 if size is not None else '?'} MiB) is "
             "short of perfetto's file limit, so the trace does not say why")
 

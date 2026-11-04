@@ -392,8 +392,17 @@ class ProfileManager:
         first = await device.snapshot(profile.bundle_id)
         # Recorded with the start, so the summary judges the trace by the
         # limit it was written under, not by today's config.
-        first["max_trace_bytes"] = self.settings().get("android_max_trace_bytes",
-                                                       ad.MAX_TRACE_BYTES)
+        settings = self.settings()
+        trace_bytes = settings.get("android_max_trace_bytes", ad.MAX_TRACE_BYTES)
+        # Never past the whole store's budget: one trace over it is kept, and
+        # the store stays over until the next start (CodeRabbit). Which one
+        # binds is kept too, so the summary names the setting that raises it.
+        if settings["max_bytes"] < trace_bytes:
+            first["max_trace_bytes"], first["max_trace_setting"] = (
+                settings["max_bytes"], "profiles.max_mb")
+        else:
+            first["max_trace_bytes"], first["max_trace_setting"] = (
+                trace_bytes, "profiles.android_max_trace_mb")
         await asyncio.to_thread(_write_json_atomic, profile.start_file, first)
         self.trace_processor.ensure()
         # Recorded before perfetto is asked, as an xctrace is at spawn: a

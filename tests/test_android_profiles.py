@@ -517,8 +517,10 @@ class TestReducers:
 
 
 async def _summary(tp, logged=(None, "logcat was not captured"), preset="hangs",
-                   expected_s=None, trace=Path("/t"), max_trace_bytes=None):
+                   expected_s=None, trace=Path("/t"), max_trace_bytes=None,
+                   max_trace_setting=None):
     first = {"pid": 1, "ticks": 100, "uptime": 10.0, "max_trace_bytes": max_trace_bytes,
+             "max_trace_setting": max_trace_setting,
              "frames": {"total_frames": 50, "janky_frames": 2, "janky_method": "legacy"}}
     last = {"pid": 1, "ticks": 150, "uptime": 20.0,
             "frames": {"total_frames": 80, "janky_frames": 5, "janky_method": "legacy"}}
@@ -630,6 +632,9 @@ class TestSummarize:
         [loss] = s["trace_data_loss"]
         assert "at perfetto's 0 MiB file limit" in loss["detail"]
         assert "profiles.android_max_trace_mb" in loss["detail"]
+        s = await _summary(FakeTP(), expected_s=60.0, trace=trace, max_trace_bytes=1000,
+                           max_trace_setting="profiles.max_mb")
+        assert "config.json's profiles.max_mb raises" in s["trace_data_loss"][0]["detail"]
         s = await _summary(FakeTP(), expected_s=60.0, trace=trace, max_trace_bytes=4000)
         assert "does not say why" in s["trace_data_loss"][0]["detail"]
 
@@ -872,15 +877,22 @@ class TestParseCsv:
 # ── the manager ──────────────────────────────────────────────────────────────
 
 class TestManager:
-    async def test_the_configured_file_limit_reaches_perfetto_and_the_record(self, state):
+    @pytest.mark.parametrize("store_mb, limit_mb, setting", [
+        (2048, 64, "profiles.android_max_trace_mb"),
+        # A store smaller than one trace: the trace is held to the store, or
+        # it is kept over budget (CodeRabbit).
+        (40, 40, "profiles.max_mb")])
+    async def test_the_configured_file_limit_reaches_perfetto_and_the_record(
+            self, state, store_mb, limit_mb, setting):
         adb = FakeAdb()
-        m = ProfileManager(settings=lambda: {"max_bytes": 2048 * 2**20,
+        m = ProfileManager(settings=lambda: {"max_bytes": store_mb * 2**20,
                                              "android_max_trace_bytes": 64 * 2**20},
                            adb=adb, trace_processor=FakeTP(), logged_hangs=None)
         profile, _ = await _start(m)
-        assert b"max_file_size_bytes: 67108864" in adb.config
+        assert f"max_file_size_bytes: {limit_mb * 2**20}\n".encode() in adb.config
         record = json.loads(profile.start_file.read_text())
-        assert record["max_trace_bytes"] == 64 * 2**20
+        assert (record["max_trace_bytes"], record["max_trace_setting"]) == (
+            limit_mb * 2**20, setting)
         # Written once perfetto confirmed the session, after the request.
         assert record["recording_at"] > profile.started_at
         async with asyncio.timeout(10):
