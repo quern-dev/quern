@@ -285,8 +285,10 @@ def parse_csv(text: str) -> list[dict]:
         return []
     # One summary section is one field, and the input-queue counters of every
     # window on the device run past csv's default 128 KiB: 300 KB measured
-    # for 25 s on a Pixel 5 (Android 14), and the whole summary failed.
-    csv.field_size_limit(max(csv.field_size_limit(), FIELD_LIMIT))
+    # for 25 s on a Pixel 5 (Android 14), and the whole summary failed. No
+    # field can be longer than the text, so that bound holds for any trace
+    # the file-size setting allows (CodeRabbit).
+    csv.field_size_limit(max(csv.field_size_limit(), FIELD_LIMIT, len(text)))
     rows = list(csv.reader(io.StringIO("\n".join(lines))))
     header, body = rows[0], rows[1:]
     out = []

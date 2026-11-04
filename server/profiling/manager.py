@@ -632,9 +632,15 @@ class ProfileManager:
                 return
         try:
             first = json.loads(profile.start_file.read_text())
+            expected_s = _recorded_s(profile, first.get("recording_at"))
         except (OSError, ValueError):
             first = {"unavailable": {"cpu": "the reading at the start was lost",
                                      "frames": "the reading at the start was lost"}}
+            # Without when perfetto began, a stop's time runs from the request,
+            # setup and all, and could read as a trace ended early: only a
+            # profile that ran its limit is still held to it (CodeRabbit).
+            expected_s = (float(profile.time_limit_s) if profile.stop_reason == "time_limit"
+                          else None)
         status = await self.trace_processor.wait(TP_WAIT_S)
         logged: tuple[list[dict] | None, str | None] = (
             None, "InputDispatcher's reports are read from logcat, which this server cannot")
@@ -648,7 +654,7 @@ class ProfileManager:
         summary = await ad.summarize(
             preset=profile.preset, package=profile.bundle_id, trace=profile.trace,
             first=first, last=last, tp=self.trace_processor, tp_status=status.as_dict(),
-            logged_hangs=logged, expected_s=_recorded_s(profile, first.get("recording_at")))
+            logged_hangs=logged, expected_s=expected_s)
         await asyncio.to_thread(_write_json_atomic, profile.summary_file, summary)
         profile.state = "finished"
 

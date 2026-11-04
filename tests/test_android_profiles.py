@@ -855,6 +855,19 @@ class TestParseCsv:
         big = "5B" * 200_000
         assert parse_csv(f'"wq","n"\n"{big}",1\n') == [{"wq": big, "n": 1}]
 
+    def test_a_field_past_the_fixed_limit_is_still_read(self, monkeypatch):
+        """No fixed size holds for every trace the file-size setting allows;
+        the text's own length always does (CodeRabbit)."""
+        import csv
+        before = csv.field_size_limit()
+        monkeypatch.setattr(tpm, "FIELD_LIMIT", 10)
+        csv.field_size_limit(10)
+        try:
+            big = "5B" * 1000
+            assert parse_csv(f'"wq","n"\n"{big}",1\n') == [{"wq": big, "n": 1}]
+        finally:
+            csv.field_size_limit(before)
+
 
 # ── the manager ──────────────────────────────────────────────────────────────
 
@@ -901,6 +914,28 @@ class TestManager:
         # the same, and the cut is said (CodeRabbit).
         loss = profile.summary()["trace_data_loss"]
         assert [x["stat"] for x in loss] == ["trace ended early"] and loss[0]["value"] == 24.8
+
+    @pytest.mark.parametrize("by_itself", [True, False])
+    async def test_a_lost_start_record_measures_no_stop_from_the_request(self, state,
+                                                                         by_itself):
+        """With start.json unreadable there is no recording_at, and a stop's
+        time from the request counts setup too: held to it, a whole trace read
+        as ended early. One that ran its limit is still held to the limit
+        (CodeRabbit)."""
+        adb = FakeAdb()
+        m = _manager(adb)
+        profile, _ = await _start(m, limit=120)
+        profile.start_file.unlink()
+        # A minute of "setup": the 24.8 s fixture trace is well short of it.
+        profile.started_at = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+        if by_itself:
+            adb.sessions[ad.session_key(profile.id)] = False
+            await _done(profile)
+        else:
+            async with asyncio.timeout(10):
+                profile = await m.stop(profile.id)
+        loss = profile.summary().get("trace_data_loss") or []
+        assert ([x["stat"] for x in loss] == ["trace ended early"]) is by_itself
 
     async def test_a_stop_while_the_watch_polls_lands(self, state):
         """Live: the stop got exit 2 from the race and the profile recorded on
