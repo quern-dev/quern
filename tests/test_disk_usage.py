@@ -670,3 +670,37 @@ def test_a_total_that_leaves_something_out_reads_as_a_floor():
               "disk": {"free_bytes": 10 * 1024 ** 3}}
     assert du.summary_line({**report, "used_complete": False}).startswith("at least 5.0 GB used")
     assert du.summary_line({**report, "used_complete": True}).startswith("5.0 GB used")
+
+
+def test_simulators_on_another_disk_warn_when_that_disk_fills(tmp_path, monkeypatch):
+    """Only quern's own disk was checked, so a symlinked CoreSimulator on a
+    nearly full external disk raised no warning (CodeRabbit)."""
+    import collections
+
+    sims, home = tmp_path / "Devices", tmp_path / "quern"
+    sims.mkdir()
+    home.mkdir()
+    real_stat = du.os.stat
+    Usage = collections.namedtuple("Usage", "total used free")
+    gb = 1024 ** 3
+
+    def stat(path, *a, **k):
+        st = real_stat(path, *a, **k)
+        if Path(path) == sims:
+            return du.os.stat_result((st.st_mode, st.st_ino, st.st_dev + 1) + tuple(st)[3:])
+        return st
+
+    monkeypatch.setattr(du.os, "stat", stat)
+    monkeypatch.setattr(du.shutil, "disk_usage",
+                        lambda p: Usage(500 * gb, 0, 2 * gb if Path(p) == sims
+                                        else 400 * gb))
+    settings = {"warn_bytes": 0, "warn_free_bytes": 20 * gb}
+    report = du.measure(sim_devices=sims, config_dir=home, settings=settings)
+    assert report["disk"]["free_bytes"] == 400 * gb
+    assert [w for w in report["warnings"] if "simulators' disk" in w] == [
+        "2.0 GB free on the simulators' disk, under disk.warn_free_gb (20.0 GB)"]
+    assert str(sims) not in " ".join(report["warnings"])
+
+    monkeypatch.setattr(du.os, "stat", real_stat)   # the same disk: one warning at most
+    report = du.measure(sim_devices=sims, config_dir=home, settings=settings)
+    assert not [w for w in report["warnings"] if "simulators' disk" in w]

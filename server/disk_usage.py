@@ -148,9 +148,10 @@ def measure(*, sim_devices: Path | None = None, config_dir: Path | None = None,
             stop: threading.Event | None = None) -> dict:
     """Measure every store now. Blocking: run it in a thread."""
     config_dir = config_dir or config_mod.CONFIG_DIR
+    sim_devices = sim_devices or SIM_DEVICES
     settings = settings or config_mod.disk_settings()
     stores = {
-        "simulators": _simulators(sim_devices or SIM_DEVICES, stop),
+        "simulators": _simulators(sim_devices, stop),
         "builds": _store(config_dir / "builds", stop),
         "recordings": _store(config_dir / "recordings", stop),
         "profiles": _store(config_dir / "profiles", stop),
@@ -178,6 +179,14 @@ def measure(*, sim_devices: Path | None = None, config_dir: Path | None = None,
     if settings["warn_free_bytes"] and free is not None and free < settings["warn_free_bytes"]:
         warnings.append(f"{_gb(free)} free on the disk, under disk.warn_free_gb "
                         f"({_gb(settings['warn_free_bytes'])})")
+    # Simulators moved to another disk (a symlinked CoreSimulator) fill that
+    # one, which `disk` does not measure (CodeRabbit). Not named: clients
+    # see warnings, and the path is the owner's.
+    sim_free = _free_elsewhere(sim_devices, config_dir)
+    if settings["warn_free_bytes"] and sim_free is not None \
+            and sim_free < settings["warn_free_bytes"]:
+        warnings.append(f"{_gb(sim_free)} free on the simulators' disk, under "
+                        f"disk.warn_free_gb ({_gb(settings['warn_free_bytes'])})")
     if unknown:
         warnings.append(f"could not measure {', '.join(unknown)}: the total leaves "
                         f"{'it' if len(unknown) == 1 else 'them'} out")
@@ -187,6 +196,17 @@ def measure(*, sim_devices: Path | None = None, config_dir: Path | None = None,
     return {"measured_at": now(), "stores": stores, "used_bytes": used,
             "used_complete": not unknown and not partial, "disk": disk, "warnings": warnings,
             "note": settings.get("note")}
+
+
+def _free_elsewhere(path: Path, home: Path) -> int | None:
+    """Free bytes on `path`'s filesystem when it is not `home`'s; None when
+    they are the same one, or either cannot be read."""
+    try:
+        if os.stat(path).st_dev == os.stat(home if home.exists() else home.parent).st_dev:
+            return None
+        return shutil.disk_usage(path).free
+    except OSError:
+        return None
 
 
 def _gb(n: int) -> str:
