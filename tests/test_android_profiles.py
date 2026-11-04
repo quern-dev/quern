@@ -213,6 +213,18 @@ class TestConfig:
         p.ended_at = None
         assert manager_mod._recorded_s(p) is None
 
+    @pytest.mark.parametrize("reason, expected", [
+        ("time_limit", 30.0), ("stopped", 12.5), ("killed", 12.5), ("server_restart", 12.5)])
+    def test_a_profile_nobody_stopped_was_to_run_its_whole_limit(self, reason, expected):
+        """perfetto stopped from another shell, or crashed, ends the profile
+        near the trace's end; held to that, the cut reads as a whole trace
+        (CodeRabbit)."""
+        p = manager_mod.Profile(id="prof_x", udid=SERIAL, platform="android", device=SERIAL,
+                    bundle_id=PKG, preset="hangs", time_limit_s=30,
+                    started_at="2026-11-03T10:00:00+00:00")
+        p.ended_at, p.stop_reason = "2026-11-03T10:00:12.500000+00:00", reason
+        assert manager_mod._recorded_s(p) == expected
+
     def test_the_file_limit_is_the_one_asked_for(self):
         assert "max_file_size_bytes: 268435456" in ad.config_text(ad.PRESETS["hangs"], PKG, 30)
         assert "max_file_size_bytes: 1048576" in ad.config_text(ad.PRESETS["hangs"], PKG, 30,
@@ -870,6 +882,7 @@ class TestManager:
             profile = await m.stop(profile.id)
         assert (profile.state, profile.stop_reason) == ("finished", "stopped")
         s = profile.summary()
+        assert not s.get("trace_data_loss")      # stopped when asked: not cut short
         assert s["platform"] == "android" and s["hangs_count"] == 1
         assert profile.view()["files"] == ["summary.json", "perfetto.log", "profile.pftrace"]
         assert profile.trace.read_bytes() == adb.pull_bytes
@@ -882,6 +895,11 @@ class TestManager:
         adb.sessions[ad.session_key(profile.id)] = False          # perfetto's own limit
         await _done(profile)
         assert (profile.state, profile.stop_reason) == ("finished", "time_limit")
+        # Ended by itself 5 s short of its limit (the fixture's trace is
+        # 24.8 s): a `perfetto --stop` from another shell, or a crash, reads
+        # the same, and the cut is said (CodeRabbit).
+        loss = profile.summary()["trace_data_loss"]
+        assert [x["stat"] for x in loss] == ["trace ended early"] and loss[0]["value"] == 24.8
 
     async def test_a_stop_while_the_watch_polls_lands(self, state):
         """Live: the stop got exit 2 from the race and the profile recorded on

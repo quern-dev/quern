@@ -101,7 +101,12 @@ def _now() -> str:
 def _recorded_s(profile: Profile, recording_at: str | None = None) -> float | None:
     """How long the profile ran: from when it was recording (else its start)
     to its end, but never past its time limit -- one finished by a later
-    server ended long before it was read."""
+    server ended long before it was read. One nobody stopped was to run its
+    whole limit: perfetto ending sooner by itself (a `perfetto --stop` from
+    another shell, a crash) ends it near the trace's end, which would hide
+    the cut (CodeRabbit)."""
+    if profile.stop_reason == "time_limit":
+        return float(profile.time_limit_s)
     try:
         span = (datetime.fromisoformat(profile.ended_at or "")
                 - datetime.fromisoformat(recording_at or profile.started_at)).total_seconds()
