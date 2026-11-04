@@ -60,7 +60,7 @@ You can also change the list at runtime with the `set_local_capture` MCP tool. T
 
 ## Device Control
 
-Manage iOS simulators and physical devices, and interact with running apps.
+Manage iOS simulators, Android emulators and physical devices, and interact with running apps.
 
 - **Device management** — list, boot, shutdown, and erase simulators and Android emulators; discover physical devices
 - **App management** — install, launch, terminate, uninstall, list apps; build an Xcode scheme and install it across several devices in one call
@@ -74,8 +74,9 @@ Manage iOS simulators and physical devices, and interact with running apps.
 - **Configuration** — set GPS location, grant permissions, open URLs and deep links, attach or detach the simulated hardware keyboard (iOS), and set locale, font scale, and display density (Android)
 - **App state checkpoints** — save and restore a named snapshot of an app's data container and app groups, so a test can start from a seeded state instead of driving the UI there every time. Auth tokens live in the simulator keychain, *outside* every app container, so a checkpoint restores logged-out unless you pass `include_keychain` — which additionally requires the device to be shut down, since the keychain is a WAL-mode SQLite database held open by `securityd`
 - **Plist inspection** — read, diff, set, and delete defaults inside a simulator app's container, or watch a plist and have per-key changes land in the log pipeline alongside app logs and proxy flows
-- **Device pool** — smart device resolution with active device tracking for multi-device workflows
-- **Shared and remote servers** — reserve devices so agents sharing a server don't collide, pair another Mac (`quern pair` / `quern connect`), see each paired Mac's free devices (`quern remote list`, `list_remotes`), and switch an agent to one (`use_remote`) with its mocks, session capture and knowledge base following. See the [remote server guides](guides/remote-setup.md)
+- **Device pool** — smart device resolution with active device tracking for multi-device workflows, on your project's platform
+- **Performance** — `get_performance` for an app's CPU, memory, threads and (on Android) frames now; `start_recording(gauges=...)` for per-action peaks in `get_trace`; and `start_profile` / `stop_profile` for an Instruments profile on iOS or a perfetto one on Android, summarised as hangs, late or janky frames with their causes, and the functions taking CPU time
+- **Shared and remote servers** — reserve devices so agents sharing a server don't collide, pair another Mac (`quern pair` / `quern connect`), see each paired Mac's free devices (`quern remote list`, `list_remotes`), and switch an agent to one (`use_remote`) with its mocks, session capture and knowledge base following. A client's installs are removed when its hold ends, the build store is bounded, and each machine's disk use is shown. See the [remote server guides](guides/remote-setup.md)
 
 **Simulator UI automation** uses a native Swift helper, `sim-bridge`, that talks to `CoreSimulator` / `SimulatorKit` / `AccessibilityPlatformTranslation` directly — no daemon, no subprocess per call. It's built automatically on first use and requires Xcode 26+ on Apple Silicon. On Intel Macs or older Xcode, Quern falls back to [idb](https://fbidb.io/) (`brew install idb-companion` + `pip install fb-idb`); `quern setup` handles the install in that case. Device management and screenshots use `xcrun simctl` (always available with Xcode).
 

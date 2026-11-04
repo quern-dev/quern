@@ -23,6 +23,8 @@ Behind the scenes, these use `adb` for device communication. Your agent handles 
 - **Annotated screenshots**: Screenshots with accessibility overlays (same as iOS)
 - **Logcat**: Real-time log capture with level mapping (see [Logcat Integration](android-logging.md))
 - **UI automation**: Full UI control via uiautomator2 — tap, swipe, type, read the screen, press buttons
+- **Builds**: `build_and_install` runs your project's Gradle wrapper and installs the APK on each device
+- **Performance**: `get_performance` for CPU, memory and frames now, and `start_profile` / `stop_profile` for a perfetto profile, summarised as hangs, janky frames and their causes
 
 ### UI Automation
 
@@ -41,7 +43,6 @@ Android button names for `press_button`: `home`, `back`, `recents`, `volumeUp`, 
 ### What's Not Yet Supported
 
 - **App state checkpoints**: iOS simulator-only feature (container access)
-- **Build integration**: No Gradle build tooling yet
 
 ### Live Preview
 

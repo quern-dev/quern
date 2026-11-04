@@ -255,10 +255,10 @@ def test_a_remote_that_never_finishes_is_reported_at_the_deadline(monkeypatch):
     release = threading.Event()
     real_probe = status.probe
 
-    def probe(remote, version, timeout):
+    def probe(remote, version, timeout, **kw):
         if remote.name == "slow":
             release.wait(10)                       # stuck mid-answer
-        return real_probe(remote, version, timeout)
+        return real_probe(remote, version, timeout, **kw)
 
     monkeypatch.setattr(status, "probe", probe)
     _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
@@ -452,7 +452,7 @@ def test_entries_that_share_a_name_keep_their_own_answers(monkeypatch):
         name=status.LOCAL, url="http://127.0.0.1:9110", fingerprint="", key="owner",
         label="this Mac"))
 
-    def fake_probe(remote, local_version, timeout):
+    def fake_probe(remote, local_version, timeout, **kw):
         row = status._blank(remote.name, remote.url, remote.label)
         if remote.fingerprint:
             row["error"] = "not reachable (refused)"
@@ -476,7 +476,7 @@ def test_the_deadline_counts_the_local_lookup(monkeypatch):
         time.sleep(0.4)
         return {**status._blank("local", None, "this Mac"), "local": True, "error": "x"}
 
-    def slow_probe(remote, local_version, timeout):
+    def slow_probe(remote, local_version, timeout, **kw):
         time.sleep(0.4)
         return {**status._blank(remote.name, remote.url, remote.label), "reachable": True}
 
@@ -517,3 +517,85 @@ def test_an_android_devices_ca_install_is_listed_when_the_remote_says():
         {"udid": "SIM", "name": "iPhone", "device_type": "simulator"}]})
     assert out[0]["ca_install"] == "automatic"
     assert "ca_install" not in out[1]
+
+
+def test_a_slow_disk_read_keeps_the_rest_of_the_row(monkeypatch):
+    """Three reads of 4s each outlast the 10s list: one slow disk read cost
+    the version and devices already read (CodeRabbit)."""
+    import threading
+
+    records = {"studio": {"url": "https://studio.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    release = threading.Event()
+    answers = {"/health": {"status": "ok", "version": "0.25.0"}, "/api/v1/device/list": DEVICES}
+
+    def fake_get(remote, path, timeout):
+        if path == "/api/v1/system/disk":
+            release.wait(10)                       # stuck mid-answer
+            return {"measuring": True}
+        return answers[path]
+
+    monkeypatch.setattr(status, "_get", fake_get)
+    try:
+        [row] = status.statuses("0.25.0", deadline=0.3)
+    finally:
+        release.set()
+    assert row["reachable"] is True and row["free"] == 2 and row["error"] is None
+    assert row["disk"] is None and "in time" in row["disk_error"]
+
+
+def test_a_disk_read_in_time_replaces_the_partial_row(monkeypatch):
+    records = {"studio": {"url": "https://studio.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": DEVICES,
+                           "/api/v1/system/disk": {"measuring": True}})
+    [row] = status.statuses("0.25.0")
+    assert row["disk"] == {"measuring": True} and row["disk_error"] is None
+
+
+def test_free_space_that_could_not_be_measured_says_why(monkeypatch):
+    """disk.error was dropped: free space read as missing for no reason
+    (CodeRabbit)."""
+    records = {"studio": {"url": "https://studio.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": DEVICES,
+                           "/api/v1/system/disk": {
+                               "used_bytes": 5, "used_complete": True, "warnings": [],
+                               "disk": {"total_bytes": None, "free_bytes": None,
+                                        "error": "could not be read"}}})
+    [row] = status.statuses("0.25.0")
+    assert row["disk_error"] is None and row["disk"]["free_bytes"] is None
+    assert row["disk"]["warnings"] == ["free space could not be measured: could not be read"]
+
+
+def test_an_odd_disk_answer_costs_only_the_disk_part(monkeypatch):
+    """A truthy non-list `warnings` raised out of probe, which never raises,
+    and the row read as not answering in time (CodeRabbit)."""
+    records = {"studio": {"url": "https://studio.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": DEVICES,
+                           "/api/v1/system/disk": {"used_bytes": 5, "warnings": "x"}})
+    [row] = status.statuses("0.25.0")
+    assert row["reachable"] is True and row["free"] == 2 and row["error"] is None
+    assert row["disk"] is None and "warnings are not a list" in row["disk_error"]
+
+
+def test_a_disk_read_that_raises_never_leaves_probe(monkeypatch):
+    """probe() never raises: whatever reading the disk answer throws is that
+    row's disk_error, not a row stuck at "did not answer in time"."""
+    records = {"studio": {"url": "https://studio.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": DEVICES})
+
+    def broken(remote, timeout):
+        raise KeyError("used_bytes")
+
+    monkeypatch.setattr(status, "_disk", broken)
+    [row] = status.statuses("0.25.0")
+    assert row["reachable"] is True and row["free"] == 2
+    assert row["disk"] is None and "could not be read" in row["disk_error"]
+    assert "in time" not in row["disk_error"]
