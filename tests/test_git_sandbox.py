@@ -8,6 +8,7 @@ the end-to-end push goes to a server on loopback.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -40,7 +41,9 @@ def root(tmp_path, monkeypatch):
 
 def _git(*args, cwd=None):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True,
-                          text=True, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}).stdout
+                          text=True, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                          # A push that hangs fails the test, not the suite (CodeRabbit).
+                          timeout=60).stdout
 
 
 def _commit(work: Path, files: dict, message="c") -> str:
@@ -94,6 +97,23 @@ class TestNames:
 
 
 class TestCheckout:
+    async def test_the_cap_is_measured_off_the_event_loop(self, root, project, monkeypatch):
+        """A walk of up to sandboxes.max_mb, which on the loop stalled every
+        other request for its length (CodeRabbit)."""
+        threads = []
+        real = sandboxes.size_of
+
+        def recording(path):
+            threads.append(threading.current_thread())
+            return real(path)
+        monkeypatch.setattr(sandboxes, "size_of", recording)
+        gitdir = await sandboxes.ensure_repo(ALICE, "app")
+        _commit(project, {"a.txt": "a\n"})
+        _push(project, gitdir)
+        await sandboxes.check_out(ALICE, "app", max_bytes=2**30)
+        assert threads, "the cap was never measured: the test would be blind"
+        assert threading.main_thread() not in threads
+
     async def test_a_push_is_checked_out_and_a_second_writes_only_what_changed(
             self, root, project):
         gitdir = await sandboxes.ensure_repo(ALICE, "app")
@@ -523,6 +543,42 @@ class TestEndToEnd:
             assert backends() == 0, "a quiet body still holds its backend"
         finally:
             s.close()
+
+    async def test_a_response_that_never_starts_still_releases_the_push(
+            self, root, caller, limits, monkeypatch):
+        """A client gone once its upload is in, before the answer starts: the
+        body never runs, and the push lock and the backend were left held
+        until a restart, so every later push of that key waited (CodeRabbit)."""
+        monkeypatch.setattr(git_sandbox, "_push_locks", {})
+        started = []
+        real = git_sandbox.asyncio.create_subprocess_exec
+
+        async def recording(*args, **kwargs):
+            proc = await real(*args, **kwargs)
+            started.append(proc)
+            return proc
+        monkeypatch.setattr(git_sandbox.asyncio, "create_subprocess_exec", recording)
+        sent = [{"type": "http.request", "body": b"0000", "more_body": False}]
+
+        async def receive():
+            return sent.pop(0) if sent else {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                raise OSError("the client is gone")
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                 "method": "POST", "scheme": "http", "path": "/git/app.git/git-receive-pack",
+                 "raw_path": b"/git/app.git/git-receive-pack", "query_string": b"",
+                 "root_path": "", "client": ("127.0.0.1", 1), "server": ("test", 80),
+                 "headers": [(b"content-type", b"application/x-git-receive-pack-request"),
+                             (b"content-length", b"4")]}
+        with pytest.raises(OSError):
+            await asyncio.wait_for(_app()(scope, receive, send), 30)
+        assert started, "the push's backend never started: the test would be blind"
+        assert git_sandbox._push_locks and not any(
+            lock.locked() for lock in git_sandbox._push_locks.values()), "the push lock is held"
+        for proc in started:
+            await asyncio.wait_for(proc.wait(), 5)    # killed, not left running
 
     def test_a_chunked_push_past_the_cap_is_cut_off(self, server, root, project, limits):
         limits["max_bytes"] = 64 * 1024

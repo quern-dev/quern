@@ -387,8 +387,10 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
         # sandbox, so the caller names no path on this Mac.
         from server import sandboxes, visibility
         try:
-            body.project_path = sandboxes.resolve(visibility.current_caller().principal,
-                                                  body.project_path)
+            # In a thread: it runs git, and the event loop serves every other
+            # request meanwhile (CodeRabbit).
+            body.project_path = await asyncio.to_thread(
+                sandboxes.resolve, visibility.current_caller().principal, body.project_path)
         except sandboxes.SandboxError as e:
             raise HTTPException(e.status, str(e)) from None
     if controller is None:

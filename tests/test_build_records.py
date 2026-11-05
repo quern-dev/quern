@@ -353,6 +353,24 @@ class TestTheRoute:
         assert record["platform"] == "iphonesimulator" and record["installed_on"] == ["SIM-UDID"]
         assert build_app.run.calls == []
 
+    async def test_a_sandbox_path_is_resolved_off_the_event_loop(self, build_app, monkeypatch):
+        """resolve runs git, which on the loop held up every other request
+        (CodeRabbit)."""
+        import threading
+
+        from server import sandboxes
+        threads = []
+
+        def resolve(principal, ref):
+            threads.append(threading.current_thread())
+            return str(build_app.project)
+        monkeypatch.setattr(sandboxes, "resolve", resolve)
+        build_app.app.state.device_controller = FakeController({"SIM-1": "simulator"})
+        resp = await _build_and_install(build_app.app, project_path="sandbox:app/main",
+                                        scheme="MyApp", udids=["SIM-1"])
+        assert resp.status_code == 200, resp.text
+        assert threads and threading.main_thread() not in threads
+
     async def test_an_empty_entry_beside_a_named_device_names_nothing(self, build_app):
         """`udids: ["", "SIM-1"]` builds SIM-1 alone. Kept, the empty entry
         resolved to the session's active device -- another one -- past the

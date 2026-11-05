@@ -27,9 +27,12 @@ import json
 import logging
 import os
 import signal
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 from server import sandboxes, visibility
 from server.api.actions import logged_action
@@ -111,6 +114,23 @@ def _room(principal: str) -> int:
     return limits["max_bytes"] - held
 
 
+class _CleanupResponse(StreamingResponse):
+    """A streamed answer that runs `on_close` once it has ended, however it
+    ended. Its body's own `finally` is not enough: Starlette sends the
+    response's start before it iterates the body, so a client gone by then
+    leaves the body unstarted, and its `finally` never runs (CodeRabbit)."""
+
+    def __init__(self, *args: Any, on_close: Callable[[], None], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.on_close = on_close
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.on_close()
+
+
 async def _cgi(request: Request, repo: str, tail: str, service: str) -> StreamingResponse:
     principal = _caller(request)
     if not (service == "git-receive-pack" and request.method == "POST"):
@@ -124,15 +144,16 @@ async def _cgi(request: Request, repo: str, tail: str, service: str) -> Streamin
     except BaseException:
         lock.release()
         raise
-    inner = response.body_iterator
+    stop = response.on_close
 
-    async def body():
+    def release() -> None:
+        # Once the response has ended, sent or not: by then the body, and the
+        # checkout in it, have finished or will never run.
         try:
-            async for chunk in inner:
-                yield chunk
+            stop()
         finally:
             lock.release()
-    response.body_iterator = body()
+    response.on_close = release
     return response
 
 
@@ -335,7 +356,8 @@ async def _run_cgi(request: Request, principal: str, repo: str, tail: str,
 
     headers.pop("Content-Length", None)    # streamed: let the server frame it
     media = headers.pop("Content-Type", None)
-    return StreamingResponse(body(), status_code=status, headers=headers, media_type=media)
+    return _CleanupResponse(body(), status_code=status, headers=headers, media_type=media,
+                            on_close=stop)
 
 
 @router.get("/git/{repo}/info/refs")

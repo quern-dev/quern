@@ -213,7 +213,10 @@ async def check_out(principal: str, repo: str, max_bytes: int | None = None,
         try:
             need = await _tree_bytes(gitdir, sha)
             if max_bytes is not None:
-                held = size_of(principal_dir(principal)) - size_of(work)
+                # A walk of up to sandboxes.max_mb: off the event loop, which
+                # every other request is waiting on (CodeRabbit).
+                held = await asyncio.to_thread(
+                    lambda: size_of(principal_dir(principal)) - size_of(work))
                 if held + need > max_bytes:
                     raise SandboxError(
                         f"{repo}/{branch} expands to {need // 2**20} MB, and with the "
