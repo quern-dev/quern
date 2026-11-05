@@ -14,7 +14,7 @@ from starlette.responses import StreamingResponse
 
 from server import visibility
 from server.api.actions import action, logged_action
-from server.device import performance, platform
+from server.device import performance, platform, thread_stacks
 from server.device.media import media_engine
 from server.device.media.preview import simulator_entries
 from server.device.pool import DevicePool
@@ -808,6 +808,30 @@ async def get_performance(
     except DeviceError as e:
         raise _handle_device_error(e)
     return snap.model_dump()
+
+
+@router.get("/app/thread-stacks")
+@logged_action("get_thread_stacks", category="device.read")
+async def get_thread_stacks(
+    request: Request,
+    bundle_id: str = Query(..., min_length=1),
+    udid: str | None = Query(default=None),
+    all_threads: bool = Query(default=False),
+    max_frames: int = Query(default=thread_stacks.MAX_FRAMES_DEFAULT, ge=1,
+                            le=thread_stacks.MAX_FRAMES_MAX),
+):
+    """What an app's threads are doing right now: the main thread's stack,
+    symbolicated (#245, phase 5)."""
+    from server.api.crashes import _symbol_finder
+
+    controller = _get_controller(request)
+    try:
+        stacks = await controller.get_thread_stacks(
+            bundle_id, _symbol_finder(request), udid=udid, all_threads=all_threads,
+            max_frames=max_frames)
+    except DeviceError as e:
+        raise _handle_device_error(e)
+    return stacks.model_dump()
 
 
 # ---------------------------------------------------------------------------

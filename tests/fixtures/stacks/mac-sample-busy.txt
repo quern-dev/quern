@@ -1,0 +1,132 @@
+Analysis of sampling Python (pid 71993) every 1 millisecond
+Process:         Python [71993]
+Path:            /opt/homebrew/bin/python3.12
+Load Address:    0x104ae8000
+Identifier:      org.python.python
+Version:         3.12.13 (3.12.13)
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  zsh [71985]
+Target Type:     live task
+
+Date/Time:       2026-11-04 12:45:39.908 -0800
+Launch Time:     2026-11-04 12:45:38.848 -0800
+OS Version:      macOS 27.0.1 (26A434)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+----
+
+Call graph:
+    629 Thread_179134008   DispatchQueue_1: com.apple.main-thread  (serial)
+      629 start  (in dyld) + 6688  [0x19a74be80]
+        629 Py_BytesMain  (in Python) + 44  [0x1056020d8]
+          629 pymain_main  (in Python) + 304  [0x105602034]
+            627 Py_RunMain  (in Python) + 716  [0x105601b44]
+            + 627 PyRun_SimpleStringFlags  (in Python) + 64  [0x1055ddbd8]
+            +   627 PyRun_StringFlags  (in Python) + 124  [0x1055ddcac]
+            +     627 run_mod  (in Python) + 132  [0x1055de664]
+            +       627 run_eval_code_obj  (in Python) + 88  [0x1055e057c]
+            +         627 PyEval_EvalCode  (in Python) + 184  [0x10557fad0]
+            +           215 _PyEval_EvalFrameDefault  (in Python) + 38760  [0x1055894a0]
+            +           ! 205 PyObject_Vectorcall  (in Python) + 88  [0x105496230]
+            +           ! : 182 cfunction_vectorcall_NOARGS  (in Python) + 104  [0x1054e6880]
+            +           ! : | 173 time_time  (in Python) + 36  [0x10565f388]
+            +           ! : | + 165 py_get_system_clock  (in Python) + 44  [0x1055e12d4]
+            +           ! : | + ! 150 clock_gettime  (in libsystem_c.dylib) + 256  [0x19a9b81c4]
+            +           ! : | + ! : 142 gettimeofday  (in libsystem_c.dylib) + 56  [0x19a9afefc]
+            +           ! : | + ! : | 133 __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 44  [0x19aadec20]
+            +           ! : | + ! : | + 133 mach_absolute_time  (in libsystem_kernel.dylib) + 108,112,...  [0x19aadd0f8,0x19aadd0fc,...]
+            +           ! : | + ! : | 9 __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 80,12  [0x19aadec44,0x19aadec00]
+            +           ! : | + ! : 6 __commpage_gettimeofday_internal  (in libsystem_kernel.dylib) + 164,168  [0x19aadec98,0x19aadec9c]
+            +           ! : | + ! : 1 ???  (in <unknown binary>)  [0x1a2372f7c]
+            +           ! : | + ! : 1 gettimeofday  (in libsystem_c.dylib) + 16  [0x19a9afed4]
+            +           ! : | + ! 15 clock_gettime  (in libsystem_c.dylib) + 124,260,...  [0x19a9b8140,0x19a9b81c8,...]
+            +           ! : | + 8 py_get_system_clock  (in Python) + 40,68  [0x1055e12d0,0x1055e12ec]
+            +           ! : | 5 time_time  (in Python) + 116,88,...  [0x10565f3d8,0x10565f3bc,...]
+            +           ! : | 4 time_time  (in Python) + 136  [0x10565f3ec]
+            +           ! : |   4 _tlv_get_addr  (in libdyld.dylib) + 20  [0x19a6fae5c]
+            +           ! : 21 cfunction_vectorcall_NOARGS  (in Python) + 92,28,...  [0x1054e6874,0x1054e6834,...]
+            +           ! : 2 cfunction_vectorcall_NOARGS  (in Python) + 36  [0x1054e683c]
+            +           ! :   2 _tlv_get_addr  (in libdyld.dylib) + 20  [0x19a6fae5c]
+            +           ! 6 PyObject_Vectorcall  (in Python) + 36,52,...  [0x1054961fc,0x10549620c,...]
+            +           ! 4 PyObject_Vectorcall  (in Python) + 44  [0x105496204]
+            +           !   4 _tlv_get_addr  (in libdyld.dylib) + 12,20  [0x19a6fae54,0x19a6fae5c]
+            +           167 _PyEval_EvalFrameDefault  (in Python) + 16168  [0x105583c60]
+            +           ! 90 insertdict  (in Python) + 100  [0x1054d3b0c]
+            +           ! : 48 _Py_dict_lookup  (in Python) + 256  [0x1054d22fc]
+            +           ! : | 48 unicodekeys_lookup_unicode  (in Python) + 232,140,...  [0x1054d20e4,0x1054d2088,...]
+            +           ! : 28 unicodekeys_lookup_unicode  (in Python) + 208,224,...  [0x1054d20cc,0x1054d20dc,...]
+            +           ! : 14 _Py_dict_lookup  (in Python) + 76,1000,...  [0x1054d2248,0x1054d25e4,...]
+            +           ! 23 insertdict  (in Python) + 568  [0x1054d3ce0]
+            +           ! : 16 _PyObject_Free  (in Python) + 156,24,...  [0x1054ef488,0x1054ef404,...]
+            +           ! : 3 _PyObject_Free  (in Python) + 32  [0x1054ef40c]
+            +           ! : | 3 _tlv_get_addr  (in libdyld.dylib) + 20,24  [0x19a6fae5c,0x19a6fae60]
+            +           ! : 3 long_dealloc  (in Python) + 4,44  [0x1054cbb48,0x1054cbb70]
+            +           ! : 1 PyObject_Free  (in Python) + 16  [0x1054eec48]
+            +           ! 23 insertdict  (in Python) + 52,80,...  [0x1054d3adc,0x1054d3af8,...]
+            +           ! 16 PyDict_SetItem  (in Python) + 76,116,...  [0x1054d2dec,0x1054d2e14,...]
+            +           ! 7 _PyObject_Free  (in Python) + 172  [0x1054ef498]
+            +           ! 5 _Py_dict_lookup  (in Python) + 300,284,...  [0x1054d2328,0x1054d2318,...]
+            +           ! 3 PyDict_SetItem  (in Python) + 124  [0x1054d2e1c]
+            +           !   3 _tlv_get_addr  (in libdyld.dylib) + 20,24  [0x19a6fae5c,0x19a6fae60]
+            +           108 _PyEval_EvalFrameDefault  (in Python) + 15508,5260,...  [0x1055839cc,0x1055811c4,...]
+            +           92 _PyEval_EvalFrameDefault  (in Python) + 18548  [0x1055845ac]
+            +           ! 69 PyDict_GetItemWithError  (in Python) + 84  [0x1054d31e4]
+            +           ! : 28 _Py_dict_lookup  (in Python) + 256  [0x1054d22fc]
+            +           ! : | 28 unicodekeys_lookup_unicode  (in Python) + 116,72,...  [0x1054d2070,0x1054d2044,...]
+            +           ! : 28 _Py_dict_lookup  (in Python) + 76,252,...  [0x1054d2248,0x1054d22f8,...]
+            +           ! : 13 unicodekeys_lookup_unicode  (in Python) + 224,220,...  [0x1054d20dc,0x1054d20d8,...]
+            +           ! 14 PyDict_GetItemWithError  (in Python) + 20,36,...  [0x1054d31a4,0x1054d31b4,...]
+            +           ! 9 _Py_dict_lookup  (in Python) + 300,288  [0x1054d2328,0x1054d231c]
+            +           38 _PyEval_EvalFrameDefault  (in Python) + 5248  [0x1055811b8]
+            +           ! 24 _PyLong_FromSTwoDigits  (in Python) + 100  [0x1054c848c]
+            +           ! : 10 _PyObject_Malloc  (in Python) + 76  [0x1054eeebc]
+            +           ! : | 10 pymalloc_alloc  (in Python) + 0,72,...  [0x1054eef20,0x1054eef68,...]
+            +           ! : 5 _PyObject_Malloc  (in Python) + 36  [0x1054eee94]
+            +           ! : | 5 _tlv_get_addr  (in libdyld.dylib) + 20,0,...  [0x19a6fae5c,0x19a6fae48,...]
+            +           ! : 4 _PyObject_Malloc  (in Python) + 76,28,...  [0x1054eeebc,0x1054eee8c,...]
+            +           ! : 3 pymalloc_alloc  (in Python) + 96,92  [0x1054eef80,0x1054eef7c]
+            +           ! : 2 _PyLong_FromSTwoDigits  (in Python) + 104,148  [0x1054c8490,0x1054c84bc]
+            +           ! 6 _PyEval_EvalFrameDefault  (in Python) + 5248  [0x1055811b8]
+            +           ! : 6 _PyLong_FromSTwoDigits  (in Python) + 72,88  [0x1054c8470,0x1054c8480]
+            +           ! 5 _PyLong_FromSTwoDigits  (in Python) + 176,0  [0x1054c84d8,0x1054c8428]
+            +           ! 3 _PyObject_Malloc  (in Python) + 88  [0x1054eeec8]
+            +           4 PyDict_GetItemWithError  (in Python) + 92  [0x1054d31ec]
+            +           3 insertdict  (in Python) + 760  [0x1054d3da0]
+            2 Py_RunMain  (in Python) + 256  [0x105601978]
+              1 Py_FinalizeEx  (in Python) + 172  [0x1055d5c40]
+              ! 1 PyGC_Collect  (in Python) + 84  [0x105602e8c]
+              !   1 gc_collect_with_callback  (in Python) + 76  [0x105602f2c]
+              !     1 gc_collect_main  (in Python) + 232  [0x105603094]
+              !       1 deduce_unreachable  (in Python) + 60  [0x105605768]
+              1 Py_FinalizeEx  (in Python) + 188  [0x1055d5c50]
+                1 finalize_modules  (in Python) + 1468  [0x1055d65b0]
+                  1 _PyGC_CollectNoFail  (in Python) + 52  [0x105602f94]
+                    1 gc_collect_main  (in Python) + 1792  [0x1056036ac]
+                      1 maybe_freelist_clear  (in Python) + 168  [0x1054fe6e4]
+                        1 _PyObject_Free  (in Python) + 32  [0x1054ef40c]
+                          1 _tlv_get_addr  (in libdyld.dylib) + 12  [0x19a6fae54]
+
+Total number in stack (recursive counted multiple, when >=5):
+        7       _tlv_get_addr  (in libdyld.dylib) + 0  [0x19a6fae48]
+
+Sort by top of stack, same collapsed (when >= 5):
+        mach_absolute_time  (in libsystem_kernel.dylib)        133
+        unicodekeys_lookup_unicode  (in Python)        117
+        _PyEval_EvalFrameDefault  (in Python)        108
+        _Py_dict_lookup  (in Python)        56
+        insertdict  (in Python)        26
+        _PyObject_Free  (in Python)        23
+        _tlv_get_addr  (in libdyld.dylib)        22
+        cfunction_vectorcall_NOARGS  (in Python)        21
+        PyDict_GetItemWithError  (in Python)        18
+        PyDict_SetItem  (in Python)        16
+        __commpage_gettimeofday_internal  (in libsystem_kernel.dylib)        15
+        clock_gettime  (in libsystem_c.dylib)        15
+        _PyLong_FromSTwoDigits  (in Python)        13
+        pymalloc_alloc  (in Python)        13
+        py_get_system_clock  (in Python)        8
+        _PyObject_Malloc  (in Python)        7
+        PyObject_Vectorcall  (in Python)        6
+        time_time  (in Python)        5
+

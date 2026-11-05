@@ -1,0 +1,149 @@
+Analysis of sampling QuernProbe (pid 49423) every 1 millisecond
+Process:         QuernProbe [49423]
+Path:            /Users/USER/Library/Developer/CoreSimulator/Devices/F5AF3736-C05F-493F-AA52-CA883B13B18C/data/Containers/Bundle/Application/76C7BF09-2189-4724-9A27-608616471014/QuernProbe.app/QuernProbe
+Load Address:    0x100a98000
+Identifier:      com.quern.probe
+Version:         1.0 (1)
+Code Type:       ARM64
+Platform:        iOS Simulator
+Parent Process:  launchd_sim [83626]
+Target Type:     live task (Roots Present)
+
+Date/Time:       2026-11-04 12:32:46.723 -0800
+Launch Time:     2026-11-04 12:23:29.335 -0800
+OS Version:      macOS 27.0.1 (26A434)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         27.0M
+Physical footprint (peak):  29.5M
+Idle exit:                  untracked
+----
+
+Call graph:
+    746 Thread_178997863   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 746 start  (in dyld) + 6688  [0x100bb1e80]
+    +   746 start_sim  (in dyld_sim) + 20  [0x100e293d4]
+    +     746 main  (in QuernProbe) + 28  [0x100ab53a8]
+    +       746 static AppDelegate.$main()  (in QuernProbe) + 32  [0x100ab5240]
+    +         746 static UIApplicationDelegate.main()  (in QuernProbe) + 128  [0x100ab52cc]
+    +           746 ???  (in UIKitCore)  load address 0x184e00000 + 0x228f88  [0x185028f88]
+    +             746 UIApplicationMain  (in UIKitCore) + 124  [0x185c62f84]
+    +               746 -[UIApplication _run]  (in UIKitCore) + 796  [0x185c5ebb8]
+    +                 746 GSEventRunModal  (in GraphicsServices) + 164  [0x19101fd00]
+    +                   746 CFRunLoopRunSpecific  (in CoreFoundation) + 536  [0x180422b98]
+    +                     731 __CFRunLoopRun  (in CoreFoundation) + 780  [0x1804232e0]
+    +                     ! 731 __CFRunLoopDoSources0  (in CoreFoundation) + 220  [0x1804288e4]
+    +                     !   731 __CFRunLoopDoSource0  (in CoreFoundation) + 168  [0x18042915c]
+    +                     !     731 __CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE0_PERFORM_FUNCTION__  (in CoreFoundation) + 24  [0x180429214]
+    +                     !       731 runloopSourceCallback  (in UIKitCore) + 80  [0x185b8ccf4]
+    +                     !         731 schedulerStepScheduledMainSection  (in UIKitCore) + 204  [0x185b8d8d8]
+    +                     !           731 _UIUpdateSequenceRun  (in UIKitCore) + 76  [0x1851c241c]
+    +                     !             730 updateCycleEntry  (in UIKitCore) + 156  [0x185cfe4c4]
+    +                     !             : 730 __processEventQueue  (in UIKitCore) + 4800  [0x185d05eb0]
+    +                     !             :   727 __dispatchPreprocessedEventFromEventQueue  (in UIKitCore) + 1160  [0x185d0320c]
+    +                     !             :   | 727 -[UIApplicationAccessibility sendEvent:]  (in UIKit) + 100  [0x1ccdb98a8]
+    +                     !             :   |   727 -[UIApplication sendEvent:]  (in UIKitCore) + 376  [0x185c78b1c]
+    +                     !             :   |     727 -[UIWindow sendEvent:]  (in UIKitCore) + 2820  [0x185c99164]
+    +                     !             :   |       727 -[UIWindow _sendTouchesForEvent:]  (in UIKitCore) + 976  [0x185c97d5c]
+    +                     !             :   |         727 -[UIControl touchesEnded:withEvent:]  (in UIKitCore) + 392  [0x18552f480]
+    +                     !             :   |           727 -[UIButton _sendActionsForEvents:withEvent:]  (in UIKitCore) + 120  [0x18552d28c]
+    +                     !             :   |             727 -[UIControl _sendActionsForEvents:withEvent:]  (in UIKitCore) + 268  [0x1855307d4]
+    +                     !             :   |               727 -[UIControl sendAction:to:forEvent:]  (in UIKitCore) + 108  [0x18553049c]
+    +                     !             :   |                 727 -[UIApplication sendAction:to:from:forEvent:]  (in UIKitCore) + 96  [0x185c64204]
+    +                     !             :   |                   727 @objc DiagViewController.hang()  (in QuernProbe) + 44  [0x100a9ecd4]
+    +                     !             :   |                     727 DiagViewController.hang()  (in QuernProbe) + 44  [0x100a9ec9c]
+    +                     !             :   |                       727 +[NSThread sleepForTimeInterval:]  (in Foundation) + 152  [0x180f33af4]
+    +                     !             :   |                         727 nanosleep  (in libsystem_c.dylib) + 216  [0x18016ecd8]
+    +                     !             :   |                           727 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x100cefe54]
+    +                     !             :   2 __dispatchPreprocessedEventFromEventQueue  (in UIKitCore) + 4188  [0x185d03de0]
+    +                     !             :   | 1 -[_UIRemoteKeyboards peekApplicationEvent:]  (in UIKitCore) + 120  [0x185abba04]
+    +                     !             :   | + 1 -[_UIRemoteKeyboards allowedToShowKeyboard]  (in UIKitCore) + 36  [0x185ab6214]
+    +                     !             :   | +   1 -[UIApplication isSuspendedEventsOnly]  (in UIKitCore) + 36  [0x185c672fc]
+    +                     !             :   | +     1 -[_UISceneLifecycleMultiplexer suspendedEventsOnly]  (in UIKitCore) + 100  [0x185262518]
+    +                     !             :   | +       1 -[UIScene _isSuspendedEventsOnly]  (in UIKitCore) + 28  [0x18509ce94]
+    +                     !             :   | +         1 _UISceneLifecycleStateIsSEO  (in UIKitCore) + 24  [0x185808c0c]
+    +                     !             :   | +           1 -[UIApplicationSceneSettings deactivationReasons]  (in UIKitCore) + 20  [0x18571ddd4]
+    +                     !             :   | +             1 -[FBSSettings _legacyOtherSettings]  (in FrontBoardServices) + 20  [0x187d0054c]
+    +                     !             :   | +               1 -[FBSSettings _legacyOtherSettings:]  (in FrontBoardServices) + 24  [0x187d00570]
+    +                     !             :   | +                 1 OUTLINED_FUNCTION_10  (in FrontBoardServices) + 0  [0x187cd7674]
+    +                     !             :   | 1 -[_UIRemoteKeyboards peekApplicationEvent:]  (in UIKitCore) + 924  [0x185abbd28]
+    +                     !             :   |   1 _CF_forwarding_prep_0  (in CoreFoundation) + 92  [0x1804cfe2c]
+    +                     !             :   |     1 ___forwarding___  (in CoreFoundation) + 656  [0x1804cd6b8]
+    +                     !             :   |       1 -[NSXPCConnection _sendInvocation:orArguments:count:methodSignature:selector:withProxy:]  (in Foundation) + 1936  [0x180ff3758]
+    +                     !             :   |         1 xpc_connection_send_message_with_reply  (in libxpc.dylib) + 232  [0x1800cd2f8]
+    +                     !             :   |           1 _xpc_connection_enqueue  (in libxpc.dylib) + 148  [0x1800cc478]
+    +                     !             :   |             1 dispatch_mach_send_with_result_and_async_reply_4libxpc  (in libdispatch.dylib) + 112  [0x180198e68]
+    +                     !             :   |               1 _dispatch_mach_send_msg  (in libdispatch.dylib) + 496  [0x180198640]
+    +                     !             :   |                 1 _dispatch_mach_send_drain  (in libdispatch.dylib) + 288  [0x18019c57c]
+    +                     !             :   |                   1 _dispatch_mach_msg_send  (in libdispatch.dylib) + 876  [0x18019cd48]
+    +                     !             :   |                     1 mach_msg2_internal  (in libsystem_kernel.dylib) + 72  [0x100cfe0e4]
+    +                     !             :   |                       1 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x100cecb5c]
+    +                     !             :   1 __dispatchPreprocessedEventFromEventQueue  (in UIKitCore) + 2752  [0x185d03844]
+    +                     !             :     1 _UIEventHIDEnumerateChildren  (in UIKitCore) + 160  [0x185d113b0]
+    +                     !             :       1 ____updateTouchesWithDigitizerEventAndDetermineIfShouldSend_block_invoke.28  (in UIKitCore) + 344  [0x185cfea8c]
+    +                     !             :         1 __startNewUITouch  (in UIKitCore) + 648  [0x185cffa34]
+    +                     !             :           1 -[UIWindowAccessibility _targetWindowForPathIndex:atPoint:scenePointZ:forEvent:windowServerHitTestWindow:]  (in UIKit) + 512  [0x1ccebf5a0]
+    +                     !             :             1 -[UIWindow _targetWindowForPathIndex:atPoint:scenePointZ:forEvent:windowServerHitTestWindow:]  (in UIKitCore) + 184  [0x185ca7450]
+    +                     !             :               1 +[UIWindow _hitTestToPoint:scenePointZ:forEvent:windowServerHitTestWindow:]  (in UIKitCore) + 192  [0x185ca714c]
+    +                     !             :                 1 -[UIWindowScene _topVisibleWindowEnumeratingAsCopy:passingTest:]  (in UIKitCore) + 364  [0x185f049e8]
+    +                     !             :                   1 -[UIWindowScene _enumerateWindowsIncludingInternalWindows:onlyVisibleWindows:asCopy:stopped:withBlock:]  (in UIKitCore) + 292  [0x185f04ccc]
+    +                     !             :                     1 __64-[UIWindowScene _topVisibleWindowEnumeratingAsCopy:passingTest:]_block_invoke  (in UIKitCore) + 108  [0x185f04ad4]
+    +                     !             :                       1 __75+[UIWindow _hitTestToPoint:scenePointZ:forEvent:windowServerHitTestWindow:]_block_invoke  (in UIKitCore) + 64  [0x185ca71e0]
+    +                     !             :                         1 -[UIWindow _hitTestLocation:sceneLocationZ:inScene:withWindowServerHitTestWindow:event:]  (in UIKitCore) + 92  [0x185ca7370]
+    +                     !             :                           1 -[UIView(Geometry) _hitTest:withEvent:windowServerHitTestWindow:]  (in UIKitCore) + 80  [0x1861be2f8]
+    +                     !             :                             1 -[UIView(Geometry) hitTest:withEvent:]  (in UIKitCore) + 408  [0x1861bdec8]
+    +                     !             :                               1 -[__NSSingleObjectArrayI enumerateObjectsWithOptions:usingBlock:]  (in CoreFoundation) + 88  [0x180510474]
+    +                     !             :                                 1 __NSARRAY_IS_CALLING_OUT_TO_A_BLOCK__  (in CoreFoundation) + 16  [0x18042d398]
+    +                     !             :                                   1 __38-[UIView(Geometry) hitTest:withEvent:]_block_invoke  (in UIKitCore) + 88  [0x1861be204]
+    +                     !             :                                     1 -[UIView(Geometry) _hitTest:withEvent:windowServerHitTestWindow:]  (in UIKitCore) + 80  [0x1861be2f8]
+    +                     !             :                                       1 -[UITransitionView hitTest:withEvent:]  (in UIKitCore) + 52  [0x18619c6ec]
+    +                     !             :                                         1 -[UIView(Geometry) hitTest:withEvent:]  (in UIKitCore) + 408  [0x1861bdec8]
+    +                     !             :                                           1 -[__NSSingleObjectArrayI enumerateObjectsWithOptions:usingBlock:]  (in CoreFoundation) + 88  [0x180510474]
+    +                     !             :                                             1 __NSARRAY_IS_CALLING_OUT_TO_A_BLOCK__  (in CoreFoundation) + 16  [0x18042d398]
+    +                     !             :                                               1 __38-[UIView(Geometry) hitTest:withEvent:]_block_invoke  (in UIKitCore) + 88  [0x1861be204]
+    +                     !             :                                                 1 -[UIView(Geometry) _hitTest:withEvent:windowServerHitTestWindow:]  (in UIKitCore) + 80  [0x1861be2f8]
+    +                     !             :                                                   1 -[UIDropShadowView hitTest:withEvent:]  (in UIKitCore) + 244  [0x18618793c]
+    +                     !             :                                                     1 -[UIView(Geometry) hitTest:withEvent:]  (in UIKitCore) + 160  [0x1861bddd0]
+    +                     !             :                                                       1 _UIViewAnimationDelegateAllowsUserInteraction  (in UIKitCore) + 160  [0x1861be0cc]
+    +                     !             :                                                         1 -[CALayer release]  (in QuartzCore) + 0  [0x18b584788]
+    +                     !             1 __setupUpdateSequence_block_invoke_2  (in UIKitCore) + 356  [0x185b8e044]
+    +                     !               1 _UIApplicationFlushCATransaction  (in UIKitCore) + 48  [0x185c5d4c0]
+    +                     !                 1 CA::Transaction::flush_as_runloop_observer(bool)  (in QuartzCore) + 68  [0x18b4fcd48]
+    +                     !                   1 CA::Transaction::commit()  (in QuartzCore) + 2272  [0x18b4fbce8]
+    +                     !                     1 _os_signpost_emit_unreliably_with_name_impl  (in libsystem_trace.dylib) + 24  [0x1800b7c04]
+    +                     !                       1 __os_signpost_emit_impl  (in libsystem_trace.dylib) + 192  [0x1800b7ba4]
+    +                     !                         1 _os_log_impl_flatten_and_send  (in libsystem_trace.dylib) + 276  [0x1800b4d8c]
+    +                     15 __CFRunLoopRun  (in CoreFoundation) + 1148  [0x180423450]
+    +                       15 __CFRunLoopServiceMachPort  (in CoreFoundation) + 156  [0x180428a70]
+    +                         15 mach_msg  (in libsystem_kernel.dylib) + 20  [0x100cecedc]
+    +                           15 mach_msg_overwrite  (in libsystem_kernel.dylib) + 484  [0x100cf4c58]
+    +                             15 mach_msg2_internal  (in libsystem_kernel.dylib) + 72  [0x100cfe0e4]
+    +                               15 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x100cecb5c]
+    746 Thread_178997926: com.apple.uikit.eventfetch-thread
+    + 746 thread_start  (in libsystem_pthread.dylib) + 8  [0x100ee1a88]
+    +   746 _pthread_start  (in libsystem_pthread.dylib) + 104  [0x100ee6680]
+    +     746 __NSThread__start__  (in Foundation) + 716  [0x180f35148]
+    +       746 -[UIEventFetcher threadMain]  (in UIKitCore) + 408  [0x185d0c774]
+    +         746 -[NSRunLoop(NSRunLoop) runUntilDate:]  (in Foundation) + 60  [0x180f0e5ac]
+    +           746 -[NSRunLoop(NSRunLoop) runMode:beforeDate:]  (in Foundation) + 208  [0x180f0e38c]
+    +             746 CFRunLoopRunSpecific  (in CoreFoundation) + 536  [0x180422b98]
+    +               746 __CFRunLoopRun  (in CoreFoundation) + 1148  [0x180423450]
+    +                 746 __CFRunLoopServiceMachPort  (in CoreFoundation) + 156  [0x180428a70]
+    +                   746 mach_msg  (in libsystem_kernel.dylib) + 20  [0x100cecedc]
+    +                     746 mach_msg_overwrite  (in libsystem_kernel.dylib) + 484  [0x100cf4c58]
+    +                       746 mach_msg2_internal  (in libsystem_kernel.dylib) + 72  [0x100cfe0e4]
+    +                         746 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x100cecb5c]
+    744 Thread_179042682
+      743 start_wqthread  (in libsystem_pthread.dylib) + 8  [0x100ee1a7c]
+      ! 743 _pthread_wqthread  (in libsystem_pthread.dylib) + 364  [0x100ee2cc8]
+      !   743 __workq_kernreturn  (in libsystem_kernel.dylib) + 8  [0x100cee68c]
+      1 start_wqthread  (in libsystem_pthread.dylib) + 0  [0x100ee1a74]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        mach_msg2_trap  (in libsystem_kernel.dylib)        762
+        __workq_kernreturn  (in libsystem_kernel.dylib)        743
+        __semwait_signal  (in libsystem_kernel.dylib)        727
+

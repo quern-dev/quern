@@ -10,7 +10,7 @@ import time
 from collections.abc import AsyncIterator
 
 from server import logging_ext
-from server.device import performance
+from server.device import performance, thread_stacks
 from server.device.android.adb import AdbBackend
 from server.device.android.u2_client import U2Backend
 from server.device.controller_ui import DeviceControllerUI
@@ -37,9 +37,11 @@ from server.models import (
     EraseIncompleteError,
     InvalidDeviceRequestError,
     PerformanceSnapshot,
+    ThreadStacks,
     UIElement,
 )
 from server.session import current_session, parse_session
+from server.sources.symbolicate import SymbolFinder
 
 logger = logging.getLogger(__name__)
 
@@ -1762,6 +1764,28 @@ class DeviceController(DeviceControllerUI):
                 self.simctl, resolved, bundle_id, sample_seconds)
         raise DeviceError(
             f"get_performance could not tell what kind of device {resolved} is",
+            tool="quern")
+
+    async def get_thread_stacks(
+        self, bundle_id: str, finder: SymbolFinder, udid: str | None = None, *,
+        all_threads: bool = False, max_frames: int = thread_stacks.MAX_FRAMES_DEFAULT,
+    ) -> ThreadStacks:
+        """What one app's threads are doing right now (#245, phase 5). A
+        read, like get_performance: the active device is not changed."""
+        if not performance.PACKAGE_NAME.fullmatch(bundle_id):
+            raise InvalidDeviceRequestError(f"{bundle_id!r} is not a bundle id or package name")
+        resolved = await self.resolve_udid(udid, set_active=False)
+        if self._is_android(resolved):
+            return thread_stacks.android_stacks(resolved, bundle_id)
+        if self._is_physical(resolved):
+            return await thread_stacks.device_stacks(
+                resolved, bundle_id, finder, all_threads=all_threads, max_frames=max_frames)
+        if self._device_type(resolved) == DeviceType.SIMULATOR:
+            return await thread_stacks.simulator_stacks(
+                self.simctl, resolved, bundle_id, all_threads=all_threads,
+                max_frames=max_frames)
+        raise DeviceError(
+            f"get_thread_stacks could not tell what kind of device {resolved} is",
             tool="quern")
 
     async def gauge_stream(self, udid: str, app: str,

@@ -489,6 +489,64 @@ A metric that could not be read is null and named in unavailable with the reason
     }
   });
 
+  server.registerTool("get_thread_stacks", {
+    description: `What one running app's threads are doing right now: the main thread's stack, innermost frame first, symbolicated. Use it while an app is hung or slow to see where the main thread is stuck.
+
+iOS simulators: macOS sample reads the app for about a second. Each thread's frames are the path it was on most, and samples_on_stack of samples says how often: a hung thread is on one path in every sample, a busy one splits its time.
+
+Physical iOS devices: one stackshot, an instant of every thread. The app's own frames are symbolicated from its dSYM, found by UUID with the same lookup crash symbolication uses (a build quern made, or one Spotlight indexed). The OS's frames come from the symbols Xcode copies off the device the first time it is used for development. symbols says per image how far that got and why not, and counts the frames that could not be placed, with the reason. A stackshot needs the device's kernel profiler, so it fails while an Instruments or xctrace recording, or a quern profile, holds it.
+
+Android: not supported without root, and unavailable says so. A hang's main-thread gap is in a profile (start_profile, hangs preset).
+
+all_threads returns every thread, the main one first; thread_count is how many there are either way. A stack deeper than max_frames keeps its innermost frames, and frames_cut says how many were dropped. running: false means the app is not running.`,
+    inputSchema: strictParams({
+      bundle_id: z
+        .string()
+        .min(1)
+        .describe("Bundle id (iOS) or package name (Android) of the app"),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+      all_threads: z
+        .boolean()
+        .optional()
+        .describe("Every thread, not just the main one (default false)"),
+      max_frames: z
+        .number()
+        .int()
+        .min(1)
+        .max(128)
+        .optional()
+        .describe("Frames kept per thread, innermost first (default 40)"),
+    }),
+  }, async ({ bundle_id, udid, all_threads, max_frames }) => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/device/app/thread-stacks", {
+        bundle_id,
+        udid,
+        all_threads,
+        max_frames,
+      });
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: errorText(e),
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("take_screenshot", {
     description: `Capture a screenshot from a simulator or physical device. Returns the image as base64-encoded data, or saves to disk when save_path is provided.`,
     inputSchema: strictParams({
