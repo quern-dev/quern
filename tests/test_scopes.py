@@ -691,6 +691,23 @@ class TestClientBuilds:
         r = c.post(self.URL, headers=_h(alice), json={"project_path": SANDBOX})
         assert r.status_code == 403 and "reserve one first" in r.json()["detail"]
 
+    @pytest.mark.parametrize("query, body", [
+        ({"serial": "SIM-1"}, {}),
+        ({}, {"serial": "SIM-1"}),
+        ({"udid": "SIM-1"}, {}),     # read from the body only
+        ({"udids": "SIM-1"}, {}),
+    ])
+    def test_on_a_device_key_the_build_ignores_names_nothing(self, world, registry, builds,
+                                                            query, body):
+        """A build reads udid and udids from its body. Anything else must not
+        stand in for them, or the route picks the device itself (CodeRabbit)."""
+        builds["on"] = True
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        r = c.post(self.URL, headers=_h(alice), params=query,
+                   json={"project_path": SANDBOX, **body})
+        assert r.status_code == 403 and "reserve one first" in r.json()["detail"], r.text
+
     def test_the_owner_builds_whatever_the_setting(self, world, builds):
         c, *_ = world
         r = c.post(self.URL, headers=_h(KEY), json={"project_path": "/p", "udid": "SIM-9"})
@@ -1254,3 +1271,37 @@ class TestClientBuildReviewFixes:
         with pytest.raises(HTTPException) as e:
             await build_android._default_android(Ctl())
         assert ("emulator-5554" in e.value.detail) is named, e.value.detail
+        assert ("2 Android" in e.value.detail) is named, "a blind client is not told the count"
+
+    @pytest.mark.parametrize("theirs", [True, False])
+    async def test_a_blind_client_is_never_given_anothers_sole_android_device(
+            self, monkeypatch, theirs):
+        """The one booted emulator is another key's: on a blind server it is
+        not chosen, so its id never reaches a refusal (CodeRabbit)."""
+        from types import SimpleNamespace
+
+        from fastapi import HTTPException
+
+        from server import device_access, visibility
+        from server.api import build_android
+        from server.models import DeviceState, DeviceType
+
+        class Ctl:
+            _active_udid = "SIM-MINE"   # an iOS device the client holds
+
+            async def list_devices(self):
+                return [SimpleNamespace(udid="emulator-5554", state=DeviceState.BOOTED,
+                                        device_type=DeviceType.ANDROID_EMULATOR)]
+
+            async def resolve_udid(self, udid):
+                return udid
+
+        monkeypatch.setattr(visibility, "blind_for", lambda caller=None: True)
+        monkeypatch.setattr(device_access, "why_not",
+                            lambda udid: device_access.HELD_ELSEWHERE if theirs else None)
+        if not theirs:
+            assert await build_android._default_android(Ctl()) == "emulator-5554"
+            return
+        with pytest.raises(HTTPException) as e:
+            await build_android._default_android(Ctl())
+        assert "emulator-5554" not in e.value.detail, e.value.detail

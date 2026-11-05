@@ -262,12 +262,13 @@ def is_write(method: str, path: str) -> bool:
     return method.upper() not in ("GET", "HEAD", "OPTIONS") and path not in READ_POSTS
 
 
-def _named_devices(query: bytes, body: bytes) -> list[str]:
+def _named_devices(query: bytes, body: bytes,
+                   keys: frozenset[str] = DEVICE_KEYS) -> list[str]:
     from urllib.parse import parse_qsl
 
     found: list[str] = []
     for key, value in parse_qsl(query.decode("latin-1"), keep_blank_values=False):
-        if key in DEVICE_KEYS and value:
+        if key in keys and value:
             found.extend(v for v in value.split(",") if v)
     # Every body that parses as JSON, whatever its size or its Content-Type
     # claims. Deciding by the header was a way past the check: FastAPI reads
@@ -280,7 +281,7 @@ def _named_devices(query: bytes, body: bytes) -> list[str]:
         except (ValueError, UnicodeDecodeError):
             data = None
         if isinstance(data, dict):
-            for key in DEVICE_KEYS:
+            for key in keys:
                 value = data.get(key)
                 if isinstance(value, str) and value:
                     found.append(value)

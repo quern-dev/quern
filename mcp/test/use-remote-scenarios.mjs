@@ -6,7 +6,7 @@
 import { createHash, X509Certificate } from "node:crypto";
 import { createServer as http } from "node:http";
 import { createServer as https } from "node:https";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -187,8 +187,13 @@ const plans = {
   "leave-erroring": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
                        "GET /api/v1/sessions/agent-1": async () => globalThis.hang ? [503, { detail: "busy" }] : [200, { reservations: [] }],
                        "DELETE /api/v1/proxy/mocks/mock_local1": json(200, {}) }, {}],
+  // list_remotes asks each server itself now (#605), so the device the hint
+  // points at is served by the fake romulus, not printed by a fake quern CLI.
   hint: [{ "POST /api/v1/sessions/agent-1/reservations": async () => [409, { detail: globalThis.detail }],
-           "GET /api/v1/device/list": json(200, { devices: [], tools: {}, active_udid: null }) }, {}],
+           "GET /api/v1/device/list": json(200, { devices: [], tools: {}, active_udid: null }) },
+         { "GET /api/v1/device/list": json(200, { devices: [
+           { udid: "R1", name: "iPhone 15", model: "iPhone 15 Pro", os_version: "iOS 17.5",
+             device_family: "iPhone", device_type: "simulator", state: "shutdown" }] }) }],
 };
 const [localRoutes, romulusRoutes] = plans[scenario];
 const local = await fake("local", false, { ...base("local"), ...localRoutes });
@@ -469,13 +474,6 @@ if (scenario === "leave-unreachable" || scenario === "leave-erroring") {
   result.afterRelease = JSON.parse(text(await tools.use_remote({ name: "local" })).text);
   result.mockBodies = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").map((b) => b.body);
 } else if (scenario === "hint") {
-  writeFileSync(join(home, "quern"), `#!/bin/sh\ncat <<'J'\n${JSON.stringify({ remotes: [
-    { name: "local", devices: [] },
-    { name: "romulus", devices: [{ udid: "R1", name: "iPhone 15", model: "iPhone 15 Pro", os_version: "iOS 17.5",
-      device_family: "iPhone", device_type: "simulator", free: true, state: "shutdown" }] },
-  ] })}\nJ\n`);
-  chmodSync(join(home, "quern"), 0o755);
-  process.env.PATH = `${home}:/usr/bin:/bin`;
   globalThis.detail = "asked for 1 device(s), 0 free; 0 held by other sessions";
   result.noMatch = text(await tools.reserve_devices({ count: 1, os_version: "17.5" }));
   result.tooMany = text(await tools.reserve_devices({ count: 2, os_version: "17.5" }));

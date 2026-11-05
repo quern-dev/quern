@@ -1,20 +1,8 @@
 // Runs against the compiled output: `npm run build && npm test`.
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 
-import { markCurrent, quernRemoteList } from "../dist/tools/system.js";
-
-function fakeQuern(script) {
-  const dir = mkdtempSync(join(tmpdir(), "quern-lr-"));
-  const bin = join(dir, "bin");
-  mkdirSync(bin);
-  writeFileSync(join(bin, "quern"), `#!/bin/sh\n${script}\n`);
-  chmodSync(join(bin, "quern"), 0o755);
-  return { dir, bin };
-}
+import { markCurrent } from "../dist/tools/system.js";
 
 async function withEnv(env, fn) {
   // QUERN_REMOTE cleared: one exported by a developer would change which
@@ -33,46 +21,6 @@ async function withEnv(env, fn) {
   }
 }
 
-test("a remote that is down still gives the list: quern exits 1 and prints it", async () => {
-  const { dir, bin } = fakeQuern(
-    `echo '{"local_version":"1","remotes":[{"name":"studio","reachable":false,"error":"timed out"}]}'; exit 1`);
-  const data = await withEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: dir }, quernRemoteList);
-  assert.equal(data.remotes[0].name, "studio");
-  assert.equal(data.remotes[0].error, "timed out");
-});
-
-test("output that is not the list is an error naming what quern said", async () => {
-  const { dir, bin } = fakeQuern(`echo "usage: quern remote ..." >&2; exit 2`);
-  await assert.rejects(withEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: dir }, quernRemoteList),
-                       /quern remote list failed: usage/);
-});
-
-test("no quern CLI anywhere says so", async () => {
-  const empty = mkdtempSync(join(tmpdir(), "quern-none-"));
-  await assert.rejects(withEnv({ PATH: "/usr/bin:/bin", HOME: empty }, quernRemoteList),
-                       /quern CLI is not installed/);
-});
-
-test("the wrapper in ~/.local/bin is found when quern is not on PATH", async () => {
-  const home = mkdtempSync(join(tmpdir(), "quern-home-"));
-  mkdirSync(join(home, ".local", "bin"), { recursive: true });
-  writeFileSync(join(home, ".local", "bin", "quern"), `#!/bin/sh\necho '{"remotes":[]}'\n`);
-  chmodSync(join(home, ".local", "bin", "quern"), 0o755);
-  const data = await withEnv({ PATH: "/usr/bin:/bin", HOME: home }, quernRemoteList);
-  assert.deepEqual(data, { remotes: [] });
-});
-
-
-test("an older quern on PATH falls back to the installed wrapper", async () => {
-  const { dir, bin } = fakeQuern(`echo "usage: quern remote list" >&2; exit 2`);
-  mkdirSync(join(dir, ".local", "bin"), { recursive: true });
-  writeFileSync(join(dir, ".local", "bin", "quern"), `#!/bin/sh\necho '{"remotes":[{"name":"r"}]}'\n`);
-  chmodSync(join(dir, ".local", "bin", "quern"), 0o755);
-  const data = await withEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: dir }, quernRemoteList);
-  assert.equal(data.remotes[0].name, "r");
-});
-
-
 test("the server this MCP talks to is marked current, and only it", () => {
   const data = { remotes: [{ name: "local", local: true }, { name: "romulus" }, { name: "studio" }] };
   assert.deepEqual(markCurrent(structuredClone(data), "local").remotes.map((r) => r.current),
@@ -80,12 +28,6 @@ test("the server this MCP talks to is marked current, and only it", () => {
   assert.deepEqual(markCurrent(structuredClone(data), "romulus").remotes.map((r) => r.current),
                    [false, true, false]);
   assert.equal(markCurrent({ error: "x" }, "local").error, "x");          // not a list: untouched
-});
-
-test("it asks for this Mac's server too", async () => {
-  const { dir, bin } = fakeQuern(`printf '{"args": "%s"}' "$*"`);
-  const data = await withEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: dir }, quernRemoteList);
-  assert.equal(data.args, "remote list --json --with-local");
 });
 
 import { matchingElsewhere, elsewhereHint } from "../dist/tools/system.js";
@@ -135,17 +77,17 @@ test("elsewhere: a name matches name or model, exact before substring", () => {
 });
 
 test("the hint names the server and how to switch; nothing when nowhere has a match", async () => {
-  const { dir, bin } = fakeQuern(`cat <<'J'\n${JSON.stringify(LIST)}\nJ`);
-  const hint = await withEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: dir },
-    () => elsewhereHint({ os_version: "17.5", device_family: "iPhone" }));
+  const list = async () => LIST;
+  const hint = await withEnv({}, () =>
+    elsewhereHint({ os_version: "17.5", device_family: "iPhone" }, undefined, undefined, list));
   assert.match(hint, /romulus has 2 free that match: iPhone 15 Pro \(booted\), CI 3/);
   assert.match(hint, /use_remote\(name="romulus"\)/);
-  const none = await withEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: dir },
-    () => elsewhereHint({ os_version: "16.0" }));
-  assert.equal(none, "");
-  const broken = fakeQuern("exit 2");
-  assert.equal(await withEnv({ PATH: `${broken.bin}:/usr/bin:/bin`, HOME: broken.dir },
-    () => elsewhereHint({ os_version: "17.5" })), "", "a list that fails costs only the hint");
+  assert.equal(await withEnv({}, () =>
+    elsewhereHint({ os_version: "16.0" }, undefined, undefined, list)), "");
+  const broken = async () => { throw new Error("remotes.json is not readable"); };
+  assert.equal(await withEnv({}, () =>
+    elsewhereHint({ os_version: "17.5" }, undefined, undefined, broken)), "",
+    "a list that fails costs only the hint");
 });
 
 test("use_remote's selection wins over QUERN_REMOTE, and 'local' means this Mac", () => {

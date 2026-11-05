@@ -2,9 +2,14 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 
 import { randomBytes } from "node:crypto";
-import { fetch as undiciFetch } from "undici";
+import { Agent, fetch as undiciFetch } from "undici";
 import { discoverServer } from "./config.js";
 import { PinMismatch, pinnedAgent } from "./remote.js";
+
+/** A dispatcher that connects directly: what this Mac's server is reached
+ * through, so NODE_USE_ENV_PROXY / --use-env-proxy and HTTP_PROXY never route
+ * a request -- and the key in it -- through a proxy. */
+const DIRECT = new Agent();
 
 /** fetch, pinned to a remote quern's certificate when the server is one
  * (#254, phase 3); Node's own fetch otherwise. `noTimeouts` drops undici's
@@ -15,7 +20,12 @@ export async function serverFetch(
   init: RequestInit = {},
   { noTimeouts = false } = {},
 ): Promise<Response> {
-  if (!server.fingerprint) return fetch(url, init);
+  if (!server.fingerprint) {
+    // Never through a proxy from the environment, which would be handed the
+    // key: an explicit dispatcher is used whatever NODE_USE_ENV_PROXY says
+    // (#607 review).
+    return (await undiciFetch(url, { ...(init as object), dispatcher: DIRECT })) as unknown as Response;
+  }
   try {
     return (await undiciFetch(url, {
       ...(init as object),
@@ -104,7 +114,9 @@ export function requestWithoutTimeout(
 ): Promise<{ status: number; text: string }> {
   const send = url.protocol === "https:" ? httpsRequest : httpRequest;
   return new Promise((resolve, reject) => {
-    const req = send(url, { method, headers }, (res) => {
+    // agent: false -- not the global agent, which NODE_USE_ENV_PROXY routes
+    // through HTTP_PROXY, key and all (measured on Node 22.23; #607 review).
+    const req = send(url, { method, headers, agent: false }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (c: Buffer) => chunks.push(c));
       res.on("end", () =>
@@ -227,7 +239,11 @@ export async function apiRequest(
       ({ status, text } = await requestWithoutTimeout(
         url, method, headers, init.body as string | undefined));
     } else {
-      const resp = await fetch(url.toString(), init);
+      // Direct, never through a proxy from the environment, which would be
+      // handed the key (CodeRabbit). Node's own fetch happens to go direct
+      // too, but only because importing undici replaces the env-proxy
+      // dispatcher Node installs (measured, Node 22.23): not to be relied on.
+      const resp = await serverFetch(server, url.toString(), init);
       status = resp.status;
       text = await resp.text();
     }
