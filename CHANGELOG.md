@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`list_remotes` works without the quern CLI (#605).** It ran `quern remote list` on the MCP's machine, so a Linux or Windows machine with only the MCP installed, paired with a Mac, couldn't list its remotes, and the "free elsewhere" hint on `reserve_devices` and `list_devices` silently never appeared. The MCP now asks each server itself, with the same answer, timeouts and failure wording, and a shared fixture keeps the Python and TypeScript versions from drifting.
 - **A server's owner can let paired clients build (#605).** `build_and_install` from a client key was always refused, because a build runs the project's code as the Mac's user. Setting `"remote": {"client_builds": true}` in `~/.quern/config.json` allows it. Quern installs the result only on devices the client's own session holds, and `gradle_args` and `java_home` stay the owner's, since an extra Gradle task such as `installDebug` would install on every connected device. The build itself still runs the project's scripts as the Mac's user. It's off unless literally `true`, and off when the config can't be read. Off, the refusal now names the setting rather than just saying owner-only. The project path is still read on the server's disk: quern doesn't copy source from the client.
 
 ## [0.26.0-beta.1] - 2026-11-04
