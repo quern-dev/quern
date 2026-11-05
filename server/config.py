@@ -457,7 +457,8 @@ def client_builds() -> bool:
     the Mac's user: xcodebuild runs a project's build phases and plug-ins, and
     Gradle whatever the build script says. An owner who turns it on is letting
     every paired client do that. The client still builds only onto devices
-    its own session holds, and names a project path on the Mac's disk.
+    its own session holds, and only from what it pushed to its own sandbox
+    (a `sandbox:` project path, #608), never a path already on the Mac's disk.
 
     A config.json that cannot be read is off, so a broken file never hands
     out builds. Nor does one quern may not read: `exists()` raises
