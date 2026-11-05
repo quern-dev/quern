@@ -194,3 +194,12 @@ def test_the_setting_is_a_known_remote_key(monkeypatch):
     monkeypatch.setattr(config, "read_user_config",
                         lambda strict=False: {"remote": {"client_viewer_links": False}})
     assert config.remote_settings()["key_warning"] is None
+
+
+def test_a_config_quern_may_not_read_is_off_not_a_crash(monkeypatch):
+    """exists() raises PermissionError on a directory quern cannot search,
+    which is not ConfigUnreadable and reached the caller as a 500 (#605 review)."""
+    def denied(strict=False):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(config, "read_user_config", denied)
+    assert config.client_viewer_links() is False

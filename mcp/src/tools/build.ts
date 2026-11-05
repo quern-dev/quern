@@ -12,13 +12,13 @@ export function registerBuildTools(server: McpServer): void {
 
 ANDROID (a Gradle project: project_path is the build root or a module inside it). Pass variant (e.g. "debug", "stagingDebug"); module defaults to "app". Omit variant to get an error listing the module's variants, then pick one and call again; a name that covers several (a build type on a flavoured app, like "debug") or that is not a variant is refused the same way, before anything builds. Runs the project's own ./gradlew :module:assemble<Variant>, installs the APK on each Android target in parallel (the split matching each device's CPU, or the universal one), and records the build -- its R8 mapping and native libraries -- so its crashes are symbolicated by get_latest_crash without a record_android_build call. quern finds a JDK and the Android SDK itself, since a daemon started from the menu bar does not see your shell's JAVA_HOME or sdkman, and the response names the ones it used (java, android_sdk). Gradle's own daemon stays running between builds, as it does under Android Studio.
 
-When the MACHINE rather than the code stops the build -- no suitable JDK, the toolchain JDK the build asks for, no Android SDK, missing SDK packages or licences, the NDK -- the response has an "environment" list instead of a build: each entry has a kind, a summary, what was found, and options, most direct first. Some options you can apply yourself by calling again: java_home="<a JDK it found>", or gradle_args=[...] (for example a toolchain path). Others -- installing a JDK or SDK package, editing gradle.properties or local.properties -- change the user's machine or project: ask the user before doing them. Never installs or edits anything itself.
+When the MACHINE rather than the code stops the build -- no suitable JDK, the toolchain JDK the build asks for, no Android SDK, missing SDK packages or licences, the NDK -- the response has an "environment" list instead of a build: each entry has a kind, a summary, what was found, and options, most direct first. Some options you can apply yourself by calling again: java_home="<a JDK it found>", or gradle_args=[...] (for example a toolchain path) -- except as a client of a remote quern, where both are the server owner's and are refused with 403: tell the user what the owner would need to change. Others -- installing a JDK or SDK package, editing gradle.properties or local.properties -- change the user's machine or project: ask the user before doing them. Never installs or edits anything itself.
 
 A failed build gives Gradle's reason: compile errors with file and line (Kotlin, Java, resources), or what went wrong otherwise. An install refused because the installed app is signed with a different key says so; uninstall_on_signature_mismatch=true uninstalls it first, which ERASES the app's data on that device -- ask the user before passing it. One refused because the installed build has a higher versionCode says so too; allow_downgrade=true installs over it (debuggable builds only) and keeps the data. A release variant with no signing config builds an unsigned APK, which Android will not install: said, with the options. A keystore that is missing or will not open is an environment problem of kind "signing".
 
 Builds often read environment variables (a version suffix from JOB_NAME, a signing password), and a daemon started from the menu bar does not see your shell's exports. The response's env_vars lists the variables the build scripts read and which were unset; pass env={...} to set them for this build.
 
-A long build reports progress while it runs (the Gradle task it is on and the time so far) to a client that asks for progress notifications.
+A long build reports progress while it runs (the Gradle task it is on and the time so far) to a client that asks for progress notifications. On a blind remote quern a client key can't read the build's progress, so it gets only the time so far.
 
 iOS:
 
@@ -27,6 +27,8 @@ Builds once per required architecture — not once per device:
 - Simulators        → generic/platform=iOS Simulator (one build, installed on all simulator targets)
 
 Both architectures are built concurrently when the target list mixes physical and simulator devices.
+
+On a remote quern (use_remote), project_path is on that server's disk, not this machine's, and a client key may build only when the server's owner has set remote.client_builds; otherwise the call is refused with a 403 that says so. A client key can't pass java_home or gradle_args.
 
 Each checkout builds into its own DerivedData, under builds/ in quern's state directory (~/.quern unless QUERN_STATE_DIR moves it) and keyed by the project's path, scheme and platform -- never Xcode's default, nor another checkout's. So no -derivedDataPath is needed to keep two checkouts of one project, or this build and Xcode's, from colliding.
 
@@ -76,10 +78,10 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
         "Android/Gradle: the module to build when project_path is the build root (default \"app\")."
       ),
       java_home: z.string().optional().describe(
-        "Android/Gradle: a JDK to run Gradle with, typically one an environment problem listed."
+        "Android/Gradle: a JDK to run Gradle with, typically one an environment problem listed. The server owner's only: a client key of a remote quern is refused."
       ),
       gradle_args: z.array(z.string()).optional().describe(
-        "Android/Gradle: extra arguments for gradlew, e.g. one an environment problem suggested."
+        "Android/Gradle: extra arguments for gradlew, e.g. one an environment problem suggested. The server owner's only: a client key of a remote quern is refused."
       ),
       uninstall_on_signature_mismatch: z.union([
         z.boolean(),
