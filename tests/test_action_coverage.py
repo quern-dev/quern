@@ -41,6 +41,11 @@ _NOT_ACTIONS: frozenset[str] = frozenset({
     "remote.py:status",
     "remote.py:pair_hello",
     "uploads.py:list_uploads",          # a read of the caller's own uploads
+    # Git sandboxes (#608): the protocol's advert and a fetch are reads; the
+    # push (receive_pack) is the action, and is logged.
+    "git_sandbox.py:info_refs",
+    "git_sandbox.py:upload_pack",
+    "git_sandbox.py:list_sandboxes",
     "recordings.py:recording_files",    # reads: a recording's files, downloaded
     "recordings.py:recording_file",
     "screenshots.py:screenshot_file",   # a read of a screenshot already taken

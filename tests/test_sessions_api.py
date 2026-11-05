@@ -493,6 +493,10 @@ class TestTheGuardCoversEveryRoute:
             "route checks the recording is the caller's (#559); no device",
         ("DELETE", "/api/v1/device/app/state/{label}"): "deletes a snapshot on the Mac's disk",
         ("POST", "/api/v1/proxy/replay/{flow_id}"): "replays a request from the Mac; no device",
+        # Git sandboxes (#608): the caller's own repositories, by name; no device.
+        ("POST", "/git/{repo}/git-receive-pack"): "the caller's own sandbox (#608); no device",
+        ("POST", "/git/{repo}/git-upload-pack"): "the caller's own sandbox (#608); no device",
+        ("DELETE", "/api/v1/sandboxes/{repo}"): "the caller's own sandbox (#608); no device",
     }
 
     def test_every_change_addressed_by_an_id_has_been_decided(self):

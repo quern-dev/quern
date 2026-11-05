@@ -773,6 +773,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.uploads.reset()
     uploads_task = asyncio.create_task(_sweep_uploads(app), name="upload-sweep")
 
+    # Git sandboxes (#608): a revoked key's go, and repositories idle past
+    # sandboxes.max_idle_days.
+    from server.api.git_sandbox import sweep as _sweep_sandboxes
+    from server.config import sandbox_settings as _sandbox_settings
+
+    if _sandbox_settings()["note"]:
+        logger.warning("%s", _sandbox_settings()["note"])
+    sandboxes_task = asyncio.create_task(_sweep_sandboxes(app), name="sandbox-sweep")
+
     # An Android keyboard typing replaced goes back after IDLE_RESTORE_S with
     # no typing on that device (#513). Without it, a device nobody reserved
     # kept u2's keyboard, which shows no keys, until the server stopped.
@@ -878,7 +887,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     for task in (
         watchdog_task, update_check_task, network_monitor_task,
         sim_bridge_resync_task, mcp_clients_task, sim_tls_task, sessions_task,
-        uploads_task, builds_task, disk_task,
+        uploads_task, builds_task, sandboxes_task, disk_task,
     ):
         if task and not task.done():
             task.cancel()
@@ -1095,6 +1104,8 @@ def create_app(
     app.include_router(remote_router)
     from server.api.uploads import router as uploads_router
     app.include_router(uploads_router)
+    from server.api.git_sandbox import router as git_sandbox_router
+    app.include_router(git_sandbox_router)
     from server.api.screenshots import router as screenshots_router
     app.include_router(screenshots_router)
     app.include_router(crashes_router)

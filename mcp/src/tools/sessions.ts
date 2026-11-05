@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { heldSessionState } from "../held-session.js";
+import { heldSessionState, liveSoon } from "../held-session.js";
 import { SESSION_ID, apiRequest } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
 import { betweenSwitches, elsewhereHint } from "./system.js";
@@ -50,6 +50,9 @@ After a use_remote switch, the first reservation that includes the right devices
       // What a switch moved here is set up on what was just reserved, in the
       // same turn of the queue: two reservations at once, or one and a
       // switch, applied it twice or lost it (review).
+      // A session still connecting is given a moment, rather than the
+      // reservation racing it to a 409 (#608).
+      await liveSoon();
       const { data, carried } = await betweenSwitches(async () => {
         const data = (await apiRequest("POST", path("/reservations"), undefined,
           { ...args, ...picking })) as

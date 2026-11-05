@@ -567,6 +567,41 @@ def builds_settings() -> dict:
             "note": "; ".join(notes) or None}
 
 
+#: What one key's git sandboxes may hold together, and how long a repository
+#: may go unused before it is removed (#608).
+SANDBOX_DEFAULT_MB = 4096
+SANDBOX_DEFAULT_IDLE_DAYS = 14
+
+
+def sandbox_settings() -> dict:
+    """The git sandbox limits from config.json's `sandboxes` object (#608):
+
+        {"sandboxes": {"max_mb": 4096, "max_idle_days": 14}}
+
+    `max_mb` is what one key's sandboxes may hold on disk, repositories and
+    checkouts together; `max_idle_days` how long a repository may go without
+    a push or a build before the sweep removes it (0 keeps them). The free
+    space the volume keeps is the uploads' `min_free_mb`. A value that is not
+    a whole number reads as the default, with a note."""
+    raw = read_user_config().get("sandboxes")
+    raw = raw if isinstance(raw, dict) else {}
+    notes = []
+
+    def whole(key: str, default: int, least: int) -> int:
+        value = raw.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < least:
+            notes.append(f"config.json's sandboxes.{key} is {value!r}, not a whole number "
+                         f"{'above 0' if least else 'of 0 or more'}: using {default}")
+            return default
+        return value
+
+    max_mb = whole("max_mb", SANDBOX_DEFAULT_MB, 1)
+    idle_days = whole("max_idle_days", SANDBOX_DEFAULT_IDLE_DAYS, 0)
+    return {"max_bytes": max_mb * 1024 * 1024, "max_idle_days": idle_days,
+            "min_free_bytes": upload_settings()["min_free_bytes"],
+            "note": "; ".join(notes) or None}
+
+
 #: When disk use is worth a warning, by default (#581): simulators and quern's
 #: stores together over this, or the disk with less than this free.
 DISK_DEFAULT_WARN_GB = 100

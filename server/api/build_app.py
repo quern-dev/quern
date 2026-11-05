@@ -382,6 +382,17 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
     UDID format translation for physical iOS 17+ devices is handled internally.
     """
     controller = request.app.state.device_controller
+    if body.project_path.startswith("sandbox:"):
+        # A checkout of what the caller pushed (#605): resolved inside its own
+        # sandbox, so the caller names no path on this Mac.
+        from server import sandboxes, visibility
+        try:
+            # In a thread: it runs git, and the event loop serves every other
+            # request meanwhile (CodeRabbit).
+            body.project_path = await asyncio.to_thread(
+                sandboxes.resolve, visibility.current_caller().principal, body.project_path)
+        except sandboxes.SandboxError as e:
+            raise HTTPException(e.status, str(e)) from None
     if controller is None:
         raise HTTPException(status_code=503, detail="Device controller not initialized")
 

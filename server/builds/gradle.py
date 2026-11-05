@@ -60,10 +60,18 @@ def is_gradle_project(path: str) -> bool:
 
 
 def _root_of(p: Path) -> Path | None:
+    from server import sandboxes
+
     p = p.resolve()
+    # A git sandbox's checkout is a project of its own (#608): the search for
+    # its build root stops there, rather than building whatever settings.gradle
+    # the owner keeps above it, in ~/.quern or ~ (review).
+    top = sandboxes.checkout_of(p)
     for d in (p, *p.parents):
         if any((d / s).is_file() for s in _SETTINGS):
             return d
+        if d == top:
+            break
     return None
 
 

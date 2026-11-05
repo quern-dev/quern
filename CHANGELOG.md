@@ -8,8 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A remote client can build its own project (#608).** With `remote.client_builds` on (#606), `build_and_install` from a client key sends the project to the server itself, and builds only that: a client's `project_path` must be the `sandbox:` path, never a path on the Mac. (Its build scripts can still reach anything the Mac's user can.)
+  - The MCP snapshots the working tree (untracked files included, nothing in the repository changed but new objects).
+  - It pushes the snapshot over git's smart HTTP into a sandbox of that key's own, with TLS pinned to the paired certificate.
+  - It builds the checkout, which stays at a stable path, so rebuilds are incremental.
+  - Sandboxes are capped per key (`sandboxes.max_mb`), keep the uploads' free-space floor, and are removed with a revoked key or after `sandboxes.max_idle_days`. `GET`/`DELETE /api/v1/sandboxes` list and remove them.
+  - Projects with submodules or Git LFS are refused with the reason, and so is a push the server refuses, which git alone reports only as an HTTP status.
+  - A reservation made as the MCP starts now waits briefly for its session to connect, instead of failing with "has no live connection".
 - **`list_remotes` works without the quern CLI (#605).** It ran `quern remote list` on the MCP's machine, so a Linux or Windows machine with only the MCP installed, paired with a Mac, couldn't list its remotes, and the "free elsewhere" hint on `reserve_devices` and `list_devices` silently never appeared. The MCP now asks each server itself, with the same answer, timeouts and failure wording, and a shared fixture keeps the Python and TypeScript versions from drifting.
-- **A server's owner can let paired clients build (#605).** `build_and_install` from a client key was always refused, because a build runs the project's code as the Mac's user. Setting `"remote": {"client_builds": true}` in `~/.quern/config.json` allows it. Quern installs the result only on devices the client's own session holds, and `gradle_args` and `java_home` stay the owner's, since an extra Gradle task such as `installDebug` would install on every connected device. The build itself still runs the project's scripts as the Mac's user. It's off unless literally `true`, and off when the config can't be read. Off, the refusal now names the setting rather than just saying owner-only. The project path is still read on the server's disk: quern doesn't copy source from the client.
+- **A server's owner can let paired clients build (#605).** `build_and_install` from a client key was always refused, because a build runs the project's code as the Mac's user. Setting `"remote": {"client_builds": true}` in `~/.quern/config.json` allows it. Quern installs the result only on devices the client's own session holds, and `gradle_args` and `java_home` stay the owner's, since an extra Gradle task such as `installDebug` would install on every connected device. The build itself still runs the project's scripts as the Mac's user. It's off unless literally `true`, and off when the config can't be read. Off, the refusal now names the setting rather than just saying owner-only. The project reaches the server through a git sandbox (#608).
 
 ## [0.26.0-beta.1] - 2026-11-04
 

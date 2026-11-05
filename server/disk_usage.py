@@ -156,6 +156,8 @@ def measure(*, sim_devices: Path | None = None, config_dir: Path | None = None,
         "recordings": _store(config_dir / "recordings", stop),
         "profiles": _store(config_dir / "profiles", stop),
         "uploads": _store(config_dir / "uploads", stop),
+        # Clients' git sandboxes (#608): up to sandboxes.max_mb per key.
+        "sandboxes": _store(config_dir / "sandboxes", stop),
     }
     try:
         usage = shutil.disk_usage(config_dir if config_dir.exists() else config_dir.parent)

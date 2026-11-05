@@ -72,7 +72,8 @@ export function sharesDisk(server: Server): Promise<boolean> {
   return answer;
 }
 
-/** Whether an app at a path on this machine must be sent, not named. */
+/** Whether something at a path on this machine -- an app, a project to build
+ * -- must be sent, not named. */
 export async function mustUpload(server: Server): Promise<boolean> {
   return isClientKey(server.apiKey) || !(await sharesDisk(server));
 }

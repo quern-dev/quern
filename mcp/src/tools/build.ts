@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { discoverServer } from "../config.js";
 import { apiRequest } from "../http.js";
+import { mustUpload } from "../remote-paths.js";
+import { syncProject, type Synced } from "../sandbox-sync.js";
 import { reportProgress, type HandlerExtra, type RunningBuild } from "./build-progress.js";
 import { strictParams, errorText } from "./helpers.js";
 
@@ -28,7 +31,7 @@ Builds once per required architecture — not once per device:
 
 Both architectures are built concurrently when the target list mixes physical and simulator devices.
 
-On a remote quern (use_remote), project_path is on that server's disk, not this machine's, and a client key may build only when the server's owner has set remote.client_builds; otherwise the call is refused with a 403 that says so. A client key can't pass java_home or gradle_args.
+On a remote quern (use_remote), give project_path on THIS machine as usual: the project's working tree is sent with git to your own sandbox on that server (untracked files included, nothing in your repository changed) and built there; the answer says what was sent. It needs git here, the project in a git repository, no submodules or Git LFS, and the server's owner to allow client builds (remote.client_builds), else it says why. A project already on the server is named project_path="sandbox:<repo>/<branch>/<path>". A client key can't pass java_home or gradle_args.
 
 Each checkout builds into its own DerivedData, under builds/ in quern's state directory (~/.quern unless QUERN_STATE_DIR moves it) and keyed by the project's path, scheme and platform -- never Xcode's default, nor another checkout's. So no -derivedDataPath is needed to keep two checkouts of one project, or this build and Xcode's, from colliding.
 
@@ -123,6 +126,14 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
     });
     try {
       const body: Record<string, unknown> = { project_path, configuration };
+      // On another machine the project is not on the server's disk, and a
+      // client key may build only its own sandbox: send it to this key's git
+      // sandbox there and build that (#608).
+      let synced: Synced | undefined;
+      if (!project_path.startsWith("sandbox:") && await mustUpload(discoverServer())) {
+        synced = await syncProject(discoverServer(), project_path);
+        body.project_path = synced.project_path;
+      }
       if (skip_plugin_validation) body.skip_plugin_validation = true;
       if (variant) body.variant = variant;
       if (module) body.module = module;
@@ -148,13 +159,16 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
 
       // Return concise summary on full success, full JSON on any failure
       const resp = data as Record<string, unknown>;
+      const sent = synced ? `Sent to the server as ${synced.project_path} ` +
+        `(commit ${synced.commit.slice(0, 12)}). ` : "";
       if (resp.all_installed && resp.summary) {
         return {
           content: [
-            { type: "text" as const, text: resp.summary as string },
+            { type: "text" as const, text: sent + (resp.summary as string) },
           ],
         };
       }
+      if (synced) resp.synced = synced;
 
       return {
         content: [
