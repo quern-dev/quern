@@ -239,7 +239,11 @@ export async function apiRequest(
       ({ status, text } = await requestWithoutTimeout(
         url, method, headers, init.body as string | undefined));
     } else {
-      const resp = await fetch(url.toString(), init);
+      // Direct, never through a proxy from the environment, which would be
+      // handed the key (CodeRabbit). Node's own fetch happens to go direct
+      // too, but only because importing undici replaces the env-proxy
+      // dispatcher Node installs (measured, Node 22.23): not to be relied on.
+      const resp = await serverFetch(server, url.toString(), init);
       status = resp.status;
       text = await resp.text();
     }
