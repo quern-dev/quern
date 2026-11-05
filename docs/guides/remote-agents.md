@@ -40,6 +40,7 @@ A switch is made only once the agent's session is live on the new server. If tha
 - **Its mocks.** The mock responses your agent set are removed from the server it leaves and set up again on the devices of its first reservation on the new one -- a mock scoped to a simulator on its simulators, one scoped to an Android device on its Android devices. That reservation's answer lists the new rule ids, and anything that couldn't be set up yet -- for example because the new server's proxy isn't running -- waits for a later reservation.
 - **Its session capture.** Apps it asked to capture with `add_session_capture` are captured again on the newly reserved simulators.
 - **Your project's knowledge base.** If your project has one (`.quern/knowledge`), it's loaded on the new server for your agent's session, so screen identification keeps working.
+- **Builds of your project**, if that Mac's owner allows them (`remote.client_builds`). `build_and_install` sends your project with git to a sandbox of your own there and builds it onto devices you hold. It needs git on your machine and a project in a git repository, with no submodules or Git LFS. Your build scripts run as that Mac's user. See [Sharing a Server](remote-sharing.md).
 
 The answer to `use_remote` also says whether the new server's proxy is running, since mocks and capture need it.
 

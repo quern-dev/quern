@@ -94,7 +94,7 @@ Give it to the client as `QUERN_CLIENT_KEY` (not `QUERN_API_KEY`, which `quern e
 - **Revoking a key** ends its sessions and frees their devices within a second, closes its session sockets, and ends its open streams -- video at the next frame, logs and flows at their next entry or 15-second heartbeat; the next request is refused with 401.
 - **Every request must carry `X-Quern-Session`** (400 otherwise). The server puts a client's session ids in its own namespace, `<label>:<id>`, so one client can never name, release or take over another's session or active device. A client's sessions appear under those names in `GET /api/v1/sessions` and in 423 bodies.
 
-**What a client key is not:** a sandbox. It keeps cooperating users from changing each other's devices and the Mac's shared state by mistake. It does not make a key safe to give someone you would not let use the Mac: an app a client installs on its own simulator runs as the Mac's user, and the simulator sandbox is not a security boundary.
+**What a client key is not:** a sandbox. It keeps cooperating users from changing each other's devices and the Mac's shared state by mistake. It does not make a key safe to give someone you would not let use the Mac: an app a client installs on its own simulator runs as the Mac's user, and so does a build the owner lets it run (`remote.client_builds`); the simulator sandbox is not a security boundary.
 
 Every route is classified in `server/scopes.py`, and a route with no classification is owner-only; a test fails until each new route is given one.
 
