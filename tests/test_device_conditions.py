@@ -116,8 +116,10 @@ class FakeService:
 
 
 class FakeRsd:
+    made: list[FakeRsd] = []
+
     def __init__(self, address):
-        pass
+        FakeRsd.made.append(self)
 
     async def connect(self):
         pass
@@ -129,6 +131,7 @@ class FakeRsd:
 @pytest.fixture
 def phone(monkeypatch, tmp_path):
     p = Phone()
+    FakeRsd.made = []
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(cond, "_POLL_S", 0.0)
     monkeypatch.setattr(cond, "CONFIRM_S", 0.5)
@@ -677,6 +680,51 @@ class TestReview:
         assert (await k.describe(UDID)).active.set_by is None
         # And a clear that worked is not reported as failing.
         assert (await k.clear(UDID)).profile == "ThermalFair" and phone.active() is None
+
+
+class TestReviewTwo:
+    async def test_a_cleared_hold_is_not_live_while_it_closes(self, phone, monkeypatch):
+        """A real connection takes a while to close after a clear; a call in
+        that window must go to the device, not to the closing hold."""
+        closing = asyncio.Event()
+
+        async def slow_close(self):
+            # The hold's connection only: the set's read before it is the
+            # first one made, and a read waits for its own close.
+            if FakeRsd.made.index(self) == 1:
+                await closing.wait()
+        monkeypatch.setattr(FakeRsd, "close", slow_close)
+        k = keeper()
+        await k.set(UDID, "SlowNetwork3G", allow_performance=False, principal=None,
+                    session=None)
+        await k.clear(UDID)
+        assert k._live(UDID) is None                  # closing, not live
+        assert (await k.describe(UDID)).active is None
+        closing.set()
+
+    async def test_a_close_that_never_finishes_still_ends_the_hold(self, phone,
+                                                                   monkeypatch):
+        async def never(self):
+            if FakeRsd.made.index(self) == 1:        # the hold's, as above
+                await asyncio.sleep(30)
+        monkeypatch.setattr(FakeRsd, "close", never)
+        k = keeper()
+        await k.set(UDID, "SlowNetwork3G", allow_performance=False, principal=None,
+                    session=None)
+        hold = k._holds[UDID]
+        await k.clear(UDID)
+        await asyncio.wait_for(hold.task, 5)          # ended, not stuck in close
+        assert UDID not in k._holds
+
+    async def test_resolving_the_tunnel_is_inside_the_deadline(self, phone, monkeypatch):
+        from server.device import performance
+
+        async def hang(uuid):
+            await asyncio.sleep(30)
+        monkeypatch.setattr(performance, "_device_address", hang)
+        monkeypatch.setattr(cond, "CALL_TIMEOUT_S", 0.2)
+        with pytest.raises(DeviceError, match="did not answer within"):
+            await asyncio.wait_for(cond.read_conditions(UDID), 3)
 
 
 class TestReleaseBySameKey:

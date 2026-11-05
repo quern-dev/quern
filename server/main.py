@@ -675,11 +675,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # An Android keyboard an earlier process replaced and never put back,
         # because it crashed or was killed (#513). Last: it waits on devices.
         _log_keyboards(await device_controller.u2.restore_keyboards(), "at startup")
-        # A phone left in a network or thermal condition by a server that
-        # crashed or was killed before it could clear it (#245).
-        _log_conditions(await app.state.conditions.clear_leftovers(), "at startup")
 
     app.state._warmup_task = asyncio.create_task(_warmup_devices())
+
+    async def _clear_leftover_conditions():
+        """A phone left in a network or thermal condition by a server that
+        crashed or was killed before it could clear it (#245). Its own task:
+        it needs neither device discovery nor the Android keyboards, so a
+        warm-up step failing must not skip it (CodeRabbit)."""
+        try:
+            _log_conditions(await app.state.conditions.clear_leftovers(), "at startup")
+        except Exception:  # noqa: BLE001 -- startup carries on regardless
+            logger.warning("Could not clear the conditions a previous server left",
+                           exc_info=True)
+
+    app.state._conditions_task = asyncio.create_task(_clear_leftover_conditions())
 
     # Re-probe the simulator UI backend periodically. Selection used to be
     # latched at startup and never revisited, so an Xcode upgrade under a

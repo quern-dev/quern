@@ -184,19 +184,23 @@ async def _with_inducer(uuid: str, what: str, fn: Callable[[Any], Any]) -> Any:
     from server.device.performance import _device_address
 
     lib = _pmd3()
-    address = await _device_address(uuid)
-    rsd = lib.RemoteServiceDiscoveryService(address)
     deadline = asyncio.timeout(CALL_TIMEOUT_S)
+    rsd = None
     try:
         async with deadline:
             try:
+                # Inside the deadline: resolving the tunnel can wait on
+                # devicectl, which has no bound of its own (CodeRabbit).
+                address = await _device_address(uuid)
+                rsd = lib.RemoteServiceDiscoveryService(address)
                 await rsd.connect()
                 async with lib.DvtProvider(rsd) as dvt:
                     async with lib.ConditionInducer(dvt) as inducer:
                         return await fn(inducer)
             finally:
-                with contextlib.suppress(Exception):
-                    await rsd.close()
+                if rsd is not None:
+                    with contextlib.suppress(Exception):
+                        await rsd.close()
     except TimeoutError:
         if deadline.expired():
             raise DeviceError(f"{uuid[:8]} did not answer within {CALL_TIMEOUT_S:g}s "
@@ -287,7 +291,11 @@ class _Hold:
 
     @property
     def live(self) -> bool:
-        return self.task is not None and not self.task.done()
+        # A cleared or gone hold is closing its connection: a command asked of
+        # it then would be drained unanswered, an error after a clear that
+        # worked (CodeRabbit). It is not live from the moment it ends.
+        return (self.task is not None and not self.task.done()
+                and not self.cleared and not self.gone)
 
     async def ask(self, command: str, arg: str | None = None) -> Any:
         if not self.live:
@@ -336,8 +344,10 @@ async def _run_hold(hold: _Hold, ready: asyncio.Future,
             ready.set_exception(error)
     finally:
         if rsd is not None:
+            # Bounded: an older pymobiledevice3 waits on the transport closing
+            # with no deadline, and the hold would never be seen to end.
             with contextlib.suppress(Exception):
-                await rsd.close()
+                await asyncio.wait_for(rsd.close(), 2.0)
         while not hold.queue.empty():          # nobody is left to answer them
             _, _, future = hold.queue.get_nowait()
             if not future.done():
