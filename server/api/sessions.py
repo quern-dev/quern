@@ -550,6 +550,15 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
         held = registry.holder_of(udid)
         if held is not None and held.session.principal == session.principal:
             continue                       # still the key's, through another session
+        # A network or thermal condition it set on a phone (#245): the whole
+        # phone's, so handed to the next holder it would slow their work
+        # with nothing to say why. A clear that fails keeps the device back.
+        conditions = getattr(app.state, "conditions", None)
+        if conditions is not None:
+            cleared = await conditions.clear_recorded(
+                udid, session=session.id, principal=session.principal)
+            if cleared is not None:
+                actions.append(cleared)
         for rule in list(getattr(adapter, "_mock_rules", []) or []) if is_client else []:
             if rule.get("simulator_udid") != udid or owners.get(rule.get("rule_id")) \
                     != session.principal:

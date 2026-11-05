@@ -33,6 +33,7 @@ from server.models import (
     PreviewStartRequest,
     PreviewStopRequest,
     RebootRequiredError,
+    SetDeviceConditionRequest,
     SetDisplayDensityRequest,
     SetFontScaleRequest,
     SetHardwareKeyboardRequest,
@@ -377,7 +378,7 @@ def _with_reservations(request: Request, device_dicts: list[dict]) -> list[dict]
 
     registry = getattr(request.app.state, "sessions", None)
     if registry is None:
-        return device_dicts
+        return _with_conditions(request, device_dicts)
     caller = visibility.current_caller()
     out = []
     for dd in device_dicts:
@@ -386,7 +387,22 @@ def _with_reservations(request: Request, device_dicts: list[dict]) -> list[dict]
             continue
         dd["reservation"] = visibility.holder_detail(held, caller) if held else None
         out.append(dd)
-    return out
+    return _with_conditions(request, out)
+
+
+def _with_conditions(request: Request, device_dicts: list[dict]) -> list[dict]:
+    """A phone quern put in a network or thermal condition says so (#245):
+    one silently on slow 3G reads exactly like a slow app. From quern's
+    record, with no device asked -- `get_device_condition` asks it, and sees
+    one set in Xcode too."""
+    keeper = getattr(request.app.state, "conditions", None)
+    records = keeper.records.all() if keeper is not None else {}
+    for dd in device_dicts:
+        record = records.get(dd["udid"])
+        if record is not None:
+            dd["condition"] = {"profile": record.get("profile"), "group": record.get("group"),
+                               "set_at": record.get("set_at"), "set_by": "quern"}
+    return device_dicts
 
 
 @router.post("/boot")
@@ -832,6 +848,78 @@ async def get_thread_stacks(
     except DeviceError as e:
         raise _handle_device_error(e)
     return stacks.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# Induced conditions on a physical iPhone (#245, phase 6)
+# ---------------------------------------------------------------------------
+
+
+async def _condition_device(request: Request, udid: str | None, *, change: bool) -> str:
+    """The physical iPhone a condition call is for. Changing one resolves as
+    a write does -- the caller must hold the device when it is shared."""
+    controller = _get_controller(request)
+    resolved = await controller.resolve_udid(udid, set_active=change)
+    await controller._ensure_device_type_cached(resolved)
+    if not controller._is_physical(resolved):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{resolved} is not a physical iPhone: induced conditions come from a "
+                   f"device's own Instruments channel, which simulators and Android lack")
+    return resolved
+
+
+def _conditions(request: Request) -> Any:
+    from server.device.ios.conditions import ConditionKeeper
+
+    keeper = getattr(request.app.state, "conditions", None)
+    if keeper is None:
+        keeper = request.app.state.conditions = ConditionKeeper()
+    return keeper
+
+
+@router.get("/condition")
+@logged_action("get_device_condition", category="device.read")
+async def get_device_condition(request: Request, udid: str | None = Query(default=None)):
+    """The condition a physical iPhone is in, as it reports it, and the ones it offers."""
+    try:
+        resolved = await _condition_device(request, udid, change=False)
+        return (await _conditions(request).describe(resolved)).model_dump()
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/condition")
+@logged_action("set_device_condition", category="device.action")
+async def set_device_condition(request: Request, body: SetDeviceConditionRequest):
+    """Put a physical iPhone in a network condition -- or, with
+    allow_performance, a thermal or GPU state -- confirmed by the device."""
+    from server.session import current_session
+
+    caller = visibility.current_caller()
+    try:
+        resolved = await _condition_device(request, body.udid, change=True)
+        out = await _conditions(request).set(
+            resolved, body.profile, allow_performance=body.allow_performance,
+            principal=caller.principal, session=current_session() or None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except DeviceError as e:
+        raise _handle_device_error(e)
+    return out.model_dump()
+
+
+@router.delete("/condition")
+@logged_action("clear_device_condition", category="device.action")
+async def clear_device_condition(request: Request, udid: str | None = Query(default=None)):
+    """Clear a physical iPhone's condition, whoever set it, confirmed by the device."""
+    try:
+        resolved = await _condition_device(request, udid, change=True)
+        cleared = await _conditions(request).clear(resolved)
+    except DeviceError as e:
+        raise _handle_device_error(e)
+    return {"udid": resolved, "cleared": cleared.model_dump() if cleared else None,
+            "active": None}
 
 
 # ---------------------------------------------------------------------------

@@ -235,6 +235,16 @@ def _log_keyboards(actions: list[dict], when: str) -> None:
                            "again", a["udid"], a.get("ime"), when, a.get("error"))
 
 
+def _log_conditions(actions: list[dict], when: str) -> None:
+    for a in actions:
+        if a.get("ok"):
+            logger.info("Cleared %s's %s %s%s", a["udid"], a.get("profile"), when,
+                        f" (it was {a['already']} already)" if a.get("already") else "")
+        else:
+            logger.warning("Could not clear %s's %s %s: %s; the next start tries again",
+                           a["udid"], a.get("profile"), when, a.get("error"))
+
+
 def _adb_path(app: FastAPI) -> str | None:
     controller = getattr(app.state, "device_controller", None)
     adb = getattr(controller, "adb", None)
@@ -427,6 +437,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from server.profiling.manager import ProfileManager
     if note := profile_settings()["note"]:
         logger.warning(note)
+    from server.device.ios.conditions import ConditionKeeper
+
+    app.state.conditions = ConditionKeeper()
     from server.profiling import android as android_profiles
     # adb is the controller's, looked up per call: the controller is made
     # later in startup, and a profile resumed before then is still asked about.
@@ -665,6 +678,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     app.state._warmup_task = asyncio.create_task(_warmup_devices())
 
+    async def _clear_leftover_conditions():
+        """A phone left in a network or thermal condition by a server that
+        crashed or was killed before it could clear it (#245). Its own task:
+        it needs neither device discovery nor the Android keyboards, so a
+        warm-up step failing must not skip it (CodeRabbit)."""
+        try:
+            _log_conditions(await app.state.conditions.clear_leftovers(), "at startup")
+        except Exception:  # noqa: BLE001 -- startup carries on regardless
+            logger.warning("Could not clear the conditions a previous server left",
+                           exc_info=True)
+
+    app.state._conditions_task = asyncio.create_task(_clear_leftover_conditions())
+
     # Re-probe the simulator UI backend periodically. Selection used to be
     # latched at startup and never revisited, so an Xcode upgrade under a
     # running server left every tap routed to a backend that could no longer
@@ -844,6 +870,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     keyboards_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await keyboards_task
+    # The phones' induced conditions (#245) clear alongside, inside the same
+    # 4s: a clear takes about a second and a half. One cut short keeps its
+    # record, and the next start clears it.
+    exit_by = asyncio.get_running_loop().time() + 4.0
+    # Start-up's clean-up stopped first: one still running holds a phone's
+    # lock, and the clear below would wait out its budget on it (CodeRabbit).
+    leftover_task = getattr(app.state, "_conditions_task", None)
+    if leftover_task is not None and not leftover_task.done():
+        leftover_task.cancel()
+        await asyncio.wait({leftover_task}, timeout=1.0)
+    conditions_at_exit = asyncio.create_task(app.state.conditions.clear_all())
     controller_at_exit = getattr(app.state, "device_controller", None)
     if controller_at_exit is not None:
         try:
@@ -851,6 +888,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 controller_at_exit.u2.restore_keyboards(), 4.0), "at shutdown")
         except Exception:  # noqa: BLE001 -- shutdown must carry on regardless
             logger.warning("Could not put back the Android keyboards", exc_info=True)
+    try:
+        _log_conditions(await asyncio.wait_for(
+            conditions_at_exit, max(0.1, exit_by - asyncio.get_running_loop().time())),
+            "at shutdown")
+    except TimeoutError:
+        # Expected for a thermal state: the phone took 3.8 s to confirm one
+        # cleared (measured), which with the read before it does not fit. Its
+        # record is kept, the phone drops it soon after this process exits,
+        # and the next start clears it if it did not.
+        logger.warning("Clearing the phones' induced conditions did not finish before "
+                       "shutdown; their records are kept, and the next start clears any "
+                       "still on")
+    except Exception:  # noqa: BLE001 -- shutdown must carry on regardless
+        logger.warning("Could not clear the phones' induced conditions", exc_info=True)
 
     # Sessions end with the server; a reconnect will be told so (4404).
     from server import device_access as _device_access
