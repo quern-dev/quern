@@ -874,6 +874,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 4s: a clear takes about a second and a half. One cut short keeps its
     # record, and the next start clears it.
     exit_by = asyncio.get_running_loop().time() + 4.0
+    # Start-up's clean-up stopped first: one still running holds a phone's
+    # lock, and the clear below would wait out its budget on it (CodeRabbit).
+    leftover_task = getattr(app.state, "_conditions_task", None)
+    if leftover_task is not None and not leftover_task.done():
+        leftover_task.cancel()
+        await asyncio.wait({leftover_task}, timeout=1.0)
     conditions_at_exit = asyncio.create_task(app.state.conditions.clear_all())
     controller_at_exit = getattr(app.state, "device_controller", None)
     if controller_at_exit is not None:
@@ -886,6 +892,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _log_conditions(await asyncio.wait_for(
             conditions_at_exit, max(0.1, exit_by - asyncio.get_running_loop().time())),
             "at shutdown")
+    except TimeoutError:
+        # Expected for a thermal state: the phone took 3.8 s to confirm one
+        # cleared (measured), which with the read before it does not fit. Its
+        # record is kept, the phone drops it soon after this process exits,
+        # and the next start clears it if it did not.
+        logger.warning("Clearing the phones' induced conditions did not finish before "
+                       "shutdown; their records are kept, and the next start clears any "
+                       "still on")
     except Exception:  # noqa: BLE001 -- shutdown must carry on regardless
         logger.warning("Could not clear the phones' induced conditions", exc_info=True)
 

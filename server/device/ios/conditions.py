@@ -199,8 +199,10 @@ async def _with_inducer(uuid: str, what: str, fn: Callable[[Any], Any]) -> Any:
                         return await fn(inducer)
             finally:
                 if rsd is not None:
+                    # Bounded too: once the deadline has fired, nothing else
+                    # would end a close that hangs (CodeRabbit).
                     with contextlib.suppress(Exception):
-                        await rsd.close()
+                        await asyncio.wait_for(rsd.close(), 2.0)
     except TimeoutError:
         if deadline.expired():
             raise DeviceError(f"{uuid[:8]} did not answer within {CALL_TIMEOUT_S:g}s "
@@ -445,8 +447,13 @@ class ConditionKeeper:
         return hold if hold is not None and hold.live else None
 
     def _hold_ended(self, hold: _Hold) -> None:
-        if self._holds.get(hold.udid) is hold:
+        owned = self._holds.get(hold.udid) is hold
+        if owned:
             del self._holds[hold.udid]
+        else:
+            # A newer hold has the phone: its record and its notes are its
+            # own, not this one's to drop (CodeRabbit).
+            return
         if hold.cleared or not hold.held_one or not hold.ended \
                 or hold.ended == "the server stopped":
             return                     # cleared, never set anything, or shutting down

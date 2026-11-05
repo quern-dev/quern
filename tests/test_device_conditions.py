@@ -692,15 +692,41 @@ class TestReviewTwo:
             # The hold's connection only: the set's read before it is the
             # first one made, and a read waits for its own close.
             if FakeRsd.made.index(self) == 1:
-                await closing.wait()
+                await asyncio.wait_for(closing.wait(), 5)
         monkeypatch.setattr(FakeRsd, "close", slow_close)
         k = keeper()
         await k.set(UDID, "SlowNetwork3G", allow_performance=False, principal=None,
                     session=None)
+        try:
+            await k.clear(UDID)
+            assert k._live(UDID) is None              # closing, not live
+            assert (await k.describe(UDID)).active is None
+        finally:
+            closing.set()
+
+    async def test_a_hung_close_after_the_deadline_still_returns(self, phone, monkeypatch):
+        """A read whose call times out, and whose close then hangs too."""
+        async def hang(self):
+            await asyncio.sleep(30)
+        monkeypatch.setattr(FakeInducer, "list", hang)
+        monkeypatch.setattr(FakeRsd, "close", hang)
+        monkeypatch.setattr(cond, "CALL_TIMEOUT_S", 0.2)
+        with pytest.raises(DeviceError, match="did not answer"):
+            await asyncio.wait_for(cond.read_conditions(UDID), 5)
+
+    async def test_an_old_hold_ending_leaves_a_newer_ones_record(self, phone):
+        """A hold that ended elsewhere, finishing its close after a new set
+        took the phone, must not drop the new set's record or note."""
+        k = keeper()
+        await k.set(UDID, "ThermalFair", allow_performance=True, principal=None, session=None)
+        old = k._holds[UDID]
+        stale = cond._Hold(UDID)
+        stale.held_one, stale.gone, stale.ended = True, True, "cleared elsewhere"
+        k._hold_ended(stale)                           # not the hold the phone has
+        assert k._holds.get(UDID) is old
+        assert cond.ConditionRecords().get(UDID)["profile"] == "ThermalFair"
+        assert (await k.describe(UDID)).note is None
         await k.clear(UDID)
-        assert k._live(UDID) is None                  # closing, not live
-        assert (await k.describe(UDID)).active is None
-        closing.set()
 
     async def test_a_close_that_never_finishes_still_ends_the_hold(self, phone,
                                                                    monkeypatch):
