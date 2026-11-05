@@ -45,8 +45,9 @@ Client keys guard against mistakes between cooperating users, not against a
 hostile one: a client installing an app on its own simulator runs that app as
 the Mac's user, and the simulator sandbox is not a security boundary. Builds
 are owner-only for that reason -- a build runs a project's scripts, and a
-Gradle build whatever arguments it is given -- but nothing here makes a client
-key safe to hand to someone you would not let use the Mac (#254).
+Gradle build whatever arguments it is given -- unless the owner opts clients in
+with `remote.client_builds` (#605), but nothing here makes a client key safe to
+hand to someone you would not let use the Mac (#254).
 """
 
 from __future__ import annotations
@@ -83,6 +84,8 @@ class Rule:
     access: Access
     device: Device = None
     #: For `named`: the fields the route scopes by, one of which must name a device.
+    #: For `resolved`: the only body fields that name one, when the route reads
+    #: fewer than every device key -- any other, and any query, names nothing.
     keys: tuple[str, ...] = ()
     owner_fields: frozenset[str] = frozenset()
 
@@ -447,6 +450,23 @@ def _blind_kind(method: str, path: str) -> str:
                      "hidden") if found else "hidden"
 
 
+#: Owner-only routes the owner may open to client keys with a setting (#605),
+#: and the rule a client is held to when it is on. A build is a change to the
+#: devices quern installs it on: named (`udid`/`udids`) or the session's active
+#: one, and every one of them its own -- AccessMiddleware checks each name.
+#: `gradle_args` stays the owner's: an extra task such as `installDebug` makes
+#: Gradle itself install on every connected device, and `-p` builds another
+#: project (review). `java_home` names a path on the Mac.
+_OPT_IN = {("POST", "/api/v1/device/build-and-install")}
+_BUILD = Rule(Access.CONTROL, "resolved", ("udid", "udids"),
+              owner_fields=frozenset({"gradle_args", "java_home"}))
+
+
+def _opt_in_route(method: str, path: str) -> bool:
+    found = match(method, path)
+    return found is not None and (method.upper(), found[0]) in _OPT_IN
+
+
 def rule_for(method: str, path: str) -> Rule:
     """The rule for a request: unmapped is owner-only, closed by default."""
     found = match(method, path)
@@ -570,6 +590,16 @@ class ScopeMiddleware:
             # key. APIKeyMiddleware refuses these first; this is the backstop.
             await _deny(send, 401, "Invalid or missing API key")
             return
+        if rule.access is Access.OWNER and _opt_in_route(method, path):
+            from server.config import client_builds
+            if client_builds():
+                rule = _BUILD
+            else:
+                await _deny(send, 403, (
+                    f"{method} {path} is off for client keys on this server: a build runs "
+                    "the project's code as the Mac's user. Its owner can allow it with "
+                    '"remote": {"client_builds": true} in ~/.quern/config.json'))
+                return
         if rule.access is Access.OWNER:
             await _deny(send, 403, f"{method} {path} is owner-only: a client key cannot use it")
             return
@@ -647,7 +677,15 @@ class ScopeMiddleware:
                 return None
             return 403, (f"{method} {path} without {' or '.join(rule.keys)} acts on every "
                          "device: owner-only. Name a device your session holds.")
-        if device_access._named_devices(scope.get("query_string", b""), body):
+        # Only what the route reads names a device: a build reads udid and
+        # udids from its body, so a `serial`, or a udid in the query, would
+        # otherwise skip the check below and leave the route to pick a device
+        # (CodeRabbit).
+        if rule.keys:
+            named = device_access._named_devices(b"", body, frozenset(rule.keys))
+        else:
+            named = device_access._named_devices(scope.get("query_string", b""), body)
+        if named:
             return None
         return await self._no_device(scope, rule)
 

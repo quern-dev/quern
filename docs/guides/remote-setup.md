@@ -25,6 +25,7 @@ Optional settings, in the same object:
 - **`bind`** -- the address and port to listen on, default `"0.0.0.0:9130"`.
 - **`hosts`** -- extra names the listener answers to, such as `["studio.lan"]`, besides this Mac's LAN address. A request naming any other host is refused.
 - **`client_viewer_links`** -- whether a client may issue viewer links for its own recordings. On by default.
+- **`client_builds`** -- whether a client may build and install with `build_and_install`. Off by default, because a build runs the project's code as this Mac's user: quern installs the result only on devices the client holds, but the build itself can do anything that project's build scripts do. The project path is on this Mac's disk. A client can't pass `gradle_args` or `java_home`. Client builds share this Mac's build records with yours: one replaces what `get_build_result` returns, and each scheme keeps its newest 10 device builds' dSYMs whoever built them.
 
 You don't need a certificate authority or a domain name. Quern makes its own certificate the first time the listener starts, and clients pin its fingerprint when they pair.
 

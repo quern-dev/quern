@@ -311,6 +311,12 @@ def _app(registry, keys):
         the build path's readers do: only the middleware's precheck guards it."""
         return {"pressed": app.state.device_controller._active_udid}
 
+    @app.post("/api/v1/device/build-and-install")
+    async def build(request: Request):
+        body = await request.json()
+        return {"built": body.get("udids") or [body.get("udid")
+                                               or app.state.device_controller._active_udid]}
+
     @app.post("/api/v1/proxy/mocks")
     async def set_mock(request: Request):
         return {"rule": await request.json()}
@@ -621,6 +627,122 @@ def test_clients_cli_round_trip(monkeypatch, tmp_path, capsys):
     assert clients_cli.main(["add"]) == 2
     data = json.loads((tmp_path / "clients.json").read_text())
     assert data["clients"][0]["revoked_at"]
+
+
+class TestClientBuilds:
+    """Builds are the owner's unless the owner opts clients in (#605): a build
+    runs the project's code as the Mac's user. Opted in, a client builds only
+    onto devices its own session holds."""
+
+    URL = "/api/v1/device/build-and-install"
+
+    @pytest.fixture
+    def builds(self, monkeypatch):
+        state = {"on": False}
+        from server import config
+        monkeypatch.setattr(config, "client_builds", lambda: state["on"])
+        return state
+
+    def test_off_a_client_is_told_how_the_owner_turns_it_on(self, world, registry, builds):
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p", "udids": ["SIM-1"]})
+        assert r.status_code == 403
+        assert '"client_builds": true' in r.json()["detail"]
+
+    def test_on_a_client_builds_onto_a_device_it_holds(self, world, registry, builds):
+        builds["on"] = True
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p", "udids": ["SIM-1"]})
+        assert r.status_code == 200 and r.json() == {"built": ["SIM-1"]}, r.text
+
+    def test_on_a_free_device_is_still_refused(self, world, builds):
+        builds["on"] = True
+        c, _, alice, _ = world
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p", "udid": "SIM-9"})
+        assert r.status_code == 403, r.text
+
+    def test_on_every_device_in_the_list_must_be_its_own(self, world, registry, builds):
+        builds["on"] = True
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        _hold(registry, "bob:s1", "client:bob", "SIM-2")
+        r = c.post(self.URL, headers=_h(alice),
+                   json={"project_path": "/p", "udids": ["SIM-1", "SIM-2"]})
+        assert r.status_code == 423, r.text
+
+    def test_on_no_device_goes_to_its_held_active_device(self, world, registry, builds):
+        builds["on"] = True
+        c, app, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        app.state.device_controller.slots["alice:s1"] = "SIM-1"
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p"})
+        assert r.status_code == 200 and r.json() == {"built": ["SIM-1"]}, r.text
+
+    def test_on_no_device_and_nothing_active_is_refused(self, world, builds):
+        builds["on"] = True
+        c, _, alice, _ = world
+        r = c.post(self.URL, headers=_h(alice), json={"project_path": "/p"})
+        assert r.status_code == 403 and "reserve one first" in r.json()["detail"]
+
+    @pytest.mark.parametrize("query, body", [
+        ({"serial": "SIM-1"}, {}),
+        ({}, {"serial": "SIM-1"}),
+        ({"udid": "SIM-1"}, {}),     # read from the body only
+        ({"udids": "SIM-1"}, {}),
+    ])
+    def test_on_a_device_key_the_build_ignores_names_nothing(self, world, registry, builds,
+                                                            query, body):
+        """A build reads udid and udids from its body. Anything else must not
+        stand in for them, or the route picks the device itself (CodeRabbit)."""
+        builds["on"] = True
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        r = c.post(self.URL, headers=_h(alice), params=query,
+                   json={"project_path": "/p", **body})
+        assert r.status_code == 403 and "reserve one first" in r.json()["detail"], r.text
+
+    def test_the_owner_builds_whatever_the_setting(self, world, builds):
+        c, *_ = world
+        r = c.post(self.URL, headers=_h(KEY), json={"project_path": "/p", "udid": "SIM-9"})
+        assert r.status_code == 200, r.text
+
+    def test_the_table_still_says_owner(self):
+        """The setting widens one route at request time; the table, which
+        every other check reads, keeps the closed default."""
+        assert scopes.rule_for("POST", self.URL).access is scopes.Access.OWNER
+
+
+class TestClientBuildsSetting:
+    """`remote.client_builds`: off unless literally true."""
+
+    @pytest.mark.parametrize("remote, on", [
+        (None, False),
+        ({}, False),
+        ({"client_builds": True}, True),
+        ({"client_builds": "true"}, False),
+        ({"client_builds": 1}, False),
+        ({"client_builds": False}, False),
+        ("junk", False),
+    ])
+    def test_values(self, monkeypatch, remote, on):
+        from server import config
+        cfg = {} if remote is None else {"remote": remote}
+        monkeypatch.setattr(config, "read_user_config", lambda strict=False: cfg)
+        assert config.client_builds() is on
+
+    def test_an_unreadable_config_is_off(self, monkeypatch):
+        from server import config
+
+        def broken(strict=False):
+            raise config.ConfigUnreadable("bad json")
+        monkeypatch.setattr(config, "read_user_config", broken)
+        assert config.client_builds() is False
+
+    def test_it_is_a_known_remote_key(self):
+        from server import config
+        assert config._unused_remote_keys({"client_builds": True}) is None
 
 
 class TestRouteLevelOwnerChecks:
@@ -1043,3 +1165,110 @@ def test_status_shows_the_address_the_api_answers_on(capsys, host, shown):
     daemon._print_status({"pid": 1, "server_host": host, "local_ip": "192.168.1.5",
                           "server_port": 9110, "proxy_enabled": False})
     assert f"http://{shown}:9110" in capsys.readouterr().out
+
+
+class TestClientBuildReviewFixes:
+    """Findings from the #605 review of client builds."""
+
+    URL = "/api/v1/device/build-and-install"
+
+    @pytest.fixture
+    def on(self, monkeypatch):
+        from server import config
+        monkeypatch.setattr(config, "client_builds", lambda: True)
+
+    @pytest.mark.parametrize("field, value", [
+        ("gradle_args", ["installDebug"]),       # Gradle would install on every device
+        ("gradle_args", ["-p", "/other/app"]),   # another project
+        ("java_home", "/Library/Java/x"),        # a path on the Mac
+    ])
+    def test_a_client_may_not_set_owner_fields(self, world, registry, on, field, value):
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", "SIM-1")
+        r = c.post(self.URL, headers=_h(alice),
+                   json={"project_path": "/p", "udid": "SIM-1", field: value})
+        assert r.status_code == 403 and field in r.json()["detail"], r.text
+
+    def test_the_owner_still_may(self, world, on):
+        c, *_ = world
+        r = c.post(self.URL, headers=_h(KEY),
+                   json={"project_path": "/p", "udid": "SIM-9", "gradle_args": ["--info"]})
+        assert r.status_code == 200, r.text
+
+    @pytest.mark.parametrize("udid, udids, want", [
+        (None, ["", "SIM-1"], ["SIM-1"]),
+        ("", ["", ""], []),                       # nothing named: the active device
+        ("SIM-1", ["SIM-1", "SIM-2", "SIM-2"], ["SIM-1", "SIM-2"]),
+        (None, None, []),
+    ])
+    def test_an_empty_udid_names_no_device(self, udid, udids, want):
+        from server.api.build_app import BuildAndInstallRequest, _requested_udids
+        body = BuildAndInstallRequest(project_path="/p", udid=udid, udids=udids)
+        assert _requested_udids(body) == want
+
+    def test_a_permission_error_reading_config_is_off_not_a_crash(self, monkeypatch):
+        from server import config
+
+        def denied(strict=False):
+            raise PermissionError(13, "Permission denied")
+        monkeypatch.setattr(config, "read_user_config", denied)
+        assert config.client_builds() is False
+
+    @pytest.mark.parametrize("blind, named", [(True, False), (False, True)])
+    async def test_a_blind_server_does_not_name_others_android_devices(
+            self, monkeypatch, blind, named):
+        from types import SimpleNamespace
+
+        from fastapi import HTTPException
+
+        from server import visibility
+        from server.api import build_android
+        from server.models import DeviceState, DeviceType
+
+        dev = lambda u: SimpleNamespace(udid=u, state=DeviceState.BOOTED,  # noqa: E731
+                                        device_type=DeviceType.ANDROID_EMULATOR)
+
+        class Ctl:
+            _active_udid = None
+
+            async def list_devices(self):
+                return [dev("emulator-5554"), dev("emulator-5556")]
+
+        monkeypatch.setattr(visibility, "blind_for", lambda caller=None: blind)
+        with pytest.raises(HTTPException) as e:
+            await build_android._default_android(Ctl())
+        assert ("emulator-5554" in e.value.detail) is named, e.value.detail
+        assert ("2 Android" in e.value.detail) is named, "a blind client is not told the count"
+
+    @pytest.mark.parametrize("theirs", [True, False])
+    async def test_a_blind_client_is_never_given_anothers_sole_android_device(
+            self, monkeypatch, theirs):
+        """The one booted emulator is another key's: on a blind server it is
+        not chosen, so its id never reaches a refusal (CodeRabbit)."""
+        from types import SimpleNamespace
+
+        from fastapi import HTTPException
+
+        from server import device_access, visibility
+        from server.api import build_android
+        from server.models import DeviceState, DeviceType
+
+        class Ctl:
+            _active_udid = "SIM-MINE"   # an iOS device the client holds
+
+            async def list_devices(self):
+                return [SimpleNamespace(udid="emulator-5554", state=DeviceState.BOOTED,
+                                        device_type=DeviceType.ANDROID_EMULATOR)]
+
+            async def resolve_udid(self, udid):
+                return udid
+
+        monkeypatch.setattr(visibility, "blind_for", lambda caller=None: True)
+        monkeypatch.setattr(device_access, "why_not",
+                            lambda udid: device_access.HELD_ELSEWHERE if theirs else None)
+        if not theirs:
+            assert await build_android._default_android(Ctl()) == "emulator-5554"
+            return
+        with pytest.raises(HTTPException) as e:
+            await build_android._default_android(Ctl())
+        assert "emulator-5554" not in e.value.detail, e.value.detail

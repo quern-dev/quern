@@ -353,6 +353,21 @@ class TestTheRoute:
         assert record["platform"] == "iphonesimulator" and record["installed_on"] == ["SIM-UDID"]
         assert build_app.run.calls == []
 
+    async def test_an_empty_entry_beside_a_named_device_names_nothing(self, build_app):
+        """`udids: ["", "SIM-1"]` builds SIM-1 alone. Kept, the empty entry
+        resolved to the session's active device -- another one -- past the
+        middleware, which had seen only SIM-1 (#605, CodeRabbit)."""
+        class Active(FakeController):
+            async def resolve_udid(self, udid):
+                return udid or "SIM-OTHER"   # nothing named: the active device
+
+        ctl = Active({"SIM-1": "simulator", "SIM-OTHER": "simulator"})
+        build_app.app.state.device_controller = ctl
+        resp = await _build_and_install(build_app.app, project_path=str(build_app.project),
+                                        scheme="MyApp", udids=["", "SIM-1"])
+        assert resp.status_code == 200, resp.text
+        assert [u for _, u in ctl.installed] == ["SIM-1"]
+
     async def test_a_recording_defect_does_not_fail_the_install(self, build_app, monkeypatch):
         async def broken(*args, **kwargs):
             raise KeyError("boom")
