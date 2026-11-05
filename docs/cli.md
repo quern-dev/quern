@@ -95,6 +95,7 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | `device-pool.json` | Device pool state (simctl cache) — persists across restarts |
 | `config.json` | Local capture processes, update channel, the automatic-update-check and certificate-install settings, and the sessions (including `client_release` / `owner_release`), remote listener, viewer, upload, `builds` (`max_age_days`, `max_gb`), `disk` (`warn_gb`, `warn_free_gb`) `profiles` (`max_mb`, `trace_processor`, `android_max_trace_mb`) and `sandboxes` (`max_mb`, `max_idle_days`) settings |
 | `remotes.json` | The remote quern servers this machine is paired with (0600): read by `quern remote list`, `QUERN_REMOTE` and `use_remote` |
+| `device-conditions.json` | The conditions quern has set on physical iPhones (`set_device_condition`), written before each set and present only while one is held, so a crashed server's are cleared at the next start |
 | `session-proxies.json` | Running session proxies' pids (`add_session_capture`), so a crashed server's leftovers are stopped at the next start |
 | `session-hold-<id>.log` | The log of a `quern session hold --background` |
 | `update-info.json` | The last update check's result — what the menu bar reads to offer an update |

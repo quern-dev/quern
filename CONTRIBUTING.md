@@ -262,6 +262,7 @@ than a guarantee.
   `tap_element` finding no element, which sends the reader somewhere unrelated
   to the cause. Where a tool can confirm the state it claims to have produced,
   confirm it.
+- **What quern sets on a device, quern undoes.** A condition it puts on a phone (#245) slows the whole device for whoever holds it next, with nothing to say why, so it is cleared when asked, when the hold that set it ends, when the server stops, and at the next start from a record written *before* the set (`~/.quern/device-conditions.json`), since a crash between set and record would otherwise leave nothing to undo. Installs follow the same rule on release (#581). And hold what the condition needs: measured on an iPhone 11, a network profile ends the moment the Instruments connection that set it closes, so quern keeps that connection open for the condition's life and reads the phone every 10 s, reporting a condition that ended on its own rather than showing it as active.
 - **Hybrid proxy storage.** Summary log entries go in the ring buffer (so log queries include network events). Full flow records go in a separate FlowStore.
 - **Mock/intercept patterns use mitmproxy filter syntax.** Valid operators: `~d` (domain), `~u` (URL), `~m` (method), `~c` (status code), `~b` (body), etc. Note: `~p` (path) does NOT exist — use `~u` for path matching.
 - **Server-side filter validation.** Invalid mitmproxy filter patterns are rejected with 400 before reaching the addon.
