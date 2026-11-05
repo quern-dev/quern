@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0-beta.3] - 2026-11-05
+
 ## [0.26.0-beta.2] - 2026-11-04
 
 ### Added
@@ -1056,7 +1058,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.2...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.3...main
+[0.26.0-beta.3]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.3
 [0.26.0-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.2
 [0.26.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.1
 [0.25.0]: https://github.com/quern-dev/quern/releases/tag/v0.25.0
