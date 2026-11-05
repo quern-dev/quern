@@ -494,7 +494,7 @@ A metric that could not be read is null and named in unavailable with the reason
 
 iOS simulators: macOS sample reads the app for about a second. Each thread's frames are the path it was on most, and samples_on_stack of samples says how often: a hung thread is on one path in every sample, a busy one splits its time.
 
-Physical iOS devices: one stackshot, an instant of every thread. The app's own frames are symbolicated from its dSYM, found by UUID the way a crash's are (a build quern made, or one Spotlight indexed). The OS's frames come from the symbols Xcode copies off the device the first time it is used for development; symbols says per image how far that got and why not. A stackshot needs the device's kernel profiler, so it fails while an Instruments or xctrace recording, or a quern profile, holds it.
+Physical iOS devices: one stackshot, an instant of every thread. The app's own frames are symbolicated from its dSYM, found by UUID with the same lookup crash symbolication uses (a build quern made, or one Spotlight indexed). The OS's frames come from the symbols Xcode copies off the device the first time it is used for development. symbols says per image how far that got and why not, and counts the frames that could not be placed, with the reason. A stackshot needs the device's kernel profiler, so it fails while an Instruments or xctrace recording, or a quern profile, holds it.
 
 Android: not supported without root, and unavailable says so. A hang's main-thread gap is in a profile (start_profile, hangs preset).
 
