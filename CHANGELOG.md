@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0-beta.2] - 2026-11-04
+
 ### Added
 - **A remote client can build its own project (#608).** With `remote.client_builds` on (#606), `build_and_install` from a client key sends the project to the server itself, and builds only that: a client's `project_path` must be the `sandbox:` path, never a path on the Mac. (Its build scripts can still reach anything the Mac's user can.)
   - The MCP snapshots the working tree (untracked files included, nothing in the repository changed but new objects).
@@ -1044,7 +1046,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.1...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.2...main
+[0.26.0-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.2
 [0.26.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.1
 [0.25.0]: https://github.com/quern-dev/quern/releases/tag/v0.25.0
 [0.25.0-beta.6]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.6
