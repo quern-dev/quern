@@ -253,3 +253,24 @@ test("a push that ended with nothing said is explained against the cap", async (
     s.close();
   }
 });
+
+test("the certificate is fetched from an IPv6 address as well as an IPv4 one or a name", async () => {
+  // A listener's IPv6 URL is bracketed, and URL.hostname keeps the brackets,
+  // which no resolver takes (CodeRabbit).
+  const pem = readFileSync(join(certs, "cert.pem"), "utf-8");
+  const der = Buffer.from(pem.replace(/-----[^-]+-----|\s/g, ""), "base64");
+  const fp = createHash("sha256").update(der).digest("hex");
+  const srv = createTlsServer({ key: readFileSync(join(certs, "key.pem")), cert: pem },
+                              (req, res) => res.end());
+  await new Promise((r) => srv.listen(0, "::", r));
+  try {
+    const { port } = srv.address();
+    const spkis = [];
+    for (const host of ["[::1]", "127.0.0.1", "localhost"]) {
+      spkis.push((await fetchPinnedCert(`https://${host}:${port}`, fp)).spki);
+    }
+    assert.equal(new Set(spkis).size, 1);
+  } finally {
+    srv.close();
+  }
+});

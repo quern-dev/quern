@@ -17,6 +17,7 @@
 import { execFile } from "node:child_process";
 import { createHash, X509Certificate } from "node:crypto";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { isIP } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, relative, resolve } from "node:path";
 import { connect } from "node:tls";
@@ -64,9 +65,13 @@ function git(args: string[], opts: { cwd?: string; env?: Record<string, string> 
 export function fetchPinnedCert(url: string, fingerprint: string):
     Promise<{ spki: string }> {
   const u = new URL(url);
+  // An IPv6 hostname keeps its brackets in a URL, which no resolver takes;
+  // and an IP address is not a server name for SNI (CodeRabbit).
+  const host = u.hostname.replace(/^\[(.*)\]$/, "$1");
   return new Promise((ok, no) => {
-    const socket = connect({ host: u.hostname, port: Number(u.port || 443),
-                             servername: u.hostname, rejectUnauthorized: false }, () => {
+    const socket = connect({ host, port: Number(u.port || 443),
+                             ...(isIP(host) ? {} : { servername: host }),
+                             rejectUnauthorized: false }, () => {
       const raw = socket.getPeerCertificate(true)?.raw;
       socket.end();
       if (!raw) return no(new Error(`${u.host} presented no certificate`));
