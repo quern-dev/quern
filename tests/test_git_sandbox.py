@@ -555,7 +555,11 @@ class TestEndToEnd:
 
         async def recording(*args, **kwargs):
             proc = await real(*args, **kwargs)
-            started.append(proc)
+            # The backend alone: setting up the repository runs git through
+            # the same call, and those would satisfy the guard below without
+            # any backend having started (CodeRabbit).
+            if args[:2] == ("git", "http-backend"):
+                started.append(proc)
             return proc
         monkeypatch.setattr(git_sandbox.asyncio, "create_subprocess_exec", recording)
         sent = [{"type": "http.request", "body": b"0000", "more_body": False}]
@@ -578,7 +582,9 @@ class TestEndToEnd:
         assert git_sandbox._push_locks and not any(
             lock.locked() for lock in git_sandbox._push_locks.values()), "the push lock is held"
         for proc in started:
-            await asyncio.wait_for(proc.wait(), 5)    # killed, not left running
+            # Gone, whether killed or finished: the lock above is what fails
+            # without the fix. A backend given a whole body may exit unaided.
+            await asyncio.wait_for(proc.wait(), 5)
 
     def test_a_chunked_push_past_the_cap_is_cut_off(self, server, root, project, limits):
         limits["max_bytes"] = 64 * 1024
