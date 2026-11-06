@@ -69,11 +69,11 @@ Physical iOS devices are supported for screenshots, UI automation, log capture, 
 4. `tap_element(label="Wi-Fi")` — navigate to Wi-Fi settings
 5. `tap_element(label="More Info", element_type="Button")` — open the connected network's detail page
 6. Read the device IP from the `IP Address` row (use `take_screenshot` or `get_screen_summary`)
-7. Scroll down to find the **HTTP Proxy** section, tap `Configure Proxy` (StaticText). If it is **Off** (this network was never configured), choose **Manual** and fill in Port as well as Server: the proxy's port from `proxy_status`. If it is already Manual, check the Port too, not only the Server, and save any change
+7. Scroll down to find the **HTTP Proxy** section, tap `Configure Proxy` (StaticText). If it is **Off** (this network was never configured), choose **Manual** and fill in Port as well as Server: the proxy's port from `proxy_status`. If it is already Manual, check the Port as well as the Server in step 8 before saving: Save returns to the network's detail page, so a field left stale means opening the editor again
 8. Verify the current Server value — if stale, tap the Server field to focus it:
    - The Server TextField is not discoverable by label in `get_ui_tree`. Use `take_annotated_screenshot` to find its bounding box, calculate its center as a fraction of the screen, convert to device logical points, then `tap` those coordinates.
-   - `clear_text()` → `type_text("192.168.x.x")` with the correct Mac IP
-   - `tap_element(label="Save", element_type="Button")`
+   - `clear_text()` → `type_text("192.168.x.x")` with the correct Mac IP, and the same for Port if it differs from `proxy_status`
+   - Then, with both fields right, `tap_element(label="Save", element_type="Button")`
 9. `record_device_proxy_config(udid=..., ssid=..., client_ip=<device IP from step 6>)` — the correct Mac interface IP is derived automatically
 10. `proxy_status` — verify `wifi_proxy_stale: false` and `active_wifi_network` is set
 11. `launch_app(bundle_id="com.apple.mobilesafari", udid=...)` — open Safari to generate traffic
