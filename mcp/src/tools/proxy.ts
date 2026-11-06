@@ -1112,7 +1112,8 @@ looks exactly like an app making no requests. To decrypt one, install the CA
 on it (install_proxy_cert): new connections are decrypted within seconds, with
 no restart; ones already open stay as they were until they close.
 With auto_install_cert on, the CA is installed first and everything is
-decrypted. Installing a root CA is the user's decision -- ask before doing it.
+decrypted. Installing a root CA is the user's decision -- ask before doing it,
+unless proxy_status shows auto_install_cert: true, which is their standing yes.
 
 On first use, macOS will prompt to allow the Mitmproxy Redirector system
 extension in System Settings > Privacy & Security.`,
