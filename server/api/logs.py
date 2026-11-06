@@ -25,6 +25,7 @@ from server.models import (
     StartOslogRequest,
     UtcDatetime,
 )
+from server.processing import log_gaps
 from server.processing.summarizer import (
     WINDOW_DURATIONS,
     generate_summary,
@@ -89,6 +90,8 @@ class LogQueryResponse(Completeness):
     entries: list[LogEntry]
     total: int
     has_more: bool
+    #: Why a process-filtered answer is empty (#619); see LogSummaryResponse.note.
+    note: str | None = None
 
 
 class SourcesResponse(BaseModel):
@@ -329,12 +332,46 @@ async def query_logs(
     ):
         completeness["truncated"] = False
 
+    note = None
+    if total == 0 and source in (LogSource.SIMULATOR, None):
+        note = await _gap_note(request, process, level=level, view=view,
+                               truncated=completeness["truncated"])
     return LogQueryResponse(
         entries=entries,
         total=total,
         has_more=(offset + limit) < total,
+        note=note,
         **completeness,
     )
+
+
+async def _gap_note(request: Request, process: str | None, *, level: LogLevel | None,
+                    view: visibility.View, truncated: bool) -> str | None:
+    """The note for an empty answer filtered to `process` (#619), or None.
+
+    Only when the answer is whole -- an answer cut short by eviction is not
+    evidence of anything -- and only for simulators whose logs quern is
+    streaming and the caller may see."""
+    if not process or truncated:
+        return None
+    adapters = getattr(request.app.state, "sim_log_adapters", None) or {}
+    udids = [u for u in list(adapters) if view.allows(u)]
+    running = await log_gaps.running_on_simulators(process, udids)
+    if not running:
+        return None
+    ingestion = getattr(request.app.state, "ingestion_filter", None)
+    filtered_out = []
+    if ingestion is not None:
+        for udid in running:
+            # An error line from the app, with no subsystem: if even that is
+            # refused, the filter is refusing the process itself.
+            probe = LogEntry(id="gap-probe", timestamp=datetime.now(UTC), device_id=udid,
+                             process=process, level=LogLevel.ERROR, message="",
+                             source=LogSource.SIMULATOR)
+            if not ingestion.should_admit(probe):
+                filtered_out.append(udid)
+    return log_gaps.gap_note(process, running, level=level.value if level else None,
+                             filtered_out=filtered_out)
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +439,12 @@ async def get_summary(
     all_entries = [e for e in all_entries if visibility.entry_visible(view, e)]
     all_entries.sort(key=lambda e: e.timestamp)
     summary = generate_summary(all_entries, window=window, process=process)
+    if summary.total_count == 0 and arrival_after is None:
+        # A delta summary that is empty says nothing new arrived, not that the
+        # app is silent, so only a whole-window summary gets the note.
+        summary.note = await _gap_note(
+            request, process, level=None, view=view,
+            truncated=_completeness(buffers, covers_since)["truncated"])
     summary.cursor = make_arrival_cursor(clock, upto)
     summary.cursor_reset = cursor_reset
     completeness = _completeness(buffers, covers_since)
