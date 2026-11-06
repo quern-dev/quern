@@ -6,6 +6,8 @@ changing code here.
 For using Quern from another project, see [`README.md`](README.md) and
 [`docs/agent-guide.md`](docs/agent-guide.md) instead.
 
+**Where a feature tells agents about itself.** First in its tool description and responses: that is what an agent sees at the moment of a call, so a rule it must follow lives there, never only in a guide. Then in the agent guide, which agents read over MCP: `docs/agent-guide.md` is `quern://guide`, an overview with a tool map by job, and the detail is in `docs/agent-guide/<topic>.md`, each served as `quern://guide/<topic>` from `AGENT_GUIDE_TOPICS` in `mcp/src/index.ts`. A feature adds a row to the overview's tool map if it is a new job, and its detail to one topic guide. Link to other pages by `quern://` address or URL: a relative link resolves on GitHub and nowhere an agent reads it. `tests/test_agent_guide.py` checks the topics, files and addresses agree. Advice for the people writing the app under test, such as how to log, belongs in `docs/guides/`, which quern.dev publishes.
+
 ## What this project is
 
 A debug server for AI-assisted iOS development. Captures device logs, intercepts network traffic, and controls simulators — all exposed through HTTP APIs and MCP tools so AI agents can see what your app is actually doing.

@@ -408,14 +408,14 @@ TROUBLESHOOTING — no traffic from a physical device:
 1. wifi_proxy_stale: true → the Mac's IP on this subnet changed (different network or
    DHCP lease). Update the device's Settings (Wi-Fi > network > Configure Proxy > Manual)
    with the new IP, then call record_device_proxy_config with the current ssid and client_ip.
-   This can be done fully via WDA automation — see the agent guide (quern://guide),
-   "Autonomous proxy reconfiguration" under Physical Device Proxy Capture.
+   This can be done fully via WDA automation — see quern://guide/devices,
+   "Autonomous proxy reconfiguration" under Proxy capture on a physical device.
 2. wifi_proxy_configs: null → the device has never been configured. Run the full
    physical device setup: configure the Wi-Fi proxy and install and trust the cert in
    the order proxy_setup_guide gives (proxy first: the cert comes from
    http://mitm.it/cert/cer, which the proxy serves), then call
    record_device_proxy_config -- a step of its own, which the guide does not list.
-   See the agent guide (quern://guide) for the full WDA script.
+   See quern://guide/devices for the full WDA script.
 3. wifi_proxy_stale: false and active_wifi_network is set, but still no flows → check:
    - The proxy is running (status: "running")
    - The cert is trusted on the device (Settings > General > About > Certificate Trust Settings)
