@@ -3,6 +3,25 @@
 *`quern://guide/logs` -- part of the Quern agent guide. Start from `quern://guide`.*
 
 Reading app logs, investigating crashes, and recording a run to read back afterwards.
+## Can quern see this app's logs?
+
+Check before you rely on them. Quern reads app logs from **unified logging on iOS** and **logcat on Android**, and nothing else.
+
+| The app logs with | iOS simulator | Physical iPhone | Android |
+|---|---|---|---|
+| `os.Logger` / `Logger`, `os_log` | Captured | Captured | -- |
+| `NSLog()` | Captured | Captured | -- |
+| `print()`, `debugPrint()`, `dump()` | **Not captured** | **Not captured** | -- |
+| `android.util.Log`, `println` / `System.out` | -- | -- | Captured (stdout lands in logcat as `System.out`) |
+
+On iOS, `print()` writes to the app's stdout, which unified logging never sees and quern never reads. So an app that logs with `print()` reads as an app that logged nothing: an empty `query_logs` filtered to its process is not evidence that nothing happened.
+
+**How to check**, before a session that depends on logs:
+- Search the project: `print(` against `Logger(`, `os_log` or `NSLog`.
+- Or launch the app and look for its process or subsystem in `get_log_summary`.
+
+**If the app uses `print()`**, tell the user rather than concluding the app is silent, and recommend `os.Logger`, with `privacy: .public` on values worth seeing on a device (they otherwise show as `<private>`). Don't rewrite the app's logging without asking: it's their code. The full advice for the app's developers, including a `print()` diverter for an app that can't switch yet, is in quern's iOS logging guide: https://quern.dev/ios/ios-logging/
+
 ## Reading logs
 
 **Logs**: Filter by `level`, `process`, `search` text, and time range. Don't fetch 1,000 entries when 50 filtered ones will do. For sustained debugging, use `set_log_filter` to drop noise at ingestion — the `device-quiet` preset removes common system daemons, or combine `process` + `subsystems` includes for app-only output with zero framework noise. Setting a process filter automatically restarts running log adapters with subprocess-level filtering, cutting noise at the source. You can also apply presets at start time: `start_device_logging(process: "MyApp", preset: "device-quiet")`.
@@ -21,6 +40,10 @@ Reading app logs, investigating crashes, and recording a run to read back afterw
 **Confusing `tail_logs` and `query_logs`** — Use `tail_logs` for "show me recent stuff" (defaults to 50, newest first). Use `query_logs` for searching with filters and time ranges.
 
 **Ignoring log source names** — `device` = physical device logs (on-demand, via `start_device_logging`), `simulator` = simulator unified logging (on-demand, via `start_simulator_logging`), `oslog` = host Mac unified logging (on-demand, via `start_oslog_streaming` — useful for capturing dev tool logs like Vite or webpack that write to os_log), `crash` = crash reports, `build` = xcodebuild output, `proxy` = network traffic. Legacy: `syslog` = idevicesyslog (disabled by default, opt-in with `--syslog`).
+
+## A screenshot after every action: screenshot timelines
+
+`start_screenshot_timeline` captures a screenshot after every UI action quern performs (tap, type, swipe, launch, `open_url`...), each labelled with the action, and `stop_screenshot_timeline` returns the manifest: timestamp, action, screenshot path and HTTP status for every step. `get_screenshot_timeline` reads it without stopping. Use it for a visual record of a run for a person to review; for actions joined to their flows and logs, use `get_trace` or a recording instead.
 
 ## Debugging Crashes
 

@@ -101,6 +101,33 @@ Open real-time video windows to see what's happening on USB-connected physical d
 
 **The person at the Mac can open simulators too.** The preview app's Devices menu lists the booted simulators alongside USB devices, and keeps the list current as simulators boot and shut down. A simulator picked there is opened by the server, so it appears in `preview_status` and `stop_preview` closes it like any other.
 
+## Building and installing
+
+`build_and_install` builds an app and installs it on one or more devices: an Xcode scheme on iOS (simulators and physical iPhones) or a Gradle project on Android (`variant` names the build variant; omit it and the 400 lists them). A failed build always names a cause. `get_build_result` reads the most recent build's errors, warnings and test results, and `parse_build_output` parses a log from an `xcodebuild` you ran yourself. Builds are recorded so their crashes can be symbolicated; for an Android build made outside quern, call `record_android_build` right after building. On a client key, builds are the server owner's setting (`quern://guide/sharing`).
+
+## Starting from a known state: app checkpoints and plists
+
+Simulators only. These reach into an app's data container, which a physical device doesn't expose.
+
+- **Checkpoints.** `save_app_state` saves a named copy of an app's data container and app group containers (it terminates the app first), and `restore_app_state` puts it back, so a test starts from "logged in" or "onboarding done" without driving the UI there. `list_app_states` and `delete_app_state` manage them.
+- **Logged-in states need the keychain.** Auth tokens live in the simulator keychain, outside every app container, so a checkpoint restores to a logged-out app unless it was saved with `include_keychain: true`. That needs the simulator shut down, to save and to restore, because `securityd` holds the keychain open. The restore's `meta.keychain` says which happened.
+- **One flag, not a whole state.** `read_app_plist`, `set_app_plist_value` (or `set_app_plist_values` for several), `delete_app_plist_key`, and `diff_app_plist` against a checkpoint. A key is taken literally: `"com.example.flag"` is one top-level key, not a path. On a booted simulator a preference file is written through `cfprefsd`, so a running app sees the change on its next read.
+- **Watching a plist.** `start_plist_watch` logs each added, removed or changed key into the log pipeline (`source: "plist_watcher"`), next to the app's logs and flows. `configure_plist_watch` makes it start with every `start_simulator_logging`.
+
+## Device settings
+
+- **Text input on an iOS simulator:** `set_simulator_setting` turns off what rewrites typed text (`auto_correction`, `auto_capitalization`, `smart_punctuation`, `period_shortcut`) and the "Save Password?" sheet (`password_autofill`). Each change reboots the simulator, so do it before launching the app under test; `get_simulator_settings` shows what's set (see `quern://guide/ui`).
+- **Hardware keyboard:** `set_hardware_keyboard` attaches or detaches a simulator's hardware keyboard. Attached, the software keyboard is hidden, so trees are smaller and screenshots unobstructed. `type_text` attaches it as a side effect of sending keys, so detach it again if a later step expects the software keyboard.
+- **Locale:** `set_locale` on Android and on physical iPhones (which briefly restarts SpringBoard); iOS simulators aren't supported yet.
+- **Android display:** `set_font_scale` (1.0 is the default, 1.30 the largest standard) and `set_display_density` (omit `dpi` to reset) take effect at once.
+- **Location and permissions:** `set_location` on simulators and emulators; `grant_permission` on simulators and Android devices.
+- **Buttons and links:** `press_button` presses hardware buttons (iOS: `HOME`, `LOCK`, `SIDE_BUTTON`...; Android: `home`, `back`, `recents`...). `open_url` opens any URL the device has a handler for: web links, deep links, universal links, `geo:`, and settings URIs.
+- **Factory reset:** `erase_device` erases a simulator (it is left shut down) or an Android emulator (it reboots with `-wipe-data`, possibly on a new serial, so use the `udid` in the answer). It removes every app, all data and every setting, simulator settings included. Not for physical devices.
+
+## Foldable simulators
+
+On an iPhone Duo simulator (Xcode 27.1+), `set_hinge` folds and unfolds it with Device Hub's poses (`closed`, `open`, `flat`) or any `angle`, and `get_hinge` reads the angle and which panel is lit. Which panel lights depends on how the hinge moved, not only where it stopped, so read `lit_panel` in the answer rather than assuming; a pose whose panel didn't light carries a warning. Taps, the UI tree and screenshots follow the lit panel, and the next tap after a fold waits for the screen to settle. Edge swipes are refused on a Duo.
+
 ## Mistakes to avoid
 
 **Hardcoding device UDIDs** — Use `resolve_device` with a name and let Quern find the right device. UDIDs differ across machines.
