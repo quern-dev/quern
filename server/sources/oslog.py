@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Map OSLog messageType values to our LogLevel enum
 OSLOG_LEVEL_MAP: dict[str, LogLevel] = {
-    "default": LogLevel.INFO,
+    "default": LogLevel.NOTICE,
     "info": LogLevel.INFO,
     "debug": LogLevel.DEBUG,
     "error": LogLevel.ERROR,
