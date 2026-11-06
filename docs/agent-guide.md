@@ -107,4 +107,5 @@ Every tool's method and path, and the endpoints with no tool (SSE streams, publi
 Everything needs `Authorization: Bearer <key>` from `~/.quern/api-key` (or a
 client key from `quern clients add`, which also needs `X-Quern-Session` on
 every request), except `/`, `/health`, `/api/v1/health`, `/tools`, `/docs`,
-`/redoc`, `/openapi.json`, and `/api/v1/proxy/cert`.
+`/redoc`, `/openapi.json`, `/api/v1/proxy/cert`, and the two pairing routes a client calls before it has a key,
+`POST /api/v1/remote/pair/hello` and `POST /api/v1/remote/pair/finish`.

@@ -415,7 +415,8 @@ TROUBLESHOOTING — no traffic from a physical device:
    the order proxy_setup_guide gives (proxy first: the cert comes from
    http://mitm.it/cert/cer, which the proxy serves), then call
    record_device_proxy_config -- a step of its own, which the guide does not list.
-   See quern://guide/devices for the full WDA script.
+   Each step can be driven on the device with WDA; quern://guide/devices shows how for
+   the Wi-Fi proxy screen.
 3. wifi_proxy_stale: false and active_wifi_network is set, but still no flows → check:
    - The proxy is running (status: "running")
    - The cert is trusted on the device (Settings > General > About > Certificate Trust Settings)

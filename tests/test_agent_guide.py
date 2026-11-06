@@ -20,7 +20,8 @@ TOOLS_DIR = REPO_ROOT / "mcp" / "src" / "tools"
 OVERVIEW = REPO_ROOT / "docs" / "agent-guide.md"
 TOPICS_DIR = REPO_ROOT / "docs" / "agent-guide"
 
-_URI = re.compile(r"quern://[a-z][a-z0-9-]*(?:/[a-z][a-z0-9-]*)?")
+# The whole address: a longer one must not pass as the registered prefix.
+_URI = re.compile(r"quern://[a-z][a-z0-9-]*(?:/[a-z][a-z0-9-]*)*(?![a-z0-9/-])")
 
 
 def _topics() -> list[str]:
@@ -68,7 +69,8 @@ def test_guide_pages_use_no_relative_links():
     # [text](path.md) resolves on GitHub and nowhere an agent reads it.
     bad = {}
     for page in _guide_pages():
-        links = [m for m in re.findall(r"\]\(([^)\s]+)\)", page.read_text())
+        # The target, with or without a title: [text](page.md "Title").
+        links = [m for m in re.findall(r"\]\(\s*([^)\s]+)[^)]*\)", page.read_text())
                  if not m.startswith(("http://", "https://", "#", "quern://"))]
         if links:
             bad[page.relative_to(REPO_ROOT).as_posix()] = links

@@ -55,8 +55,10 @@ With this in place, you can tell your agent things like "show me just the networ
 | `.debug` | Verbose development traces, variable dumps | Captured but high volume — filter aggressively |
 | `.info` | Routine operations (request started, cache hit) | Good default for most app events |
 | `.notice` | Significant events worth seeing in production (login, navigation, state changes) | **Recommended default** — survives aggressive level filters (on physical devices; see below) |
-| `.error` | Failures that need attention (network errors, decode failures) | Always visible in `get_errors` |
-| `.fault` | Invariant violations, "this should never happen" | Always visible |
+| `.error` | Failures that need attention (network errors, decode failures) | Listed by `get_errors` |
+| `.fault` | Invariant violations, "this should never happen" | Listed by `get_errors` |
+
+`get_errors` lists what is still in Quern's log buffer and was not dropped by a log filter, up to its limit: an empty answer is not proof that nothing went wrong. Its `truncated` field says when entries in the window were evicted.
 
 **Recommended default: `.notice`**. It's high enough to survive `min_level` filters but doesn't imply something is wrong. Use `.info` for chatty operational logs, `.error` only for actual failures.
 

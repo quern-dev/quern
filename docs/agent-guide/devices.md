@@ -53,7 +53,7 @@ Physical iOS devices are supported for screenshots, UI automation, log capture, 
 
 ## Proxy capture on a physical device
 
-**Physical device proxy capture**: Physical devices need their Wi-Fi proxy configured manually in Settings. The full setup flow is: install cert → trust cert → configure Wi-Fi proxy → call `record_device_proxy_config`. After that, filter flows by the device's `client_ip`.
+**Physical device proxy capture**: Physical devices need their Wi-Fi proxy configured manually in Settings. The full setup flow is: configure the Wi-Fi proxy → install the cert (the device downloads it from `http://mitm.it/cert/cer`, which only the proxy serves, so the proxy comes first) → trust the cert → call `record_device_proxy_config`. `proxy_setup_guide` gives the exact steps. After that, filter flows by the device's `client_ip`.
 
 - `record_device_proxy_config(udid, ssid, client_ip)` — records the config per Wi-Fi network (SSID). Automatically derives the correct Mac interface IP by finding the interface on the same /24 subnet as the device's `client_ip`. This handles multi-interface Macs correctly (e.g. Wi-Fi + Ethernet active simultaneously).
 - Call it again whenever you move to a different network — each SSID is tracked independently, so configs for home and work don't overwrite each other.
@@ -69,7 +69,7 @@ Physical iOS devices are supported for screenshots, UI automation, log capture, 
 4. `tap_element(label="Wi-Fi")` — navigate to Wi-Fi settings
 5. `tap_element(label="More Info", element_type="Button")` — open the connected network's detail page
 6. Read the device IP from the `IP Address` row (use `take_screenshot` or `get_screen_summary`)
-7. Scroll down to find the **HTTP Proxy** section, tap `Configure Proxy` (StaticText)
+7. Scroll down to find the **HTTP Proxy** section, tap `Configure Proxy` (StaticText). If it is **Off** (this network was never configured), choose **Manual** and fill in Port as well as Server: the proxy's port from `proxy_status`
 8. Verify the current Server value — if stale, tap the Server field to focus it:
    - The Server TextField is not discoverable by label in `get_ui_tree`. Use `take_annotated_screenshot` to find its bounding box, calculate its center as a fraction of the screen, convert to device logical points, then `tap` those coordinates.
    - `clear_text()` → `type_text("192.168.x.x")` with the correct Mac IP
