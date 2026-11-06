@@ -54,11 +54,13 @@ With this in place, you can tell your agent things like "show me just the networ
 |-------|---------|-----------------|
 | `.debug` | Verbose development traces, variable dumps | Captured but high volume — filter aggressively |
 | `.info` | Routine operations (request started, cache hit) | Good default for most app events |
-| `.notice` | Significant events worth seeing in production (login, navigation, state changes) | **Recommended default** — survives aggressive level filters |
+| `.notice` | Significant events worth seeing in production (login, navigation, state changes) | **Recommended default** — survives aggressive level filters (on physical devices; see below) |
 | `.error` | Failures that need attention (network errors, decode failures) | Always visible in `get_errors` |
 | `.fault` | Invariant violations, "this should never happen" | Always visible |
 
 **Recommended default: `.notice`**. It's high enough to survive `min_level` filters but doesn't imply something is wrong. Use `.info` for chatty operational logs, `.error` only for actual failures.
+
+**On a simulator, Quern currently records `.notice` as `info`**, so a `min_level=notice` filter drops it there. On a physical device it is recorded as `notice`. This is a known issue ([#621](https://github.com/quern-dev/quern/issues/621)); until it's fixed, filter a simulator's logs at `info` to keep your notice-level lines.
 
 ### Mark strings as .public for debugging
 
