@@ -97,7 +97,7 @@ A tool reported as unavailable may be installed but not answering; the two are
 not yet distinguishable in this response. If one is unexpectedly missing, check
 `~/.quern/server.log` for a probe timeout before assuming it is uninstalled.
 
-Each topic guide ends with what goes wrong in its area: no flows captured in `quern://guide/network`, an empty screen summary on a physical device in `quern://guide/devices`, a tap that misses in `quern://guide/ui`.
+The UI, network and devices guides end with what goes wrong in their area: a tap that misses in `quern://guide/ui`, no flows captured in `quern://guide/network`, an empty screen summary on a physical device in `quern://guide/devices`.
 
 ---
 

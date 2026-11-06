@@ -11,7 +11,7 @@ Measuring an app, finding where it hangs, and testing it under a bad network or 
 | How hard is the app working right now? | `get_performance` | iOS simulators, physical iPhones, Android |
 | What did each step of a run cost? | `start_recording(gauges=...)`, then `get_trace` | iOS simulators, physical iPhones, Android |
 | Why did it freeze or stutter? | `start_profile`, drive the app, `stop_profile` | iOS simulators, physical iPhones, Android |
-| Where is the main thread stuck right now? | `get_thread_stacks` | iOS simulators and physical iPhones; Android needs root |
+| Where is the main thread stuck right now? | `get_thread_stacks` | iOS simulators and physical iPhones; not Android (use `start_profile` with the `hangs` preset) |
 | How does it cope with a bad network or a hot phone? | `set_device_condition` | Physical iPhones |
 
 A number that couldn't be read is `null` with the reason, never a `0`, across all of these. Read the reason before reading a gap as "nothing happened".
@@ -28,7 +28,7 @@ An app that isn't running answers `running: false`; when quern can't tell, the a
 
 ## Profiles: hangs, hitches and hot functions
 
-- Why the app froze or stuttered: `start_profile` (iOS: relaunches the app under Instruments, presets hangs, cpu, hitches, launch; Android: perfetto records without relaunching, presets hangs, frames, cpu -- its deep summary needs trace_processor, which quern downloads on first use and says so in the answer), drive the app, then `stop_profile` for hangs, hitches and hot functions -- on iOS with Xcode 27.2, the ten longest hangs say whether the main thread was `blocked` or `busy`, and the longest three give the stack it was in; a blocked hang in a profile without System Call Trace has no stack (`stack_note` says why), and without triage `unavailable.triage` says why; `download_profile` for the trace itself
+- Why the app froze or stuttered: `start_profile` (iOS: relaunches the app under Instruments, presets hangs, cpu, hitches, launch; Android: perfetto records without relaunching, presets hangs, frames, cpu -- its deep summary needs trace_processor, which quern downloads on first use and says so in the answer), drive the app, then `stop_profile` for hangs, hitches and hot functions -- on iOS with Xcode 27.2, the ten longest hangs say whether the main thread was `blocked`, `busy` or `mixed`, and the longest three give the stack it was in; a blocked hang in a profile without System Call Trace has no stack (`stack_note` says why), and without triage `unavailable.triage` says why; `download_profile` for the trace itself
 
 On iOS the app launches slowly under Instruments: wait for its first screen (`wait_for_element`) before driving it, and relaunch it after the profile stops, since xctrace terminates it. `hitches` is physical devices only; simulators refuse Animation Hitches. `stop_profile` can take a minute or more while the trace is finished; past 4 minutes it answers 504 and the profile keeps finishing, so read it later with `get_profile`. A hang in the first few seconds can be the app's own cold launch. On Android 12 and later, `frame_timeline` says which frames were janky and whose fault it was. Kept profiles share `profiles.max_mb`, and the oldest finished ones make room.
 
