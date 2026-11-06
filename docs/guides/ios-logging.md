@@ -6,9 +6,18 @@ The difference between a productive AI-assisted debugging session and a frustrat
 
 ### The Problem with print()
 
-`print()` in Swift writes to stdout. On simulators, this shows up in Xcode's console. On physical devices, it goes nowhere useful — it doesn't appear in the unified logging system and can't be captured by any log collection tool.
+`print()` in Swift writes to stdout. On simulators, this shows up in Xcode's console when Xcode launched the app. It doesn't appear in the unified logging system, which is what Quern and Console.app read, on simulators or physical devices.
 
-For an AI agent trying to debug your app, `print()` output is invisible on physical devices and noisy on simulators.
+For an AI agent trying to debug your app, `print()` output is invisible: an app that logs only with `print()` looks like an app that logged nothing.
+
+### What Quern can see
+
+| Output method | Simulator | Physical device |
+|--------------|-----------|-----------------|
+| `os.Logger` / `Logger` | Captured | Captured |
+| `NSLog()` | Captured | Captured (routes through unified logging on iOS 10+) |
+| `print()` / `debugPrint()` | Not captured | Not captured |
+| `dump()` | Not captured | Not captured |
 
 ### Why os.log Wins
 
@@ -38,6 +47,32 @@ Logger.auth.debug("Token refresh started")
 ```
 
 With this in place, you can tell your agent things like "show me just the networking errors" or "what happened in the auth flow?" and get precise answers.
+
+### Choose the right log level
+
+| Level | Use for | Quern visibility |
+|-------|---------|-----------------|
+| `.debug` | Verbose development traces, variable dumps | Captured but high volume — filter aggressively |
+| `.info` | Routine operations (request started, cache hit) | Good default for most app events |
+| `.notice` | Significant events worth seeing in production (login, navigation, state changes) | **Recommended default** — survives aggressive level filters |
+| `.error` | Failures that need attention (network errors, decode failures) | Always visible in `get_errors` |
+| `.fault` | Invariant violations, "this should never happen" | Always visible |
+
+**Recommended default: `.notice`**. It's high enough to survive `min_level` filters but doesn't imply something is wrong. Use `.info` for chatty operational logs, `.error` only for actual failures.
+
+### Mark strings as .public for debugging
+
+By default, the unified logging system redacts dynamic string interpolations as `<private>` on physical devices. This makes logs useless for debugging. Mark values you need to see:
+
+```swift
+// BAD — shows as "<private>" on device
+logger.notice("User tapped \(buttonName)")
+
+// GOOD — visible in Quern logs
+logger.notice("User tapped \(buttonName, privacy: .public)")
+```
+
+**When to use `.public`**: Any value you'd want to see while debugging — URLs, view names, error messages, state descriptions. Don't mark genuinely sensitive data (auth tokens, passwords, PII) as public; `.private`, as in `userId` above, keeps those redacted.
 
 ## The print() Diverter Pattern
 
