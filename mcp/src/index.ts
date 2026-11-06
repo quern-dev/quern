@@ -89,7 +89,17 @@ const BASE_INSTRUCTIONS = [
   "",
   "TROUBLESHOOTING: If tools fail with connection errors, call ensure_server to check/restart the server.",
   "",
-  "For the full agent guide with workflows, advanced patterns, and troubleshooting: read the quern://guide resource.",
+  "For the agent guide, read the quern://guide resource: an overview with a tool map, and the topic guides it points to (quern://guide/ui, /network, /devices, /logs, /performance, /sharing), each read when your task reaches it.",
+];
+
+/** The agent guide's topic resources: quern://guide/<topic>, read from docs/agent-guide/<topic>.md. */
+export const AGENT_GUIDE_TOPICS: ReadonlyArray<readonly [string, string]> = [
+  ["ui", "Agent guide: reading the screen, taps and gestures, web views, scrolling to an element, landmarks"],
+  ["network", "Agent guide: capturing traffic, local capture and the system proxy, certificates, mocks, intercepts"],
+  ["devices", "Agent guide: choosing a device, physical iPhones and WDA, live preview, app state and plists, device settings, builds"],
+  ["logs", "Agent guide: app logs and whether quern can see them, crashes, recordings, get_trace, screenshot timelines"],
+  ["performance", "Agent guide: CPU and memory, hangs and janky frames, profiles, thread stacks, device conditions"],
+  ["sharing", "Agent guide: shared servers, reservations, client keys, other Macs and use_remote"],
 ];
 
 // Built in main(), after the knowledge base load: the instructions are fixed
@@ -161,6 +171,16 @@ function buildServer(instructions: string): McpServer {
       ],
     })
   );
+
+  // The guide's topics, each its own resource so an agent reads only the one
+  // its task needs; quern://guide names them all. tests/test_agent_guide.py
+  // keeps this list, the files and the overview's links in step.
+  for (const [topic, description] of AGENT_GUIDE_TOPICS) {
+    const uri = `quern://guide/${topic}`;
+    server.resource(`guide-${topic}`, uri, { description, mimeType: "text/markdown" }, async () => ({
+      contents: [{ uri, mimeType: "text/markdown", text: readResourceFile(`agent-guide/${topic}.md`) }],
+    }));
+  }
 
   server.resource(
     "api-reference",

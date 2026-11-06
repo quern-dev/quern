@@ -1,0 +1,32 @@
+# Shared and remote servers
+
+*`quern://guide/sharing` -- part of the Quern agent guide. Start from `quern://guide`.*
+
+Working on a quern server other agents use too, from a client key, or on another Mac.
+## Sharing a server with other agents
+
+If another agent or a CI job may use the same quern server, **reserve your devices first** with `reserve_devices`, for example `reserve_devices(count=1, device_type="simulator")` or `reserve_devices(udids=[...])`. While you hold a device, nobody else can change it: their taps and installs get 423 naming you. Reading it (screenshots, UI tree, logs) still works for everyone. Reserving one device makes it your active device, so later tools need no `udid`.
+
+- You don't have to release: your reservation ends with your session. A brief network drop keeps it for a grace period (3 minutes by default). `release_devices` frees devices sooner.
+- A 423 on a device means someone else holds it. `session_status(all=true)` or `list_devices` (its `reservation` field) shows who. Pick a free device rather than waiting.
+- A 409 saying the device "is being cleaned up after its last hold" is brief: the last holder's release is removing what it installed. Retry in a moment.
+- **What a client installs is removed when its hold ends** (the owner's `sessions.client_release`, `uninstall` by default; `erase` erases a simulator). Reserving the device again later means installing again. An install is refused with 503 when the device's apps can't be listed first, since its release couldn't tell what to remove; retry, or pick another device.
+- If a tool result ends with a `quern session notice:` line, read it. It says, for example, that quern restarted and your reservations are gone, so reserve again.
+- **On a client key** (`QUERN_CLIENT_KEY` set to a key from `quern clients add`, or a paired remote), you may change only devices you have reserved: a 403 saying "reserve it first" means exactly that, so call `reserve_devices`. A 403 saying "owner-only" is something Mac-wide -- the proxy itself, local capture (`set_local_capture`), the system proxy, intercepts, updates, the device pool's `resolve_device` -- that only the server's owner can do; ask them, don't retry.
+- **Building on a client key** (`build_and_install`, #608): off unless the server's owner sets `remote.client_builds`. A 403 saying builds are off for client keys is their setting: ask, don't retry. When it's on, the MCP pushes your project with git to a sandbox of your own on that Mac and builds that, so the project must be in a git repository, with no submodules or Git LFS, which the push can't carry; the MCP says so before sending anything. You can't name a path already on that Mac, and `java_home` and `gradle_args` stay owner-only. A push over the sandbox cap (`sandboxes.max_mb`) is a 413, and one when the disk is at its free-space floor a 507.
+- **To capture your app's traffic on a client key**, reserve the simulator and call `add_session_capture(simulator_udid, processes)`. Nothing restarts, and it ends with your hold. Its refusals: 403 "reserve it first"; 409 when the proxy isn't running (only the owner can start it -- ask, don't retry); 428 when the simulator doesn't trust the CA (as for capture sessions); 429 when you're already using four session proxies (release some with `remove_session_capture`); 400 for exclusions, PIDs, commas or slashes in a name, or more than 16 names; 422 for an Android or physical iOS device, which it can't capture -- route that device through the proxy instead (`device-proxy-config`); 503 when the device couldn't be identified because listing devices failed (retry). Connections an app already has open aren't captured until it reconnects, so relaunch it.
+- **Calling the REST API without the MCP**, a reservation needs a held socket: a bare-REST reserve answers 409, and the 409 says how to hold one. Run `quern session hold NAME --background` and send the printed id as `X-Quern-Session`; don't write your own socket holder.
+- **Viewer links on a client key**: you may issue them for your own recordings (`start_recording(viewer=true)`). A 403 saying links are turned off is the owner's setting; don't retry.
+
+## Working across machines
+
+The user may have paired other Macs running quern (`quern pair` / `quern connect`), so a device you need may be on another server.
+
+- **`list_remotes`** lists every server you could use: this Mac first (`local`), then each paired one, with whether it answers, its version, and its devices (name, model, OS version, family, state, and free / yours / held). The one marked `"current": true` is the server your tools talk to now. Only its devices can be reserved.
+- **When `reserve_devices` finds nothing, or a filtered `list_devices` comes back empty, read the hint** (the reserve error's text, or `elsewhere` on the list). It names the paired servers with matching free devices and the exact `use_remote(name=...)` call. Don't conclude the device doesn't exist, and don't offer to download a runtime, before reading it.
+- **`use_remote(name)`** -- or `use_remote(name="local")` to come back -- switches every later tool call, and your held session, to that server. It switches only once your session is live there; otherwise you stay where you were, and the answer says why.
+- **It refuses while you hold devices** on the current server, or when the current server can't say what you hold -- not retryable as-is. Call `release_devices` first, or `use_remote(name, release=true)`.
+- **What follows you:** your mocks -- removed from the old server and recreated on your next reservation there; read `carried` on that `reserve_devices` answer for the new rule ids and anything still waiting -- your `add_session_capture` processes, and the project's knowledge base (`knowledge` in the answer).
+- **What stays:** local capture, the system proxy, intercepts, bypass, recordings, logging and device settings. Check `proxy` in the answer: mocks and capture need the new server's proxy running, and only its owner can start it.
+- **Mocks that couldn't be removed** from an unreachable server are listed in `carried.still_on_old`; switching back there tries again (`left_here_earlier`).
+- **The `quern` CLI in your shell isn't switched.** It still talks to this Mac, so don't shell out to `quern` expecting the remote.

@@ -1,19 +1,20 @@
 # Quern Agent Guide
 
 **For**: AI agents using Quern MCP tools for mobile app debugging and testing
-**Last Updated**: March 1, 2026
 
----
+This page is the overview: how to start, the principles behind the tools, and which tool fits which job. The detail lives in topic guides, each its own MCP resource. Read one when your task reaches it.
 
-## Philosophy
-
-Quern is your sensory and motor interface to mobile apps. The tools give you three capabilities:
-
-- **Eyes**: See UI state, network traffic, logs
-- **Ears**: Hear app events, crashes, errors
-- **Hands**: Control UI, intercept network, trigger actions
-
-The tools should feel natural — you don't think about mechanics, you just look, listen, and act.
+| Read | When |
+|---|---|
+| `quern://guide/ui` | Reading the screen, tapping, gestures, web views, scrolling to an element, landmarks and screen identification |
+| `quern://guide/network` | Capturing traffic, local capture and the system proxy, certificates, mocks, intercepts |
+| `quern://guide/devices` | Choosing a device, physical iPhones and WDA, live preview, app state and plists, device settings, foldables, builds |
+| `quern://guide/logs` | App logs and whether quern can see them, crashes, recordings, `get_trace`, screenshot timelines |
+| `quern://guide/performance` | CPU and memory, hangs and janky frames, profiles, thread stacks, a slow network or a hot phone |
+| `quern://guide/sharing` | A server other agents use too, reservations, client keys, other Macs (`use_remote`) |
+| `quern://app-knowledge-guide` | Building or updating an app's knowledge base with the user |
+| `quern://troubleshooting` | iOS error patterns in app logs, and reading crash reports |
+| `quern://api-reference` | Every tool's HTTP endpoint, when calling the REST API directly |
 
 ---
 
@@ -31,545 +32,38 @@ From there, use the right tool for your task. If any tool fails with a connectio
 
 ## Core Principles
 
-### 1. Prefer Structured Data for Decision-Making
-
-Use `get_screen_summary` for a curated text description or `get_ui_tree` for the full accessibility hierarchy. These are cheaper, faster, and easier to reason about programmatically than screenshots.
-
-Screenshots are still useful — for verifying visual layout, catching rendering bugs, documenting state for humans, or when you need to see something the accessibility tree doesn't capture. Use both, but reach for structured data first when you need to make decisions or find elements to interact with.
-
-Both `take_screenshot` and `take_annotated_screenshot` support a `save_path` parameter to write the image to disk instead of returning base64 — useful when handing off files to other tools (e.g., opening in Preview) or attaching to reports.
-
----
-
-### 2. Prefer Accessibility Over Coordinates
-
-Use `tap_element` with a label and element type instead of `tap` with raw coordinates. Accessibility-based taps work across screen sizes, survive layout changes, and are self-documenting.
-
-**When coordinates are OK**: Gestures that aren't tied to specific elements (swipe to refresh, drag to reorder).
-
-**When a tap is refused as obstructed** (iOS simulators): `tap_element` hit-tests the point it is about to tap. If something else is there -- a row scrolled under the navigation bar or a floating search field, a field under the edit menu or the keyboard -- or the element is off screen, it answers 409 with `status: "obstructed"`, `covered_by` naming what is in the way, and a `detail` with the remedy. Nothing was tapped. Scroll the element into view (`scroll_to_element`) or dismiss what is on top, then tap again; retrying unchanged will be refused again. A tap sent moments after another action waits for the screen to settle first (`waited_for_settle_ms`), because a transition still running swallows taps silently. A target still moving across that wait is tapped where it was last read, with `target_moving: true` and a `warning` -- read the screen before trusting that tap; on Android's fast path the wait is for the target itself (`waited_for_rest_ms`). On an iOS simulator a target that has moved off its point is not tapped at all: `obstructed` with `reason: "moving"`. A coordinate `tap` is never refused, but says what it `landed_on`. On a screen that never stops moving (a pulsing location dot, a spinner), pass `skip_stability_check` to `tap_element` or `skip_settle` to `tap`, or each wait runs to its timeout. A pass is not proof: something on top that fits entirely inside a large target, like a floating button over the middle of a card, reads as part of it.
-
-**Long press and edge swipes**: pass `duration` (seconds; 1.0 is safe) to `tap` or `tap_element` for a long press -- context menus, drag handles, press-and-hold controls. Pass `edge` to `swipe` for a swipe the system takes: back from the left, home from the bottom, Control Centre or notifications from the top. Start the swipe at that edge (`start_x: 1` for the left) or it is refused. On a simulator an edge swipe needs sim-bridge, the default backend; idb, or WDA after `start_driver`, refuses it.
-
-**A documented navigation tap that did not register is reported** (#491). With a knowledge base loaded, a `tap_element` whose element is a `leads_to` edge is remembered, at no cost. If a later `tap_element` misses, or `wait_for_element` times out, on the screen that tap is documented to *leave* -- with nothing having changed the screen in between (another tap, a swipe, a button, a launch) -- the response carries `previous_tap`: what was tapped, where it should have led (`expected`), where you still are (`on`), and a `note`. That is usually the explanation for the miss: the earlier tap was dropped, which apps -- and WDA in particular -- do. Check the screen before repeating it, and never repeat blindly a submit, a purchase or a send. It is said once, only on an exact identification, not for a tap more than two minutes old, and not before the edge's `timeout:` (else one second) has passed, so a screen still arriving is not blamed. Its limit: quern does not know where the tap was made, so a label that is documented on one screen and also used, undocumented, on another can be blamed wrongly -- hence "probably".
-
-**A miss says when the screen has not changed since your last tap** (#502), with or without a knowledge base. Every `tap_element` (except a long press) captures a frame of the screen first. If your next `tap_element` misses, or `wait_for_element` times out, with no screen change made through quern in between, at least a second after the tap (longer if the knowledge base gives the edge a `timeout:`), and the screen looks exactly as it did before that tap, the response carries `screen_unchanged_since_tap`: what was tapped, how long ago, the measured `change`, and a `note`. If the tap was meant to navigate, open or toggle something, it probably did not register. A tap meant to change nothing -- a label -- reports it too, which is still true and is only said on a miss. `previous_tap`, when there is one, is the more specific claim and replaces it. The comparison is near-exact, so a switch flipping or a digit changing counts as a change, and so does a spinner or a blinking caret: on an animated screen there is no note. The status bar is not compared. The frame costs one capture per tap -- measured, ~60ms on Android, ~90ms on a simulator, ~200ms on an iPhone 11 -- and `note_unchanged: false` skips it.
-
-**To check at the tap instead**, pass `verify_navigation: true`. A documented tap from the screen you are on then waits for the screen it leads to and reports `navigation`: `{expected, from, arrived, waited_ms}`. `status` stays `ok`, because the tap was delivered, but `arrived: false` means the screen did not change as documented: `on` names where you are (`stayed: true` when it is still the starting screen), and a top-level `warning` says so. For a screen that is slow to arrive, the edge's `timeout:` in the knowledge base, or `navigation_timeout` on the call, lengthens the wait (3s by default). `arrived: null` means it could not tell -- the screen afterwards was unidentified or ambiguous (`unidentified`, `ambiguous`), every read failed (`read_failed`), no read began late enough after the tap to show where it went (`no_settled_read`), or only a `condition`al edge matched (`conditional`) -- and is not a miss. It costs a screen read before the tap and at least one after: measured, a few hundred milliseconds on a WDA simulator or Android, but 1.5-2s a tap on an iPhone and on sim-bridge. Use it where knowing at once matters more than speed.
-
-**Two fingers, or a real double tap**: `gesture` does pinch (`scale`), rotate (`degrees`), two-finger pan, double tap and two-finger tap, centred on an element by `label`/`identifier` or on `x`/`y`. Use it for maps, photo viewers and zoomable canvases, and for a double tap: two `tap` calls each pay a round trip and can land outside the double-tap interval, reading as two single taps. Expect the app to report a little less than you sent -- a recogniser starts measuring only once the fingers pass its threshold, so `scale: 3` reads as about 2.6. Works on iOS simulators, physical iPhones and Android (which needs scrcpy installed; without it the 400 says so). On Android a pinch defaults to starting 30mm apart along the long axis, since many apps ignore fingers closer than ~27mm -- so a 3x spread may not fit on a phone screen, and the 400 names the point that would leave it.
+1. **Prefer structured data for decisions.** `get_screen_summary` for a curated description, `get_ui_tree` for the full hierarchy. Screenshots are for checking what something looks like, not for deciding what to tap.
+2. **Prefer accessibility over coordinates.** `tap_element` with a label and an `element_type` survives layout changes; a coordinate `tap` is for gestures that aren't tied to an element. A refused tap says why and what to do (`quern://guide/ui`).
+3. **Summarize first, drill down second.** Start with `get_log_summary`, `get_flow_summary` and `get_screen_summary`, then filter to what they showed you.
+4. **Verify state before acting.** Don't assume the proxy is running or an element exists: check, since state changes between calls.
+5. **Let the server wait.** `wait_for_element`, `wait_for_flow`, `wait_for_settle` and `list_held_flows` with a `timeout` instead of polling in a loop.
+6. **Filter aggressively.** Logs by level, process and text; flows by host, method and status; the UI tree with `max_elements` or `children_of`. The summary tools return a `cursor`: pass it back as `since_cursor` for only what's new.
+7. **Correlate across sources.** Humans struggle to correlate millisecond-level timing across logs, network, and UI. You don't. After an action, read logs, flows and the screen for the same narrow window, or let `get_trace` join them for you.
 
 ---
 
-### 3. Summarize First, Drill Down Second
+## Which tool for which job
 
-Don't start with `query_logs(limit=10000)` or `query_flows(limit=1000)`. Start with the summary tools:
-
-- `get_log_summary` — overview of recent log activity
-- `get_flow_summary` — traffic grouped by host with error highlights
-- `get_screen_summary` — curated interactive elements on screen
-
-Then drill down based on what you learned: filter logs by a specific error message, query flows for a specific failing host, or scope the UI tree to a specific container.
-
----
-
-### 4. Verify State Before Acting
-
-Don't assume the proxy is running — check with `proxy_status` first. Don't assume an element exists — check with `get_screen_summary` before tapping. State can change between tool calls. Always verify before acting.
-
----
-
-### 5. Use Server-Side Waiting, Not Client-Side Polling
-
-Use `wait_for_element` instead of calling `get_ui_tree` in a loop. It polls server-side at sub-second intervals, returns immediately on match, handles timeouts, and uses fewer API round-trips.
-
-Use `wait_for_flow` after triggering a UI action to observe the resulting network request — it blocks until a matching flow appears or times out. Auto-sets `since` to 5 seconds before the call to catch flows that completed between the action and the wait. Use `list_held_flows` with a `timeout` when you need to intercept and *modify* flows.
-
-Use `wait_for_settle` when you are waiting for the screen to stop changing rather than for a specific element — after a navigation, an animation, or before interacting with a web view, whose content is invisible to the accessibility tree so nothing else can tell you it has finished drawing.
-
-It answers "has drawing stopped", not "has content arrived". A blank page still loading is perfectly still, and will be called settled in under two seconds. Raising the timeout does not help, because nothing is moving. So for a slow load, wait for the content first — poll `get_web_content` until it returns elements, or `wait_for_element` for a native one — and use `wait_for_settle` afterwards to let the result stop moving.
-
-Check the `settled` field before acting on the result. `settled: false` means something is animating rather than loading — a spinner, a video, a carousel — and will never settle. Treat that as a fact about the screen, not a failed wait.
-
----
-
-### 6. Filter Aggressively
-
-Logs, network flows, and UI trees can be huge. Always filter to what you need.
-
-**Logs**: Filter by `level`, `process`, `search` text, and time range. Don't fetch 1,000 entries when 50 filtered ones will do. For sustained debugging, use `set_log_filter` to drop noise at ingestion — the `device-quiet` preset removes common system daemons, or combine `process` + `subsystems` includes for app-only output with zero framework noise. Setting a process filter automatically restarts running log adapters with subprocess-level filtering, cutting noise at the source. You can also apply presets at start time: `start_device_logging(process: "MyApp", preset: "device-quiet")`.
-
-**Flows**: Filter by `host` (single), `hosts` (list), `exclude_hosts` (list), `method`, `path_contains`, and `status_min`/`status_max`. Use `detail="summary"` to get compact results (method/url/status/timing only) that stay within token limits. Use `get_flow_summary` first to identify which hosts or patterns to investigate.
-
-**UI Tree**: Use `get_screen_summary` with a reasonable `max_elements` limit. If you need detail, scope `get_ui_tree` with `children_of` to a specific container rather than fetching the full 500+ element hierarchy.
-
----
-
-## Common Workflows
-
-### Debugging Network Issues
-
-1. Check `proxy_status` — start the proxy if it isn't running
-2. Get a baseline with `get_flow_summary` to see current traffic patterns
-3. Trigger the issue (tap a button, navigate to a screen)
-4. Query for relevant flows — filter by method, path, status code, or `simulator_udid`
-5. Use `get_flow_detail` on the specific flow to inspect headers, request body, and response body
-6. To re-send a captured request (e.g., after fixing a backend issue), use `replay_flow` with the flow ID
-
-**Key insight**: Start with summary, trigger action, drill down to specific flows.
-
-**Capture sessions for test fixtures**: To isolate the API calls for a specific UI action, use `start_capture_session` before the action and `stop_capture_session` after. This returns only the flows from that time window, with built-in host filtering and compact summaries. Use `exclude_hosts` to filter out analytics/SDK noise, or `hosts` to capture only specific API domains.
-
-**Per-simulator flow filtering**: When local capture is enabled, each flow is tagged with the originating simulator's UDID. Use `simulator_udid` in `query_flows`, `get_flow_summary`, and `start_capture_session` to see only traffic from a specific simulator — essential when running parallel tests.
-
-**Proxy modes for simulators**:
-
-- **Local capture (recommended)**: Uses mitmproxy's macOS System Extension to transparently capture simulator traffic without configuring a system proxy. Each simulator's flows are tagged with its UDID. Check `proxy_status` — if `local_capture` is non-empty, simulator traffic is already being captured. The user configures which processes to capture via `quern enable-local-capture <process_name>` (the process name is typically the Xcode target name). `set_local_capture` changes this Mac-wide list (owner only) at runtime and restarts the proxy: mocks, bypass patterns and the intercept are kept, but open connections reset and held flows are released (`restart` in the response says so). To capture an app on one simulator you hold without any restart -- and from a client key, the only way -- use `add_session_capture` (see *Sharing a server with other agents*).
-- **System proxy**: Configures macOS-wide proxy settings. Use `configure_system_proxy` to start capturing and `unconfigure_system_proxy` when done. Affects all Mac traffic — always unconfigure when finished.
-
-**`set_local_capture` sets the list, but a minimum is always kept.** Naming one app no longer drops `MobileSafari` and `com.apple.WebKit.Networking` — a webview's requests leave through WebKit and an OAuth hand-off goes through Safari, so losing them silently stopped capturing the traffic you were probably looking for. The response says what was added for you (`capture_added`) and what your list removed (`capture_removed`); read both. Everything else is still replaced rather than merged, so read `local_capture` from `proxy_status` first and pass entries you want kept. `only: true` on the HTTP endpoint captures exactly your list for the running server. The **flag** is not stored but the **list is**, so it replaces whatever was configured before, and start-up widens that stored list again because nothing on disk records you meant it narrowly. Treat `only` as a one-shot narrowing, not a temporary view.
-
-**Entries are mitmproxy local-mode syntax, not only process names.** Each is passed through unchanged. A name matches as a case-sensitive *substring* of the process's full executable path — the same path flows report as `source_process`, so any fragment of it works. A bare number is a PID, and a leading `!` excludes either form. Entries apply in order, and **the first one sets the starting point**: a list that begins with an exclusion captures every process on the Mac except those excluded. The minimum is appended after your entries, so it does not narrow that, and such a list is **refused with 400** unless you pass `whole_mac: true`. To drop one process from a capture, put the exclusion after an include — `["MyApp", "!12345"]`, never `["!12345"]`. And to work with one simulator, don't change this list at all: filter by `simulator_udid` (see *Per-simulator flow filtering* above). If the app's process isn't in the list, ask for `add_session_capture` on that simulator rather than widening the Mac-wide list.
-
-Name the process that actually makes the requests. Safari's traffic leaves through `com.apple.WebKit.Networking`, not `MobileSafari`, and so does every in-app web view, so a list with `MobileSafari` alone captures nothing.
-
-**Refusals worth recognising.** These are answers, not faults, and retrying
-them wastes a turn: a `launch_app` failure on an app that cannot start (see
-*Debugging UI Issues*), and the proxy refusals below.
-
-**These tools can refuse, and that refusal is not an error to retry.** `configure_system_proxy`, and `start_proxy` **when called with `system_proxy: true`**, return **428** when a booted simulator does not trust the mitmproxy CA. Capturing in that state fails every HTTPS request from that device and the symptom points nowhere near the proxy — a blank screen, or an app that appears to have no network. The response names the devices and the ways out: install the certificate, set `auto_install_cert` so Quern handles it from now on, capture with `set_local_capture` instead (which passes such a simulator through), or shut the simulator down. (`skip_cert_check`, which proceeded anyway, is deprecated: a response to a request that uses it carries a `deprecations` note.)
-
-**`set_local_capture` does not refuse — it passes untrusting simulators through.** Local capture spans every simulator, so a simulator that does not trust the CA has its TLS passed through untouched rather than decrypted: its apps keep working, but its HTTPS requests never appear as flows. `simulator_tls` on the response and on `proxy_status` lists each booted simulator as `decrypted` or `passed_through`, with the reason and the fix, and any flow query filtered to a passed-through simulator carries `simulator_tls_note` — as does `start_capture_session`, so you hear it before driving the app rather than after. **Read those before concluding an app made no requests.** Installing the CA on that simulator (`install_proxy_cert`) decrypts its new connections within seconds, with no restart (connections already open stay undecrypted until they close) — but installing a root CA is the user's decision, so ask first.
-
-**Starting a recording or capture session for a simulator checks it first.** `start_recording` with flows, and `start_capture_session` with `simulator_udid`, ask that simulator whether it trusts the CA before they say started. If it does not, they install the CA when `auto_install_cert` is set, and otherwise refuse with **428** -- a run that records no HTTPS looks fine and holds nothing. Pass `allow_passthrough` only when the user accepts recording without that simulator's HTTPS -- and, under the system proxy, accepts that its HTTPS requests fail for the whole run. `start_recording` returns `simulator_tls`, what is actually in effect for that simulator; and if it ever refuses the proxy's certificate, the recording's warnings and `simulator_tls_note` on flow results say so, because those requests failed in the app and are not flows.
-
-**Do not route around it.** The two share one gate, so reaching the configured state by another tool recreates exactly the failure the refusal exists to prevent. In particular, `start_proxy {system_proxy: true}` after `configure_system_proxy` refused is the same action by another name — it used to work, and that was the bug. Starting the proxy *without* that flag is never refused, because binding a listener routes nothing; nor is disabling local capture with an empty `processes` list, since that is how you leave the broken state rather than enter it.
-
-Ask the user which resolution they want. Installing a certificate authority persists across sessions and outlives the capture window, so it needs their say-so — the same way `update_quern` does.
-
-
-**Certificate verification**: If no flows are captured, verify the proxy certificate is installed on the simulator:
-1. Call `verify_proxy_setup` — performs a ground-truth check by querying the simulator's TrustStore database. Defaults to **booted simulators only**; pass `state="all"` or `device_type="device"` to check shutdown sims or physical devices
-2. Returns per-device `status`: `installed`, `not_installed`, `never_booted`, or `error`
-3. Returns `erased_devices` — UDIDs where a previously installed cert is now missing (probable device erase)
-4. If the cert is missing, install it with `install_proxy_cert` — **after asking the user**. Do not shell out to `xcrun simctl keychain add-root-cert` directly: that installs a root certificate authority with no record in Quern's cert state, so `proxy_status` and the capture preflight both go on believing the device is untrusted, and nothing tracks it for removal.
-
-**Physical device proxy capture**: Physical devices need their Wi-Fi proxy configured manually in Settings. The full setup flow is: install cert → trust cert → configure Wi-Fi proxy → call `record_device_proxy_config`. After that, filter flows by the device's `client_ip`.
-
-- `record_device_proxy_config(udid, ssid, client_ip)` — records the config per Wi-Fi network (SSID). Automatically derives the correct Mac interface IP by finding the interface on the same /24 subnet as the device's `client_ip`. This handles multi-interface Macs correctly (e.g. Wi-Fi + Ethernet active simultaneously).
-- Call it again whenever you move to a different network — each SSID is tracked independently, so configs for home and work don't overwrite each other.
-- `proxy_status` shows `wifi_proxy_configs` (keyed by SSID), `wifi_proxy_stale` (true if no stored network's proxy_host matches the current Mac IP), and `active_wifi_network` (the currently matching SSID). If `wifi_proxy_stale: true`, reconfigure the device's Wi-Fi proxy and call `record_device_proxy_config` again.
-- `proxy_status` also includes `network_state` (refreshed by a ~15s background poll) — current SSID/IP, plus `last_changed_at` and `last_change_reason` fields populated when the laptop's network identity shifts. When you see `last_changed_at` is recent and a physical device is in play, expect `wifi_proxy_stale: true` to follow — and run the autonomous reconfiguration flow below.
-- See `docs/physical-device-cert-setup.md` for the full WDA automation script.
-
-**Autonomous proxy reconfiguration (cert already installed)**: When `wifi_proxy_stale: true` or `wifi_proxy_configs: null`, you can update the device's proxy settings fully via WDA without user intervention:
-
-1. `proxy_status` — confirm proxy is running, note `local_ip`
-2. `resolve_device(name=..., type="device")` — connect to the physical device
-3. `launch_app(bundle_id="com.apple.Preferences")` — open Settings
-4. `tap_element(label="Wi-Fi")` — navigate to Wi-Fi settings
-5. `tap_element(label="More Info", element_type="Button")` — open the connected network's detail page
-6. Read the device IP from the `IP Address` row (use `take_screenshot` or `get_screen_summary`)
-7. Scroll down to find the **HTTP Proxy** section, tap `Configure Proxy` (StaticText)
-8. Verify the current Server value — if stale, tap the Server field to focus it:
-   - The Server TextField is not discoverable by label in `get_ui_tree`. Use `take_annotated_screenshot` to find its bounding box, calculate its center as a fraction of the screen, convert to device logical points, then `tap` those coordinates.
-   - `clear_text()` → `type_text("192.168.x.x")` with the correct Mac IP
-   - `tap_element(label="Save", element_type="Button")`
-9. `record_device_proxy_config(udid=..., ssid=..., client_ip=<device IP from step 6>)` — the correct Mac interface IP is derived automatically
-10. `proxy_status` — verify `wifi_proxy_stale: false` and `active_wifi_network` is set
-11. `launch_app(bundle_id="com.apple.mobilesafari", udid=...)` — open Safari to generate traffic
-12. `wait_for_flow(client_ip=<device IP>)` — confirm traffic from the device is reaching the proxy. If no flow arrives within the timeout, the cert is likely not trusted on the device (Settings → General → About → Certificate Trust Settings) or the proxy port is unreachable from the device's network.
-
-**Note on the Server field coordinates**: The proxy settings screen on iOS 26 does not expose text fields in the standard accessibility tree. Always use `take_annotated_screenshot` before tapping — the annotated view shows the TextField bounding box even when `get_ui_tree` doesn't. The field typically sits at ~40% screen height; divide the bounding box center (in image pixels) by the image dimensions and multiply by the device's logical point size (e.g. 390×844 for iPhone 12).
-
----
-
-### Debugging UI Issues
-
-1. Call `get_screen_summary` to see current state
-2. Trigger the issue (tap, swipe, type)
-3. Call `get_screen_summary` again to see what changed
-4. If the result is unexpected, use `get_ui_tree` (optionally scoped with `children_of`) to inspect the full hierarchy
-
-**Key insight**: Use summary for quick checks, full tree when you need details.
-
-**An input call can come back `ok` with an advisory, and the advisory is the
-real answer.** Xcode 27's Device Hub attaches a guest HID daemon to every
-booted simulator, which disconnects the touch, button and keyboard services
-quern drives and never reconnects them. Everything else keeps working — tree
-reads, screenshots, `open_url`, app launches — so the device looks healthy
-while nothing you do reaches it. When quern has read that state, `tap`,
-`tap_element`, `swipe`, `gesture`, `type_text`, `clear_text` and `press_button` carry an
-advisory on the response. Do not treat the tap as landed because the status
-says `ok`: read the advisory, and if it is there, call
-`restore_simulator_input` before continuing. That restarts SpringBoard, so
-running apps are killed and you will need to relaunch — which is why it is
-asked for rather than done for you. Nothing is said for a healthy device, or
-for one whose state has not been read.
-
-**A launch that reports success is now a launch that happened.** `simctl
-launch` reports the launch it was *asked* for and returns a pid, so an app
-that cannot start — on iOS 27, any app that has not adopted the UIScene
-lifecycle — used to come back as launched while the screen stayed on
-SpringBoard. Every later call then failed for a reason unrelated to the
-cause, typically `tap_element` reporting "no element found". `launch_app` now
-confirms the app is actually frontmost before reporting success, so a launch
-failure surfaces where it happens. **That failure is not one to retry**: the
-app cannot launch on that runtime, and retrying will produce the same result
-more slowly.
-
-**If the element isn't on screen**: reach for `tap_element` (which auto-scrolls) or `scroll_to_element` rather than a manual `swipe` loop. Be aware that reading the full UI tree can itself scroll the content — on Android's `CoordinatorLayout`/`RecyclerView` screens the accessibility traversal a dump performs pushes top controls out of view before your tap lands. Both scroll paths avoid the dump for exactly this reason, so prefer them over "dump, read coordinates, tap".
-
-**Debugging the platform normalizer**: When `tap_element` or a landmark match doesn't behave as expected and you suspect the underlying source attributes aren't surfacing correctly (e.g. an Android tab that doesn't appear `selected`), call `get_ui_tree` with `include_raw=true` to get the raw provider attributes (full uiautomator2 XML on Android) on each element under `extra_attrs`. This is faster than dropping to `adb shell uiautomator dump` and stays inside the Quern API surface.
-
-**If the screen looks empty apart from its chrome**: you are probably looking at
-a `WKWebView`. On iOS simulators it is absent from the accessibility tree
-entirely, so `get_screen_summary` shows the navigation bar and nothing else,
-and it is easy to read that as a failed load or a blank screen. Call
-`get_web_content` — it pairs the Web Inspector's view of the DOM with the
-native tree so elements come back with real screen frames, which means you can
-tap them like any other element.
-
-The results are merged into subsequent UI reads, so `tap_element`,
-`get_ui_tree` and `get_screen_summary` all see them and you can tap by label as
-usual. That overlay is dropped as soon as anything changes the screen — a tap,
-swipe, scroll or launch — so **call `get_web_content` again after each
-interaction with the page** rather than reusing an earlier read. A tap against
-stale web content is refused with reason `stale_web_content` instead of landing
-somewhere wrong.
-
-A lookup that misses on a web page says so. When Safari is in front, or the
-native tree has collapsed to a bare `Application` (a presented web modal), a
-miss from `tap_element`, `type_text`, `get_element`, `clear_text` or a
-`wait_for_element` timeout tells you to call `get_web_content` first, and
-`tap_element` and `wait_for_element` also carry it as `web_content_hint`. Read
-that as "not visible to the tree yet", not "the field does not exist".
-
-If the response reports `anchored: false`, the page was found but its position
-on screen could not be confirmed, and the elements are withheld rather than
-returned at a guessed offset. Treat that as "look again", not "no content".
-
-Simulator only, and deliberately: Android's accessibility tree already descends
-into `WebView`, and physical iOS devices are reached over a different
-transport. On both, the ordinary UI tree is the right tool and this one has
-nothing to add.
-
----
-
-### Identifying Screens with Landmarks
-
-When the question is "what screen am I on right now?" — for verifying navigation, gating actions, or driving recipe-style workflows — landmarks give you a deterministic answer that doesn't depend on label parsing or model swaps.
-
-**Why use landmarks instead of just reading `get_screen_summary`?**
-
-- **Deterministic.** Quern matches the live UI tree against authored selectors and returns `matched: <screen_name>` with `confidence: exact | ambiguous | none`. No prose interpretation.
-- **Cross-platform.** The same landmarks work on iOS (sim-bridge / idb / WDA depending on device) and Android (uiautomator2) — selection state, identifiers, and labels are normalized to a single schema.
-- **Stable across LLMs.** A workflow that asks "is this the cart screen?" gets the same answer regardless of which model is driving.
-- **Authored once, reused everywhere.** The screen knowledge base is the source of truth; agents don't re-discover screen identity on every call.
-
-**Workflow:**
-
-1. Load landmarks from the app's knowledge base. In the app's own project you usually need not: the MCP server loads the project's `.quern/knowledge` at session start, and the session's instructions say whether it did. Set `QUERN_PROJECT_DIR` in the MCP server's environment to point it at another project. Elsewhere -- or to keep it loaded across restarts:
-   ```
-   load_landmarks(path="/Users/dev/myapp", remember=true)
-   ```
-   **From a remote quern or a client key** the MCP can't send a path the server can read, so it uploads the project's knowledge base at session start and loads it for your session only; `load_landmarks(path=...)` uploads the same way, and `remember=true` is refused there. The set ends with your session -- not when you release a device -- and follows you through a `use_remote` switch.
-   In an app project with no knowledge base, the instructions say that too, and `identify_screen` answers `no_landmarks_loaded` with a `hint`. Suggest building one to the user -- `init_app_knowledge` and `quern://app-knowledge-guide` -- rather than starting it unasked: it is a guided tour with them, and it writes into their repo.
-   Or pass landmarks inline (useful for ad-hoc identification):
-   ```
-   load_landmarks(app="...", landmarks={"home-tab": [{"element": "RadioButton", "identifier": "tab.home", "selected": true}]})
-   ```
-2. Call `identify_screen(app="...")` or — more often — pass `identify=true` to `get_screen_summary` to fold identification into a call you were already making.
-3. Read the response. On a match, you get `matched`, `confidence: "exact"`, and `matched_landmarks` with per-landmark hit/miss detail. On no match, `partial_matches` lists every evaluated screen sorted by descending match count, *each with its full per-landmark results* — you can see exactly which selectors failed without re-running.
-
-**Landmark schema** (in screen frontmatter or inline JSON):
-
-| Field | Purpose |
-|---|---|
-| `element` | Element type, required (e.g. `Button`, `RadioButton`, `Heading`). Matched against `type`, which follows the backend that read the screen — a simulator's tab is `RadioButton` from the accessibility tree and `Button` through WDA. With an `identifier` or a `label` as well, quern matches the same element under either name, and says so with `matched_via: "RadioButton≈Button"`; a type-only landmark is matched exactly. Avoid `navigationBar`: the accessibility tree does not expose one, so anchor on the screen title as a `Heading` |
-| `identifier` | Accessibility identifier, exact match (preferred — locale-independent) |
-| `label` | Label text, case-insensitive exact match |
-| `label_contains` | Substring match for elements with dynamic content in their label |
-| `absent: true` | Element must NOT be present (use sparingly — rare) |
-| `selected: true` | For tabs/switches/radios/checkboxes, element must be in the on/active state. Distinguishes "the Home tab is the selected one" from "a Home tab exists." |
-
-**A knowledge base with no landmarks:** If `load_landmarks` returns `screens: 0` and a populated `skipped[]`, each entry says why. `legacy_format` means the file uses `identify_by:`, the field that preceded `landmarks:` and that the loader has never evaluated; the original entries come back in the response, so the rename can be done from it directly (keep `element`/`identifier`/`label`/`label_contains`/`absent`, turn `value: "1"` into `selected: true`, drop the rest). Check the result against the running app rather than translating blind — a knowledge base old enough to use that field is old enough to have drifted.
-
-**Validating before relying on landmarks**: Run `validate_landmarks(app="...")` after loading. Reports collisions (two screens whose landmark sets overlap — one could be mistaken for the other) and screens with no landmarks. Fix collisions by adding a distinguishing element to one of the screens.
-
-**Checking a knowledge base against the current conventions**: `load_landmarks` and `validate_landmarks` both return a `conventions` block — counts over every screen file, and each file not `current` with the landmarks at fault and why (for example a type-only landmark that matches on one backend only). A file's `landmark_conventions: 2` is what it is written for, not a claim it complies; the block is the computed answer. "Auditing a knowledge base" in `docs/screen-landmarks.md` is the procedure.
-
-**When `confidence: "none"` on a known-good screen**: the landmarks are likely stale — the app has shipped UI changes since the knowledge base was authored. Surface this to the user before continuing; downstream automation built on top of stale landmarks will silently produce wrong results (you'll act on the wrong screen and misreport state). The fix is to navigate to the screen, run `get_ui_tree`, and re-author the landmarks block from what's actually there. See "Keeping Landmarks in Sync" in the knowledge-base authoring guide.
-
----
-
-### Debugging Crashes
-
-1. Check recent crashes with `get_latest_crash`
-2. Get logs around the crash time — query for error-level entries in the seconds leading up to the crash
-3. Check network activity around the same time with `query_flows`
-4. Correlate: crash report + logs + network activity = full picture
-
-**Key insight**: Crashes leave traces in multiple places. Cross-referencing sources is where you find root causes.
-
-**Crash discovery**: Simulator crash reports are automatically picked up from `~/Library/Logs/DiagnosticReports/` (enabled by default). The macOS crash dialog can be disabled via `quern setup` or manually with `defaults write com.apple.CrashReporter DialogType none` — crash reports are still written to disk.
-
-**Crash hooks**: Use `--on-crash '<command>'` to run a shell command whenever a crash is detected: an iOS crash report, or an Android crash found by `get_latest_crash` (once per crash, even when logcat already logged it). Crashes from before the server started, such as a phone's older reports or DropBox history, are listed but do not run the hook. The full `CrashReport` JSON is piped to the command's stdin. The hook runs in the background with a 60-second timeout and never blocks the server. Example:
-
-```bash
-quern start --on-crash 'cat > /tmp/last_crash.json'
-```
-
----
-
-### Working with Physical Devices
-
-Physical iOS devices are supported for screenshots, UI automation, log capture, and crash reports. UI automation on a device always uses WebDriverAgent (WDA). A simulator uses the accessibility tree (sim-bridge / idb) by default, and can be switched to WDA with `start_driver` — that is the way to see the element types XCUITest will see (`xcui_type`), and `stop_driver` switches it back.
-
-**First-time setup**: Call `setup_wda` with the device UDID. This builds and installs WDA on the device, which requires a valid Apple Developer signing identity. If multiple identities exist, the tool returns a list — call again with the chosen `team_id`. The app appears on the device as **Quern Driver**.
-
-**After setup**: WDA auto-starts when you first interact with the device (screenshot, UI tree, tap, etc.). No need to manually call `start_driver` — it happens transparently. The driver idles out after 15 minutes of inactivity.
-
-**What works the same**: `take_screenshot`, `get_screen_summary`, `get_ui_tree`, `tap_element`, `swipe`, `type_text`, `wait_for_element`, `install_app`, `launch_app`, `terminate_app`.
-
-**What's different**:
-- `boot_device` / `shutdown_device` — simulators only
-- `set_location` — simulators only
-- `grant_permission` — simulators only
-- `start_device_logging` / `stop_device_logging` — on-demand log capture for physical devices (vs `start_simulator_logging` for simulators). Captures os_log and Logger output only — `print()` writes to stdout and is not captured. Both support `preset` parameter to apply ingestion filters at start time
-- `get_latest_crash` with a `udid` parameter — pulls crash reports directly from the physical device
-- `tap_element` taps only an element a tap can reach: its centre on screen and XCUITest reporting it hittable. Elements read through WDA carry `on_screen`. When every match is unreachable the not-found response lists them and why — scroll the element into view (`scroll_to_element`) rather than retrying the tap
-- Reads made for `tap_element`, `get_element`, `wait_for_element` and `scroll_to_element` go through WDA at depth 12, which keeps long lists fast (measured: 3.9s instead of 34.5s on a 200-row list). A miss looks once more at the full depth (25) -- bounded, and only when the first read was quick -- and that holds when you pass `snapshot_depth` too: the depth you give is a floor, not a ceiling. Pass `deepen: false` for a read at exactly that depth. Every miss reports how deep it looked
-- A physical iPhone that has never had `setup_wda` is a **400 naming `setup_wda`**, not a failure to retry: run setup first
-- `preview_device` — opens a live macOS video preview window of the device screen: CoreMediaIO for USB-connected physical devices, and quern-media's MJPEG stream for booted simulators. Each device is independently controlled — add and remove individual previews without affecting others. Use `stop_preview` with a UDID to close one device, or without to close all. `preview_status` shows per-device breakdown and what can be previewed, booted simulators included, each tagged `kind`. Asking again for a device already being previewed answers `already_active` with the original `started_at`: the stream is reused, not restarted. A simulator answer carries `on_air`, so a reused preview that is reattaching is not read as live
-
----
-
-### Live Preview of Devices and Simulators
-
-Open real-time video windows to see what's happening on USB-connected physical devices and on booted simulators. Each device is independently managed — no restart penalty after the initial 3-second CoreMediaIO discovery.
-
-1. `preview_device` with a device UDID — adds that device's preview window
-2. `preview_device` with another UDID — adds a second device (1s stagger, no rediscovery)
-3. `preview_status` — see which devices are active vs. available. `available` always includes booted simulators (`kind: "simulator"`, `id` is the UDID `preview_device` takes). USB devices (`kind: "device"`) appear once the preview process is running, and their `id` is a CoreMediaIO id: preview a phone by its UDID from `list_devices`. `simulators_error` means simulators could not be listed, not that none are booted
-4. `stop_preview` with a UDID — remove one device's preview, others stay running
-5. `stop_preview` without a UDID — stop all previews and kill the process
-
-**Key insight**: The preview process stays alive even if all windows are closed (by user or via `stop_preview` with UDID). Re-adding a device is instant — no 3s discovery delay. Only `stop_preview` without a UDID kills the process.
-
-**Two routes, one tool.** A simulator is not a CoreMediaIO capture source, so it does not arrive the same way: `quern-media` reads its framebuffer directly and serves MJPEG on loopback, and the preview window opens on that stream. Pass a booted simulator's UDID to `preview_device` and it works; the difference matters only when something breaks, because the failure modes are unrelated.
-
-**Limitations**: a simulator must already be booted, and `preview_device` with no UDID previews USB-connected physical devices only — it does not sweep up simulators, which would open a window for every booted one.
-
-**OFF AIR.** A simulator window whose stream drops — the simulator shut down or rebooted, or `quern-media` restarted — stays open, greys out under an OFF AIR label, and reconnects on its own. While it is off air, `preview_status` reports `"on_air": false` for that simulator, so a frozen last frame is never reported as a live preview. Quitting Simulator.app shuts down every simulator, headless ones included.
-
-**The person at the Mac can open simulators too.** The preview app's Devices menu lists the booted simulators alongside USB devices, and keeps the list current as simulators boot and shut down. A simulator picked there is opened by the server, so it appears in `preview_status` and `stop_preview` closes it like any other.
-
----
-
-### Reproducing Bug Reports
-
-1. Use `get_screen_summary` to verify your starting state
-2. Follow the reported steps using `tap_element`, `type_text`, `swipe`, etc.
-3. After each step, call `get_screen_summary` to verify the expected state before continuing — this catches where the reproduction diverges from expectations
-4. Check logs and network flows alongside UI state to build the full picture
-5. If the bug reproduces, capture a diagnostic bundle: screenshot, logs, network flows, and UI tree
-
-**To let people watch it live**, pass `viewer=true` with `video=true`: the response's `viewer_url` plays the simulator in a browser on another machine on the LAN, and expires 10 minutes after the recording stops. Needs `viewer.enabled` in `~/.quern/config.json`; see docs/api-reference.md, "The LAN viewer".
-
-**To keep the whole run**, call `start_recording(udid=...)` before step 1 and `stop_recording` after. Quern's buffers are bounded and shared, so a long run outlives them; a recording writes the device's actions, full network flows (including requests that never finished) and app logs to disk, and on a simulator `video=true` films the screen too. Read it back as a timeline with `get_trace(recording=<id>)`, where each action carries the flows and logs it caused, or page through it with `get_recording`. To see what each step cost the app, add `gauges=<bundle id or package>`: every action in the trace then carries its CPU, memory and (on Android) frames, as peaks over the samples that overlap it, live as well as afterwards.
-
-**Key insight**: Verify state at each step. The step where expected and actual diverge is where the bug lives.
-
----
-
-## Tool Selection Guide
-
-**"I need to see what's on screen"**
-- Quick overview: `get_screen_summary`
-- Full detail: `get_ui_tree`
-- Visual for humans: `take_screenshot`
-- Accessibility overlay: `take_annotated_screenshot` — draws bounding boxes on interactive elements, useful for debugging why `tap_element` can't find an element
-
-**"The screen looks empty, or I know it's a web view"**
-- `get_web_content` — reads `WKWebView` content the accessibility tree cannot see, with real screen coordinates
-- iOS simulator only; on Android and physical iOS the normal `get_ui_tree` already covers web views
-- Optional `bundle_id` when several apps are running, and `udid` to target a specific simulator
-- Re-read after every interaction; the merged results are dropped when the screen changes
-
-**"I need to tap/interact with UI"**
-- Known element: `tap_element` with label and element_type
-- Coordinates (rare): `tap`
-- Gesture: `swipe`
-- Text input: focus the element, then `type_text`
-
-**"The element I want is scrolled off-screen"**
-- `tap_element` handles this: on a miss it scrolls the target into view and retries. `scroll_to_find` is tri-state — `true` always sweeps, `false` never, and **unset (the default) asks the knowledge base** and sweeps only on a screen recorded as `scrollable: true`.
-- With no knowledge base loaded nothing is recorded, so a miss does *not* sweep and the response says `scrollability_unknown`. Pass `scroll_to_find: true` if you know the screen scrolls, or record it once (see [App Knowledge Base](guides/app-knowledge.md)) and every later tap gets it right for free.
-- A sweep that runs is reported: the response carries the swipes and whether anything moved, so a gesture you did not ask for is never invisible. On Android it also stops early and says why: `ends` lists the directions found at their end, and `no_progress: true` means the screen did not move when swiped either way -- it does not scroll there, so the element is not off screen.
-- Need it visible but *not* tapped (asserting on it, screenshotting it): `scroll_to_element`
-- Both work on Android and iOS (simulator and physical), and both drive a bounded swipe loop that re-checks the target by selector rather than dumping the UI tree — a tree dump can itself scroll the target away, which is the bug this design exists to avoid
-- Neither is a substitute for `swipe` when you want to scroll a *screen* rather than reach a known element
-
-**"I need to see network traffic"**
-- Overview: `get_flow_summary` (use `simulator_udid` to filter by simulator)
-- Specific requests: `query_flows` with filters (`hosts`, `exclude_hosts`, `detail="summary"`)
-- Bracket a UI action: `start_capture_session` → action → `stop_capture_session`
-- Full detail: `get_flow_detail`
-- Modify traffic: `set_intercept` + `release_flow` with modifications
-- Mock responses: `set_mock`
-- Replay a request: `replay_flow`
-- Check capture mode: `proxy_status` — look at `local_capture` field
-
-**"I need to see logs"**
-- Recent activity: `tail_logs`
-- Overview: `get_log_summary`
-- Specific search: `query_logs` with filters
-- Errors only: `get_errors`
-- Reduce noise at start: `start_device_logging(process: "MyApp", preset: "device-quiet")` — applies subprocess-level process filter and ingestion preset in one call
-- Reduce noise mid-session: `set_log_filter(source: "device", process: "MyApp")` — automatically restarts the adapter with subprocess-level filtering and purges old entries
-- **App-only mode** (zero noise): First `tail_logs` with the process filter to see your app's own entries, then lock it down with `set_log_filter(source: "device", process: "MyApp", subsystems: ["com.myapp"])` -- your os_log subsystem -- or the library your code lives in, which entries carry as `sender` (`"MyApp.debug.dylib"` in a debug build); a subsystem filter matches either. This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows only your code's output.
-
-**"Which request did my action cause?" / "What was quern doing when this happened?"**
-- `get_trace` — one timeline of quern's own actions, the flows each caused, and the app log lines that arrived while it ran. This is the tool for "I tapped Checkout, what did the app send?" and it replaces reconstructing the answer by hand from `query_flows` and `query_logs` timestamps.
-- When several agents share one server, pass `mine: true` to see only the actions you asked for. Every action carries `session`, the id of the agent session that asked for it (each agent's quern MCP server sends one automatically), so this separates agents even on one shared device; `udid` separates devices. `session` reads another agent's actions by its id.
-- Read `caveats` and `overlaps` before trusting a join. They are always present, so an empty list means "nothing to flag", not "this version doesn't say". Attribution strength varies: a simulator under local capture is joined exactly, a physical device by IP against a proxy config that DHCP may have invalidated, and a simulator behind a plain Wi-Fi proxy on timing alone.
-- Traffic an action caused *after* it returned is attributed through a three-second grace window and flagged as such — most actions hand work to the device and return before the request goes out.
-- `proxy_running` is in the response because a trace with no flows because the proxy was off looks exactly like one where the app requested nothing.
-- If the log window reached further back than the ring buffer holds, the trace says so rather than presenting a truncated window as a quiet one.
-
-**"I need to control the device"**
-- Boot: `boot_device` or `resolve_device` with auto_boot
-- Install app: `install_app`
-- Launch app: `launch_app`
-- Terminate app: `terminate_app`
-- Uninstall app: `uninstall_app`
-- List installed apps: `list_apps`
-- How hard an app is working: `get_performance` (CPU, memory, threads; Android frames; null with a reason when something can't be read)
-- Where a hung or slow app's main thread is right now: `get_thread_stacks` (iOS simulators and physical devices, symbolicated; not Android, which needs root)
-- How an app copes with a bad network or a hot phone: `set_device_condition` (physical iPhones; slow and lossy network profiles, and thermal or GPU states with `allow_performance`), then `clear_device_condition` -- it changes the whole phone, and stays until cleared, the hold ends, or the server stops (a server that died clears it at its next start); `get_device_condition` says what the phone is in, including one set in Xcode, and its `note` says when a network profile has ended on its own (the phone drops it when quern's connection to it does). `list_devices` shows quern's conditions as `condition`, so check there when a phone is unexpectedly slow
-- Why the app froze or stuttered: `start_profile` (iOS: relaunches the app under Instruments, presets hangs, cpu, hitches, launch; Android: perfetto records without relaunching, presets hangs, frames, cpu -- its deep summary needs trace_processor, which quern downloads on first use and says so in the answer), drive the app, then `stop_profile` for hangs, hitches and hot functions -- on iOS with Xcode 27.2, the ten longest hangs say whether the main thread was `blocked` or `busy`, and the longest three give the stack it was in; a blocked hang in a profile without System Call Trace has no stack (`stack_note` says why), and without triage `unavailable.triage` says why; `download_profile` for the trace itself
-- Screenshot: `take_screenshot`
-- Location: `set_location` (simulators only)
-- Permissions: `grant_permission` (simulators only)
-- Physical device setup: `setup_wda` (first time only)
-
----
-
-## REST API Reference
-
-When calling the HTTP API directly instead of going through MCP, the complete
-mapping — every tool, its method and path, and the endpoints that have no tool
-(SSE streams, public probes) — is in `docs/api-reference.md`, also readable over
-MCP as the `quern://api-reference` resource.
-
-The paths you will reach for most:
-
-| Purpose | Method | Path |
+| You want to | Reach for | Detail |
 |---|---|---|
-| Liveness probe | GET | `/health` (public, sub-millisecond) |
-| Device-tool availability | GET | `/tools` (public) |
-| Query logs | GET | `/api/v1/logs/query` |
-| Log summary | GET | `/api/v1/logs/summary` |
-| Live log stream | GET | `/api/v1/logs/stream` (SSE — no MCP equivalent) |
-| Actions joined to flows and logs | GET | `/api/v1/trace` |
-| Query flows | GET | `/api/v1/proxy/flows` |
-| Flow summary | GET | `/api/v1/proxy/flows/summary` |
-| Live flow stream | GET | `/api/v1/proxy/flows/stream` (SSE — no MCP equivalent) |
-| Screen summary | GET | `/api/v1/device/screen-summary` |
-| Tap an element | POST | `/api/v1/device/ui/tap-element` |
-| Scroll to an element | POST | `/api/v1/device/ui/scroll-to-element` |
-| Resolve a device | POST | `/api/v1/devices/resolve` |
-
-Everything needs `Authorization: Bearer <key>` from `~/.quern/api-key` (or a
-client key from `quern clients add`, which also needs `X-Quern-Session` on
-every request), except `/`, `/health`, `/api/v1/health`, `/tools`, `/docs`,
-`/redoc`, `/openapi.json`, and `/api/v1/proxy/cert`.
-
-## Advanced Patterns
-
-### Correlation
-
-Humans struggle to correlate millisecond-level timing across logs, network, and UI. You don't. After triggering an action, query logs, flows, and UI state for the same narrow time window. Events that occur within milliseconds of each other are almost certainly related — this lets you trace causation across system boundaries.
+| See what's on screen | `get_screen_summary`, then `get_ui_tree`; `take_annotated_screenshot` when an element can't be found | ui |
+| Read a web view | `get_web_content` (iOS simulators; elsewhere the UI tree covers it) | ui |
+| Tap, type, swipe | `tap_element`, `type_text` (after `clear_text`), `swipe`, `gesture` | ui |
+| Reach an element off screen | `tap_element` (sweeps when the screen scrolls), `scroll_to_element` | ui |
+| Know which screen you're on | `identify_screen`, or `get_screen_summary(identify=true)` | ui |
+| See network traffic | `get_flow_summary`, `query_flows`, `get_flow_detail`; bracket an action with `start_capture_session` | network |
+| Fake or change a response | `set_mock`; `set_intercept` + `release_flow` to edit a request | network |
+| Read app logs | `get_log_summary`, `query_logs`, `tail_logs`, `get_errors` | logs |
+| See what an action caused | `get_trace` | logs |
+| Investigate a crash | `get_latest_crash`, then logs and flows around it | logs |
+| Keep a whole run | `start_recording` / `stop_recording` | logs |
+| Measure an app | `get_performance`, `start_profile` / `stop_profile`, `get_thread_stacks` | performance |
+| Test under a bad network or a hot phone | `set_device_condition` (physical iPhones) | performance |
+| Get or control a device | `resolve_device`, `ensure_devices`, `install_app`, `launch_app`, `build_and_install` | devices |
+| Start an app from a known state | `save_app_state` / `restore_app_state`, plist tools (simulators) | devices |
+| Share a server or use another Mac | `reserve_devices`, `list_remotes`, `use_remote` | sharing |
 
 ---
-
-### Intercept-Modify-Release for Testing Edge Cases
-
-Test error handling without breaking the backend:
-
-1. Set up an intercept pattern matching the target endpoint (e.g., `~d api.example.com & ~m POST`)
-2. Trigger the action in the app
-3. Wait for the request to be held with `list_held_flows` (use the timeout parameter)
-4. Release the flow with modifications — change the status code to 500, inject an error body, or alter headers
-5. Observe how the app handles the modified response via `get_screen_summary` and `query_logs`
-
-Use this to test error handling, slow network conditions, and malformed responses without needing backend changes.
-
----
-
-### Mocking for Deterministic Testing
-
-Use `set_mock` to return synthetic responses for specific endpoints. This lets you create reliable, repeatable test scenarios — fixed user data, specific error conditions, or edge-case payloads — without depending on backend state. Use `update_mock` to modify an existing rule's pattern or response without deleting and recreating it. Only the fields you name change: a body-only update keeps the status code and headers. `headers`, when given, replaces all headers.
-
-**Mocking one simulator only.** A mock applies to every device whose request matches, so on a Mac where other simulators are running too (a CI machine running XCUITests, another agent) an unscoped mock answers their requests as well. Pass `simulator_udid` to `set_mock` to mock only that simulator: every other device's matching requests reach the real server and are captured as usual. No filter pattern can do this, because every simulator's traffic arrives from `127.0.0.1`; quern decides from the process that opened the connection, which also covers that simulator's web views. A request quern cannot attribute to a simulator is not mocked by a scoped rule. Scoped rules are checked before unscoped ones, so a catch-all on the same route never shadows a simulator's own mock; `update_mock` keeps a rule's place. Use local capture: with only the system proxy, the connection's process may not be known when the request arrives. A simulator whose HTTPS is passed through (it does not trust the CA) cannot have its HTTPS mocked, and `replay_flow` traffic comes from quern itself, so a scoped rule never mocks a replay. `set_mock`'s `warning` says when any of these applies.
-
-**Mocking one Android device.** Pass its serial as `simulator_udid` (the name stays): `emulator-5554`, or a phone's serial. An emulator's requests are told by the emulator process that opened the connection; a phone's by its Wi-Fi address, which quern reads over adb, or from the record `record_device_proxy_config` leaves -- a phone whose address it cannot find is refused, rather than given a mock that never fires. The device has to be routed through the proxy (`record_device_proxy_config` with `apply=true`), and `set_mock`'s `warning` says when it is not. The first request on an emulator's connection may be held for a moment while quern works out which emulator it is; one it cannot tell goes through unmocked. A client key may scope mocks to the Android devices it holds, and they end with its hold. A phone's rule is matched by the address the phone had when the rule was set, shown as `client_ip` in `list_mocks`: if the phone's address changes, re-scope the rule (`update_mock` naming its serial again), or another device that takes the old address would get the mock.
-
-A mocked request is recorded once, with `mock_rule_id` set and the tag `mocked`, so captured traffic distinguishes synthetic responses from real ones.
-
-Mock rules take priority over intercept rules. Clear them with `clear_mocks` when done.
-Clearing one rule by id now **errors with 404** if no such rule exists, where it used to
-report success — so teardown can tell "removed it" from "it was never there", and a rule
-you failed to remove does not go on quietly matching traffic. Do not retry that error: the
-rule is absent, which is the state you wanted. Clearing *all* rules still succeeds on an
-empty set, and its `count` says how many went.
-
-**Filter pattern syntax:** Mock and intercept patterns use mitmproxy filter expressions. Common operators: `~d` (domain), `~u` (URL/path — use this for path matching), `~m` (method), `~c` (status code), `~h` (header), `~t` (content-type), `~b` (body). Combine with `&` (and), `|` (or), `!` (not). Examples: `"~d api.example.com & ~u /v1/users"`, `"~m POST & ~d api.example.com & ~u /v1/login"`. Note: `~p` is not a valid operator — use `~u` for path matching.
-
----
-
-### Device Pool for Parallel Testing
-
-Use `ensure_devices` to boot multiple simulators at once, then run different test scenarios on each in parallel. The first device in the result becomes the active device; pass explicit `udid` parameters to target the others.
-
-**Active device**: After `resolve_device` or `ensure_devices`, the resolved device becomes the active device for all subsequent tool calls. You don't need to pass `udid` to every tool — it defaults to the active device. To switch, call `resolve_device` with new criteria, or pass `udid` directly to `resolve_device` (faster than re-matching by name when you already know the UDID — e.g., from a `list_devices` call). The active device is persisted in `~/.quern/active-device.json` and survives `quern stop` / `quern restart`, so within one agent session you don't have to re-resolve after a restart.
-
-**It is yours alone.** Each agent session has its own active device (#254), keyed by the session id its MCP server sends, so another agent resolving a different device never redirects your calls. A session that hasn't chosen one yet doesn't inherit anyone else's: with several devices booted, an unqualified call is refused with "specify udid" until you resolve one or pass `udid`. This keeps agents from *redirecting* each other; it doesn't hand them *different* devices. Two agents that each ask `resolve_device` for "a simulator" can get the same one; to keep devices apart, reserve them (see "Sharing a server with other agents" below). Your choice is kept across a server restart for a day of inactivity. Callers that send no session (a plain curl, an MCP server older than #453) share one active device, as before.
-
-**Default behavior**: `resolve_device` and `ensure_devices` default to a virtual device -- `type="simulator"` on iOS, an emulator on Android -- to prevent accidentally targeting physical devices (which may not have your app installed). Pass `type="device"` or `type="android_device"` explicitly to target physical devices.
-
-**Which platform**: device requests are made on your project's platform -- `.quern/config.json`'s `"platform"`, else what the project is (an Xcode project is iOS, an Android app module Android). So in an iOS project `resolve_device(os_version="16")` means iOS 16, never Android 16, and the answer says so (`platform`, `platform_source`). Name a device on the other platform -- "Pixel 8" from an iOS project -- and it is used when it is the only match (or, with `count`, when there are no more matches than you asked for). In a project that builds for both, or none, a bare version both platforms have is refused with the matches on each side: the refusal is a 409 `ambiguous_platform` whose `retry_with` names the call to make: pass `platform="ios"` or `"android"`, or write the version as "iOS 16" or "Android 16".
-
----
-
-### Sharing a server with other agents
-
-If another agent or a CI job may use the same quern server, **reserve your devices first** with `reserve_devices`, for example `reserve_devices(count=1, device_type="simulator")` or `reserve_devices(udids=[...])`. While you hold a device, nobody else can change it: their taps and installs get 423 naming you. Reading it (screenshots, UI tree, logs) still works for everyone. Reserving one device makes it your active device, so later tools need no `udid`.
-
-- You don't have to release: your reservation ends with your session. A brief network drop keeps it for a grace period (3 minutes by default). `release_devices` frees devices sooner.
-- A 423 on a device means someone else holds it. `session_status(all=true)` or `list_devices` (its `reservation` field) shows who. Pick a free device rather than waiting.
-- A 409 saying the device "is being cleaned up after its last hold" is brief: the last holder's release is removing what it installed. Retry in a moment.
-- **What a client installs is removed when its hold ends** (the owner's `sessions.client_release`, `uninstall` by default; `erase` erases a simulator). Reserving the device again later means installing again. An install is refused with 503 when the device's apps can't be listed first, since its release couldn't tell what to remove; retry, or pick another device.
-- If a tool result ends with a `quern session notice:` line, read it. It says, for example, that quern restarted and your reservations are gone, so reserve again.
-- **On a client key** (`QUERN_CLIENT_KEY` set to a key from `quern clients add`, or a paired remote), you may change only devices you have reserved: a 403 saying "reserve it first" means exactly that, so call `reserve_devices`. A 403 saying "owner-only" is something Mac-wide -- the proxy itself, local capture (`set_local_capture`), the system proxy, intercepts, updates, the device pool's `resolve_device` -- that only the server's owner can do; ask them, don't retry.
-- **Building on a client key** (`build_and_install`, #608): off unless the server's owner sets `remote.client_builds`. A 403 saying builds are off for client keys is their setting: ask, don't retry. When it's on, the MCP pushes your project with git to a sandbox of your own on that Mac and builds that, so the project must be in a git repository, with no submodules or Git LFS, which the push can't carry; the MCP says so before sending anything. You can't name a path already on that Mac, and `java_home` and `gradle_args` stay owner-only. A push over the sandbox cap (`sandboxes.max_mb`) is a 413, and one when the disk is at its free-space floor a 507.
-- **To capture your app's traffic on a client key**, reserve the simulator and call `add_session_capture(simulator_udid, processes)`. Nothing restarts, and it ends with your hold. Its refusals: 403 "reserve it first"; 409 when the proxy isn't running (only the owner can start it -- ask, don't retry); 428 when the simulator doesn't trust the CA (as for capture sessions); 429 when you're already using four session proxies (release some with `remove_session_capture`); 400 for exclusions, PIDs, commas or slashes in a name, or more than 16 names; 422 for an Android or physical iOS device, which it can't capture -- route that device through the proxy instead (`device-proxy-config`); 503 when the device couldn't be identified because listing devices failed (retry). Connections an app already has open aren't captured until it reconnects, so relaunch it.
-- **Calling the REST API without the MCP**, a reservation needs a held socket: a bare-REST reserve answers 409, and the 409 says how to hold one. Run `quern session hold NAME --background` and send the printed id as `X-Quern-Session`; don't write your own socket holder.
-- **Viewer links on a client key**: you may issue them for your own recordings (`start_recording(viewer=true)`). A 403 saying links are turned off is the owner's setting; don't retry.
-
-### Working across machines
-
-The user may have paired other Macs running quern (`quern pair` / `quern connect`), so a device you need may be on another server.
-
-- **`list_remotes`** lists every server you could use: this Mac first (`local`), then each paired one, with whether it answers, its version, and its devices (name, model, OS version, family, state, and free / yours / held). The one marked `"current": true` is the server your tools talk to now. Only its devices can be reserved.
-- **When `reserve_devices` finds nothing, or a filtered `list_devices` comes back empty, read the hint** (the reserve error's text, or `elsewhere` on the list). It names the paired servers with matching free devices and the exact `use_remote(name=...)` call. Don't conclude the device doesn't exist, and don't offer to download a runtime, before reading it.
-- **`use_remote(name)`** -- or `use_remote(name="local")` to come back -- switches every later tool call, and your held session, to that server. It switches only once your session is live there; otherwise you stay where you were, and the answer says why.
-- **It refuses while you hold devices** on the current server, or when the current server can't say what you hold -- not retryable as-is. Call `release_devices` first, or `use_remote(name, release=true)`.
-- **What follows you:** your mocks -- removed from the old server and recreated on your next reservation there; read `carried` on that `reserve_devices` answer for the new rule ids and anything still waiting -- your `add_session_capture` processes, and the project's knowledge base (`knowledge` in the answer).
-- **What stays:** local capture, the system proxy, intercepts, bypass, recordings, logging and device settings. Check `proxy` in the answer: mocks and capture need the new server's proxy running, and only its owner can start it.
-- **Mocks that couldn't be removed** from an unreachable server are listed in `carried.still_on_old`; switching back there tries again (`left_here_earlier`).
-- **The `quern` CLI in your shell isn't switched.** It still talks to this Mac, so don't shell out to `quern` expecting the remote.
 
 ## Common Mistakes
 
@@ -577,49 +71,11 @@ The user may have paired other Macs running quern (`quern pair` / `quern connect
 
 **Using only screenshots to understand UI state** — Screenshots work, but `get_screen_summary` and `get_ui_tree` are faster, cheaper, and return structured data you can act on directly. Use screenshots to complement structured data, not replace it.
 
-**Forgetting element_type when label is ambiguous** — `tap_element(label="Cancel")` might match a StaticText instead of the Button. Specify `element_type="Button"` when the label might not be unique.
-
-**Using `get_ui_tree` to debug missing elements** — When `tap_element` can't find an element, use `take_annotated_screenshot` to visually see what the accessibility tree detects overlaid on the actual screen. It's faster than reading through the full UI tree and immediately shows mismatches between visual layout and accessibility labels.
-
-**Retrying a `tap_element` miss that says the screen does not scroll** — When a miss reports `reason: "screen_not_scrollable"`, that is an answer, not a failure to work around: the screen is recorded as not scrolling, so the element is not on it and sweeping cannot find it. Retrying with `scroll_to_find: true` costs two real gestures and reaches the same conclusion. Look at where you are instead. Each no-sweep reason carries a `detail` naming the remedy that actually works, and they are deliberately distinct — `screen_ambiguous` (landmarks loaded for two apps and a screen matches both; the colliding names are in `candidates`, so scope to one app), `scrollability_unknown` (nobody has recorded it — pass `scroll_to_find: true` now, and add `scrollable: true` to the screen's entry to make it automatic), `screen_unreadable` (the read failed; this one *is* worth retrying), and `needs_page_urls` (a web-identified app on a path that does not read URLs — pass `scroll_to_find` explicitly).
-
 **Not filtering logs/flows** — Unfiltered queries return overwhelming amounts of data. Always filter by level, process, host, status code, or search text.
-
-**Hardcoding device UDIDs** — Use `resolve_device` with a name and let Quern find the right device. UDIDs differ across machines.
 
 **Client-side polling instead of server-side waiting** — Use `wait_for_element` instead of looping on `get_ui_tree`. Use `wait_for_flow` instead of polling `query_flows` after triggering a UI action. Use `list_held_flows` with a timeout instead of polling for intercepted flows.
 
-**Not clearing text before typing** — Use `clear_text` before `type_text` when a field has pre-existing content. Otherwise you'll append to whatever's already there.
-
-**Letting iOS rewrite what you type** — On a simulator, iOS edits text as it is typed: auto-correction turned "qft" into "aft" and "teh" into "the", auto-capitalization makes "hi. there" "hi. There", smart punctuation curls quotes and turns `--` into a dash, and the "." shortcut turns a double space into ". ". `type_text`'s read-back is exact, so a rewritten field fails the call -- deliberately, because in a case-sensitive field the rewrite is the bug. Turn the rewriting off once, before the test, with `set_simulator_setting` (`auto_correction`, `auto_capitalization`, `smart_punctuation`, `period_shortcut` set to `off`), and `password_autofill` off to stop iOS's "Save Password?" sheet, which is invisible in the app's UI tree. Each change reboots the simulator, so it refuses with an error on a booted one unless you pass `reboot: true` -- do it before launching the app under test. The settings survive reboots and app-state restores; `erase_device` resets them. `get_simulator_settings` shows what is set and which iOS versions each setting was verified on.
-
-**Confusing `tail_logs` and `query_logs`** — Use `tail_logs` for "show me recent stuff" (defaults to 50, newest first). Use `query_logs` for searching with filters and time ranges.
-
-**Ignoring log source names** — `device` = physical device logs (on-demand, via `start_device_logging`), `simulator` = simulator unified logging (on-demand, via `start_simulator_logging`), `oslog` = host Mac unified logging (on-demand, via `start_oslog_streaming` — useful for capturing dev tool logs like Vite or webpack that write to os_log), `crash` = crash reports, `build` = xcodebuild output, `proxy` = network traffic. Legacy: `syslog` = idevicesyslog (disabled by default, opt-in with `--syslog`).
-
-**Using mock when you need intercept (or vice versa)** — Mocks return instant synthetic responses for stable test fixtures. Intercept pauses real requests for ad-hoc inspection and modification. Mock rules take priority over intercept.
-
-**Not checking simulator backend availability** — Device management and screenshots use `simctl` (always available with Xcode). Simulator UI automation (`get_ui_tree`, `tap`, `swipe`, `type_text`, `clear_text`, `press_button`) requires either sim-bridge (Xcode 26+ / Apple Silicon, preferred) or idb (fallback). Physical device UI automation uses WDA (auto-started). Check `list_devices` response for tool availability.
-
-You do not pick the backend and normally need not think about it — quern probes at start-up and re-probes every five minutes, so an Xcode change under a running server is picked up. What matters is that the two simulator backends behave differently in ways that surface as odd results rather than errors: sim-bridge holds a swipe at the end so a list stops where the finger does and sweeps about seven-tenths of the screen, while idb cannot hold one, so it flings and steps a quarter. `get_ui_tree`, `get_screen_summary` and `scroll_to_element` therefore return a `backend` field. When a sweep overshoots or a read looks wrong, check it first — it distinguishes "this backend behaved unexpectedly" from "I am not on the backend I assumed", which otherwise look identical.
-
-**Not using per-simulator flow filtering** — When local capture is enabled, flows are tagged with the originating simulator's UDID. Always pass `simulator_udid` when querying flows during parallel testing — otherwise you'll see traffic from all simulators mixed together.
-
-**Leaving system proxy configured** — If you use `configure_system_proxy`, always call `unconfigure_system_proxy` when done. Forgetting this breaks the user's browser. With local capture enabled, you typically don't need the system proxy for simulator traffic at all.
-
-**Holding flows too long** — Held flows auto-release after 30 seconds to prevent hanging clients. Use `list_held_flows` with `timeout` for long-polling instead of rapid polling.
-
----
-
-## Performance Tips
-
-**Use summaries before full queries.** Summaries are cheap and curated. Use them to decide what to investigate, then make targeted queries.
-
-**Limit result counts.** Fetch 50 entries, not 10,000. You can always query for more if needed.
-
-**Use cursors for incremental updates.** `get_log_summary` and `get_flow_summary` return a cursor. Pass it back with `since_cursor` to get only new activity since your last call — critical for token efficiency. The continuous monitoring pattern: call the summary tool, save the cursor, and on each subsequent check pass `since_cursor` to get a lightweight delta instead of re-fetching everything. For one-off actions where you need all flows from a specific time window, use `start_capture_session` / `stop_capture_session` instead — they handle the time-bracketing and filtering automatically.
-
-**Scope UI tree queries.** Use `get_ui_tree` with `children_of` to fetch a subtree instead of the full hierarchy. Use `get_screen_summary` with a reasonable `max_elements` limit.
+**Retrying a refusal.** Many answers that look like errors are answers: a launch that can't start on this runtime, a proxy refusal over an untrusted certificate, a tap refused as obstructed, a 403 that is the server owner's setting. The response says what to do instead. Read it before calling again.
 
 ---
 
@@ -642,116 +98,14 @@ A tool reported as unavailable may be installed but not answering; the two are
 not yet distinguishable in this response. If one is unexpectedly missing, check
 `~/.quern/server.log` for a probe timeout before assuming it is uninstalled.
 
-**"No element found matching label"** — The element may not exist, the label may be wrong, or multiple elements match. Use `get_screen_summary` to see what's actually on screen, then refine your query with the exact label and an element_type.
-
-**"Proxy not running"** — Check with `proxy_status` and call `start_proxy` if needed.
-
-**"No flows captured"** — Check `proxy_status` first, in this order:
-
-1. `tls_rejections` — clients that refused the certificate we offered, with the host, the resolved process and simulator UDID, and the TLS alert verbatim. This is the direct evidence, and it distinguishes the two causes that look identical from the outside: `unknown ca` means the device does not trust the CA, while any other alert on a device that does usually means the app pins its certificate. Don't reinstall a certificate to fix pinning.
-2. A `capture_without_cert` warning, and `cert_trust_stale` on a device in `cert_setup` — the second means that device's recorded `cert_installed: true` is contradicted by the device itself, which is what an erase leaves behind.
-3. Otherwise: if `local_capture` is non-empty, simulator traffic should be captured automatically — verify certs with `verify_proxy_setup`. Check that the list actually contains the process making the requests — the web-view minimum is kept for you, but anything else you previously named is replaced rather than merged. If local capture is not enabled, the device may not be configured to route through the proxy; check `proxy_setup_guide` for device configuration steps.
-
-An empty `tls_rejections` with no flows means the traffic is not reaching the proxy at all, rather than being refused once it does — a routing problem, not a certificate one.
-
-**"The screen summary is empty on a physical device"** — `element_count: 0` with no error, while `take_screenshot` plainly shows a populated screen. The accessibility tree and screenshots take different paths, so the device looks alive and unreadable at once.
-
-The usual cause is that WDA's `/source` read exceeded its budget. WDA serializes requests, so the abandoned call keeps running on the device and the *next* one queues behind it — which is why retrying with a larger timeout can still fail, and why the failure looks permanent rather than intermittent. Give the device a moment to drain before retrying.
-
-You no longer have to infer any of this. A read that timed out and fell back now says so: `get_screen_summary` and `get_ui_tree` return `source_timed_out: true` and a `degraded` string, and a post-action screen context carries them too. On a full-tree read, an `element_count` with no `degraded` beside it is a real count. That does not extend to `strategy: "skeleton"`, which never has a `degraded` field because you asked for a partial read — its count is the navigation chrome it returned, not what is on the screen. Quern also no longer treats a timeout as proof the runner is hung. WDA serialises requests, so a tree big enough to outlast any check window queues every liveness ping behind it — waiting longer can only ever distinguish slow from slower. A restart now needs evidence the runner is *gone*: a refused or reset connection, meaning nothing is listening. A ping that merely times out says something accepted it and is busy, and the runner is left alone — which matters because the restart reinstalls it through xcodebuild (#170).
-
-The budgets are 20s for A13-era and older chips and 10s for everything newer. Both are sized from measurement with headroom: an iPhone 11 on iOS 26 takes about 10.2s to answer on its home screen, and an iPhone 15 Pro 4.4–5.3s depending on how dense the screen is. Expect these to move when *Xcode* moves rather than when the device does — the same iPhone 11 answered in 7.5s before WDA was rebuilt under Xcode 27, on identical hardware and the same screen.
-
-Pass `source_timeout` (30–45) on `get_screen_summary` or `get_ui_tree` when a device is slower than that, or a screen is unusually dense. It does not restart anything. `strategy: "skeleton"` skips the `/source` read entirely and returns navigation chrome only, which is the right answer for maps with many pins.
-
-**"Wait for element timed out"** — The element may never have appeared (a bug or wrong expectation), the timeout may be too short, or the label may differ from what you expect. Check what actually appeared with `get_screen_summary`.
-
-**"Tap isn't registering / wrong element activated"** — Your coordinates may be off. Use `take_annotated_screenshot` to see element bounding boxes overlaid on the actual screen. Find your target element's bounding box, express its center as a fraction of the screen image dimensions, then multiply by the device's logical point size (e.g. iPhone 12: 390×844 pt, iPhone 15 Pro: 393×852 pt) to get the correct tap coordinates. This is the reliable calibration technique when `tap_element` can't find the element and coordinate taps are missing.
+Each topic guide ends with what goes wrong in its area: no flows captured in `quern://guide/network`, an empty screen summary on a physical device in `quern://guide/devices`, a tap that misses in `quern://guide/ui`.
 
 ---
 
-## iOS Logging Best Practices for App Developers
+## Calling the REST API directly
 
-Quern captures logs from Apple's unified logging system. How your app emits logs directly affects what Quern can capture and filter. These recommendations help developers get the most out of remote log capture.
-
-### Use os.Logger, not print()
-
-Swift's `print()` writes to stdout, which is **not captured** by the unified logging system. On a physical device, `print()` output is invisible to Quern (and to Console.app). Always use `os.Logger` instead:
-
-```swift
-import os
-
-// Create a logger with your app's subsystem and a category
-let logger = Logger(subsystem: "com.example.myapp", category: "networking")
-
-// Log at appropriate levels
-logger.notice("Request started: \(url.absoluteString, privacy: .public)")
-logger.error("Request failed: \(error.localizedDescription, privacy: .public)")
-```
-
-The subsystem and category are what make Quern's filtering powerful — they let agents filter to exactly your code's output with zero framework noise.
-
-### Choose the right log level
-
-| Level | Use for | Quern visibility |
-|-------|---------|-----------------|
-| `.debug` | Verbose development traces, variable dumps | Captured but high volume — filter aggressively |
-| `.info` | Routine operations (request started, cache hit) | Good default for most app events |
-| `.notice` | Significant events worth seeing in production (login, navigation, state changes) | **Recommended default** — survives aggressive level filters |
-| `.error` | Failures that need attention (network errors, decode failures) | Always visible in `get_errors` |
-| `.fault` | Invariant violations, "this should never happen" | Always visible, triggers crash-adjacent alerts |
-
-**Recommended default: `.notice`**. It's high enough to survive `min_level` filters but doesn't imply something is wrong. Use `.info` for chatty operational logs, `.error` only for actual failures.
-
-### Mark strings as .public for debugging
-
-By default, the unified logging system redacts dynamic string interpolations as `<private>` on physical devices. This makes logs useless for debugging. Mark values you need to see:
-
-```swift
-// BAD — shows as "<private>" on device
-logger.notice("User tapped \(buttonName)")
-
-// GOOD — visible in Quern logs
-logger.notice("User tapped \(buttonName, privacy: .public)")
-```
-
-**When to use `.public`**: Any value you'd want to see while debugging — URLs, view names, error messages, state descriptions. Don't mark genuinely sensitive data (auth tokens, passwords, PII) as public.
-
-### Structure your subsystems for filtering
-
-Use a consistent subsystem hierarchy so agents can filter at the right granularity:
-
-```swift
-// Top-level subsystem for the app
-Logger(subsystem: "com.example.myapp", category: "general")
-
-// Feature-specific loggers
-Logger(subsystem: "com.example.myapp", category: "networking")
-Logger(subsystem: "com.example.myapp", category: "auth")
-Logger(subsystem: "com.example.myapp", category: "ui")
-```
-
-With this structure, an agent can filter to your entire app with `subsystems: ["com.example.myapp"]` or drill into a specific category with `query_logs(search: "auth")`.
-
-### What Quern captures vs. what it doesn't
-
-| Output method | Simulator | Physical device |
-|--------------|-----------|-----------------|
-| `os.Logger` / `Logger` | Captured | Captured |
-| `NSLog()` | Captured | Captured (routes through unified logging on iOS 10+) |
-| `print()` / `debugPrint()` | Not captured | Not captured |
-| `dump()` | Not captured | Not captured |
-
-If your app uses `print()` extensively and you can't change it immediately, consider adding a `freopen` redirect at app launch to route stdout to os_log — but migrating to `os.Logger` is the proper fix.
-
----
-
-## Summary
-
-1. **Think in structured data**, not visuals
-2. **Verify state before acting**
-3. **Summarize first, drill down second**
-4. **Filter aggressively** — logs, flows, UI
-5. **Use accessibility over coordinates**
-6. **Correlate across sources** — logs + network + UI = full picture
-7. **Let the server wait**, don't poll client-side
+Every tool's method and path, and the endpoints with no tool (SSE streams, public probes), are in `quern://api-reference`.
+Everything needs `Authorization: Bearer <key>` from `~/.quern/api-key` (or a
+client key from `quern clients add`, which also needs `X-Quern-Session` on
+every request), except `/`, `/health`, `/api/v1/health`, `/tools`, `/docs`,
+`/redoc`, `/openapi.json`, and `/api/v1/proxy/cert`.
