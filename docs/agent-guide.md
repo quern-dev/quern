@@ -81,8 +81,7 @@ From there, use the right tool for your task. If any tool fails with a connectio
 
 ## Troubleshooting
 
-**Tools missing or misbehaving?** `quern doctor` reports device-tool availability and venv sync, plus the version, provenance and upgrade command for the tools quern tracks as install sites (`pymobiledevice3`, `idb`, `mitmproxy`, `adb`, `libimobiledevice`, `node`, and quern's own `trace_processor` for Android profiles). `simctl` and `devicectl` ship inside Xcode and are reported as available or not, without version detail
-(adb, simctl, idb, devicectl, pymobiledevice3), and `GET /tools` returns the
+**Tools missing or misbehaving?** `quern doctor` reports device-tool availability and venv sync, plus the version, provenance and upgrade command for the tools quern tracks as install sites (`pymobiledevice3`, `idb`, `mitmproxy`, `adb`, `libimobiledevice`, `node`, and quern's own `trace_processor` for Android profiles). `simctl` and `devicectl` ship inside Xcode and are reported as available or not, without version detail, and `GET /tools` returns the
 same data over HTTP. Both are deliberately kept off the `/health` path so the
 liveness probe stays sub-millisecond — do not expect `/health` to tell you
 whether a tool is installed.

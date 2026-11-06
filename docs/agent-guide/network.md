@@ -20,7 +20,7 @@ Seeing, changing and faking an app's network traffic.
 
 **Proxy modes for simulators**:
 
-- **Local capture (recommended)**: Uses mitmproxy's macOS System Extension to transparently capture simulator traffic without configuring a system proxy. Each simulator's flows are tagged with its UDID. Check `proxy_status` — if `local_capture` is non-empty, simulator traffic is already being captured. The user configures which processes to capture via `quern enable-local-capture <process_name>` (the process name is typically the Xcode target name). `set_local_capture` changes this Mac-wide list (owner only) at runtime and restarts the proxy: mocks, bypass patterns and the intercept are kept, but open connections reset and held flows are released (`restart` in the response says so). To capture an app on one simulator you hold without any restart -- and from a client key, the only way -- use `add_session_capture` (see *Sharing a server with other agents*).
+- **Local capture (recommended)**: Uses mitmproxy's macOS System Extension to transparently capture simulator traffic without configuring a system proxy. Each simulator's flows are tagged with its UDID. Check `proxy_status` — if `local_capture` is non-empty, simulator traffic is already being captured. The user configures which processes to capture via `quern enable-local-capture <process_name>` (the process name is typically the Xcode target name). `set_local_capture` changes this Mac-wide list (owner only) at runtime and restarts the proxy: mocks, bypass patterns and the intercept are kept, but open connections reset and held flows are released (`restart` in the response says so). To capture an app on one simulator you hold without any restart -- and from a client key, the only way -- use `add_session_capture` (see `quern://guide/sharing`).
 - **System proxy**: Configures macOS-wide proxy settings. Use `configure_system_proxy` to start capturing and `unconfigure_system_proxy` when done. Affects all Mac traffic — always unconfigure when finished.
 
 **`set_local_capture` sets the list, but a minimum is always kept.** Naming one app no longer drops `MobileSafari` and `com.apple.WebKit.Networking` — a webview's requests leave through WebKit and an OAuth hand-off goes through Safari, so losing them silently stopped capturing the traffic you were probably looking for. The response says what was added for you (`capture_added`) and what your list removed (`capture_removed`); read both. Everything else is still replaced rather than merged, so read `local_capture` from `proxy_status` first and pass entries you want kept. `only: true` on the HTTP endpoint captures exactly your list for the running server. The **flag** is not stored but the **list is**, so it replaces whatever was configured before, and start-up widens that stored list again because nothing on disk records you meant it narrowly. Treat `only` as a one-shot narrowing, not a temporary view.
@@ -31,7 +31,7 @@ Name the process that actually makes the requests. Safari's traffic leaves throu
 
 **Refusals worth recognising.** These are answers, not faults, and retrying
 them wastes a turn: a `launch_app` failure on an app that cannot start (see
-*Debugging UI Issues*), and the proxy refusals below.
+`quern://guide/ui`), and the proxy refusals below.
 
 **These tools can refuse, and that refusal is not an error to retry.** `configure_system_proxy`, and `start_proxy` **when called with `system_proxy: true`**, return **428** when a booted simulator does not trust the mitmproxy CA. Capturing in that state fails every HTTPS request from that device and the symptom points nowhere near the proxy — a blank screen, or an app that appears to have no network. The response names the devices and the ways out: install the certificate, set `auto_install_cert` so Quern handles it from now on, capture with `set_local_capture` instead (which passes such a simulator through), or shut the simulator down. (`skip_cert_check`, which proceeded anyway, is deprecated: a response to a request that uses it carries a `deprecations` note.)
 
@@ -73,10 +73,10 @@ Test error handling without breaking the backend:
 1. Set up an intercept pattern matching the target endpoint (e.g., `~d api.example.com & ~m POST`)
 2. Trigger the action in the app
 3. Wait for the request to be held with `list_held_flows` (use the timeout parameter)
-4. Release the flow with modifications — change the status code to 500, inject an error body, or alter headers
-5. Observe how the app handles the modified response via `get_screen_summary` and `query_logs`
+4. Release the flow with modifications to the request — its headers, body, URL or method — or unchanged
+5. Observe how the app handles the result via `get_screen_summary` and `query_logs`
 
-Use this to test error handling, slow network conditions, and malformed responses without needing backend changes.
+`release_flow` changes the request, not the response. To see how the app handles an error status or a malformed body, mock the response with `set_mock` (below); to see how it copes with a slow network, hold the flow before releasing it, or on a physical iPhone set a network condition (`quern://guide/performance`).
 
 ## Mocking for Deterministic Testing
 

@@ -113,7 +113,7 @@ somewhere wrong.
 
 A lookup that misses on a web page says so. When Safari is in front, or the
 native tree has collapsed to a bare `Application` (a presented web modal), a
-miss from `tap_element`, `type_text`, `get_element`, `clear_text` or a
+miss from `tap_element`, `type_text`, `get_element_state`, `clear_text` or a
 `wait_for_element` timeout tells you to call `get_web_content` first, and
 `tap_element` and `wait_for_element` also carry it as `web_content_hint`. Read
 that as "not visible to the tree yet", not "the field does not exist".
@@ -130,8 +130,8 @@ nothing to add.
 ## Reaching elements off screen
 
 **"The element I want is scrolled off-screen"**
-- `tap_element` handles this: on a miss it scrolls the target into view and retries. `scroll_to_find` is tri-state — `true` always sweeps, `false` never, and **unset (the default) asks the knowledge base** and sweeps only on a screen recorded as `scrollable: true`.
-- With no knowledge base loaded nothing is recorded, so a miss does *not* sweep and the response says `scrollability_unknown`. Pass `scroll_to_find: true` if you know the screen scrolls, or record it once (see [App Knowledge Base](guides/app-knowledge.md)) and every later tap gets it right for free.
+- `tap_element` handles this: on a miss it scrolls the target into view and retries. `scroll_to_find` is tri-state — `true` always sweeps, `false` never, and **unset (the default)** sweeps on Android, while on iOS it asks the knowledge base and sweeps only on a screen recorded as `scrollable: true`.
+- On iOS with no knowledge base loaded nothing is recorded, so a miss does *not* sweep and the response says `scrollability_unknown`. Pass `scroll_to_find: true` if you know the screen scrolls, or record it once (see `quern://app-knowledge-guide`) and every later tap gets it right for free.
 - A sweep that runs is reported: the response carries the swipes and whether anything moved, so a gesture you did not ask for is never invisible. On Android it also stops early and says why: `ends` lists the directions found at their end, and `no_progress: true` means the screen did not move when swiped either way -- it does not scroll there, so the element is not off screen.
 - Need it visible but *not* tapped (asserting on it, screenshotting it): `scroll_to_element`
 - Both work on Android and iOS (simulator and physical), and both drive a bounded swipe loop that re-checks the target by selector rather than dumping the UI tree — a tree dump can itself scroll the target away, which is the bug this design exists to avoid
