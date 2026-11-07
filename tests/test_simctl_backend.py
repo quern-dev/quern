@@ -265,11 +265,45 @@ class TestSimctlCommands:
             assert kwargs["env"]["SIMCTL_CHILD_QUERN_AUTOMATION"] == "YES"
             assert kwargs["env"]["SIMCTL_CHILD_DEBUG"] == "1"
 
+    async def test_terminate_an_app_that_is_not_running(self):
+        """simctl's exit 3, measured on iOS 27.0 (#629)."""
+        backend = SimctlBackend()
+        stderr = (b"An error was encountered processing the command "
+                  b"(domain=NSPOSIXErrorDomain, code=3):\nSimulator device failed to "
+                  b"terminate com.example.App.\nfound nothing to terminate\n")
+        with patch("asyncio.create_subprocess_exec",
+                   return_value=_mock_proc(returncode=3, stderr=stderr)):
+            assert await backend.terminate_app("AAAA-1111", "com.example.App") is False
+
+    async def test_any_other_terminate_failure_raises(self):
+        backend = SimctlBackend()
+        with patch("asyncio.create_subprocess_exec",
+                   return_value=_mock_proc(returncode=148, stderr=b"Invalid device: X")):
+            with pytest.raises(DeviceError, match="Invalid device"):
+                await backend.terminate_app("X", "com.example.App")
+
+    @pytest.mark.parametrize("returncode,stderr,expected", [
+        (0, b"", True),
+        (2, b"The operation couldn\xe2\x80\x99t be completed. No such file or directory\n", False),
+    ])
+    async def test_is_installed(self, returncode, stderr, expected):
+        backend = SimctlBackend()
+        with patch("asyncio.create_subprocess_exec",
+                   return_value=_mock_proc(returncode=returncode, stderr=stderr)):
+            assert await backend.is_installed("AAAA-1111", "com.example.App") is expected
+
+    async def test_is_installed_raises_when_simctl_cannot_say(self):
+        backend = SimctlBackend()
+        with patch("asyncio.create_subprocess_exec",
+                   return_value=_mock_proc(returncode=148, stderr=b"Invalid device: X")):
+            with pytest.raises(DeviceError):
+                await backend.is_installed("X", "com.example.App")
+
     async def test_terminate_app(self):
         backend = SimctlBackend()
         proc = _mock_proc()
         with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
-            await backend.terminate_app("AAAA-1111", "com.example.App")
+            assert await backend.terminate_app("AAAA-1111", "com.example.App") is True
             mock_exec.assert_called_once_with(
                 "xcrun",
                 "simctl",

@@ -769,9 +769,16 @@ async def terminate_app(request: Request, body: TerminateAppRequest):
     with action("terminate_app", category="device.lifecycle") as act:
         act.detail = body.bundle_id
         try:
-            udid = await controller.terminate_app(bundle_id=body.bundle_id, udid=body.udid)
+            udid, was_running = await controller.terminate_app(
+                bundle_id=body.bundle_id, udid=body.udid,
+            )
             act.udid = udid
-            return {"status": "terminated", "udid": udid, "bundle_id": body.bundle_id}
+            return {
+                "status": "not_running" if was_running is False else "terminated",
+                "was_running": was_running,
+                "udid": udid,
+                "bundle_id": body.bundle_id,
+            }
         except DeviceError as e:
             raise _handle_device_error(e)
 

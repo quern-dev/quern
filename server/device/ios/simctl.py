@@ -440,9 +440,42 @@ class SimctlBackend:
             return int(digits) if digits else None
         return None
 
-    async def terminate_app(self, udid: str, bundle_id: str) -> None:
-        """Terminate an app on a simulator."""
-        await self._run_simctl("terminate", udid, bundle_id)
+    async def terminate_app(self, udid: str, bundle_id: str) -> bool:
+        """Terminate an app on a simulator. Returns whether it was running.
+
+        simctl exits non-zero, saying "found nothing to terminate", for an app
+        that is not running -- and for one that is not installed, which it
+        does not tell apart. Callers that need the difference ask
+        `is_installed`. Any other failure raises.
+        """
+        proc = await asyncio.create_subprocess_exec(
+            "xcrun", "simctl", "terminate", udid, bundle_id,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await communicate(proc)
+        if proc.returncode == 0:
+            return True
+        message = stderr.decode().strip()
+        if "found nothing to terminate" in message:
+            return False
+        raise DeviceError(f"simctl terminate failed: {message}", tool="simctl")
+
+    async def is_installed(self, udid: str, bundle_id: str) -> bool:
+        """Whether bundle_id is installed. Raises when simctl cannot say:
+        only its "no such file" answer means not installed."""
+        proc = await asyncio.create_subprocess_exec(
+            "xcrun", "simctl", "get_app_container", udid, bundle_id, "app",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await communicate(proc)
+        if proc.returncode == 0:
+            return True
+        message = stderr.decode().strip()
+        if "No such file or directory" in message:
+            return False
+        raise DeviceError(f"simctl get_app_container failed: {message}", tool="simctl")
 
     async def uninstall_app(self, udid: str, bundle_id: str) -> None:
         """Uninstall an app from a simulator."""
