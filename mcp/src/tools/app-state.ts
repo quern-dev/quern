@@ -17,7 +17,7 @@ export function registerAppStateTools(server: McpServer): void {
   // ---------------------------------------------------------------------------
 
   server.registerTool("save_app_state", {
-    description: `Save a named checkpoint of a simulator app's state. Captures the data container and all app group containers. Terminates the app before copying. Simulator only.
+    description: `Save a named checkpoint of a simulator app's state. Captures the data container and the app group containers the app (or one of its extensions) is entitled to, read from its com.apple.security.application-groups entitlement; other apps' groups are never included. Terminates the app before copying. Simulator only.
 
 Use this to snapshot known-good states (e.g. "logged_in", "staging_configured") so you can restore them later without reinstalling.
 
@@ -46,7 +46,7 @@ IMPORTANT for logged-in states: auth tokens live in the simulator keychain, whic
   });
 
   server.registerTool("restore_app_state", {
-    description: `Restore a named app state checkpoint. Terminates the app, wipes live container contents, and copies the checkpoint back using re-resolved live paths (handles UUID rotation on reinstall). Simulator only.
+    description: `Restore a named app state checkpoint. Terminates the app, wipes live container contents, and copies the checkpoint back using re-resolved live paths (handles UUID rotation on reinstall). Only the app's own entitled groups are restored; groups in an older checkpoint that the app is not entitled to are left alone and listed in meta.groups_not_entitled. If one of the app's own groups has no container on the device yet, it is not restored and meta.groups_not_restored says so: launch the app once and restore again. Simulator only.
 
 If the checkpoint carries a keychain (saved with include_keychain), it is restored too and the app comes up logged in — this requires the device to be shut down, and the call fails before touching anything if it is not. A checkpoint saved without a keychain always restores to a logged-out app; the response's meta.keychain says which happened.`,
     inputSchema: strictParams({
@@ -116,12 +116,12 @@ If the checkpoint carries a keychain (saved with include_keychain), it is restor
   server.registerTool("read_app_plist", {
     description: `Read a plist file (or single key) from a simulator app's container. Useful for inspecting feature flags, cached tokens, or any preference stored in a plist.
 
-Container can be "data" (main data container) or a group ID like "group.com.example".
+Container can be "data" (main data container) or one of the app's own app-group IDs, like "group.com.example": only groups the app or one of its extensions is entitled to (com.apple.security.application-groups) are reachable, and any other group is refused.
 plist_path is relative to the container root (e.g. "Library/Preferences/com.example.plist").
 If key is omitted, returns the entire plist as JSON.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
-      container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+      container: z.string().describe("\"data\" or an app-group ID (e.g. \"group.com.example\") in the application-groups entitlement of the app or one of its extensions; any other group is refused"),
       plist_path: z.string().describe("Relative path to the plist within the container"),
       key: z.string().optional().describe("Specific key to read (omit to return entire plist)"),
       udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
@@ -147,7 +147,7 @@ If key is omitted, returns the entire plist as JSON.`,
 The key is taken literally: "com.example.flag" is one top-level key, not a path. A preference file (Library/Preferences/*.plist) on a booted simulator is written through cfprefsd, so even a running app sees the value on its next read; the value is read back before success is reported. Type inference: a boolean is stored as a plist boolean, an integer as an integer, a float as a real, anything else as a string.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
-      container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+      container: z.string().describe("\"data\" or an app-group ID (e.g. \"group.com.example\") in the application-groups entitlement of the app or one of its extensions; any other group is refused"),
       plist_path: z.string().describe("Relative path to the plist within the container"),
       key: z.string().describe("Plist key to set"),
       value: plistValue.describe("Value to set (type is inferred)"),
@@ -173,7 +173,7 @@ The key is taken literally: "com.example.flag" is one top-level key, not a path.
 Keys are taken literally and every value is read back, as in set_app_plist_value. A failure part-way names the keys already written. Type inference per value: boolean → plist boolean, integer → integer, float → real, everything else → string.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
-      container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+      container: z.string().describe("\"data\" or an app-group ID (e.g. \"group.com.example\") in the application-groups entitlement of the app or one of its extensions; any other group is refused"),
       plist_path: z.string().describe("Relative path to the plist within the container"),
       values: z.record(z.string(), plistValue).describe("Object mapping plist keys to values (e.g. {\"flag1\": true, \"flag2\": false, \"count\": 42})"),
       udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
@@ -196,7 +196,7 @@ Keys are taken literally and every value is read back, as in set_app_plist_value
     description: `Compare a live plist against a saved checkpoint to see what changed. Returns added, removed, and changed keys. Useful for discovering new flags after app updates or verifying that a state restore worked correctly. Simulator only.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
-      container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+      container: z.string().describe("\"data\" or an app-group ID (e.g. \"group.com.example\") in the application-groups entitlement of the app or one of its extensions; any other group is refused"),
       plist_path: z.string().describe("Relative path to the plist within the container"),
       checkpoint_label: z.string().describe("Name of the saved checkpoint to compare against"),
       udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
@@ -221,7 +221,7 @@ Keys are taken literally and every value is read back, as in set_app_plist_value
     description: `Remove a key from a plist file inside a simulator app's container. Useful for simulating missing/unset state (e.g. remove a flag to trigger first-launch flow). Simulator only.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
-      container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+      container: z.string().describe("\"data\" or an app-group ID (e.g. \"group.com.example\") in the application-groups entitlement of the app or one of its extensions; any other group is refused"),
       plist_path: z.string().describe("Relative path to the plist within the container"),
       key: z.string().describe("Plist key to remove"),
       udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
@@ -246,7 +246,7 @@ Keys are taken literally and every value is read back, as in set_app_plist_value
 Logs an initial snapshot of all keys when the watch starts. Then emits one log entry per added, removed, or changed key as mutations happen. Simulator only.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
-      container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+      container: z.string().describe("\"data\" or an app-group ID (e.g. \"group.com.example\") in the application-groups entitlement of the app or one of its extensions; any other group is refused"),
       plist_path: z.string().describe("Relative path to the plist within the container"),
       poll_interval: z.coerce.number().default(1.0).describe("Poll interval in seconds (default 1.0)"),
       ignore_prefixes: z.array(z.string()).optional().describe('Key prefixes to ignore (e.g. ["kGSPSearchFilter", "LaunchDarkly"]). Changes to keys starting with these prefixes are silently dropped.'),
@@ -271,7 +271,7 @@ Logs an initial snapshot of all keys when the watch starts. Then emits one log e
     description: `Stop watching a plist file for changes.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
-      container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+      container: z.string().describe("The container of the running watch, exactly as it was given: to start_plist_watch, or in configure_plist_watch for a watch start_simulator_logging started"),
       plist_path: z.string().describe("Relative path to the plist within the container"),
       udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
     }),
@@ -292,11 +292,11 @@ Logs an initial snapshot of all keys when the watch starts. Then emits one log e
   server.registerTool("configure_plist_watch", {
     description: `Save persistent plist watch config for an app. Supports multiple plists per bundle — e.g., app group plist for coaching flags + main container plist for SDK config, each with its own ignore list.
 
-When start_simulator_logging runs, it automatically starts watchers for ALL configured targets. Config persists in ~/.quern/config.json across server restarts.`,
+When start_simulator_logging starts logging, it automatically starts watchers for ALL configured targets. If logging is already running, a newly configured watch is not started until logging is restarted; start it now with start_plist_watch. Config persists in ~/.quern/config.json across server restarts.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
       watches: z.array(z.object({
-        container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
+        container: z.string().describe("\"data\" or an app-group ID (e.g. \"group.com.example\") in the application-groups entitlement of the app or one of its extensions. Saving does not check the group: it is checked when start_simulator_logging starts the watch, and a watch that fails then is listed in that response's plist_watchers_failed, with the reason"),
         plist_path: z.string().describe("Relative path to the plist within the container"),
         ignore_prefixes: z.array(z.string()).optional().describe('Key prefixes to ignore in this plist'),
       })).describe("List of plist targets to watch for this bundle"),

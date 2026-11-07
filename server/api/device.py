@@ -1273,6 +1273,10 @@ async def _start_simulator_logging(
     # Auto-start plist watchers from persistent config
     plist_watchers_started = []
     plist_watchers_already_running = []
+    # A watch that fails to start is reported, not only logged: the caller
+    # otherwise reads success and waits for plist changes that never come.
+    # Since #628 a group the app is not entitled to is one way to get here.
+    plist_watchers_failed: list[dict] = []
     try:
         from server.config import get_plist_watch_config
         from server.sources.plist_watcher import PlistWatcherAdapter
@@ -1309,8 +1313,11 @@ async def _start_simulator_logging(
                         "Auto-start plist watch failed for %s: %s",
                         watch_label, pw_adapter._error,
                     )
+                    plist_watchers_failed.append(
+                        {"watch": watch_label, "error": pw_adapter._error})
     except Exception as e:
         logger.warning("Failed to auto-start plist watchers: %s", e)
+        plist_watchers_failed.append({"watch": "*", "error": str(e)})
 
     result = {
         "status": "started", "udid": udid,
@@ -1322,6 +1329,8 @@ async def _start_simulator_logging(
         result["plist_watchers_started"] = plist_watchers_started
     if plist_watchers_already_running:
         result["plist_watchers_already_running"] = plist_watchers_already_running
+    if plist_watchers_failed:
+        result["plist_watchers_failed"] = plist_watchers_failed
     return result
 
 

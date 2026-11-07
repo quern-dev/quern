@@ -20,6 +20,8 @@ import asyncio
 import fcntl
 import json
 import logging
+import os
+import re
 import ssl
 import subprocess
 import time
@@ -44,6 +46,21 @@ UPDATE_INFO_FILE = CONFIG_DIR / "update-info.json"
 CHECK_INTERVAL = 86400  # 24 hours
 ENDPOINT = "https://quern.dev/api/check-update"
 TIMEOUT = 5  # seconds
+
+#: Set by quern's own release tooling (scripts/release-rehearsal.sh) so the
+#: checks its sandboxed installs send can be told apart from real installs'
+#: in quern.dev's analytics: `quern-update-check/1.0 (rehearsal)`. A short
+#: lowercase token or nothing -- it goes into a header.
+REQUEST_TAG_ENV = "QUERN_UPDATE_CHECK_TAG"
+_REQUEST_TAG = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+
+
+def user_agent(product: str) -> str:
+    """The User-Agent for a request to quern.dev: `product`, with the release
+    tooling's tag when it set one. Anything that is not a short token is
+    ignored rather than sent."""
+    tag = os.environ.get(REQUEST_TAG_ENV, "")
+    return f"{product} ({tag})" if _REQUEST_TAG.fullmatch(tag) else product
 
 
 def _find_project_root() -> Path | None:
@@ -307,7 +324,8 @@ def check_for_updates(
 
         # Hit the endpoint
         url = f"{ENDPOINT}?{'&'.join(params)}"
-        req = urllib.request.Request(url, headers={"User-Agent": "quern-update-check/1.0"})
+        req = urllib.request.Request(
+            url, headers={"User-Agent": user_agent("quern-update-check/1.0")})
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             data = json.loads(resp.read().decode())
 
