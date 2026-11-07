@@ -229,6 +229,8 @@ def fetch(port: int, *, host: str = "127.0.0.1", timeout: float = 10.0) -> tuple
     import urllib.error
     import urllib.request
 
+    from server.remote.client import loopback_opener
+
     try:
         key = config_mod.API_KEY_FILE.read_text().strip()
     except OSError as e:
@@ -236,16 +238,10 @@ def fetch(port: int, *, host: str = "127.0.0.1", timeout: float = 10.0) -> tuple
     req = urllib.request.Request(f"http://{host}:{port}/api/v1/system/disk",
                                  headers={"Authorization": f"Bearer {key}",
                                           "X-Quern-Session": "cli"})
-    class NoRedirects(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req: urllib.request.Request, fp: Any, code: int, msg: str,
-                             headers: Any, newurl: str) -> None:
-            return None   # the 3xx is then an HTTPError, said below
-
-    # Never through a proxy from the environment, nor after a redirect: either
-    # would be handed the owner's key (CodeRabbit).
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirects())
+    # Never through a proxy, nor after a redirect: either would be handed the
+    # owner's key. A 3xx is then an HTTPError, said below.
     try:
-        with opener.open(req, timeout=timeout) as resp:
+        with loopback_opener().open(req, timeout=timeout) as resp:
             body = json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
         return None, f"the server answered {e.code}"

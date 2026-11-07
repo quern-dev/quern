@@ -204,6 +204,21 @@ class _SameOriginRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, joined)
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None     # the 3xx is then an HTTPError, which each caller says
+
+
+def loopback_opener() -> urllib.request.OpenerDirector:
+    """A urllib opener for this Mac's own server, which every caller hands the
+    owner's key or a client's: never through a proxy -- urllib takes one from
+    the environment, and from the macOS system proxy that
+    `configure_system_proxy` turns on -- and never after a redirect, which
+    urllib follows with the Authorization header (#613). quern's own routes
+    answer where they are asked, so a 3xx is not quern's."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects())
+
+
 def opener(remote: Remote) -> urllib.request.OpenerDirector:
     """A urllib opener whose every HTTPS connection is pinned to `remote`, and
     which follows redirects only within its origin."""

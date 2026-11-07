@@ -79,11 +79,13 @@ def _remote():
 
 
 def _open(req, timeout: float):
-    """urllib's open, pinned to the remote's certificate when there is one."""
+    """urllib's open, pinned to the remote's certificate when there is one,
+    and straight to this Mac's own server when there is not."""
+    from server.remote import client
+
     remote = _remote()
     if remote is None:
-        return urllib.request.urlopen(req, timeout=timeout)
-    from server.remote import client
+        return client.loopback_opener().open(req, timeout=timeout)
 
     try:
         return client.opener(remote).open(req, timeout=timeout)
