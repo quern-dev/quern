@@ -717,7 +717,8 @@ def _node_env_is_not_this_machine(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def _no_real_release_downloads(monkeypatch, request):
-    """Fail any test that tries to fetch a release asset.
+    """Fail any test that tries to fetch a release asset, or to ask quern.dev
+    whether there is one.
 
     `quern doctor --fix` installs a missing or stale Quern app, so a test that
     runs it on a machine without one goes to the network and downloads an app.
@@ -726,6 +727,14 @@ def _no_real_release_downloads(monkeypatch, request):
 
     Both hops: the release lookup and the asset download. The first version
     guarded only the second, while promising both.
+
+    The update check too. `run_update` ends with a forced `check_for_updates`
+    -- forced, so neither the once-a-day stamp nor the opt-out stops it -- and
+    fourteen tests that stubbed everything else in an update left that call
+    real. Each full run sent fourteen checks to quern.dev, so every CI run sent
+    about seventy from GitHub's runners, which read in quern.dev's analytics as
+    traffic from Azure. Measured with a DNS probe on the whole suite; a test
+    that means to check stubs `updater._refresh_update_check` or the check.
 
     Tests that exercise the download itself mark themselves
     `@pytest.mark.release_download` and inject their own transport; tests that
@@ -744,6 +753,7 @@ def _no_real_release_downloads(monkeypatch, request):
         captured stdout. A BaseException reaches the runner.
         """
 
+    import urllib.parse
     import urllib.request
 
     from server.lifecycle import setup as setup_mod
@@ -756,6 +766,11 @@ def _no_real_release_downloads(monkeypatch, request):
             raise ReleaseFetchBlocked(
                 f"a test tried to fetch {target}. Patch urlopen, or stub the "
                 "section that calls it."
+            )
+        if isinstance(target, str) and urllib.parse.urlsplit(target).hostname == "quern.dev":
+            raise ReleaseFetchBlocked(
+                f"a test sent a real update check ({target}). Stub "
+                "updater._refresh_update_check, or check_for_updates, in it."
             )
         return real_urlopen(url, *a, **kw)
 

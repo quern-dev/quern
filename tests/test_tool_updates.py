@@ -49,6 +49,15 @@ FAKE_HOME = Path("/tmp/quern-tests-home")
 
 
 @pytest.fixture(autouse=True)
+def _no_real_update_check(monkeypatch):
+    """An update ends by checking quern.dev for the next one. Tests here run
+    updates, and none is about that check."""
+    from server.lifecycle import updater
+
+    monkeypatch.setattr(updater, "_refresh_update_check", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _home_is_not_this_machine(monkeypatch):
     """Point `Path.home()` at FAKE_HOME for every test in this module."""
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: FAKE_HOME))
