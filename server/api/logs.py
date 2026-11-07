@@ -368,15 +368,17 @@ async def _gap_note(request: Request, process: str | None, *, level: LogLevel | 
     ingestion = getattr(request.app.state, "ingestion_filter", None)
     filtered, below, silent = [], [], []
     for udid, started in running.items():
-        if ingestion is not None and _filter_may_drop(ingestion, process, udid):
-            filtered.append(udid)
-            continue
         seen = [e for e in history if e.device_id == udid]
         if seen:
-            # It does log. The only gap worth naming is the caller's level.
+            # It does log, and its lines got past any filter, so neither the
+            # filter nor print() is the gap (CodeRabbit). Only the caller's
+            # level can be.
             if level is not None and all(
                     _LEVEL_ORDER[e.level] < _LEVEL_ORDER[level] for e in seen):
                 below.append(udid)
+            continue
+        if ingestion is not None and _filter_may_drop(ingestion, process, udid):
+            filtered.append(udid)
             continue
         # Nothing at all from it: silence only if the buffer has kept
         # everything since it started, else its lines may have been evicted.

@@ -171,6 +171,17 @@ class TestQueryNote:
         note = (await _get(app, "/api/v1/logs/query", process="MyApp"))["note"]
         assert "set_log_filter" in note and "print()" not in note
 
+    async def test_a_filter_is_not_blamed_for_an_app_whose_lines_got_past_it(self, app,
+                                                                              monkeypatch):
+        """An app-only subsystem filter, and the app's lines in the buffer: a
+        search that missed is the query's doing, not the filter's (CodeRabbit)."""
+        _running(monkeypatch, APP_PATH)
+        app.state.ingestion_filter.update_filter(build_config(subsystems=["com.me.myapp"]),
+                                                 source=LogSource.SIMULATOR)
+        await app.state.ring_buffer.append(_entry("MyApp"))
+        body = await _get(app, "/api/v1/logs/query", process="MyApp", search="zzz-not-there")
+        assert body["total"] == 0 and body["note"] is None
+
     async def test_simulator_quiet_alone_is_not_blamed(self, app, monkeypatch):
         """Its rules are Apple's frameworks only; the app's lines pass it."""
         _running(monkeypatch, APP_PATH)
