@@ -166,6 +166,14 @@ class TestAnUnusableKeyFileStopsBeforeAnythingIsTornDown:
     log, so the shell sees `quern start` succeed with no server running.
     """
 
+    @pytest.fixture(autouse=True)
+    def _no_real_update_check(self, monkeypatch):
+        """Both tests start in the foreground, which checks quern.dev for
+        updates whenever the stamp an earlier test left allows it: not what
+        either is about."""
+        monkeypatch.setattr("server.lifecycle.update_check.check_for_updates",
+                            lambda **k: None)
+
     def _args(self, **over):
         import argparse
 

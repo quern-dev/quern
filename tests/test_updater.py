@@ -540,6 +540,9 @@ class TestTheUpdateRecord:
     def sandbox(self, tmp_path, monkeypatch):
         from server.lifecycle import updater
         monkeypatch.setattr(updater, "RESULT_FILE", tmp_path / "last-update.json")
+        # An update ends by checking quern.dev for the next one; these tests
+        # are about the record it leaves, not that check.
+        monkeypatch.setattr(updater, "_refresh_update_check", lambda: None)
         return updater
 
     def _read(self, updater):
