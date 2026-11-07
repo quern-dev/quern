@@ -3,6 +3,9 @@
 *`quern://guide/network` -- part of the Quern agent guide. Start from `quern://guide`.*
 
 Seeing, changing and faking an app's network traffic.
+
+**On this page:** Capturing traffic · Filtering flows · Tools for network work · Intercept-Modify-Release for Testing Edge Cases · Slowing the network on a simulator · Mocking for Deterministic Testing · Mistakes to avoid · When something is wrong.
+
 ## Capturing traffic
 
 1. Check `proxy_status` — start the proxy if it isn't running
@@ -60,6 +63,7 @@ Ask the user which resolution they want. Installing a certificate authority pers
 - Overview: `get_flow_summary` (use `simulator_udid` to filter by simulator)
 - Specific requests: `query_flows` with filters (`hosts`, `exclude_hosts`, `detail="summary"`)
 - Bracket a UI action: `start_capture_session` → action → `stop_capture_session`
+- Capture an app on one simulator you hold, without changing the Mac-wide list or restarting the proxy: `add_session_capture(simulator_udid, processes)`, then `remove_session_capture` (or let your hold end). It works on the owner key and a client key alike; its refusals are listed in `quern://guide/sharing`
 - Full detail: `get_flow_detail`
 - Modify traffic: `set_intercept` + `release_flow` with modifications
 - Mock responses: `set_mock`
@@ -77,6 +81,13 @@ Test error handling without breaking the backend:
 5. Observe how the app handles the result via `get_screen_summary` and `query_logs`
 
 `release_flow` changes the request, not the response. To see how the app handles an error status or a malformed body, mock the response with `set_mock` (below); to see how it copes with a slow network, hold the flow before releasing it, or on a physical iPhone set a network condition (`quern://guide/performance`).
+
+## Slowing the network on a simulator
+
+`set_device_condition`'s network profiles are for physical iPhones only (`quern://guide/performance`). A simulator uses the Mac's network, so there are two ways, and neither is a quern setting:
+
+- **One endpoint:** intercept it (`set_intercept`, owner key only), wait for the request with `list_held_flows`, and release it with `release_flow` once the delay you want has passed. The hold is the latency, and every other request is untouched. Clear the intercept when done.
+- **Everything:** Network Link Conditioner, from Apple's Additional Tools for Xcode. It slows the whole Mac, every app and every simulator on it, so ask the user before turning it on, and turn it off afterwards.
 
 ## Mocking for Deterministic Testing
 

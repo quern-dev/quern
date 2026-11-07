@@ -7,7 +7,7 @@ This page is the overview: how to start, the principles behind the tools, and wh
 | Read | When |
 |---|---|
 | `quern://guide/ui` | Reading the screen, tapping, gestures, web views, scrolling to an element, landmarks and screen identification |
-| `quern://guide/network` | Capturing traffic, local capture and the system proxy, certificates, mocks, intercepts |
+| `quern://guide/network` | Capturing traffic, local capture and the system proxy, certificates, mocks, intercepts, a slow network on a simulator |
 | `quern://guide/devices` | Choosing a device, physical iPhones and WDA, live preview, app state and plists, device settings, foldables, builds |
 | `quern://guide/logs` | App logs and whether quern can see them, crashes, recordings, `get_trace`, screenshot timelines |
 | `quern://guide/performance` | CPU and memory, hangs and janky frames, profiles, thread stacks, a slow network or a hot phone |
@@ -51,7 +51,7 @@ From there, use the right tool for your task. If any tool fails with a connectio
 | Tap, type, swipe | `tap_element`, `type_text` (after `clear_text`), `swipe`, `gesture` | ui |
 | Reach an element off screen | `tap_element` (sweeps when the screen scrolls), `scroll_to_element` | ui |
 | Know which screen you're on | `identify_screen`, or `get_screen_summary(identify=true)` | ui |
-| See network traffic | `get_flow_summary`, `query_flows`, `get_flow_detail`; bracket an action with `start_capture_session` | network |
+| See network traffic | `get_flow_summary`, `query_flows`, `get_flow_detail`; bracket an action with `start_capture_session`; capture one simulator's app with `add_session_capture` | network |
 | Fake or change a response | `set_mock`; `set_intercept` + `release_flow` to edit a request | network |
 | Read app logs | `get_log_summary`, `query_logs`, `tail_logs`, `get_errors` | logs |
 | See what an action caused | `get_trace` | logs |
@@ -59,6 +59,7 @@ From there, use the right tool for your task. If any tool fails with a connectio
 | Keep a whole run | `start_recording` / `stop_recording` | logs |
 | Measure an app | `get_performance`, `start_profile` / `stop_profile`, `get_thread_stacks` | performance |
 | Test under a bad network or a hot phone | `set_device_condition` (physical iPhones) | performance |
+| Slow the network on a simulator | hold requests with `set_intercept`, or the Mac's Network Link Conditioner (ask first) | network |
 | Get or control a device | `resolve_device`, `ensure_devices`, `install_app`, `launch_app`, `build_and_install` | devices |
 | Start an app from a known state | `save_app_state` / `restore_app_state`, plist tools (simulators) | devices |
 | Share a server or use another Mac | `reserve_devices`, `list_remotes`, `use_remote` | sharing |
