@@ -83,7 +83,6 @@ class LogSource(str, enum.Enum):
     CRASH = "crash"
     BUILD = "build"
     PROXY = "proxy"
-    APP_DRAIN = "app_drain"
     SIMULATOR = "simulator"
     DEVICE = "device"
     LOGCAT = "logcat"
