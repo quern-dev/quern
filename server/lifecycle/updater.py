@@ -29,7 +29,7 @@ from server.config import CONFIG_DIR
 from server.lifecycle import releases
 from server.lifecycle.invocation import run_it_yourself
 from server.lifecycle.ports import DEFAULT_SERVER_PORT, LEGACY_SERVER_PORT
-from server.lifecycle.update_check import ENDPOINT
+from server.lifecycle.update_check import ENDPOINT, user_agent
 from server.lifecycle.update_check import TIMEOUT as CHECK_TIMEOUT
 
 GITHUB_REPO = releases.GITHUB_REPO
@@ -250,7 +250,7 @@ def _check_via_quern_dev(head_sha: str) -> bool | None:
 
     try:
         url = f"{ENDPOINT}?sha={head_sha}&channel={get_update_channel()}"
-        req = urllib.request.Request(url, headers={"User-Agent": "quern-update/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": user_agent("quern-update/1.0")})
         with urllib.request.urlopen(req, timeout=CHECK_TIMEOUT) as resp:
             data = json.loads(resp.read().decode())
         return data.get("update_available", False)

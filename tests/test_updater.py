@@ -195,6 +195,24 @@ def test_check_via_git_returns_none_on_fetch_failure():
 # ---------------------------------------------------------------------------
 
 
+def test_the_updaters_own_question_carries_the_release_tooling_tag(monkeypatch):
+    """`quern update` asks quern.dev too, before it pulls; a rehearsal's
+    update cases send that question as well as the server's check."""
+    from server.lifecycle import updater
+
+    monkeypatch.setenv("QUERN_UPDATE_CHECK_TAG", "rehearsal")
+    response = MagicMock()
+    response.__enter__ = MagicMock(return_value=response)
+    response.__exit__ = MagicMock(return_value=False)
+    response.read = MagicMock(return_value=b'{"update_available": false}')
+    with patch("urllib.request.urlopen", return_value=response) as urlopen:
+        updater._check_via_quern_dev("abc123")
+
+    assert urlopen.call_count == 1
+    assert (urlopen.call_args[0][0].get_header("User-agent")
+            == "quern-update/1.0 (rehearsal)")
+
+
 @pytest.fixture
 def stub_quern_dev_no_signal(monkeypatch):
     """Make _check_via_quern_dev return None ("don't know") so the test

@@ -270,7 +270,8 @@ step "What quern.dev tells an older install"
 site_channel=stable
 [[ "$VERSION" == *-* ]] && site_channel=beta
 if [[ -z "${QUERN_RELEASES_URL:-}" ]]; then
-  answer="$(curl -fsSL "https://quern.dev/api/check-update?version=0.0.1&channel=$site_channel" || true)"
+  # Its own User-Agent, so quern.dev's analytics can leave it out.
+  answer="$(curl -fsSL -A "quern-release-verify/1.0" "https://quern.dev/api/check-update?version=0.0.1&channel=$site_channel" || true)"
   if printf '%s' "$answer" | grep -q '"update_available": *true'; then
     ok "quern.dev offers an update to an old install on $site_channel"
   else
