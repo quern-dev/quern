@@ -417,11 +417,24 @@ async def entitled_app_groups(udid: str, bundle_id: str) -> set[str]:
         for executable in _bundle_executables(app):
             embedded = await asyncio.to_thread(macho_entitlements, executable)
             signed = await _signature_entitlements(executable.parent)
+            # A simulator build carries its groups in the section, a device
+            # build in the signature. Where both name them and disagree, which
+            # one the system honours is not something to guess at: a group
+            # taken from the wrong one is wiped on restore (CodeRabbit).
+            lists = []
             for source in (embedded or {}, signed):
-                value = source.get(APP_GROUPS_ENTITLEMENT, [])
+                if APP_GROUPS_ENTITLEMENT not in source:
+                    continue
+                value = source[APP_GROUPS_ENTITLEMENT]
                 if not isinstance(value, list) or not all(isinstance(g, str) for g in value):
                     raise ValueError(f"{executable.name}'s {APP_GROUPS_ENTITLEMENT} is not "
                                      f"a list of strings")
+                lists.append(set(value))
+            if len(lists) == 2 and lists[0] != lists[1]:
+                raise ValueError(
+                    f"{executable.name}'s embedded and signed {APP_GROUPS_ENTITLEMENT} "
+                    f"disagree ({sorted(lists[0])} vs {sorted(lists[1])})")
+            for value in lists:
                 groups.update(value)
     except (OSError, ValueError) as e:
         raise DeviceError(

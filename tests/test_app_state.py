@@ -313,6 +313,27 @@ class TestGetAppGroups:
         with pytest.raises(DeviceError, match="codesign failed"):
             await get_app_groups(device.udid, "com.example.App")
 
+    async def test_section_and_signature_that_disagree_raise(self, device):
+        """Neither list is taken on trust when they conflict (CodeRabbit on #632)."""
+        device.group("group.com.example.mine")
+        device.group("group.com.example.other")
+        device.app("com.example.App", _macho(_ents("group.com.example.other")))
+        device.signed["App.app"] = {
+            "com.apple.security.application-groups": ["group.com.example.mine"],
+        }
+        with pytest.raises(DeviceError, match="disagree"):
+            await get_app_groups(device.udid, "com.example.App")
+
+    async def test_section_and_signature_that_agree_are_fine(self, device):
+        mine = device.group("group.com.example.mine")
+        device.app("com.example.App", _macho(_ents("group.com.example.mine")))
+        device.signed["App.app"] = {
+            "com.apple.security.application-groups": ["group.com.example.mine"],
+        }
+        assert await get_app_groups(device.udid, "com.example.App") == {
+            "group.com.example.mine": mine,
+        }
+
     async def test_an_unsigned_app_keeps_its_embedded_groups(self, device):
         """codesign's "not signed at all" is an answer, not a failure: the
         section is still read (CodeRabbit on #632)."""
