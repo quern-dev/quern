@@ -68,75 +68,376 @@ def _mock_proc(returncode: int = 0, stdout: bytes = b"", stderr: bytes = b""):
 
 
 # ---------------------------------------------------------------------------
-# get_app_groups
+# get_app_groups: only the groups the app is entitled to (#628)
 # ---------------------------------------------------------------------------
+
+METADATA = ".com.apple.mobile_container_manager.metadata.plist"
+
+
+def _macho(entitlements: bytes | None, *, wide: bool = True) -> bytes:
+    """A minimal little-endian Mach-O: a __TEXT segment, with an __entitlements
+    section holding `entitlements` when given and an unrelated one otherwise."""
+    import struct
+    payload = entitlements if entitlements is not None else b"code"
+    sectname = b"__entitlements" if entitlements is not None else b"__text"
+    if wide:
+        header_size, seg_size, sect_size = 32, 72, 80
+        offset = header_size + seg_size + sect_size
+        section = struct.pack("<16s16sQQIIIIIIII", sectname, b"__TEXT", 0, len(payload),
+                              offset, 0, 0, 0, 0, 0, 0, 0)
+        segment = struct.pack("<II16sQQQQiiII", 0x19, seg_size + sect_size, b"__TEXT",
+                              0, 0, 0, 0, 7, 5, 1, 0)
+        header = struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 1,
+                             seg_size + sect_size, 0, 0)
+    else:
+        header_size, seg_size, sect_size = 28, 56, 68
+        offset = header_size + seg_size + sect_size
+        section = struct.pack("<16s16sIIIIIIIII", sectname, b"__TEXT", 0, len(payload),
+                              offset, 0, 0, 0, 0, 0, 0)
+        segment = struct.pack("<II16sIIIIiiII", 0x1, seg_size + sect_size, b"__TEXT",
+                              0, 0, 0, 0, 7, 5, 1, 0)
+        header = struct.pack("<IiiIIII", 0xFEEDFACE, 12, 0, 2, 1, seg_size + sect_size, 0)
+    return header + segment + section + payload
+
+
+def _fat(*slices: bytes) -> bytes:
+    import struct
+    out = struct.pack(">II", 0xCAFEBABE, len(slices))
+    at = 8 + 20 * len(slices)
+    body = b""
+    for image in slices:
+        out += struct.pack(">iiIII", 0x0100000C, 0, at + len(body), len(image), 0)
+        body += image
+    return out + body
+
+
+def _ents(*groups: str) -> bytes:
+    return plistlib.dumps({"com.apple.security.application-groups": list(groups)})
+
+
+class FakeDevice:
+    """A simulator's on-disk containers under a fake HOME."""
+
+    def __init__(self, home: Path, udid: str = "TEST-UDID"):
+        self.root = (home / "Library" / "Developer" / "CoreSimulator" / "Devices" / udid
+                     / "data" / "Containers")
+        self.udid = udid
+
+    def _container(self, kind: str, identifier: str) -> Path:
+        path = self.root / kind / f"UUID-{identifier}"
+        path.mkdir(parents=True)
+        (path / METADATA).write_bytes(
+            plistlib.dumps({"MCMMetadataIdentifier": identifier}, fmt=plistlib.FMT_BINARY)
+        )
+        return path
+
+    def group(self, identifier: str, content: str = "") -> Path:
+        path = self._container("Shared/AppGroup", identifier)
+        (path / "Library").mkdir()
+        (path / "Library" / "data.txt").write_text(content or identifier)
+        return path
+
+    def app(self, bundle_id: str, binary: bytes, *, extensions: dict[str, bytes] | None = None):
+        app = self._container("Bundle/Application", bundle_id) / "App.app"
+        app.mkdir()
+        (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": "App"}))
+        (app / "App").write_bytes(binary)
+        for name, ext_binary in (extensions or {}).items():
+            ext = app / "PlugIns" / f"{name}.appex"
+            ext.mkdir(parents=True)
+            (ext / "Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": name}))
+            (ext / name).write_bytes(ext_binary)
+        return app
+
+
+@pytest.fixture
+def device(tmp_path, monkeypatch):
+    """A fake device, with plutil answered from the files and codesign
+    reporting what an Xcode simulator build's ad-hoc signature carries: nothing,
+    unless a test sets `signed`."""
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT",
+                        home / "Library" / "Developer" / "CoreSimulator" / "Devices")
+    fake = FakeDevice(home)
+    fake.signed = {}
+
+    async def fake_exec(*argv, **_):
+        if argv[0] == "plutil":
+            data = plistlib.loads(Path(argv[-1]).read_bytes())
+            return _mock_proc(0, stdout=json.dumps(data).encode())
+        if argv[0] == "codesign":
+            ents = fake.signed.get(Path(argv[-1]).name)
+            if ents == "fail":
+                return _mock_proc(1, stderr=b"App.app: invalid signature (code or signature "
+                                             b"have been modified)")
+            if ents == "unsigned":
+                return _mock_proc(1, stderr=b"App.app: code object is not signed at all")
+            if ents is None:
+                return _mock_proc(0, stdout=plistlib.dumps({}))
+            return _mock_proc(0, stdout=plistlib.dumps(ents))
+        raise AssertionError(f"unexpected subprocess {argv}")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    return fake
+
+
+class TestMachoEntitlements:
+    def test_reads_the_section_of_a_64_bit_image(self, tmp_path):
+        binary = tmp_path / "App"
+        binary.write_bytes(_macho(_ents("group.a")))
+        assert app_state_module.macho_entitlements(binary) == {
+            "com.apple.security.application-groups": ["group.a"],
+        }
+
+    def test_reads_a_32_bit_image(self, tmp_path):
+        binary = tmp_path / "App"
+        binary.write_bytes(_macho(_ents("group.a"), wide=False))
+        assert app_state_module.macho_entitlements(binary)[
+            "com.apple.security.application-groups"] == ["group.a"]
+
+    def test_reads_the_slice_of_a_fat_binary_that_has_it(self, tmp_path):
+        binary = tmp_path / "App"
+        binary.write_bytes(_fat(_macho(None), _macho(_ents("group.b"))))
+        assert app_state_module.macho_entitlements(binary)[
+            "com.apple.security.application-groups"] == ["group.b"]
+
+    def test_reads_a_fat_64_binary(self, tmp_path):
+        import struct
+        slices = [_macho(None), _macho(_ents("group.c"))]
+        header = struct.pack(">II", 0xCAFEBABF, len(slices))
+        at, body, entries = 8 + 32 * len(slices), b"", b""
+        for image in slices:
+            entries += struct.pack(">iiQQII", 0x0100000C, 0, at + len(body), len(image), 0, 0)
+            body += image
+        binary = tmp_path / "App"
+        binary.write_bytes(header + entries + body)
+        assert app_state_module.macho_entitlements(binary)[
+            "com.apple.security.application-groups"] == ["group.c"]
+
+    def test_a_section_count_past_the_load_command_raises_rather_than_looping(self, tmp_path):
+        import struct
+        image = bytearray(_macho(_ents("group.a")))
+        struct.pack_into("<I", image, 32 + 64, 0xFFFFFFFF)  # nsects
+        binary = tmp_path / "App"
+        binary.write_bytes(bytes(image))
+        with pytest.raises(ValueError, match="sections run past"):
+            app_state_module.macho_entitlements(binary)
+
+    def test_none_when_there_is_no_section(self, tmp_path):
+        binary = tmp_path / "App"
+        binary.write_bytes(_macho(None))
+        assert app_state_module.macho_entitlements(binary) is None
+
+    @pytest.mark.parametrize("data", [b"#!/bin/sh\n", b"", _macho(_ents("g"))[:40]])
+    def test_a_file_that_is_not_a_whole_macho_raises(self, tmp_path, data):
+        binary = tmp_path / "App"
+        binary.write_bytes(data)
+        with pytest.raises(ValueError):
+            app_state_module.macho_entitlements(binary)
 
 
 class TestGetAppGroups:
-    async def test_finds_matching_group(self, tmp_path, monkeypatch):
-        # Build a fake AppGroup directory structure
-        app_group_root = (
-            tmp_path
-            / "Library"
-            / "Developer"
-            / "CoreSimulator"
-            / "Devices"
-            / "TEST-UDID"
-            / "data"
-            / "Containers"
-            / "Shared"
-            / "AppGroup"
-        )
-        container = app_group_root / "ABCD-1234"
-        container.mkdir(parents=True)
-        meta = {"MCMMetadataIdentifier": "group.com.example.shared"}
-        plist_path = container / ".com.apple.mobile_container_manager.metadata.plist"
-        plist_path.write_text("")  # exists check passes
+    async def test_returns_only_the_entitled_group(self, device):
+        mine = device.group("group.com.example.shared")
+        device.group("group.com.apple.Health")
+        device.group("group.com.other.App")
+        device.app("com.example.App", _macho(_ents("group.com.example.shared")))
 
-        # Patch Path.home() and plutil call
-        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        groups = await get_app_groups(device.udid, "com.example.App")
 
-        plist_json = json.dumps(meta).encode()
-        with patch(
-            "asyncio.create_subprocess_exec",
-            return_value=_mock_proc(0, stdout=plist_json),
+        assert groups == {"group.com.example.shared": mine}
+
+    async def test_an_app_with_no_group_entitlement_gets_none(self, device):
+        """The trial's case: an app with no groups checkpointed all 57."""
+        device.group("group.com.apple.Health")
+        device.app("com.example.App", _macho(None))
+        assert await get_app_groups(device.udid, "com.example.App") == {}
+
+    async def test_an_extensions_groups_count(self, device):
+        widget = device.group("group.com.example.widget")
+        device.group("group.com.other.App")
+        device.app("com.example.App", _macho(None),
+                   extensions={"Widget": _macho(_ents("group.com.example.widget"))})
+        assert await get_app_groups(device.udid, "com.example.App") == {
+            "group.com.example.widget": widget,
+        }
+
+    async def test_signature_entitlements_count(self, device):
+        """A device-signed build carries them in the signature, not the section."""
+        signed = device.group("group.com.example.signed")
+        device.group("group.com.other.App")
+        device.app("com.example.App", _macho(None))
+        device.signed["App.app"] = {
+            "com.apple.security.application-groups": ["group.com.example.signed"],
+        }
+        assert await get_app_groups(device.udid, "com.example.App") == {
+            "group.com.example.signed": signed,
+        }
+
+    async def test_an_entitled_group_with_no_container_is_absent(self, device):
+        device.app("com.example.App", _macho(_ents("group.com.example.unused")))
+        device.group("group.com.other.App")
+        assert await get_app_groups(device.udid, "com.example.App") == {}
+
+    async def test_an_app_that_is_not_installed_raises_rather_than_returning_every_group(
+        self, device,
+    ):
+        device.group("group.com.other.App")
+        with pytest.raises(AppStateNotFoundError, match="not installed"):
+            await get_app_groups(device.udid, "com.example.App")
+
+    async def test_an_unreadable_executable_raises(self, device):
+        device.group("group.com.other.App")
+        device.app("com.example.App", b"not a mach-o")
+        with pytest.raises(DeviceError, match="entitlements"):
+            await get_app_groups(device.udid, "com.example.App")
+
+    async def test_returns_empty_when_no_groups_dir(self, device):
+        device.app("com.example.App", _macho(_ents("group.com.example.shared")))
+        assert await get_app_groups(device.udid, "com.example.App") == {}
+
+    async def test_an_extension_that_cannot_be_read_raises(self, device):
+        """Its groups would otherwise drop out of every save unannounced."""
+        device.group("group.com.example.widget")
+        app = device.app("com.example.App", _macho(None),
+                         extensions={"Widget": _macho(_ents("group.com.example.widget"))})
+        (app / "PlugIns" / "Widget.appex" / "Widget").unlink()
+        with pytest.raises(DeviceError, match="Widget.appex has no executable"):
+            await get_app_groups(device.udid, "com.example.App")
+
+    async def test_a_failed_codesign_raises_rather_than_reading_as_no_groups(self, device):
+        device.group("group.com.example.signed")
+        device.app("com.example.App", _macho(None))
+        device.signed["App.app"] = "fail"
+        with pytest.raises(DeviceError, match="codesign failed"):
+            await get_app_groups(device.udid, "com.example.App")
+
+    async def test_section_and_signature_that_disagree_raise(self, device):
+        """Neither list is taken on trust when they conflict."""
+        device.group("group.com.example.mine")
+        device.group("group.com.example.other")
+        device.app("com.example.App", _macho(_ents("group.com.example.other")))
+        device.signed["App.app"] = {
+            "com.apple.security.application-groups": ["group.com.example.mine"],
+        }
+        with pytest.raises(DeviceError, match="disagree"):
+            await get_app_groups(device.udid, "com.example.App")
+
+    async def test_section_and_signature_that_agree_are_fine(self, device):
+        mine = device.group("group.com.example.mine")
+        device.app("com.example.App", _macho(_ents("group.com.example.mine")))
+        device.signed["App.app"] = {
+            "com.apple.security.application-groups": ["group.com.example.mine"],
+        }
+        assert await get_app_groups(device.udid, "com.example.App") == {
+            "group.com.example.mine": mine,
+        }
+
+    async def test_an_unsigned_app_keeps_its_embedded_groups(self, device):
+        """codesign's "not signed at all" is an answer, not a failure: the
+        section is still read."""
+        mine = device.group("group.com.example.shared")
+        device.group("group.com.other.App")
+        device.app("com.example.App", _macho(_ents("group.com.example.shared")))
+        device.signed["App.app"] = "unsigned"
+        assert await get_app_groups(device.udid, "com.example.App") == {
+            "group.com.example.shared": mine,
+        }
+
+    @pytest.mark.parametrize("ents", [
+        plistlib.dumps(["not", "a", "dict"]),
+        plistlib.dumps({"com.apple.security.application-groups": "group.com.example.one"}),
+        b"<plist>not xml",
+    ])
+    async def test_entitlements_of_the_wrong_shape_raise(self, device, ents):
+        device.group("group.com.example.one")
+        device.app("com.example.App", _macho(ents))
+        with pytest.raises(DeviceError, match="entitlements"):
+            await get_app_groups(device.udid, "com.example.App")
+
+
+class TestCheckpointsLeaveOtherAppsGroupsAlone:
+    """End to end over the fake device: the bug was in the callers, which
+    trusted get_app_groups to have filtered."""
+
+    async def test_save_holds_only_the_apps_group(self, device, store, tmp_path):
+        device.group("group.com.example.shared")
+        device.group("group.com.apple.Health")
+        device.app("com.example.App", _macho(_ents("group.com.example.shared")))
+        data = tmp_path / "data"
+        data.mkdir()
+        with (
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=data)),
+            patch("server.device.app_state._terminate_app", AsyncMock()),
         ):
-            groups = await get_app_groups("TEST-UDID", "com.example.App")
+            meta = await save_state(device.udid, "com.example.App", "snap")
 
-        assert "group.com.example.shared" in groups
-        assert groups["group.com.example.shared"] == container
+        saved = sorted(p.name for p in (store / "com.example.App" / "snap" / "app-group").iterdir())
+        assert saved == ["group.com.example.shared"]
+        assert list(meta["containers"]["groups"]) == ["group.com.example.shared"]
 
-    async def test_returns_empty_when_no_groups_dir(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-        groups = await get_app_groups("NO-UDID", "com.example.App")
-        assert groups == {}
+    async def test_restore_of_an_old_checkpoint_leaves_other_groups_untouched(
+        self, device, store, tmp_path,
+    ):
+        """A checkpoint saved before the fix holds every group. Restoring it
+        must put back the app's own and leave the rest exactly as they are."""
+        mine = device.group("group.com.example.shared", "live mine")
+        health = device.group("group.com.apple.Health", "live health")
+        device.app("com.example.App", _macho(_ents("group.com.example.shared")))
 
-    async def test_skips_non_group_identifiers(self, tmp_path, monkeypatch):
-        app_group_root = (
-            tmp_path
-            / "Library"
-            / "Developer"
-            / "CoreSimulator"
-            / "Devices"
-            / "TEST-UDID"
-            / "data"
-            / "Containers"
-            / "Shared"
-            / "AppGroup"
-        )
-        container = app_group_root / "WXYZ-5678"
-        container.mkdir(parents=True)
-        plist_path = container / ".com.apple.mobile_container_manager.metadata.plist"
-        plist_path.write_text("")
+        checkpoint = store / "com.example.App" / "old"
+        for gid, text in [("group.com.example.shared", "saved mine"),
+                          ("group.com.apple.Health", "saved health")]:
+            (checkpoint / "app-group" / gid / "Library").mkdir(parents=True)
+            (checkpoint / "app-group" / gid / "Library" / "data.txt").write_text(text)
+        (checkpoint / ".quern-meta.json").write_text(json.dumps({"label": "old"}))
 
-        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-        non_group_meta = json.dumps({"MCMMetadataIdentifier": "com.example.App"}).encode()
-        with patch(
-            "asyncio.create_subprocess_exec",
-            return_value=_mock_proc(0, stdout=non_group_meta),
+        with patch("server.device.app_state._terminate_app", AsyncMock()):
+            meta = await restore_state(device.udid, "com.example.App", "old")
+
+        assert (mine / "Library" / "data.txt").read_text() == "saved mine"
+        assert (health / "Library" / "data.txt").read_text() == "live health"
+        assert (health / METADATA).exists()
+        assert meta["groups_not_entitled"] == ["group.com.apple.Health"]
+        assert "groups_not_restored" not in meta
+
+    async def test_an_entitled_group_with_no_container_is_reported_not_restored(
+        self, device, store,
+    ):
+        device.app("com.example.App", _macho(_ents("group.com.example.shared")))
+        device.group("group.com.other.App")
+        checkpoint = store / "com.example.App" / "old"
+        (checkpoint / "app-group" / "group.com.example.shared").mkdir(parents=True)
+        (checkpoint / ".quern-meta.json").write_text(json.dumps({"label": "old"}))
+        with patch("server.device.app_state._terminate_app", AsyncMock()):
+            meta = await restore_state(device.udid, "com.example.App", "old")
+        assert meta["groups_not_restored"]["groups"] == ["group.com.example.shared"]
+        assert "launch the app" in meta["groups_not_restored"]["reason"]
+
+    async def test_a_failed_group_lookup_leaves_the_data_container_untouched(
+        self, device, store, tmp_path,
+    ):
+        """Every container is resolved before any is wiped (review)."""
+        device.group("group.com.example.shared")
+        device.app("com.example.App", b"not a mach-o")
+        live = tmp_path / "live-data"
+        live.mkdir()
+        (live / "state.txt").write_text("live")
+        checkpoint = store / "com.example.App" / "old"
+        (checkpoint / "data-container").mkdir(parents=True)
+        (checkpoint / "data-container" / "state.txt").write_text("saved")
+        (checkpoint / "app-group" / "group.com.example.shared").mkdir(parents=True)
+        (checkpoint / ".quern-meta.json").write_text(json.dumps({"label": "old"}))
+        terminate = AsyncMock()
+        with (
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=live)),
+            patch("server.device.app_state._terminate_app", terminate),
+            pytest.raises(DeviceError, match="entitlements"),
         ):
-            groups = await get_app_groups("TEST-UDID", "com.example.App")
-        assert groups == {}
+            await restore_state(device.udid, "com.example.App", "old")
+        assert (live / "state.txt").read_text() == "live"
+        terminate.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

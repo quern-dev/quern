@@ -152,6 +152,11 @@ SKIPS_FILE="$WORK/skips"
 # only two things a sandbox borrows from outside it, and both are read-mostly
 # stores that pip and npm are built to share.
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$HOME/.cache/pip}"
+# Every request a sandbox makes to quern.dev says it is a rehearsal, so
+# quern.dev's analytics can leave it out of real installs' -- each `env -i`
+# below passes it on, since it clears this. Only the candidate's code reads
+# it: the older releases a case installs send their usual User-Agent.
+export QUERN_UPDATE_CHECK_TAG=rehearsal
 export npm_config_cache="${npm_config_cache:-$HOME/.npm}"
 
 # Well clear of the defaults (9110/9101; 9100 before #446). See the note in case_gui_start: the default ports
@@ -433,7 +438,7 @@ case_gui_start() {
   # taking the default port would kill the *developer's* running server, and
   # its proxy on 9101. No stub can cover it -- the kill is os.kill, in process.
   set +e
-  env -i \
+  env -i QUERN_UPDATE_CHECK_TAG=rehearsal \
     HOME="$sb/home" \
     QUERN_STATE_DIR="$sb/state" \
     PATH="$sb/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
@@ -471,7 +476,7 @@ except Exception:
     bad "nothing answered http://127.0.0.1:$port/health"
   fi
 
-  env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+  env -i QUERN_UPDATE_CHECK_TAG=rehearsal HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
     PATH="$sb/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     "$install/quern" stop >/dev/null 2>&1 || true
   return "$failures"
@@ -540,7 +545,7 @@ case_gui_node_message() {
   # breakdown and never calls this function, so grepping its output would test
   # a different path and say nothing about the message that shipped wrong.
   set +e
-  env -i \
+  env -i QUERN_UPDATE_CHECK_TAG=rehearsal \
     HOME="$h" \
     QUERN_STATE_DIR="$h/state" \
     SHELL=/bin/zsh \
@@ -628,7 +633,7 @@ case_mcp_handshake() {
   timeout_bin="$(command -v timeout || command -v gtimeout || true)"
   local out
   out="$(printf '%s\n' "$req" \
-    | env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+    | env -i QUERN_UPDATE_CHECK_TAG=rehearsal HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
         PATH="$STUB_BIN:$(dirname "$node_bin"):/usr/bin:/bin:/usr/sbin:/sbin" \
         ${timeout_bin:+"$timeout_bin" 30} "$node_bin" "$launcher" 2>&1 \
     | head -c 4000 || true)"
@@ -727,7 +732,7 @@ case_node_matrix() {
     # doctor's path calls the stubbed tools today, but `open` and `osascript`
     # are one refactor away in setup.py -- and the second quits the
     # developer's real menu-bar app, by name.
-    ( cd "$install" && timeout 300 env -i \
+    ( cd "$install" && timeout 300 env -i QUERN_UPDATE_CHECK_TAG=rehearsal \
         HOME="$1" QUERN_STATE_DIR="$1/state" SHELL="$2" \
         PATH="$STUB_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
         "$install/quern" doctor ) > "$1/doctor.log" 2>&1 || true
@@ -863,7 +868,7 @@ case_fresh_install() {
   # user to. Both halves are checked, because "installed the tree" and "left a
   # working command" are different claims.
   set +e
-  env -i \
+  env -i QUERN_UPDATE_CHECK_TAG=rehearsal \
     HOME="$sb/home" \
     QUERN_STATE_DIR="$sb/home/.quern" \
     QUERN_RELEASES_URL="http://127.0.0.1:$port" \
@@ -929,7 +934,7 @@ case_fresh_install() {
     # checkout inspects *that* tree: setup reported "venv not found" about a
     # directory it was never asked about. CONTRIBUTING names this hazard, and
     # the rehearsal walked straight into it.
-    ( cd "$installed" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
+    ( cd "$installed" && env -i QUERN_UPDATE_CHECK_TAG=rehearsal HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
         PATH="$sb/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         PIP_CACHE_DIR="$PIP_CACHE_DIR" npm_config_cache="$npm_config_cache" \
         "$installed/quern" setup ) > "$sb/setup.log" 2>&1 || true
@@ -947,7 +952,7 @@ case_fresh_install() {
   # The caller's PATH, since `quern mcp-install` is run from the user's shell
   # and may rebuild the wrapper, which needs their node.
   set +e
-  ( cd "$installed" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
+  ( cd "$installed" && env -i QUERN_UPDATE_CHECK_TAG=rehearsal HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
       PATH="$sb/bin:$PATH" npm_config_cache="$npm_config_cache" \
       "$installed/quern" mcp-install ) > "$sb/mcp-install.log" 2>&1
   local mcp_rc=$?
@@ -997,7 +1002,7 @@ for name, spec in servers.items():
   # a cwd-dependent one works inside the tree and nowhere else.
   if [[ -x "$sb/home/.local/bin/quern" ]]; then
     set +e
-    ( cd / && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
+    ( cd / && env -i QUERN_UPDATE_CHECK_TAG=rehearsal HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
         PATH="$sb/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         "$sb/home/.local/bin/quern" --version ) > "$sb/version.log" 2>&1
     local vrc=$?
@@ -1369,7 +1374,7 @@ case_tarball_update() {
   # update survives a missing node is the Node matrix's question, and it asks
   # it properly.
   set +e
-  ( cd "$installed" && env -i \
+  ( cd "$installed" && env -i QUERN_UPDATE_CHECK_TAG=rehearsal \
       HOME="$sb/home" \
       QUERN_STATE_DIR="$sb/state" \
       QUERN_RELEASES_URL="http://127.0.0.1:$CANDIDATE_PORT" \
@@ -1512,7 +1517,7 @@ EOF
   ok "a running app of the current version is in place"
 
   set +e
-  ( cd "$install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+  ( cd "$install" && env -i QUERN_UPDATE_CHECK_TAG=rehearsal HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
       PATH="$sb/bin:$PATH" npm_config_cache="$npm_config_cache" \
       "$install/quern" setup ) > "$sb/setup.log" 2>&1
   local setup_rc=$?
@@ -1614,7 +1619,7 @@ case_clone_on_another_branch() {
   git -C "$sb/install" checkout -q -b my-work
 
   set +e
-  ( cd "$sb/install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+  ( cd "$sb/install" && env -i QUERN_UPDATE_CHECK_TAG=rehearsal HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
       PATH="$sb/bin:$PATH" "$sb/install/quern" update ) > "$sb/update.log" 2>&1
   local rc=$?
   set -e
@@ -1680,7 +1685,7 @@ case_clone_with_local_changes() {
   printf '%s\n' "$marker" >> "$sb/install/$target"
 
   set +e
-  ( cd "$sb/install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+  ( cd "$sb/install" && env -i QUERN_UPDATE_CHECK_TAG=rehearsal HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
       PATH="$sb/bin:$PATH" "$sb/install/quern" update ) > "$sb/update.log" 2>&1
   local rc=$?
   set -e
@@ -1789,7 +1794,7 @@ print(s.getsockname()[1]); s.close()" 2>/dev/null || echo 8908)"
   done
 
   set +e
-  ( cd "$installed" && env -i \
+  ( cd "$installed" && env -i QUERN_UPDATE_CHECK_TAG=rehearsal \
       HOME="$sb/home" \
       QUERN_STATE_DIR="$sb/state" \
       QUERN_RELEASES_URL="http://127.0.0.1:$port" \

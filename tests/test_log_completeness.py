@@ -323,6 +323,48 @@ async def test_starting_capture_with_a_preset_reports_what_it_purged(app, monkey
     assert resp.json()["purged"] == 1
 
 
+async def test_a_configured_watch_that_fails_to_start_is_reported(app, monkeypatch):
+    """It was only logged, so the caller read success. Since #628 a group
+    the app is not entitled to is one way to fail."""
+    from types import SimpleNamespace
+
+    from server.sources.plist_watcher import PlistWatcherAdapter
+    from server.sources.simulator_log import SimulatorLogAdapter
+
+    async def _resolve(udid):
+        return "SIM-A"
+
+    async def _no_spawn(self):
+        self._running = True
+
+    async def _fails(self):
+        self._error = "Container 'group.other' not found for com.example.App"
+
+    app.state.device_controller = SimpleNamespace(resolve_udid=_resolve)
+    app.state.deduplicator = SimpleNamespace(process=lambda entry: None)
+    monkeypatch.setattr(SimulatorLogAdapter, "start", _no_spawn)
+    monkeypatch.setattr(PlistWatcherAdapter, "start", _fails)
+    app.state.plist_watchers = {}
+    monkeypatch.setattr("server.config.get_plist_watch_config", lambda: {
+        "com.example.App": {"watches": [
+            {"container": "group.other", "plist_path": "Library/x.plist"}]},
+    })
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/device/logging/start", headers=HEADERS, json={"udid": "SIM-A"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["plist_watchers_failed"] == [{
+        "watch": "group.other:Library/x.plist",
+        "error": "Container 'group.other' not found for com.example.App",
+    }]
+    assert "plist_watchers_started" not in data
+
+
 async def test_two_starts_for_one_device_launch_one_capture(app, monkeypatch):
     """Starting logcat takes at least half a second, and the endpoint checked
     for a running adapter before that and registered one after. Two calls in

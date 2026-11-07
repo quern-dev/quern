@@ -158,6 +158,42 @@ def test_check_for_updates_sends_the_configured_channel(
     assert persisted["channel"] == channel
 
 
+@pytest.mark.parametrize("tag,expected", [
+    (None, "quern-update-check/1.0"),
+    ("rehearsal", "quern-update-check/1.0 (rehearsal)"),
+    # Anything that is not a short token is dropped, not sent: it goes into
+    # a header, and the analytics filter matches the token exactly.
+    ("Rehearsal", "quern-update-check/1.0"),
+    ("a b", "quern-update-check/1.0"),
+    ("x\r\nX-Injected: 1", "quern-update-check/1.0"),
+    ("a" * 33, "quern-update-check/1.0"),
+    ("", "quern-update-check/1.0"),
+])
+def test_the_update_check_says_when_release_tooling_sent_it(
+    isolated_update_files, monkeypatch, tag, expected,
+):
+    """Release rehearsals install quern into sandboxes that check quern.dev
+    for real. The tag lets quern.dev's analytics tell those checks from real
+    installs' without the rehearsal faking anything else about the request."""
+    from server.lifecycle import update_check
+
+    if tag is None:
+        monkeypatch.delenv(update_check.REQUEST_TAG_ENV, raising=False)
+    else:
+        monkeypatch.setenv(update_check.REQUEST_TAG_ENV, tag)
+    monkeypatch.setattr(update_check, "get_update_check", lambda: True)
+    monkeypatch.setattr(update_check, "_get_local_version", lambda: "0.14.0")
+    monkeypatch.setattr(update_check, "_get_head_sha", lambda: "abc123")
+
+    with patch(
+        "urllib.request.urlopen",
+        return_value=_fake_response({"update_available": False}),
+    ) as urlopen:
+        update_check.check_for_updates()
+
+    assert urlopen.call_args[0][0].get_header("User-agent") == expected
+
+
 def test_a_channel_switch_mid_check_discards_the_result(
     isolated_update_files, monkeypatch,
 ):
