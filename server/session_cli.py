@@ -183,7 +183,11 @@ class _Socket:
         else:
             from websockets.sync.client import connect
 
-            ws = connect(self._url, additional_headers=self._headers, open_timeout=10)
+            # Not through a proxy: websockets takes one from the environment
+            # by default, and on plain ws:// it reads the key (#613). It
+            # already drops the key on a redirect to another origin.
+            ws = connect(self._url, additional_headers=self._headers, open_timeout=10,
+                         proxy=None)
         first = json.loads(ws.recv(timeout=10))
         if first.get("event") != "attached":
             raise ConnectionError(f"the session socket said {first!r}, not attached")

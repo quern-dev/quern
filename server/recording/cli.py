@@ -100,10 +100,11 @@ def _request(url: str, key: str, path: str, method: str = "GET",
 
 
 def _opener(remote):
-    """urllib's open, pinned to the remote's certificate when there is one."""
+    """urllib's open, pinned to the remote's certificate when there is one,
+    and straight to this Mac's own server when there is not."""
     from server.remote import client
 
-    return client.opener(remote).open if remote is not None else urllib.request.urlopen
+    return client.opener(remote).open if remote is not None else client.loopback_opener().open
 
 
 def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:

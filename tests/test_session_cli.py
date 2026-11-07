@@ -185,7 +185,11 @@ def test_doctor_calls_out_a_session_in_grace(monkeypatch, capsys, tmp_path):
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: Resp(body))
+    class Opener:
+        def open(self, req, timeout):
+            return Resp(body)
+
+    monkeypatch.setattr("server.remote.client.loopback_opener", Opener)
     main_mod._report_held_sessions()
     out = capsys.readouterr().out
     assert "✓ claude-a: live, holding SIM-1" in out

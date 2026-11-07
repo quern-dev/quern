@@ -41,7 +41,8 @@ class _Recorder(http.server.ThreadingHTTPServer):
                 self.end_headers()
                 self.wfile.write(body)
 
-            do_GET = do_POST = do_DELETE = _any
+            # CONNECT is how a WebSocket client asks a proxy for a tunnel.
+            do_GET = do_POST = do_DELETE = do_CONNECT = _any
 
             def log_message(self, *args) -> None:
                 pass
@@ -126,7 +127,27 @@ def _disk_fetch(base: str) -> None:
     disk_usage.fetch(int(base.rsplit(":", 1)[1]), timeout=5)
 
 
+def _recording_call(base: str) -> None:
+    from server.recording import cli
+
+    cli._call("GET", "/api/v1/recordings")
+
+
+def _session_socket(base: str) -> None:
+    """`quern session hold` and `run` hold a WebSocket, with the key in its
+    upgrade request. Nothing here answers it as a WebSocket, so it fails
+    after the request is sent: where the request went is the point."""
+    from server import session_cli
+
+    try:
+        session_cli._Socket(base, KEY, "s613", "token").close()
+    except Exception:
+        pass
+
+
 CALL_SITES = {"remote_cli._owner_call": _owner_call,
+              "recording.cli._call": _recording_call,
+              "session_cli._Socket": _session_socket,
               "main._report_held_sessions": _held_sessions,
               "session_cli._open": _session_open,
               "remote.status._get": _status_get,
@@ -139,6 +160,8 @@ def aimed_at(monkeypatch, tmp_path):
     key_file = tmp_path / "api-key"
     key_file.write_text(KEY)
     monkeypatch.setattr("server.config.API_KEY_FILE", key_file)
+    monkeypatch.setenv("QUERN_CLIENT_KEY", KEY)
+    monkeypatch.delenv("QUERN_REMOTE", raising=False)
     monkeypatch.setattr("server.session_cli._remote", lambda: None)
 
     def aim(base: str) -> None:
