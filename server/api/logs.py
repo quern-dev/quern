@@ -26,6 +26,7 @@ from server.models import (
     UtcDatetime,
 )
 from server.processing import log_gaps
+from server.processing.ingestion_filter import _LEVEL_ORDER, IngestionFilter
 from server.processing.summarizer import (
     WINDOW_DURATIONS,
     generate_summary,
@@ -334,8 +335,7 @@ async def query_logs(
 
     note = None
     if total == 0 and source in (LogSource.SIMULATOR, None):
-        note = await _gap_note(request, process, level=level, view=view,
-                               truncated=completeness["truncated"])
+        note = await _gap_note(request, process, level=level, device_id=device_id, view=view)
     return LogQueryResponse(
         entries=entries,
         total=total,
@@ -346,32 +346,60 @@ async def query_logs(
 
 
 async def _gap_note(request: Request, process: str | None, *, level: LogLevel | None,
-                    view: visibility.View, truncated: bool) -> str | None:
+                    device_id: str | None, view: visibility.View) -> str | None:
     """The note for an empty answer filtered to `process` (#619), or None.
 
-    Only when the answer is whole -- an answer cut short by eviction is not
-    evidence of anything -- and only for simulators whose logs quern is
-    streaming and the caller may see."""
-    if not process or truncated:
+    Decided from the app's whole history in the buffer, not from this
+    answer: a search or a window that matched nothing says nothing about
+    whether the app logs (review). Only for simulators whose logs quern is
+    streaming and the caller may see, and narrowed to `device_id` when the
+    query named one."""
+    if not process:
         return None
     adapters = getattr(request.app.state, "sim_log_adapters", None) or {}
-    udids = [u for u in list(adapters) if view.allows(u)]
+    udids = [u for u in list(adapters)
+             if view.allows(u) and (not device_id or u == device_id)]
     running = await log_gaps.running_on_simulators(process, udids)
     if not running:
         return None
+    buffer = request.app.state.ring_buffer
+    history = await buffer.filter_entries(
+        LogQueryParams(process=process, source=LogSource.SIMULATOR))
     ingestion = getattr(request.app.state, "ingestion_filter", None)
-    filtered_out = []
-    if ingestion is not None:
-        for udid in running:
-            # An error line from the app, with no subsystem: if even that is
-            # refused, the filter is refusing the process itself.
-            probe = LogEntry(id="gap-probe", timestamp=datetime.now(UTC), device_id=udid,
-                             process=process, level=LogLevel.ERROR, message="",
-                             source=LogSource.SIMULATOR)
-            if not ingestion.should_admit(probe):
-                filtered_out.append(udid)
-    return log_gaps.gap_note(process, running, level=level.value if level else None,
-                             filtered_out=filtered_out)
+    filtered, below, silent = [], [], []
+    for udid, started in running.items():
+        if ingestion is not None and _filter_may_drop(ingestion, process, udid):
+            filtered.append(udid)
+            continue
+        seen = [e for e in history if e.device_id == udid]
+        if seen:
+            # It does log. The only gap worth naming is the caller's level.
+            if level is not None and all(
+                    _LEVEL_ORDER[e.level] < _LEVEL_ORDER[level] for e in seen):
+                below.append(udid)
+            continue
+        # Nothing at all from it: silence only if the buffer has kept
+        # everything since it started, else its lines may have been evicted.
+        if not _completeness([buffer], started, source=LogSource.SIMULATOR)["truncated"]:
+            silent.append(udid)
+    return log_gaps.gap_note(process, filtered=filtered, below=below, silent=silent,
+                             level=level.value if level else None)
+
+
+def _filter_may_drop(ingestion: IngestionFilter, process: str, udid: str) -> bool:
+    """Whether the log filter on `udid`'s simulator lines could drop the
+    app's. A debug line from it with no subsystem meets every level and
+    process rule; and a subsystem rule naming anything outside Apple's
+    frameworks may be the app's own. simulator-quiet's com.apple.* rules
+    never touch it, so the preset alone is not named."""
+    probe = LogEntry(id="gap-probe", timestamp=datetime.now(UTC), device_id=udid,
+                     process=process, level=LogLevel.DEBUG, message="",
+                     source=LogSource.SIMULATOR)
+    if not ingestion.should_admit(probe):
+        return True
+    config = ingestion.config_for(source=LogSource.SIMULATOR, device_id=udid)
+    named = set(config.subsystems) | set(config.exclude_subsystems)
+    return any(not name.startswith("com.apple.") for name in named)
 
 
 # ---------------------------------------------------------------------------
@@ -439,12 +467,11 @@ async def get_summary(
     all_entries = [e for e in all_entries if visibility.entry_visible(view, e)]
     all_entries.sort(key=lambda e: e.timestamp)
     summary = generate_summary(all_entries, window=window, process=process)
-    if summary.total_count == 0 and arrival_after is None:
+    if summary.total_count == 0 and not since_cursor:
         # A delta summary that is empty says nothing new arrived, not that the
-        # app is silent, so only a whole-window summary gets the note.
-        summary.note = await _gap_note(
-            request, process, level=None, view=view,
-            truncated=_completeness(buffers, covers_since)["truncated"])
+        # app is silent -- whichever kind of cursor -- so only a whole-window
+        # summary gets the note.
+        summary.note = await _gap_note(request, process, level=None, device_id=None, view=view)
     summary.cursor = make_arrival_cursor(clock, upto)
     summary.cursor_reset = cursor_reset
     completeness = _completeness(buffers, covers_since)
