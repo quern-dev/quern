@@ -292,7 +292,7 @@ Logs an initial snapshot of all keys when the watch starts. Then emits one log e
   server.registerTool("configure_plist_watch", {
     description: `Save persistent plist watch config for an app. Supports multiple plists per bundle — e.g., app group plist for coaching flags + main container plist for SDK config, each with its own ignore list.
 
-When start_simulator_logging runs, it automatically starts watchers for ALL configured targets. Config persists in ~/.quern/config.json across server restarts.`,
+When start_simulator_logging starts logging, it automatically starts watchers for ALL configured targets. If logging is already running, a newly configured watch is not started until logging is restarted; start it now with start_plist_watch. Config persists in ~/.quern/config.json across server restarts.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
       watches: z.array(z.object({
