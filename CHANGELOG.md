@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **An empty log answer for a running simulator app says why (#619).** An iOS app that logs with `print()` writes to its stdout, which quern never reads, so `query_logs`, `tail_logs` and `get_log_summary` filtered to its process came back empty and read as "the app logged nothing". When the answer is whole and the process is running on a simulator whose logs quern is streaming, it now carries `note`: a log filter that drops the process first, then a level the app never reaches, then `print()`. Running is read from `ps`, under that simulator's `CoreSimulator/Devices/<udid>/`; when quern can't tell, it says nothing. Not physical iPhones, which have no cheap check, nor Android, whose stdout reaches logcat.
+
+### Fixed
+- **A simulator's `Logger.notice()` is recorded as `notice`, as a phone's is (#621).** Apple's `Default` level was mapped to `info` for simulators and the host, and to `notice` for physical devices, so `level=notice` kept a phone's notice lines and dropped a simulator's. Measured on a simulator: `simulator-quiet` and `min_level=info` keep exactly what they did; `min_level=notice` now keeps the app's notice lines, plus system lines at Apple's default level, which a phone already showed.
+
 ## [0.26.0-beta.3] - 2026-11-05
 
 ### Added
