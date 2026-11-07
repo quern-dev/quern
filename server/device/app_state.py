@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import plistlib
 import shutil
 import uuid
 from datetime import UTC, datetime
@@ -224,19 +225,204 @@ async def get_data_container(udid: str, bundle_id: str) -> Path:
     )
 
 
+# ---------------------------------------------------------------------------
+# App-group entitlements
+# ---------------------------------------------------------------------------
+
+APP_GROUPS_ENTITLEMENT = "com.apple.security.application-groups"
+
+_MH_MAGIC = 0xFEEDFACE
+_MH_MAGIC_64 = 0xFEEDFACF
+_FAT_MAGIC = 0xCAFEBABE
+_FAT_MAGIC_64 = 0xCAFEBABF
+_LC_SEGMENT = 0x1
+_LC_SEGMENT_64 = 0x19
+
+
+def _macho_section(data: bytes, base: int, segname: bytes, sectname: bytes) -> bytes | None:
+    """The contents of one section of the thin Mach-O image at data[base:], or None.
+
+    Raises ValueError for an image that is not a little-endian Mach-O, or whose
+    load commands run past the end of the file.
+    """
+    magic = int.from_bytes(data[base:base + 4], "little")
+    if magic == _MH_MAGIC_64:
+        header_size, seg_cmd, seg_size, sect_size = 32, _LC_SEGMENT_64, 72, 80
+    elif magic == _MH_MAGIC:
+        header_size, seg_cmd, seg_size, sect_size = 28, _LC_SEGMENT, 56, 68
+    else:
+        raise ValueError(f"not a Mach-O image (magic {magic:#x})")
+    wide = magic == _MH_MAGIC_64
+    ncmds = int.from_bytes(data[base + 16:base + 20], "little")
+    cursor = base + header_size
+    for _ in range(ncmds):
+        if cursor + 8 > len(data):
+            raise ValueError("load commands run past the end of the file")
+        cmd = int.from_bytes(data[cursor:cursor + 4], "little")
+        cmdsize = int.from_bytes(data[cursor + 4:cursor + 8], "little")
+        if cmdsize < 8 or cursor + cmdsize > len(data):
+            raise ValueError("malformed load command")
+        if cmd == seg_cmd and data[cursor + 8:cursor + 24].rstrip(b"\0") == segname:
+            nsects = int.from_bytes(data[cursor + seg_size - 8:cursor + seg_size - 4], "little")
+            sect = cursor + seg_size
+            for _ in range(nsects):
+                if data[sect:sect + 16].rstrip(b"\0") == sectname:
+                    if wide:
+                        size = int.from_bytes(data[sect + 40:sect + 48], "little")
+                        offset = int.from_bytes(data[sect + 48:sect + 52], "little")
+                    else:
+                        size = int.from_bytes(data[sect + 36:sect + 40], "little")
+                        offset = int.from_bytes(data[sect + 40:sect + 44], "little")
+                    start = base + offset
+                    if start + size > len(data):
+                        raise ValueError("section runs past the end of the file")
+                    return data[start:start + size]
+                sect += sect_size
+        cursor += cmdsize
+    return None
+
+
+def macho_entitlements(binary: Path) -> dict | None:
+    """Entitlements embedded in a Mach-O's __TEXT,__entitlements section.
+
+    This is where Xcode puts a simulator build's entitlements: the ad-hoc
+    signature it signs with carries none, so codesign reports an empty dict.
+    Returns None when no slice has the section. A fat binary's slices are
+    built from one entitlements file, so the first slice that has it wins.
+
+    Raises ValueError for a file that is not a Mach-O, or a section that is not
+    a property list.
+    """
+    data = binary.read_bytes()
+    magic = int.from_bytes(data[:4], "big")
+    if magic in (_FAT_MAGIC, _FAT_MAGIC_64):
+        count = int.from_bytes(data[4:8], "big")
+        entry = 32 if magic == _FAT_MAGIC_64 else 20
+        bases = []
+        for i in range(count):
+            at = 8 + i * entry
+            if magic == _FAT_MAGIC_64:
+                bases.append(int.from_bytes(data[at + 8:at + 16], "big"))
+            else:
+                bases.append(int.from_bytes(data[at + 8:at + 12], "big"))
+    else:
+        bases = [0]
+    for base in bases:
+        section = _macho_section(data, base, b"__TEXT", b"__entitlements")
+        if section is not None:
+            try:
+                return plistlib.loads(section.rstrip(b"\0"))
+            except Exception as e:
+                raise ValueError(f"__entitlements is not a property list: {e}") from e
+    return None
+
+
+async def _signature_entitlements(path: Path) -> dict:
+    """Entitlements in the code signature: where a device-signed build has them.
+    An empty dict when the signature has none, or codesign cannot read it."""
+    proc = await asyncio.create_subprocess_exec(
+        "codesign", "-d", "--entitlements", "-", "--xml", str(path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0 or not stdout.strip():
+        return {}
+    try:
+        parsed = plistlib.loads(stdout)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+async def find_app_bundle_on_disk(udid: str, bundle_id: str) -> Path | None:
+    """The installed .app for bundle_id, found by scanning bundle containers.
+
+    Like find_data_container_on_disk, this works on a shut-down device, which
+    a keychain checkpoint requires.
+    """
+    bundle_root = (
+        Path.home() / "Library" / "Developer" / "CoreSimulator" / "Devices"
+        / udid / "data" / "Containers" / "Bundle" / "Application"
+    )
+    if not bundle_root.exists():
+        return None
+    for container_dir in bundle_root.iterdir():
+        if not container_dir.is_dir():
+            continue
+        if await _read_container_identifier(container_dir) == bundle_id:
+            apps = sorted(container_dir.glob("*.app"))
+            return apps[0] if apps else None
+    return None
+
+
+def _bundle_executables(app: Path) -> list[Path]:
+    """The app's executable and each embedded extension's: an extension can be
+    entitled to a group the app itself is not, and shares the app's data."""
+    bundles = [app]
+    for folder in ("PlugIns", "Extensions"):
+        bundles += sorted((app / folder).glob("*.appex"))
+    executables = []
+    for bundle in bundles:
+        try:
+            with (bundle / "Info.plist").open("rb") as f:
+                name = plistlib.load(f).get("CFBundleExecutable")
+        except Exception:
+            name = None
+        if name and (bundle / name).is_file():
+            executables.append(bundle / name)
+    return executables
+
+
+async def entitled_app_groups(udid: str, bundle_id: str) -> set[str]:
+    """The app-group identifiers bundle_id and its extensions are entitled to.
+
+    Raises DeviceError when the app is not installed or an executable cannot be
+    read. Callers must not fall back to every group on the device: a restore
+    wipes each group it is given.
+    """
+    app = await find_app_bundle_on_disk(udid, bundle_id)
+    if app is None:
+        raise AppStateNotFoundError(
+            f"{bundle_id} is not installed on {udid[:8]}, so its app groups are unknown",
+            tool="simctl",
+        )
+    executables = _bundle_executables(app)
+    if not executables:
+        raise DeviceError(
+            f"Could not find {bundle_id}'s executable in {app.name}, so its app groups "
+            f"are unknown",
+            tool="quern",
+        )
+    groups: set[str] = set()
+    for executable in executables:
+        try:
+            embedded = await asyncio.to_thread(macho_entitlements, executable)
+        except (OSError, ValueError) as e:
+            raise DeviceError(
+                f"Could not read the entitlements of {executable.name} in {bundle_id}: {e}",
+                tool="quern",
+            ) from e
+        signed = await _signature_entitlements(executable.parent)
+        for source in (embedded or {}, signed):
+            value = source.get(APP_GROUPS_ENTITLEMENT, [])
+            if isinstance(value, list):
+                groups.update(g for g in value if isinstance(g, str))
+    return groups
+
+
 async def get_app_groups(udid: str, bundle_id: str) -> dict[str, Path]:
-    """Discover app group containers for bundle_id on the given simulator.
+    """The app group containers bundle_id is entitled to, as {group_identifier: path}.
 
     Scans ~/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Shared/AppGroup/
-    and reads each .com.apple.mobile_container_manager.metadata.plist to find groups
-    whose MCMMetadataIdentifier starts with "group." and are associated with bundle_id
-    (checked via MCMMetadataIdentifier containing bundle components).
+    and keeps the containers whose MCMMetadataIdentifier is in the app's (or an
+    extension's) com.apple.security.application-groups entitlement. Every other
+    app's groups live in the same directory, and a restore wipes each group it
+    is given, so this never returns more than the app is entitled to.
 
-    Returns {group_identifier: path} for all matching groups.
-
-    Note: we match ALL group. containers since there's no reliable way to enumerate
-    only the groups for a specific bundle without entitlement data. We return them all
-    and let the caller filter by known group IDs.
+    An entitled group with no container yet (the app has not used it) is absent.
+    Raises DeviceError when the entitlements cannot be read; see
+    entitled_app_groups.
     """
     sim_devices_root = Path.home() / "Library" / "Developer" / "CoreSimulator" / "Devices"
     app_group_root = sim_devices_root / udid / "data" / "Containers" / "Shared" / "AppGroup"
@@ -244,30 +430,17 @@ async def get_app_groups(udid: str, bundle_id: str) -> dict[str, Path]:
     if not app_group_root.exists():
         return {}
 
-    groups: dict[str, Path] = {}
-    metadata_plist_name = ".com.apple.mobile_container_manager.metadata.plist"
+    entitled = await entitled_app_groups(udid, bundle_id)
+    if not entitled:
+        return {}
 
+    groups: dict[str, Path] = {}
     for container_dir in app_group_root.iterdir():
         if not container_dir.is_dir():
             continue
-        metadata_path = container_dir / metadata_plist_name
-        if not metadata_path.exists():
-            continue
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "plutil", "-convert", "json", "-o", "-", "--", str(metadata_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                continue
-            meta = json.loads(stdout.decode())
-            identifier = meta.get("MCMMetadataIdentifier", "")
-            if identifier.startswith("group."):
-                groups[identifier] = container_dir
-        except Exception:
-            logger.debug("Failed to read metadata for %s", container_dir, exc_info=True)
+        identifier = await _read_container_identifier(container_dir)
+        if identifier in entitled:
+            groups[identifier] = container_dir
 
     return groups
 
@@ -424,7 +597,8 @@ async def save_state(
 ) -> dict:
     """Save a named checkpoint of the app's state.
 
-    Terminates the app, copies data container and all app group containers,
+    Terminates the app, copies its data container and the app group containers
+    it is entitled to (see get_app_groups),
     then writes a .quern-meta.json metadata file.
 
     include_keychain also captures the simulator keychain, which is what makes a
@@ -543,12 +717,16 @@ async def restore_state(
     groups_src = checkpoint / "app-group"
     if groups_src.exists():
         live_groups = await get_app_groups(udid, bundle_id)
+        # Checkpoints saved before #628 hold every group on the device. Only
+        # the app's own are put back; restoring the rest would roll back other
+        # apps' data.
+        not_entitled: list[str] = []
         for group_dir in groups_src.iterdir():
             if not group_dir.is_dir():
                 continue
             group_id = group_dir.name
             if group_id not in live_groups:
-                logger.warning("Group %r not found in live simulator, skipping restore", group_id)
+                not_entitled.append(group_id)
                 continue
             live_group_path = live_groups[group_id]
             group_prefs_before = [p.name for p in preference_plists(live_group_path)]
@@ -565,6 +743,13 @@ async def restore_state(
             problems += await push_preferences(
                 udid, live_group_path, group_prefs_before, f"{group_id}.plist",
             )
+        if not_entitled:
+            logger.info(
+                "Restore of %r skipped %d group(s) %s is not entitled to, or that have "
+                "no container on this device: %s",
+                label, len(not_entitled), bundle_id, ", ".join(sorted(not_entitled)),
+            )
+            meta["groups_skipped"] = sorted(not_entitled)
 
     # Restore the keychain last: the container wipe above must not run after it.
     if should_restore_keychain:

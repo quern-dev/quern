@@ -17,7 +17,7 @@ export function registerAppStateTools(server: McpServer): void {
   // ---------------------------------------------------------------------------
 
   server.registerTool("save_app_state", {
-    description: `Save a named checkpoint of a simulator app's state. Captures the data container and all app group containers. Terminates the app before copying. Simulator only.
+    description: `Save a named checkpoint of a simulator app's state. Captures the data container and the app group containers the app (or one of its extensions) is entitled to, read from its com.apple.security.application-groups entitlement; other apps' groups are never included. Terminates the app before copying. Simulator only.
 
 Use this to snapshot known-good states (e.g. "logged_in", "staging_configured") so you can restore them later without reinstalling.
 
@@ -46,7 +46,7 @@ IMPORTANT for logged-in states: auth tokens live in the simulator keychain, whic
   });
 
   server.registerTool("restore_app_state", {
-    description: `Restore a named app state checkpoint. Terminates the app, wipes live container contents, and copies the checkpoint back using re-resolved live paths (handles UUID rotation on reinstall). Simulator only.
+    description: `Restore a named app state checkpoint. Terminates the app, wipes live container contents, and copies the checkpoint back using re-resolved live paths (handles UUID rotation on reinstall). Only the app's own entitled groups are restored; groups in an older checkpoint that the app is not entitled to are left alone and listed in meta.groups_skipped. Simulator only.
 
 If the checkpoint carries a keychain (saved with include_keychain), it is restored too and the app comes up logged in — this requires the device to be shut down, and the call fails before touching anything if it is not. A checkpoint saved without a keychain always restores to a logged-out app; the response's meta.keychain says which happened.`,
     inputSchema: strictParams({
