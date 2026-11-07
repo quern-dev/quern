@@ -336,10 +336,13 @@ class TestSetupReportsWhatDrifted:
         # check_tunneld probes the daemon over HTTP before it reports drift.
         # Left alone that is a real request to this machine's live tunneld, so
         # the test would depend on whether the developer happens to have one.
-        monkeypatch.setattr(
-            "urllib.request.urlopen",
-            lambda *a, **k: (_ for _ in ()).throw(OSError("no daemon in a test")),
-        )
+        # It asks through loopback_opener (#634), so that is what is stubbed:
+        # a urlopen stub stopped covering it.
+        class _NoDaemon:
+            def open(self, *a, **k):
+                raise OSError("no daemon in a test")
+
+        monkeypatch.setattr("server.remote.client.loopback_opener", _NoDaemon)
 
     def test_a_drifted_binary_is_named_in_the_message(
         self, home_on_external, monkeypatch, tmp_path
