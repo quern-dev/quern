@@ -326,7 +326,7 @@ NOTE: If you want to capture network traffic from this app:
   });
 
   server.registerTool("terminate_app", {
-    description: `Terminate a running app by bundle ID (iOS) or package name (Android). Stopping an app that is not running is not an error: status is "not_running" and was_running is false. was_running is null when the platform cannot tell (Android force-stop, or a physical iPhone whose WDA could not confirm). A simulator app that is not installed is refused with 400.`,
+    description: `Terminate a running app by bundle ID (iOS) or package name (Android). Stopping an app that is not running is not an error: status is "not_running" and was_running is false. was_running is null when the platform cannot tell (Android force-stop, or a physical iPhone whose WDA could not confirm). An app that is not installed is refused with 400, so a mistyped bundle id never reads as a clean stop.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle ID or package name"),
       udid: z
