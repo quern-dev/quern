@@ -253,8 +253,12 @@ export function registerLogTools(server: McpServer): void {
         .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "device", "logcat", "plist_watcher", "server"])
         .optional()
         .describe("Filter by log source. Use 'server' to see Quern's own Python logs (startup, errors, tunnel resolution, adapter status) — useful for debugging the debug server itself."),
+      include_raw: z
+        .coerce.boolean()
+        .optional()
+        .describe("Include each entry's raw, the original unparsed line. Off by default: for simulator and oslog entries it is the whole JSON record, about 2 KB, several times message. Ask for it only to see a field quern does not parse."),
     }),
-  }, async ({ count, level, process, source }) => {
+  }, async ({ count, level, process, source, include_raw }) => {
       try {
         const data = (await apiRequest("GET", "/api/v1/logs/query", {
           limit: count,
@@ -262,6 +266,7 @@ export function registerLogTools(server: McpServer): void {
           process,
           source,
           tail: true,
+          include_raw,
         })) as LogQueryAnswer;
 
         // Shaped by a function the test suite runs; see log-responses.ts.
@@ -318,8 +323,12 @@ export function registerLogTools(server: McpServer): void {
         .default(100)
         .describe("Max entries to return"),
       offset: z.coerce.number().min(0).default(0).describe("Pagination offset"),
+      include_raw: z
+        .coerce.boolean()
+        .optional()
+        .describe("Include each entry's raw, the original unparsed line. Off by default: for simulator and oslog entries it is the whole JSON record, about 2 KB, several times message. Ask for it only to see a field quern does not parse."),
     }),
-  }, async ({ since, until, level, process, source, search, limit, offset }) => {
+  }, async ({ since, until, level, process, source, search, limit, offset, include_raw }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/logs/query", {
           since,
@@ -330,6 +339,7 @@ export function registerLogTools(server: McpServer): void {
           search,
           limit,
           offset,
+          include_raw,
         });
 
         return {
@@ -410,13 +420,18 @@ export function registerLogTools(server: McpServer): void {
         .coerce.boolean()
         .default(true)
         .describe("Include crash reports in results"),
+      include_raw: z
+        .coerce.boolean()
+        .optional()
+        .describe("Include each entry's raw, the original unparsed line. Off by default: for simulator and oslog entries it is the whole JSON record, about 2 KB, several times message. Ask for it only to see a field quern does not parse."),
     }),
-  }, async ({ since, limit, include_crashes }) => {
+  }, async ({ since, limit, include_crashes, include_raw }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/logs/errors", {
           since,
           limit,
           include_crashes,
+          include_raw,
         });
 
         return {
