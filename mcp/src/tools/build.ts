@@ -191,7 +191,7 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
   });
 
   server.registerTool("record_android_build", {
-    description: `Record an Android build so its crashes can be symbolicated. quern does not run Gradle: build the variant yourself (./gradlew assembleStagingRelease), then call this with the app module's directory and the variant, right after the build: it records whatever build/ holds, and says when that is more than an hour old.
+    description: `Record an Android build so its crashes can be symbolicated. build_and_install records the builds it makes itself; use this for a build made another way: build the variant (./gradlew assembleStagingRelease), then call this with the app module's directory and the variant, right after the build: it records whatever build/ holds, and says when that is more than an hour old.
 
 quern keeps copies of what symbolicating needs, because the next build overwrites them: the APK's package, versionName and versionCode; R8's mapping.txt and its pg_map_id for a minified variant (not kept when the APK's own R8 marker names another mapping); and the unstripped native libraries from merged_native_libs, by the BuildId a tombstone names them by. get_latest_crash then retraces a minified build's Java frames with retrace (Android SDK command-line tools) and resolves native frames with the NDK's llvm-symbolizer. Records follow the same retention as iOS builds: symbols for the newest 10 builds per variant, records for 30 days.
 

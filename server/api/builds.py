@@ -87,7 +87,8 @@ async def record_android_build(
 ) -> RecordAndroidBuildResponse:
     """Record a Gradle build so its crashes can be symbolicated (#326).
 
-    quern does not run Gradle (#347): build the variant, then record it. The
+    build_and_install records its own Gradle builds; for one made another way,
+    build the variant, then record it. The
     record keeps the APK's package and version, R8's mapping.txt for a
     minified variant, and the unstripped native libraries by BuildId, all
     copied, because the next build overwrites them.

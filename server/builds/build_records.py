@@ -141,7 +141,8 @@ async def record_android_build(
 ) -> BuildRecord:
     """Record a Gradle build of `variant` in `module_dir` (the app module).
 
-    quern does not run Gradle (#347), so the agent builds and then records:
+    build_and_install records the Gradle builds it runs; for one made another
+    way the agent builds and then records:
     the APK's package and version from AGP's `output-metadata.json`, R8's
     `mapping.txt` with its `pg_map_id` when the variant is minified, and the
     unstripped native libraries from `merged_native_libs`, each by the BuildId

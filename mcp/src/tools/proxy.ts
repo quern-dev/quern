@@ -408,14 +408,15 @@ TROUBLESHOOTING — no traffic from a physical device:
 1. wifi_proxy_stale: true → the Mac's IP on this subnet changed (different network or
    DHCP lease). Update the device's Settings (Wi-Fi > network > Configure Proxy > Manual)
    with the new IP, then call record_device_proxy_config with the current ssid and client_ip.
-   This can be done fully via WDA automation — see the agent guide (quern://guide),
-   "Autonomous proxy reconfiguration" under Physical Device Proxy Capture.
+   This can be done fully via WDA automation — see quern://guide/devices,
+   "Autonomous proxy reconfiguration" under Proxy capture on a physical device.
 2. wifi_proxy_configs: null → the device has never been configured. Run the full
    physical device setup: configure the Wi-Fi proxy and install and trust the cert in
    the order proxy_setup_guide gives (proxy first: the cert comes from
    http://mitm.it/cert/cer, which the proxy serves), then call
    record_device_proxy_config -- a step of its own, which the guide does not list.
-   See the agent guide (quern://guide) for the full WDA script.
+   Each step can be driven on the device with WDA; quern://guide/devices shows how for
+   the Wi-Fi proxy screen.
 3. wifi_proxy_stale: false and active_wifi_network is set, but still no flows → check:
    - The proxy is running (status: "running")
    - The cert is trusted on the device (Settings > General > About > Certificate Trust Settings)
@@ -1111,7 +1112,8 @@ looks exactly like an app making no requests. To decrypt one, install the CA
 on it (install_proxy_cert): new connections are decrypted within seconds, with
 no restart; ones already open stay as they were until they close.
 With auto_install_cert on, the CA is installed first and everything is
-decrypted. Installing a root CA is the user's decision -- ask before doing it.
+decrypted. Installing a root CA is the user's decision -- ask before doing it,
+unless proxy_status shows auto_install_cert: true, which is their standing yes.
 
 On first use, macOS will prompt to allow the Mitmproxy Redirector system
 extension in System Settings > Privacy & Security.`,
