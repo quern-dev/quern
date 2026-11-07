@@ -264,6 +264,8 @@ def _macho_section(data: bytes, base: int, segname: bytes, sectname: bytes) -> b
             raise ValueError("malformed load command")
         if cmd == seg_cmd and data[cursor + 8:cursor + 24].rstrip(b"\0") == segname:
             nsects = int.from_bytes(data[cursor + seg_size - 8:cursor + seg_size - 4], "little")
+            if seg_size + nsects * sect_size > cmdsize:
+                raise ValueError("segment's sections run past its load command")
             sect = cursor + seg_size
             for _ in range(nsects):
                 if data[sect:sect + 16].rstrip(b"\0") == sectname:
@@ -291,7 +293,7 @@ def macho_entitlements(binary: Path) -> dict | None:
     built from one entitlements file, so the first slice that has it wins.
 
     Raises ValueError for a file that is not a Mach-O, or a section that is not
-    a property list.
+    a property-list dictionary.
     """
     data = binary.read_bytes()
     magic = int.from_bytes(data[:4], "big")
@@ -311,28 +313,43 @@ def macho_entitlements(binary: Path) -> dict | None:
         section = _macho_section(data, base, b"__TEXT", b"__entitlements")
         if section is not None:
             try:
-                return plistlib.loads(section.rstrip(b"\0"))
+                parsed = plistlib.loads(section.rstrip(b"\0"))
             except Exception as e:
                 raise ValueError(f"__entitlements is not a property list: {e}") from e
+            if not isinstance(parsed, dict):
+                raise ValueError(f"__entitlements is a {type(parsed).__name__}, not a dictionary")
+            return parsed
     return None
 
 
 async def _signature_entitlements(path: Path) -> dict:
     """Entitlements in the code signature: where a device-signed build has them.
-    An empty dict when the signature has none, or codesign cannot read it."""
-    proc = await asyncio.create_subprocess_exec(
-        "codesign", "-d", "--entitlements", "-", "--xml", str(path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, _ = await proc.communicate()
-    if proc.returncode != 0 or not stdout.strip():
+
+    An empty dict only when codesign read the signature and it has none -- an
+    Xcode simulator build's ad-hoc signature. Raises ValueError when codesign
+    cannot say: an installed app is always signed, so a failure here is not
+    "no entitlements".
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "codesign", "-d", "--entitlements", "-", "--xml", str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except OSError as e:
+        raise ValueError(f"codesign could not run: {e}") from e
+    if proc.returncode != 0:
+        raise ValueError(f"codesign failed: {stderr.decode(errors='replace').strip()}")
+    if not stdout.strip():
         return {}
     try:
         parsed = plistlib.loads(stdout)
-    except Exception:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    except Exception as e:
+        raise ValueError(f"codesign's entitlements are not a property list: {e}") from e
+    if not isinstance(parsed, dict):
+        raise ValueError(f"codesign's entitlements are a {type(parsed).__name__}")
+    return parsed
 
 
 async def find_app_bundle_on_disk(udid: str, bundle_id: str) -> Path | None:
@@ -341,10 +358,7 @@ async def find_app_bundle_on_disk(udid: str, bundle_id: str) -> Path | None:
     Like find_data_container_on_disk, this works on a shut-down device, which
     a keychain checkpoint requires.
     """
-    bundle_root = (
-        Path.home() / "Library" / "Developer" / "CoreSimulator" / "Devices"
-        / udid / "data" / "Containers" / "Bundle" / "Application"
-    )
+    bundle_root = SIM_DEVICES_ROOT / udid / "data" / "Containers" / "Bundle" / "Application"
     if not bundle_root.exists():
         return None
     for container_dir in bundle_root.iterdir():
@@ -358,7 +372,11 @@ async def find_app_bundle_on_disk(udid: str, bundle_id: str) -> Path | None:
 
 def _bundle_executables(app: Path) -> list[Path]:
     """The app's executable and each embedded extension's: an extension can be
-    entitled to a group the app itself is not, and shares the app's data."""
+    entitled to a group the app itself is not, and shares the app's data.
+
+    Raises ValueError for any bundle whose executable cannot be found, so an
+    unreadable extension cannot silently drop the groups only it names.
+    """
     bundles = [app]
     for folder in ("PlugIns", "Extensions"):
         bundles += sorted((app / folder).glob("*.appex"))
@@ -366,11 +384,13 @@ def _bundle_executables(app: Path) -> list[Path]:
     for bundle in bundles:
         try:
             with (bundle / "Info.plist").open("rb") as f:
-                name = plistlib.load(f).get("CFBundleExecutable")
-        except Exception:
-            name = None
-        if name and (bundle / name).is_file():
-            executables.append(bundle / name)
+                info = plistlib.load(f)
+        except Exception as e:
+            raise ValueError(f"{bundle.name}'s Info.plist cannot be read: {e}") from e
+        name = info.get("CFBundleExecutable") if isinstance(info, dict) else None
+        if not isinstance(name, str) or not (bundle / name).is_file():
+            raise ValueError(f"{bundle.name} has no executable")
+        executables.append(bundle / name)
     return executables
 
 
@@ -387,27 +407,22 @@ async def entitled_app_groups(udid: str, bundle_id: str) -> set[str]:
             f"{bundle_id} is not installed on {udid[:8]}, so its app groups are unknown",
             tool="simctl",
         )
-    executables = _bundle_executables(app)
-    if not executables:
-        raise DeviceError(
-            f"Could not find {bundle_id}'s executable in {app.name}, so its app groups "
-            f"are unknown",
-            tool="quern",
-        )
     groups: set[str] = set()
-    for executable in executables:
-        try:
+    try:
+        for executable in _bundle_executables(app):
             embedded = await asyncio.to_thread(macho_entitlements, executable)
-        except (OSError, ValueError) as e:
-            raise DeviceError(
-                f"Could not read the entitlements of {executable.name} in {bundle_id}: {e}",
-                tool="quern",
-            ) from e
-        signed = await _signature_entitlements(executable.parent)
-        for source in (embedded or {}, signed):
-            value = source.get(APP_GROUPS_ENTITLEMENT, [])
-            if isinstance(value, list):
-                groups.update(g for g in value if isinstance(g, str))
+            signed = await _signature_entitlements(executable.parent)
+            for source in (embedded or {}, signed):
+                value = source.get(APP_GROUPS_ENTITLEMENT, [])
+                if not isinstance(value, list) or not all(isinstance(g, str) for g in value):
+                    raise ValueError(f"{executable.name}'s {APP_GROUPS_ENTITLEMENT} is not "
+                                     f"a list of strings")
+                groups.update(value)
+    except (OSError, ValueError) as e:
+        raise DeviceError(
+            f"Could not read {bundle_id}'s entitlements, so its app groups are unknown: {e}",
+            tool="quern",
+        ) from e
     return groups
 
 
@@ -424,15 +439,18 @@ async def get_app_groups(udid: str, bundle_id: str) -> dict[str, Path]:
     Raises DeviceError when the entitlements cannot be read; see
     entitled_app_groups.
     """
+    _, groups = await _app_groups(udid, bundle_id)
+    return groups
+
+
+async def _app_groups(udid: str, bundle_id: str) -> tuple[set[str], dict[str, Path]]:
+    """The groups bundle_id is entitled to, and those of them with a container."""
     sim_devices_root = Path.home() / "Library" / "Developer" / "CoreSimulator" / "Devices"
     app_group_root = sim_devices_root / udid / "data" / "Containers" / "Shared" / "AppGroup"
 
-    if not app_group_root.exists():
-        return {}
-
     entitled = await entitled_app_groups(udid, bundle_id)
-    if not entitled:
-        return {}
+    if not entitled or not app_group_root.exists():
+        return entitled, {}
 
     groups: dict[str, Path] = {}
     for container_dir in app_group_root.iterdir():
@@ -442,7 +460,7 @@ async def get_app_groups(udid: str, bundle_id: str) -> dict[str, Path]:
         if identifier in entitled:
             groups[identifier] = container_dir
 
-    return groups
+    return entitled, groups
 
 
 async def resolve_container(udid: str, bundle_id: str, container: str) -> Path:
@@ -693,13 +711,21 @@ async def restore_state(
 
     from server.device.live_plist import preference_plists, push_preferences
 
+    # Resolve every live path before wiping anything: a lookup that fails
+    # after the data container was overwritten leaves a half-restored app.
+    # Re-resolved rather than read from the metadata, as UUIDs rotate.
+    data_src = checkpoint / "data-container"
+    groups_src = checkpoint / "app-group"
+    live_data = await get_data_container(udid, bundle_id) if data_src.exists() else None
+    entitled: set[str] = set()
+    live_groups: dict[str, Path] = {}
+    if groups_src.exists():
+        entitled, live_groups = await _app_groups(udid, bundle_id)
+
     await _terminate_app(udid, bundle_id)
     problems: list[str] = []
 
-    # Restore data container — re-resolve live path (UUID may have rotated)
-    data_src = checkpoint / "data-container"
-    if data_src.exists():
-        live_data = await get_data_container(udid, bundle_id)
+    if live_data is not None:
         prefs_before = [p.name for p in preference_plists(live_data)]
         # Wipe live container contents
         for child in live_data.iterdir():
@@ -713,20 +739,21 @@ async def restore_state(
             udid, live_data, prefs_before, f"{bundle_id}.plist",
         )
 
-    # Restore app group containers — re-resolve live paths
-    groups_src = checkpoint / "app-group"
     if groups_src.exists():
-        live_groups = await get_app_groups(udid, bundle_id)
         # Checkpoints saved before #628 hold every group on the device. Only
         # the app's own are put back; restoring the rest would roll back other
         # apps' data.
         not_entitled: list[str] = []
+        missing: list[str] = []
         for group_dir in groups_src.iterdir():
             if not group_dir.is_dir():
                 continue
             group_id = group_dir.name
-            if group_id not in live_groups:
+            if group_id not in entitled:
                 not_entitled.append(group_id)
+                continue
+            if group_id not in live_groups:
+                missing.append(group_id)
                 continue
             live_group_path = live_groups[group_id]
             group_prefs_before = [p.name for p in preference_plists(live_group_path)]
@@ -745,11 +772,25 @@ async def restore_state(
             )
         if not_entitled:
             logger.info(
-                "Restore of %r skipped %d group(s) %s is not entitled to, or that have "
-                "no container on this device: %s",
+                "Restore of %r skipped %d group(s) %s is not entitled to: %s",
                 label, len(not_entitled), bundle_id, ", ".join(sorted(not_entitled)),
             )
-            meta["groups_skipped"] = sorted(not_entitled)
+            meta["groups_not_entitled"] = sorted(not_entitled)
+        if missing:
+            # The app's own data, not restored: say so where the caller looks.
+            logger.warning(
+                "Restore of %r could not put back %s's group(s) %s: no container on this "
+                "device. Launch the app once so it creates them, then restore again.",
+                label, bundle_id, ", ".join(sorted(missing)),
+            )
+            meta["groups_not_restored"] = {
+                "groups": sorted(missing),
+                "reason": (
+                    "the app is entitled to these groups but they have no container on "
+                    "this device yet; launch the app once so it creates them, then "
+                    "restore again"
+                ),
+            }
 
     # Restore the keychain last: the container wipe above must not run after it.
     if should_restore_keychain:

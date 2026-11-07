@@ -46,7 +46,7 @@ IMPORTANT for logged-in states: auth tokens live in the simulator keychain, whic
   });
 
   server.registerTool("restore_app_state", {
-    description: `Restore a named app state checkpoint. Terminates the app, wipes live container contents, and copies the checkpoint back using re-resolved live paths (handles UUID rotation on reinstall). Only the app's own entitled groups are restored; groups in an older checkpoint that the app is not entitled to are left alone and listed in meta.groups_skipped. Simulator only.
+    description: `Restore a named app state checkpoint. Terminates the app, wipes live container contents, and copies the checkpoint back using re-resolved live paths (handles UUID rotation on reinstall). Only the app's own entitled groups are restored; groups in an older checkpoint that the app is not entitled to are left alone and listed in meta.groups_not_entitled. If one of the app's own groups has no container on the device yet, it is not restored and meta.groups_not_restored says so: launch the app once and restore again. Simulator only.
 
 If the checkpoint carries a keychain (saved with include_keychain), it is restored too and the app comes up logged in — this requires the device to be shut down, and the call fails before touching anything if it is not. A checkpoint saved without a keychain always restores to a logged-out app; the response's meta.keychain says which happened.`,
     inputSchema: strictParams({
