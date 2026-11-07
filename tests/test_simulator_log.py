@@ -103,7 +103,7 @@ def test_parse_json_line(adapter: SimulatorLogAdapter, sample_lines: list[str]):
     entry = adapter._parse_json_line(sample_lines[0])
 
     assert entry is not None
-    assert entry.level == LogLevel.INFO
+    assert entry.level == LogLevel.NOTICE     # Default is notice (#621)
     assert entry.message == "Request completed in 234ms"
     assert entry.subsystem == "com.myapp.networking"
     assert entry.category == "performance"
@@ -638,3 +638,15 @@ def test_a_simulator_entry_names_its_sender(adapter: SimulatorLogAdapter, sample
     entry = adapter._parse_json_line(sample_lines[0])
     assert entry.sender == "libsystem_trace.dylib" and entry.subsystem == "com.myapp.networking"
 
+
+
+def test_simulator_and_device_agree_on_every_shared_level():
+    """One app line, one level, whichever adapter read it: Default was INFO
+    from a simulator and NOTICE from a phone, so a notice filter kept a
+    phone's Logger.notice() lines and dropped a simulator's (#621)."""
+    from server.sources.device_log import PMD3_LEVEL_MAP
+    from server.sources.oslog import OSLOG_LEVEL_MAP
+
+    shared = OSLOG_LEVEL_MAP.keys() & PMD3_LEVEL_MAP.keys()
+    assert "default" in shared
+    assert {k: OSLOG_LEVEL_MAP[k] for k in shared} == {k: PMD3_LEVEL_MAP[k] for k in shared}

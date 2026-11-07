@@ -203,6 +203,12 @@ class IngestionFilter:
         self._source_configs: dict[LogSource, FilterConfig] = {}
         self._device_configs: dict[str, FilterConfig] = {}
 
+    def config_for(self, *, source: LogSource, device_id: str) -> FilterConfig:
+        """The config an entry from `device_id` on `source` would meet."""
+        if device_id in self._device_configs:
+            return self._device_configs[device_id]
+        return self._source_configs.get(source, self._global_config)
+
     def _resolve_config(self, entry: LogEntry) -> FilterConfig:
         """Return the most specific config: device > source > global."""
         if entry.device_id and entry.device_id in self._device_configs:

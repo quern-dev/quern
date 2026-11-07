@@ -332,6 +332,16 @@ class LogSummaryResponse(Completeness):
     warning_count: int
     total_count: int
     top_issues: list[TopIssue]
+    note: str | None = Field(
+        default=None,
+        description=(
+            "Why an answer filtered to one process is empty although that "
+            "process is running on a simulator whose logs quern is streaming "
+            "(#619): a log filter that drops it, a level it logs below, or "
+            "print() output, which quern never sees. Absent when quern could "
+            "not tell."
+        ),
+    )
 
 
 class LogErrorsResponse(Completeness):

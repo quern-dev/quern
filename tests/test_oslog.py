@@ -22,11 +22,12 @@ def sample_lines() -> list[str]:
 
 
 def test_parse_default_message_type(adapter: OslogAdapter, sample_lines: list[str]):
-    """Default messageType should map to INFO."""
+    """Default messageType, what Logger.notice() emits, maps to NOTICE, as on
+    a physical device: it was INFO, so a notice filter dropped it (#621)."""
     entry = adapter._parse_ndjson_line(sample_lines[0])
 
     assert entry is not None
-    assert entry.level == LogLevel.INFO
+    assert entry.level == LogLevel.NOTICE
     assert entry.message == "Request completed in 234ms"
     assert entry.subsystem == "com.myapp.networking"
     assert entry.category == "performance"
