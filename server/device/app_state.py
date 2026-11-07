@@ -325,10 +325,12 @@ def macho_entitlements(binary: Path) -> dict | None:
 async def _signature_entitlements(path: Path) -> dict:
     """Entitlements in the code signature: where a device-signed build has them.
 
-    An empty dict only when codesign read the signature and it has none -- an
-    Xcode simulator build's ad-hoc signature. Raises ValueError when codesign
-    cannot say: an installed app is always signed, so a failure here is not
-    "no entitlements".
+    An empty dict when the signature has none -- an Xcode simulator build's
+    ad-hoc signature -- or when codesign confirms there is no signature at all,
+    which a simulator installs but will not launch (measured, iOS 27.0): that
+    is an answer, and the embedded section still counts (CodeRabbit). Raises
+    ValueError for any other failure, which is "could not tell", never "no
+    entitlements".
     """
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -339,8 +341,11 @@ async def _signature_entitlements(path: Path) -> dict:
         stdout, stderr = await proc.communicate()
     except OSError as e:
         raise ValueError(f"codesign could not run: {e}") from e
+    message = stderr.decode(errors="replace").strip()
     if proc.returncode != 0:
-        raise ValueError(f"codesign failed: {stderr.decode(errors='replace').strip()}")
+        if "code object is not signed at all" in message:
+            return {}
+        raise ValueError(f"codesign failed: {message}")
     if not stdout.strip():
         return {}
     try:

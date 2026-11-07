@@ -169,7 +169,10 @@ def device(tmp_path, monkeypatch):
         if argv[0] == "codesign":
             ents = fake.signed.get(Path(argv[-1]).name)
             if ents == "fail":
-                return _mock_proc(1, stderr=b"code object is not signed at all")
+                return _mock_proc(1, stderr=b"App.app: invalid signature (code or signature "
+                                             b"have been modified)")
+            if ents == "unsigned":
+                return _mock_proc(1, stderr=b"App.app: code object is not signed at all")
             if ents is None:
                 return _mock_proc(0, stdout=plistlib.dumps({}))
             return _mock_proc(0, stdout=plistlib.dumps(ents))
@@ -309,6 +312,17 @@ class TestGetAppGroups:
         device.signed["App.app"] = "fail"
         with pytest.raises(DeviceError, match="codesign failed"):
             await get_app_groups(device.udid, "com.example.App")
+
+    async def test_an_unsigned_app_keeps_its_embedded_groups(self, device):
+        """codesign's "not signed at all" is an answer, not a failure: the
+        section is still read (CodeRabbit on #632)."""
+        mine = device.group("group.com.example.shared")
+        device.group("group.com.other.App")
+        device.app("com.example.App", _macho(_ents("group.com.example.shared")))
+        device.signed["App.app"] = "unsigned"
+        assert await get_app_groups(device.udid, "com.example.App") == {
+            "group.com.example.shared": mine,
+        }
 
     @pytest.mark.parametrize("ents", [
         plistlib.dumps(["not", "a", "dict"]),

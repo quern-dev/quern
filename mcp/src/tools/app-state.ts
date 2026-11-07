@@ -271,7 +271,7 @@ Logs an initial snapshot of all keys when the watch starts. Then emits one log e
     description: `Stop watching a plist file for changes.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
-      container: z.string().describe("\"data\" or one of the app's own app-group IDs (e.g. \"group.com.example\"), from its application-groups entitlement; another app's group is refused"),
+      container: z.string().describe("The container the running watch was started with, exactly as given to start_plist_watch"),
       plist_path: z.string().describe("Relative path to the plist within the container"),
       udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
     }),
@@ -296,7 +296,7 @@ When start_simulator_logging runs, it automatically starts watchers for ALL conf
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
       watches: z.array(z.object({
-        container: z.string().describe("\"data\" or one of the app's own app-group IDs (e.g. \"group.com.example\"), from its application-groups entitlement; another app's group is refused"),
+        container: z.string().describe("\"data\" or one of the app's own app-group IDs (e.g. \"group.com.example\"). Saving does not check the group: the app's application-groups entitlement is checked when the watch starts with start_simulator_logging, and a watch on another app's group fails then"),
         plist_path: z.string().describe("Relative path to the plist within the container"),
         ignore_prefixes: z.array(z.string()).optional().describe('Key prefixes to ignore in this plist'),
       })).describe("List of plist targets to watch for this bundle"),
