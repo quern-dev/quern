@@ -21,6 +21,15 @@ import pytest
 from server.__main__ import DEPS_STAMP_NAME, _ensure_python_deps, python_deps_state
 
 
+@pytest.fixture(autouse=True)
+def _no_real_update_check(monkeypatch):
+    """An update ends by checking quern.dev for the next one. Tests here run
+    updates, and none is about that check."""
+    from server.lifecycle import updater
+
+    monkeypatch.setattr(updater, "_refresh_update_check", lambda: None)
+
+
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     """A project root with a venv-shaped layout and a pyproject."""
