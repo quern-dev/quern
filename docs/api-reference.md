@@ -567,7 +567,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
-| `save_app_state` | POST | `/api/v1/device/app/state/save` | Save a named checkpoint (data container + app groups, optionally the keychain) |
+| `save_app_state` | POST | `/api/v1/device/app/state/save` | Save a named checkpoint (data container + the app's entitled app groups, optionally the keychain) |
 | `restore_app_state` | POST | `/api/v1/device/app/state/restore` | Restore a named checkpoint |
 | `list_app_states` | GET | `/api/v1/device/app/state/list` | List saved checkpoints for a bundle ID |
 | `delete_app_state` | DELETE | `/api/v1/device/app/state/{id}` | Delete a named checkpoint |
