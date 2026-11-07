@@ -314,7 +314,7 @@ class TestGetAppGroups:
             await get_app_groups(device.udid, "com.example.App")
 
     async def test_section_and_signature_that_disagree_raise(self, device):
-        """Neither list is taken on trust when they conflict (CodeRabbit on #632)."""
+        """Neither list is taken on trust when they conflict."""
         device.group("group.com.example.mine")
         device.group("group.com.example.other")
         device.app("com.example.App", _macho(_ents("group.com.example.other")))
@@ -336,7 +336,7 @@ class TestGetAppGroups:
 
     async def test_an_unsigned_app_keeps_its_embedded_groups(self, device):
         """codesign's "not signed at all" is an answer, not a failure: the
-        section is still read (CodeRabbit on #632)."""
+        section is still read."""
         mine = device.group("group.com.example.shared")
         device.group("group.com.other.App")
         device.app("com.example.App", _macho(_ents("group.com.example.shared")))
