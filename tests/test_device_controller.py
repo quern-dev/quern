@@ -7,7 +7,14 @@ from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 import pytest
 
 from server.device.controller import DeviceController
-from server.models import DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
+from server.models import (
+    DeviceError,
+    DeviceInfo,
+    DeviceState,
+    DeviceType,
+    InvalidDeviceRequestError,
+    UIElement,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -460,10 +467,30 @@ class TestAppDelegation:
     async def test_terminate_app(self):
         ctrl = DeviceController()
         ctrl._active_udid = "AAAA-1111"
-        ctrl.simctl.terminate_app = AsyncMock()
-        udid = await ctrl.terminate_app("com.example.App")
+        ctrl.simctl.terminate_app = AsyncMock(return_value=True)
+        ctrl.simctl.is_installed = AsyncMock()
+        udid, was_running = await ctrl.terminate_app("com.example.App")
         ctrl.simctl.terminate_app.assert_called_once_with("AAAA-1111", "com.example.App")
-        assert udid == "AAAA-1111"
+        assert (udid, was_running) == ("AAAA-1111", True)
+        ctrl.simctl.is_installed.assert_not_called()
+
+    async def test_terminate_an_installed_app_that_is_not_running(self):
+        """#629: was a 500 carrying simctl's stderr."""
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.simctl.terminate_app = AsyncMock(return_value=False)
+        ctrl.simctl.is_installed = AsyncMock(return_value=True)
+        assert await ctrl.terminate_app("com.example.App") == ("AAAA-1111", False)
+
+    async def test_terminate_an_app_that_is_not_installed_is_refused(self):
+        """simctl answers "found nothing to terminate" for a typo too; that
+        must not read as a clean stop."""
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.simctl.terminate_app = AsyncMock(return_value=False)
+        ctrl.simctl.is_installed = AsyncMock(return_value=False)
+        with pytest.raises(InvalidDeviceRequestError, match="not installed"):
+            await ctrl.terminate_app("com.exmaple.App")
 
     async def test_uninstall_app(self):
         ctrl = DeviceController()
@@ -505,13 +532,13 @@ class TestPhysicalAppLifecycle:
         ctrl = DeviceController()
         ctrl._active_udid = "PHYS-0001"
         ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
-        ctrl.wda_client.terminate_app = AsyncMock()
+        ctrl.wda_client.terminate_app = AsyncMock(return_value=False)
         ctrl.devicectl.terminate_app = AsyncMock()
 
-        udid = await ctrl.terminate_app("com.example.App")
+        udid, was_running = await ctrl.terminate_app("com.example.App")
         ctrl.wda_client.terminate_app.assert_called_once_with("PHYS-0001", "com.example.App")
         ctrl.devicectl.terminate_app.assert_not_called()
-        assert udid == "PHYS-0001"
+        assert (udid, was_running) == ("PHYS-0001", False), "WDA's answer reaches the caller"
 
 
 # ---------------------------------------------------------------------------
@@ -1625,7 +1652,7 @@ class TestAndroidAppLifecycle:
         ctrl.adb.terminate_app = AsyncMock()
         ctrl.simctl.terminate_app = AsyncMock()
 
-        await ctrl.terminate_app("com.example.app")
+        assert await ctrl.terminate_app("com.example.app") == ("emulator-5554", None)
         ctrl.adb.terminate_app.assert_called_once_with("emulator-5554", "com.example.app")
         ctrl.simctl.terminate_app.assert_not_called()
 
