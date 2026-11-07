@@ -1123,7 +1123,7 @@ async def _poll_wda_status(url: str, timeout: float = DRIVER_START_TIMEOUT) -> b
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(trust_env=False) as client:
                 resp = await client.get(f"{url}/status", timeout=3.0)
                 if resp.status_code == 200:
                     return True

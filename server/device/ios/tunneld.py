@@ -188,7 +188,7 @@ def _project_root() -> Path | None:
 async def is_tunneld_running() -> bool:
     """Check if tunneld is running by hitting its HTTP API."""
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:
             resp = await client.get(TUNNELD_URL, timeout=2.0)
             return resp.status_code == 200
     except Exception:
@@ -205,7 +205,7 @@ async def get_tunneld_devices() -> dict[str, list[dict]]:
     Returns empty dict on error.
     """
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:
             resp = await client.get(TUNNELD_URL, timeout=5.0)
             if resp.status_code != 200:
                 return {}
@@ -862,8 +862,10 @@ def _tunneld_devices() -> tuple[bool, dict[str, list[dict]]]:
     `get_tunneld_devices()` returns.
     """
     try:
+        from server.remote.client import loopback_opener
+
         req = urllib.request.Request(TUNNELD_URL, method="GET")
-        with urllib.request.urlopen(req, timeout=2) as resp:
+        with loopback_opener().open(req, timeout=2) as resp:     # no proxy (#634)
             if resp.status != 200:
                 return False, {}
             return True, json.loads(resp.read())

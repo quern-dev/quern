@@ -128,7 +128,7 @@ def create_viewer_app(*, recordings, grants, allowed_hosts: Callable[[], set[str
             return PlainTextResponse("too many viewers are watching right now", status_code=503)
         port, udid = target
         streams[rec_id] += 1
-        client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None))
+        client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None), trust_env=False)
         upstream: httpx.Response | None = None
         released = False
 
