@@ -181,13 +181,26 @@ class _Socket:
             except client.RemoteError as e:
                 raise ConnectionError(str(e)) from e
         else:
+            import socket as socket_mod
+            import urllib.parse
+
             from websockets.sync.client import connect
 
-            # Not through a proxy: websockets takes one from the environment
-            # by default, and on plain ws:// it reads the key (#613). It
-            # already drops the key on a redirect to another origin.
-            ws = connect(self._url, additional_headers=self._headers, open_timeout=10,
-                         proxy=None)
+            # A socket of our own, connected straight to this Mac's server:
+            # websockets takes a proxy from the environment by default, which
+            # on plain ws:// reads the key (#613), and it follows redirects,
+            # forwarding X-Quern-Resume-Token to another origin -- it strips
+            # only Authorization and cookies. Given a socket, it refuses every
+            # redirect and uses no proxy.
+            parts = urllib.parse.urlsplit(self._url)
+            sock = socket_mod.create_connection((parts.hostname, parts.port), timeout=10)
+            sock.settimeout(None)       # as websockets leaves the sockets it opens
+            try:
+                ws = connect(self._url, sock=sock, additional_headers=self._headers,
+                             open_timeout=10)
+            except BaseException:
+                sock.close()
+                raise
         first = json.loads(ws.recv(timeout=10))
         if first.get("event") != "attached":
             raise ConnectionError(f"the session socket said {first!r}, not attached")
