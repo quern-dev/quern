@@ -21,20 +21,24 @@ KEY = "owner-key-613"
 
 class _Recorder(http.server.ThreadingHTTPServer):
     """A loopback server that records what reached it and answers with
-    `answer(path) -> (status, headers, body)`."""
+    `answer(path, headers) -> (status, headers, body)`."""
 
-    def __init__(self, answer: Callable[[str], tuple[int, dict, bytes]]) -> None:
+    def __init__(self, answer: Callable[..., tuple[int, dict, bytes]]) -> None:
         self.seen: list[tuple[str, str]] = []     # (request target, Authorization)
         self.answer = answer
         recorder = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            # websockets rejects an HTTP/1.0 answer before it reads it, so on
+            # 1.0 the redirect test could not see a redirect being followed.
+            protocol_version = "HTTP/1.1"
+
             def _any(self) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
                 if length:
                     self.rfile.read(length)
                 recorder.seen.append((self.path, self.headers.get("Authorization", "")))
-                status, headers, body = recorder.answer(self.path)
+                status, headers, body = recorder.answer(self.path, self.headers)
                 self.send_response(status)
                 for name, value in {"Content-Length": str(len(body)), **headers}.items():
                     self.send_header(name, value)
@@ -55,8 +59,18 @@ class _Recorder(http.server.ThreadingHTTPServer):
         return f"http://127.0.0.1:{self.server_address[1]}"
 
 
-def _json(body: dict) -> Callable[[str], tuple[int, dict, bytes]]:
-    return lambda path: (200, {"Content-Type": "application/json"}, json.dumps(body).encode())
+def _json(body: dict) -> Callable[..., tuple[int, dict, bytes]]:
+    return lambda path, headers=None: (
+        200, {"Content-Type": "application/json"}, json.dumps(body).encode())
+
+
+def _redirect_to(sink: str) -> Callable[..., tuple[int, dict, bytes]]:
+    """A 302 to `sink`, as ws:// for a WebSocket upgrade: websockets follows
+    no redirect to http://, so an http:// Location could not catch one."""
+    def answer(path: str, headers) -> tuple[int, dict, bytes]:
+        upgrade = (headers.get("Upgrade") or "").lower() == "websocket"
+        return 302, {"Location": ("ws" + sink[4:] if upgrade else sink) + path}, b""
+    return answer
 
 
 #: An answer every call site reads as success, so a leaked call is not hidden
@@ -71,7 +85,7 @@ def servers(monkeypatch) -> Iterator[dict[str, _Recorder]]:
     started = {"server": _Recorder(_json(_OK)), "proxy": _Recorder(_json(_OK)),
                "sink": _Recorder(_json(_OK))}
     sink = started["sink"].url
-    started["redirector"] = _Recorder(lambda path: (302, {"Location": sink + path}, b""))
+    started["redirector"] = _Recorder(_redirect_to(sink))
     for name in ("no_proxy", "NO_PROXY"):
         monkeypatch.delenv(name, raising=False)
     for name in ("http_proxy", "HTTP_PROXY"):
@@ -212,3 +226,32 @@ def test_the_proxy_in_these_tests_is_one_urllib_would_use(servers):
 
     assert [path for path, _ in servers["proxy"].seen] == [servers["server"].url + "/x"]
     assert servers["server"].seen == []
+
+
+def test_the_session_socket_attaches_over_a_socket_of_its_own(monkeypatch):
+    """The hold connects its own socket so websockets follows no redirect and
+    uses no proxy. websockets leaves the sockets it opens blocking once
+    connected; this one must be too, or an idle hold times out."""
+    from websockets.sync.server import serve
+
+    from server import session_cli
+
+    monkeypatch.setattr("server.session_cli._remote", lambda: None)
+    got: list[str] = []
+
+    def handler(ws):
+        got.append(ws.request.headers.get("X-Quern-Resume-Token", ""))
+        ws.send(json.dumps({"event": "attached"}))
+        for _ in ws:
+            pass
+
+    with serve(handler, "127.0.0.1", 0) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.socket.getsockname()[1]
+        held = session_cli._Socket(f"http://127.0.0.1:{port}", KEY, "s613", "token")
+        try:
+            assert got == ["token"]
+            assert held._ws.socket.gettimeout() is None
+        finally:
+            held.close()
+            server.shutdown()

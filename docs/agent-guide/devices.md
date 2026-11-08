@@ -3,6 +3,9 @@
 *`quern://guide/devices` -- part of the Quern agent guide. Start from `quern://guide`.*
 
 Getting a device, driving physical iPhones, watching devices live, and changing device settings.
+
+**On this page:** Device Pool for Parallel Testing · Controlling a device · Working with Physical Devices · Proxy capture on a physical device · Live Preview of Devices and Simulators · Building and installing · Starting from a known state: app checkpoints and plists · Device settings · Foldable simulators · Mistakes to avoid · When something is wrong.
+
 ## Device Pool for Parallel Testing
 
 Use `ensure_devices` to boot multiple simulators at once, then run different test scenarios on each in parallel. The first device in the result becomes the active device; pass explicit `udid` parameters to target the others.
