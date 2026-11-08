@@ -51,7 +51,7 @@ From there, use the right tool for your task. If any tool fails with a connectio
 | Tap, type, swipe | `tap_element`, `type_text` (after `clear_text`), `swipe`, `gesture` | ui |
 | Reach an element off screen | `tap_element` (sweeps when the screen scrolls), `scroll_to_element` | ui |
 | Know which screen you're on | `identify_screen`, or `get_screen_summary(identify=true)` | ui |
-| See network traffic | `get_flow_summary`, `query_flows`, `get_flow_detail`; bracket an action with `start_capture_session`; capture one simulator's app with `add_session_capture` | network |
+| See network traffic | `get_flow_summary`, `query_flows`, `get_flow_detail`; bracket an action with `start_capture_session`; capture an app by process name with `add_session_capture` (every simulator's, so filter by `simulator_udid`) | network |
 | Fake or change a response | `set_mock`; `set_intercept` + `release_flow` to edit a request | network |
 | Read app logs | `get_log_summary`, `query_logs`, `tail_logs`, `get_errors` | logs |
 | See what an action caused | `get_trace` | logs |
