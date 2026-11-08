@@ -18,7 +18,7 @@ Use the preset parameter to apply an ingestion filter at start time (e.g.
 NOTE: This does NOT capture print() output — print() writes to stdout, not
 the unified logging system. Use os.Logger in your app instead.
 
-If plist watch is configured (via configure_plist_watch), watchers auto-start alongside simulator logging and auto-stop when logging stops.`,
+If plist watch is configured (via configure_plist_watch), watchers auto-start alongside simulator logging and auto-stop when logging stops. The response lists them in plist_watchers_started, and any that could not start in plist_watchers_failed with the reason: check it before waiting for plist changes. Watches start only when logging starts: if logging is already running (status \"already_running\"), watch configuration is not read, so a watch configured since then is not started and not reported. Start it with start_plist_watch, or stop and restart logging.`,
     inputSchema: strictParams({
       udid: z
         .string()

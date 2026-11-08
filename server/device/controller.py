@@ -1706,17 +1706,43 @@ class DeviceController(DeviceControllerUI):
             return False
         return any((e.label or "") == name for e in elements)
 
-    async def terminate_app(self, bundle_id: str, udid: str | None = None) -> str:
-        """Terminate an app. Returns the resolved udid."""
+    async def terminate_app(
+        self, bundle_id: str, udid: str | None = None,
+    ) -> tuple[str, bool | None]:
+        """Terminate an app. Returns the resolved udid and whether the app was
+        running: None when that cannot be told -- adb's force-stop answers
+        the same either way, and WDA sometimes cannot confirm.
+
+        An app that is not installed is refused, rather than reported as not
+        running or stopped: simctl and WDA answer the two alike, adb's
+        force-stop succeeds for any name, and a mistyped bundle id should not
+        read as a clean stop (#629).
+        """
         resolved = await self.resolve_udid(udid)
+        was_running: bool | None
         if self._is_android(resolved):
+            if not await self.adb.package_installed(resolved, bundle_id):
+                raise InvalidDeviceRequestError(
+                    f"{bundle_id} is not installed on {resolved}", tool="adb",
+                )
             await self.adb.terminate_app(resolved, bundle_id)
+            was_running = None
         elif self._is_physical(resolved):
-            await self.wda_client.terminate_app(resolved, bundle_id)
+            was_running = await self.wda_client.terminate_app(resolved, bundle_id)
+            if was_running is False and not await self.devicectl.is_installed(
+                    resolved, bundle_id):
+                raise InvalidDeviceRequestError(
+                    f"{bundle_id} is not installed on {resolved[:8]}", tool="devicectl",
+                )
         else:
-            await self.simctl.terminate_app(resolved, bundle_id)
+            was_running = await self.simctl.terminate_app(resolved, bundle_id)
+            if not was_running and not await self.simctl.is_installed(resolved, bundle_id):
+                raise InvalidDeviceRequestError(
+                    f"{bundle_id} is not installed on {resolved[:8]}",
+                    tool="simctl",
+                )
         self._invalidate_ui_cache(resolved)  # the app's screen is gone
-        return resolved
+        return resolved, was_running
 
     async def uninstall_app(self, bundle_id: str, udid: str | None = None, *,
                             set_active: bool = True) -> str:
@@ -2304,6 +2330,6 @@ class DeviceController(DeviceControllerUI):
         try:
             await self.simctl.terminate_app(resolved, bundle_id)
         except DeviceError:
-            pass  # app wasn't running, proceed anyway
+            pass  # clear_app_data reports what matters
         await self.simctl.clear_app_data(resolved, bundle_id)
         return resolved

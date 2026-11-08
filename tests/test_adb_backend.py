@@ -159,6 +159,32 @@ class TestListDevices:
 
 
 class TestAppLifecycle:
+    @pytest.mark.parametrize("stdout,expected", [
+        ("package:/product/priv-app/SettingsGoogle/SettingsGoogle.apk\n", True),
+        ("", False),
+    ])
+    async def test_package_installed(self, stdout, expected):
+        """pm path's answers, measured on Android 10 (#629). A system package
+        counts, unlike in list_apps."""
+        backend = AdbBackend()
+        backend._run_adb_for_device = AsyncMock(return_value=(stdout, ""))
+        assert await backend.package_installed("SER", "com.android.settings") is expected
+        backend._run_adb_for_device.assert_called_once_with(
+            "SER", "shell", "pm path com.android.settings || true")
+
+    async def test_package_installed_raises_when_pm_cannot_say(self):
+        backend = AdbBackend()
+        backend._run_adb_for_device = AsyncMock(
+            return_value=("Error: Can't find service: package\n", ""))
+        with pytest.raises(DeviceError, match="pm path"):
+            await backend.package_installed("SER", "com.example.app")
+
+    async def test_package_installed_quotes_the_name(self):
+        backend = AdbBackend()
+        backend._run_adb_for_device = AsyncMock(return_value=("", ""))
+        await backend.package_installed("SER", "a; reboot")
+        assert backend._run_adb_for_device.call_args.args[-1] == "pm path 'a; reboot' || true"
+
     async def test_install_app(self):
         backend = AdbBackend()
         backend._run_adb_for_device = AsyncMock(return_value=("Success", ""))

@@ -7,6 +7,16 @@ import { apiRequest, SESSION_ID, serverFetch } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
 import { type LogQueryAnswer, tailLogsResult } from "./log-responses.js";
 
+/**
+ * `include_raw` for the log tools (#630). A real boolean, or the strings
+ * "true"/"false": `z.coerce.boolean()` turned "false" into true, which sent the
+ * very field the option exists to leave out (CodeRabbit on #638).
+ */
+export const includeRaw = z
+  .union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")])
+  .optional()
+  .describe("Include each entry's raw, the original unparsed line. Off by default: for simulator and oslog entries it is the whole JSON record, about 2 KB, several times message. Ask for it only to see a field quern does not parse.");
+
 export function registerLogTools(server: McpServer): void {
   server.registerTool("ensure_server", {
     description: `Ensure Quern is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key. Pointed at a remote (QUERN_REMOTE, or use_remote), it only health-checks that remote over the pinned connection and never starts anything; the answer has server_url and version, not proxy or key details.`,
@@ -253,8 +263,9 @@ export function registerLogTools(server: McpServer): void {
         .enum(["syslog", "oslog", "crash", "build", "proxy", "simulator", "device", "logcat", "plist_watcher", "server"])
         .optional()
         .describe("Filter by log source. Use 'server' to see Quern's own Python logs (startup, errors, tunnel resolution, adapter status) — useful for debugging the debug server itself."),
+      include_raw: includeRaw,
     }),
-  }, async ({ count, level, process, source }) => {
+  }, async ({ count, level, process, source, include_raw }) => {
       try {
         const data = (await apiRequest("GET", "/api/v1/logs/query", {
           limit: count,
@@ -262,6 +273,7 @@ export function registerLogTools(server: McpServer): void {
           process,
           source,
           tail: true,
+          include_raw,
         })) as LogQueryAnswer;
 
         // Shaped by a function the test suite runs; see log-responses.ts.
@@ -318,8 +330,9 @@ export function registerLogTools(server: McpServer): void {
         .default(100)
         .describe("Max entries to return"),
       offset: z.coerce.number().min(0).default(0).describe("Pagination offset"),
+      include_raw: includeRaw,
     }),
-  }, async ({ since, until, level, process, source, search, limit, offset }) => {
+  }, async ({ since, until, level, process, source, search, limit, offset, include_raw }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/logs/query", {
           since,
@@ -330,6 +343,7 @@ export function registerLogTools(server: McpServer): void {
           search,
           limit,
           offset,
+          include_raw,
         });
 
         return {
@@ -410,13 +424,15 @@ export function registerLogTools(server: McpServer): void {
         .coerce.boolean()
         .default(true)
         .describe("Include crash reports in results"),
+      include_raw: includeRaw,
     }),
-  }, async ({ since, limit, include_crashes }) => {
+  }, async ({ since, limit, include_crashes, include_raw }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/logs/errors", {
           since,
           limit,
           include_crashes,
+          include_raw,
         });
 
         return {
