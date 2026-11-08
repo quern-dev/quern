@@ -137,11 +137,11 @@ async def _require_shutdown(udid: str, operation: str) -> None:
     )
 
 
-async def _save_keychain(udid: str, checkpoint: Path) -> dict:
-    """Copy the simulator keychain into the checkpoint. Device must be shut down."""
+async def _save_keychain(udid: str, checkpoint: Path, src: Path) -> dict:
+    """Copy the simulator keychain at `src` into the checkpoint. Device must be
+    shut down. `src` is resolved by the caller before anything is touched."""
     await _require_shutdown(udid, "Saving a checkpoint with include_keychain=True")
 
-    src = await _keychain_dir(udid)
     if not src.exists():
         raise DeviceError(
             f"No keychain directory for device {udid} at {src}",
@@ -166,10 +166,8 @@ async def _save_keychain(udid: str, checkpoint: Path) -> dict:
     return {"captured": True, "files": [p.name for p in files]}
 
 
-async def _restore_keychain(udid: str, checkpoint: Path) -> dict:
-    """Copy a checkpoint's keychain back onto the device. Device must be shut down."""
-    await _require_shutdown(udid, "Restoring a checkpoint that contains a keychain")
-
+def _checkpoint_keychain_files(checkpoint: Path) -> list[Path]:
+    """The keychain files a checkpoint holds; raises if it holds none."""
     src = checkpoint / "keychain"
     files = sorted(src.glob(KEYCHAIN_GLOB))
     if not files:
@@ -177,8 +175,15 @@ async def _restore_keychain(udid: str, checkpoint: Path) -> dict:
             f"Checkpoint keychain directory {src} contains no keychain database",
             tool="simctl",
         )
+    return files
 
-    dest = await _keychain_dir(udid)
+
+async def _restore_keychain(udid: str, files: list[Path], dest: Path) -> dict:
+    """Copy a checkpoint's keychain `files` to the device's `dest`. Device must
+    be shut down. Both are resolved by the caller before any container is
+    replaced, so a lookup that fails cannot leave a half-restored app (#640)."""
+    await _require_shutdown(udid, "Restoring a checkpoint that contains a keychain")
+
     dest.mkdir(parents=True, exist_ok=True)
     for path in files:
         await asyncio.to_thread(shutil.copy2, str(path), str(dest / path.name))
@@ -626,6 +631,7 @@ async def _save_into(
     # as it was, not killed for a checkpoint that was never taken (#640).
     data_path = await get_data_container(udid, bundle_id)
     groups = await get_app_groups(udid, bundle_id)
+    keychain_src = await _keychain_dir(udid) if include_keychain else None
 
     await _terminate_app(udid, bundle_id)
 
@@ -646,8 +652,8 @@ async def _save_into(
 
     # Copy the keychain (outside every container — this is what carries the login)
     keychain_meta: dict = {"captured": False}
-    if include_keychain:
-        keychain_meta = await _save_keychain(udid, checkpoint)
+    if keychain_src is not None:
+        keychain_meta = await _save_keychain(udid, checkpoint, keychain_src)
 
     # Write metadata
     captured_at = datetime.now(UTC).isoformat()
@@ -782,6 +788,11 @@ async def restore_state(
     live_groups: dict[str, Path] = {}
     if groups_src.exists():
         entitled, live_groups = await _app_groups(udid, bundle_id)
+    keychain_files: list[Path] = []
+    keychain_dest: Path | None = None
+    if should_restore_keychain:
+        keychain_files = _checkpoint_keychain_files(checkpoint)
+        keychain_dest = await _keychain_dir(udid)
 
     await _terminate_app(udid, bundle_id)
     problems: list[str] = []
@@ -855,7 +866,7 @@ async def restore_state(
 
     # Restore the keychain last: the container wipe above must not run after it.
     if should_restore_keychain:
-        meta["keychain"] = await _restore_keychain(udid, checkpoint)
+        meta["keychain"] = await _restore_keychain(udid, keychain_files, keychain_dest)
     else:
         meta["keychain"] = {"restored": False}
         if has_keychain:

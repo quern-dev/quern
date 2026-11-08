@@ -749,6 +749,36 @@ class TestKeychainCapture:
         finally:
             app_state_module.APP_STATES_DIR = original_dir
 
+    async def test_a_keychain_lookup_that_fails_leaves_the_containers_untouched(
+        self, tmp_path, monkeypatch,
+    ):
+        """The keychain's path is a simctl lookup since #640, so it can fail:
+        it is resolved before any container is replaced (CodeRabbit on #642)."""
+        monkeypatch.setattr(app_state_module, "APP_STATES_DIR", tmp_path / "app-states")
+
+        async def cannot_say(udid):
+            return None
+        monkeypatch.setattr(app_state_module, "_simctl_data_path", cannot_say)
+        checkpoint = app_state_module.APP_STATES_DIR / "com.example.App" / "logged_in"
+        (checkpoint / "data-container").mkdir(parents=True)
+        (checkpoint / "data-container" / "state.txt").write_text("saved")
+        (checkpoint / "keychain").mkdir()
+        (checkpoint / "keychain" / "keychain-2-debug.db").write_text("logged-in")
+        (checkpoint / ".quern-meta.json").write_text(json.dumps({"label": "logged_in"}))
+        live = tmp_path / "live-data"
+        live.mkdir()
+        (live / "state.txt").write_text("live")
+        terminate = AsyncMock()
+        with (
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=live)),
+            patch("server.device.app_state._terminate_app", terminate),
+            patch("server.device.app_state.get_device_state", AsyncMock(return_value="Shutdown")),
+            pytest.raises(DeviceError, match="could not say"),
+        ):
+            await restore_state("TEST-UDID", "com.example.App", "logged_in")
+        assert (live / "state.txt").read_text() == "live"
+        terminate.assert_not_called()
+
     async def test_restore_puts_keychain_back(self, tmp_path, monkeypatch):
         original_dir = app_state_module.APP_STATES_DIR
         app_state_module.APP_STATES_DIR = tmp_path / "app-states"
