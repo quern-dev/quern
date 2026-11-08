@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import shutil
 from pathlib import Path
 
@@ -994,6 +995,24 @@ class AdbBackend:
     async def terminate_app(self, serial: str, package: str) -> None:
         """Force-stop an app."""
         await self._run_adb_for_device(serial, "shell", "am", "force-stop", package)
+
+    async def package_installed(self, serial: str, package: str) -> bool:
+        """Whether package is installed, system packages included.
+
+        `pm path` prints `package:<apk>` for an installed package and nothing,
+        exiting 1, for a missing one (measured on Android 10). The `|| true`
+        keeps that exit from reading as adb failing; anything else it prints
+        means pm could not say, and raises.
+        """
+        stdout, _ = await self._run_adb_for_device(
+            serial, "shell", f"pm path {shlex.quote(package)} || true",
+        )
+        out = stdout.strip()
+        if out.startswith("package:"):
+            return True
+        if not out:
+            return False
+        raise DeviceError(f"pm path {package} answered {out[:200]!r}", tool="adb")
 
     async def uninstall_app(self, serial: str, package: str) -> None:
         """Uninstall an app."""

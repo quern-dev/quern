@@ -413,3 +413,31 @@ class TestSimulatorsAreNotPhysicalDevices:
         backend = DevicectlBackend()
         backend._run_devicectl = AsyncMock(return_value=(json.dumps(data), ""))
         assert len(await backend.list_devices()) == 1
+
+
+class TestIsInstalled:
+    """#629: a phone's terminate refuses an app that is not installed."""
+
+    @staticmethod
+    def _apps(*ids):
+        return json.dumps({"result": {"apps": [{"bundleIdentifier": i} for i in ids]}})
+
+    async def test_asks_for_all_apps_so_system_apps_count(self):
+        """Without --include-all-apps devicectl lists user apps only: measured,
+        4 of 74 on an iPhone 11, Settings not among them."""
+        backend = DevicectlBackend()
+        backend._run_devicectl = AsyncMock(return_value=(self._apps("com.apple.Preferences"), ""))
+        assert await backend.is_installed("UUID", "com.apple.Preferences") is True
+        assert "--include-all-apps" in backend._run_devicectl.call_args.args
+
+    async def test_an_absent_app(self):
+        backend = DevicectlBackend()
+        backend._run_devicectl = AsyncMock(return_value=(self._apps("com.example.app"), ""))
+        assert await backend.is_installed("UUID", "com.typo.app") is False
+
+    @pytest.mark.parametrize("stdout", ["not json", "{}", '{"result": {"apps": 3}}'])
+    async def test_an_unreadable_list_raises_rather_than_reading_as_absent(self, stdout):
+        backend = DevicectlBackend()
+        backend._run_devicectl = AsyncMock(return_value=(stdout, ""))
+        with pytest.raises(DeviceError, match="could not be read"):
+            await backend.is_installed("UUID", "com.example.app")

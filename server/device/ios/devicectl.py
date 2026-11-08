@@ -329,6 +329,26 @@ class DevicectlBackend:
             bundle_id,
         )
 
+    async def is_installed(self, uuid: str, bundle_id: str) -> bool:
+        """Whether bundle_id is installed on a physical device, system apps
+        included. Raises DeviceError when devicectl cannot say.
+
+        `--include-all-apps` is what makes this an answer: without it
+        devicectl lists only user apps (measured: 4 of 74 on an iPhone 11,
+        without Settings), so every system app would read as not installed.
+        """
+        stdout, _ = await self._run_devicectl(
+            "device", "info", "apps", "--device", uuid, "--include-all-apps",
+            json_output=True,
+        )
+        try:
+            apps = json.loads(stdout)["result"]["apps"]
+            return any(app.get("bundleIdentifier") == bundle_id for app in apps)
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            raise DeviceError(
+                f"devicectl's app list could not be read: {e}", tool="devicectl",
+            ) from e
+
     async def list_apps(self, uuid: str) -> list[AppInfo]:
         """List installed apps on a physical device."""
         stdout, _ = await self._run_devicectl(
