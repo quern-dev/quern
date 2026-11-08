@@ -1243,8 +1243,11 @@ first when the server's auto_install_cert is on.`,
 
   server.registerTool("remove_session_capture", {
     description: `Hand back capture you asked for with add_session_capture: all of it, or
-only one simulator's, or only some processes. A session proxy stops once no
-session's capture uses it. Releasing a simulator does this for you.`,
+only one simulator's, or only some processes. A session proxy captures every name
+it was started with and stops only once none of them is claimed by anyone, so a
+name you remove can go on being captured (and, in shared mode, seen) while
+another name keeps its proxy running. The answer's stopped lists the names whose
+capture actually ended. Releasing a simulator does this for you.`,
     inputSchema: strictParams({
       simulator_udid: z.string().optional().describe("Only this simulator's capture."),
       processes: z.array(z.string()).optional().describe("Only these processes."),
