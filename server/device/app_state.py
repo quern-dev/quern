@@ -40,7 +40,6 @@ logger = logging.getLogger(__name__)
 
 APP_STATES_DIR = CONFIG_DIR / "app-states"
 
-SIM_DEVICES_ROOT = Path.home() / "Library" / "Developer" / "CoreSimulator" / "Devices"
 
 # Keychain lives outside every app container. The basename varies by runtime
 # (keychain-2.db, keychain-2-debug.db), so match the family rather than one name.
@@ -52,8 +51,50 @@ KEYCHAIN_GLOB = "keychain-2*.db*"
 # ---------------------------------------------------------------------------
 
 
-def _keychain_dir(udid: str) -> Path:
-    return SIM_DEVICES_ROOT / udid / "data" / "Library" / "Keychains"
+async def _simctl_data_path(udid: str) -> Path | None:
+    """The device's data directory as simctl reports it, or None when simctl
+    cannot say (it failed, or does not know the device)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "xcrun", "simctl", "list", "devices", "-j",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        runtimes = json.loads(stdout)["devices"]
+        for devices in runtimes.values():
+            for device in devices:
+                if device.get("udid") == udid and device.get("dataPath"):
+                    return Path(device["dataPath"])
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return None
+
+
+async def device_data_dir(udid: str) -> Path:
+    """Where the simulator keeps its data, from simctl's `dataPath`.
+
+    Not derived from HOME: a server whose HOME is not the user's -- the CLI
+    live test, an agent trial, a VM run -- would look in the wrong place, and
+    an app it then cannot find reads as "not installed" (#640). simctl answers
+    for a booted or a shut-down device alike. Raises when it cannot say.
+    """
+    path = await _simctl_data_path(udid)
+    if path is None:
+        raise DeviceError(
+            f"simctl could not say where simulator {udid[:8]} keeps its data",
+            tool="simctl",
+        )
+    return path
+
+
+async def _keychain_dir(udid: str) -> Path:
+    return await device_data_dir(udid) / "Library" / "Keychains"
 
 
 async def get_device_state(udid: str) -> str:
@@ -100,7 +141,7 @@ async def _save_keychain(udid: str, checkpoint: Path) -> dict:
     """Copy the simulator keychain into the checkpoint. Device must be shut down."""
     await _require_shutdown(udid, "Saving a checkpoint with include_keychain=True")
 
-    src = _keychain_dir(udid)
+    src = await _keychain_dir(udid)
     if not src.exists():
         raise DeviceError(
             f"No keychain directory for device {udid} at {src}",
@@ -137,7 +178,7 @@ async def _restore_keychain(udid: str, checkpoint: Path) -> dict:
             tool="simctl",
         )
 
-    dest = _keychain_dir(udid)
+    dest = await _keychain_dir(udid)
     dest.mkdir(parents=True, exist_ok=True)
     for path in files:
         await asyncio.to_thread(shutil.copy2, str(path), str(dest / path.name))
@@ -185,7 +226,7 @@ async def find_data_container_on_disk(udid: str, bundle_id: str) -> Path | None:
     the metadata plists works in either state, which is what lets a single call save or
     restore containers and keychain together.
     """
-    app_root = SIM_DEVICES_ROOT / udid / "data" / "Containers" / "Data" / "Application"
+    app_root = await device_data_dir(udid) / "Containers" / "Data" / "Application"
     if not app_root.exists():
         return None
     for container_dir in app_root.iterdir():
@@ -363,7 +404,7 @@ async def find_app_bundle_on_disk(udid: str, bundle_id: str) -> Path | None:
     Like find_data_container_on_disk, this works on a shut-down device, which
     a keychain checkpoint requires.
     """
-    bundle_root = SIM_DEVICES_ROOT / udid / "data" / "Containers" / "Bundle" / "Application"
+    bundle_root = await device_data_dir(udid) / "Containers" / "Bundle" / "Application"
     if not bundle_root.exists():
         return None
     for container_dir in bundle_root.iterdir():
@@ -447,7 +488,7 @@ async def entitled_app_groups(udid: str, bundle_id: str) -> set[str]:
 async def get_app_groups(udid: str, bundle_id: str) -> dict[str, Path]:
     """The app group containers bundle_id is entitled to, as {group_identifier: path}.
 
-    Scans ~/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Shared/AppGroup/
+    Scans the device's Containers/Shared/AppGroup/ (under simctl's dataPath)
     and keeps the containers whose MCMMetadataIdentifier is in the app's (or an
     extension's) com.apple.security.application-groups entitlement. Every other
     app's groups live in the same directory, and a restore wipes each group it
@@ -463,8 +504,7 @@ async def get_app_groups(udid: str, bundle_id: str) -> dict[str, Path]:
 
 async def _app_groups(udid: str, bundle_id: str) -> tuple[set[str], dict[str, Path]]:
     """The groups bundle_id is entitled to, and those of them with a container."""
-    sim_devices_root = Path.home() / "Library" / "Developer" / "CoreSimulator" / "Devices"
-    app_group_root = sim_devices_root / udid / "data" / "Containers" / "Shared" / "AppGroup"
+    app_group_root = await device_data_dir(udid) / "Containers" / "Shared" / "AppGroup"
 
     entitled = await entitled_app_groups(udid, bundle_id)
     if not entitled or not app_group_root.exists():
@@ -582,17 +622,20 @@ async def _save_into(
 ) -> dict:
     from server.device.live_plist import capture_preferences
 
+    # Resolve before terminating: a lookup that fails here must leave the app
+    # as it was, not killed for a checkpoint that was never taken (#640).
+    data_path = await get_data_container(udid, bundle_id)
+    groups = await get_app_groups(udid, bundle_id)
+
     await _terminate_app(udid, bundle_id)
 
     # Copy data container, then replace its preference files with what
     # cfprefsd holds: the files on disk trail the app by seconds.
-    data_path = await get_data_container(udid, bundle_id)
     data_dest = checkpoint / "data-container"
     await _copy_container(data_path, data_dest)
     await capture_preferences(udid, data_path, data_dest, f"{bundle_id}.plist")
 
     # Copy app group containers
-    groups = await get_app_groups(udid, bundle_id)
     groups_dest = checkpoint / "app-group"
     if groups:
         groups_dest.mkdir(exist_ok=True)

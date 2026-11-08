@@ -60,6 +60,13 @@ def store(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _devices_at(monkeypatch, root: Path) -> None:
+    """Answer simctl's dataPath lookup from a fake device tree under `root`."""
+    async def data_path(udid):
+        return root / udid / "data"
+    monkeypatch.setattr(app_state_module, "_simctl_data_path", data_path)
+
+
 def _mock_proc(returncode: int = 0, stdout: bytes = b"", stderr: bytes = b""):
     proc = MagicMock()
     proc.returncode = returncode
@@ -157,8 +164,7 @@ def device(tmp_path, monkeypatch):
     unless a test sets `signed`."""
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
-    monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT",
-                        home / "Library" / "Developer" / "CoreSimulator" / "Devices")
+    _devices_at(monkeypatch, home / "Library" / "Developer" / "CoreSimulator" / "Devices")
     fake = FakeDevice(home)
     fake.signed = {}
 
@@ -482,7 +488,9 @@ class TestSaveState:
             app_state_module.APP_STATES_DIR = original_dir
 
     async def test_save_state_terminates_app_first(self, tmp_path):
-        """save_state must terminate the app before copying."""
+        """save_state resolves every container, then terminates the app, then
+        copies: a copy of a running app is torn, and a lookup that fails must
+        not have killed the app first (#640)."""
         original_dir = app_state_module.APP_STATES_DIR
         app_state_module.APP_STATES_DIR = tmp_path / "app-states"
         call_order = []
@@ -491,23 +499,47 @@ class TestSaveState:
             call_order.append("terminate")
 
         async def fake_get_data(udid, bundle_id):
-            call_order.append("copy")
+            call_order.append("resolve data")
             d = tmp_path / "sim-data"
             d.mkdir(exist_ok=True)
             return d
+
+        async def fake_groups(udid, bundle_id):
+            call_order.append("resolve groups")
+            return {}
+
+        real_copy = app_state_module._copy_container
+
+        async def recording_copy(src, dest):
+            call_order.append("copy")
+            await real_copy(src, dest)
 
         try:
             with (
                 patch("server.device.app_state._terminate_app", side_effect=fake_terminate),
                 patch("server.device.app_state.get_data_container", side_effect=fake_get_data),
-                patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+                patch("server.device.app_state.get_app_groups", side_effect=fake_groups),
+                patch("server.device.app_state._copy_container", side_effect=recording_copy),
             ):
                 await save_state("TEST-UDID", "com.example.App", "test_label")
 
-            assert call_order[0] == "terminate"
-            assert call_order[1] == "copy"
+            assert call_order == ["resolve data", "resolve groups", "terminate", "copy"]
         finally:
             app_state_module.APP_STATES_DIR = original_dir
+
+    async def test_a_save_whose_group_lookup_fails_leaves_the_app_running(self, store):
+        """The trial's case: the lookup failed after the app had been killed."""
+        terminate = AsyncMock()
+        with (
+            patch("server.device.app_state._terminate_app", terminate),
+            patch("server.device.app_state.get_data_container",
+                  AsyncMock(return_value=store)),
+            patch("server.device.app_state.get_app_groups",
+                  AsyncMock(side_effect=AppStateNotFoundError("not installed"))),
+            pytest.raises(AppStateNotFoundError),
+        ):
+            await save_state("TEST-UDID", "com.example.App", "snap")
+        terminate.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -635,7 +667,7 @@ class TestKeychainCapture:
         original_dir = app_state_module.APP_STATES_DIR
         app_state_module.APP_STATES_DIR = tmp_path / "app-states"
         device_root = tmp_path / "Devices"
-        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+        _devices_at(monkeypatch, device_root)
         _make_keychain(device_root, "TEST-UDID")
 
         try:
@@ -669,7 +701,7 @@ class TestKeychainCapture:
         original_dir = app_state_module.APP_STATES_DIR
         app_state_module.APP_STATES_DIR = tmp_path / "app-states"
         device_root = tmp_path / "Devices"
-        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+        _devices_at(monkeypatch, device_root)
         _make_keychain(device_root, "TEST-UDID")
 
         try:
@@ -697,7 +729,7 @@ class TestKeychainCapture:
         original_dir = app_state_module.APP_STATES_DIR
         app_state_module.APP_STATES_DIR = tmp_path / "app-states"
         device_root = tmp_path / "Devices"
-        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+        _devices_at(monkeypatch, device_root)
         _make_keychain(device_root, "TEST-UDID")
 
         try:
@@ -721,7 +753,7 @@ class TestKeychainCapture:
         original_dir = app_state_module.APP_STATES_DIR
         app_state_module.APP_STATES_DIR = tmp_path / "app-states"
         device_root = tmp_path / "Devices"
-        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+        _devices_at(monkeypatch, device_root)
         live_keychain = _make_keychain(device_root, "TEST-UDID", body="logged-out")
 
         try:
@@ -763,7 +795,7 @@ class TestKeychainCapture:
         original_dir = app_state_module.APP_STATES_DIR
         app_state_module.APP_STATES_DIR = tmp_path / "app-states"
         device_root = tmp_path / "Devices"
-        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+        _devices_at(monkeypatch, device_root)
         _make_keychain(device_root, "TEST-UDID")
 
         try:
@@ -803,7 +835,7 @@ class TestKeychainCapture:
         """A keychain-less checkpoint restores containers but says the login is not coming back."""
         original_dir = app_state_module.APP_STATES_DIR
         app_state_module.APP_STATES_DIR = tmp_path / "app-states"
-        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", tmp_path / "Devices")
+        _devices_at(monkeypatch, tmp_path / "Devices")
 
         try:
             checkpoint = app_state_module.APP_STATES_DIR / "com.example.App" / "plain"
@@ -835,7 +867,7 @@ class TestKeychainCapture:
         original_dir = app_state_module.APP_STATES_DIR
         app_state_module.APP_STATES_DIR = tmp_path / "app-states"
         device_root = tmp_path / "Devices"
-        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+        _devices_at(monkeypatch, device_root)
         live_keychain = _make_keychain(device_root, "TEST-UDID", body="logged-out")
 
         try:
@@ -877,7 +909,7 @@ class TestKeychainCapture:
     ):
         original_dir = app_state_module.APP_STATES_DIR
         app_state_module.APP_STATES_DIR = tmp_path / "app-states"
-        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", tmp_path / "Devices")
+        _devices_at(monkeypatch, tmp_path / "Devices")
 
         try:
             checkpoint = app_state_module.APP_STATES_DIR / "com.example.App" / "plain"
@@ -899,7 +931,7 @@ class TestDataContainerDiscovery:
 
     async def test_falls_back_to_disk_scan_when_simctl_fails(self, tmp_path, monkeypatch):
         device_root = tmp_path / "Devices"
-        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", device_root)
+        _devices_at(monkeypatch, device_root)
 
         app_root = device_root / "TEST-UDID" / "data" / "Containers" / "Data" / "Application"
         wanted = app_root / "AAAA-BBBB"
@@ -926,7 +958,7 @@ class TestDataContainerDiscovery:
         assert found == wanted
 
     async def test_raises_when_neither_simctl_nor_disk_finds_it(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(app_state_module, "SIM_DEVICES_ROOT", tmp_path / "Devices")
+        _devices_at(monkeypatch, tmp_path / "Devices")
         shutdown_error = _mock_proc(
             returncode=1, stderr=b"Unable to lookup in current state: Shutdown",
         )
@@ -1068,6 +1100,7 @@ class TestSaveIsAllOrNothing:
         with (
             patch("server.device.app_state._terminate_app", AsyncMock()),
             patch("server.device.app_state.get_data_container", AsyncMock(return_value=data)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
             patch(
                 "server.device.app_state._copy_container",
                 AsyncMock(side_effect=OSError(63, "File name too long")),
@@ -1269,3 +1302,46 @@ class TestRestorePushesTheFilesIntoCfprefsd:
         meta = await self._restore(live)
         assert plistlib.loads(live_prefs.read_bytes())["probe.counter"] == 1
         assert meta["preferences"] == {"synced": True}
+
+
+class TestDeviceDataDir:
+    """#640: the device's files are found through simctl, not HOME."""
+
+    @staticmethod
+    def _listing(udid, data_path):
+        return json.dumps({"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
+            {"udid": "OTHER", "dataPath": "/elsewhere/data"},
+            {"udid": udid, "dataPath": data_path, "state": "Shutdown"},
+        ]}}).encode()
+
+    async def test_the_path_comes_from_simctl_whatever_home_is(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "sandbox"))
+        real = "/Users/someone/Library/Developer/CoreSimulator/Devices/UDID-1/data"
+        with patch("asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=_mock_proc(0, stdout=self._listing("UDID-1", real)))):
+            assert await app_state_module.device_data_dir("UDID-1") == Path(real)
+
+    @pytest.mark.parametrize("proc", [
+        _mock_proc(1, stderr=b"simctl failed"),
+        _mock_proc(0, stdout=b"not json"),
+        _mock_proc(0, stdout=json.dumps({"devices": {}}).encode()),
+    ])
+    async def test_raises_when_simctl_cannot_say(self, proc):
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            with pytest.raises(DeviceError, match="could not say"):
+                await app_state_module.device_data_dir("UDID-1")
+
+    async def test_a_save_under_a_sandboxed_home_finds_the_app(self, device, store, tmp_path,
+                                                                monkeypatch):
+        """The trial's case end to end: HOME points elsewhere, simctl knows."""
+        mine = device.group("group.com.example.shared")
+        device.app("com.example.App", _macho(_ents("group.com.example.shared")))
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "sandbox"))
+        data = tmp_path / "data"
+        data.mkdir()
+        with (
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=data)),
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+        ):
+            meta = await save_state(device.udid, "com.example.App", "snap")
+        assert meta["containers"]["groups"] == {"group.com.example.shared": str(mine)}
