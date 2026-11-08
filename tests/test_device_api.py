@@ -13,7 +13,15 @@ from httpx import ASGITransport, AsyncClient
 from server.config import ServerConfig
 from server.device.controller import DeviceController
 from server.main import create_app
-from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
+from server.models import (
+    AppInfo,
+    DeviceError,
+    DeviceInfo,
+    DeviceState,
+    DeviceType,
+    InvalidDeviceRequestError,
+    UIElement,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -57,7 +65,7 @@ def mock_controller(app):
     ctrl.shutdown = AsyncMock()
     ctrl.install_app = AsyncMock(return_value="AAAA-1111")
     ctrl.launch_app = AsyncMock(return_value=("AAAA-1111", {}))
-    ctrl.terminate_app = AsyncMock(return_value="AAAA-1111")
+    ctrl.terminate_app = AsyncMock(return_value=("AAAA-1111", True))
     ctrl.uninstall_app = AsyncMock(return_value="AAAA-1111")
     ctrl.list_apps = AsyncMock(
         return_value=(
@@ -317,6 +325,38 @@ class TestAppEndpoints:
             )
         assert resp.status_code == 200
         assert resp.json()["status"] == "terminated"
+        assert resp.json()["was_running"] is True
+
+    @pytest.mark.parametrize("was_running,status", [(False, "not_running"), (None, "terminated")])
+    async def test_terminate_reports_whether_the_app_was_running(
+        self, app, auth_headers, mock_controller, was_running, status,
+    ):
+        mock_controller.terminate_app = AsyncMock(return_value=("AAAA-1111", was_running))
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/app/terminate",
+                json={"bundle_id": "com.example.App"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == status
+        assert resp.json()["was_running"] is was_running
+
+    async def test_terminate_an_app_that_is_not_installed_is_a_400(
+        self, app, auth_headers, mock_controller,
+    ):
+        mock_controller.terminate_app = AsyncMock(
+            side_effect=InvalidDeviceRequestError("com.x is not installed on AAAA-111"))
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/app/terminate",
+                json={"bundle_id": "com.x"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 400
+        assert "not installed" in resp.json()["detail"]
 
     async def test_uninstall_app(self, app, auth_headers, mock_controller):
         transport = ASGITransport(app=app)
