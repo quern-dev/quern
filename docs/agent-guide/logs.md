@@ -18,7 +18,7 @@ On iOS, `print()` writes to the app's stdout, which unified logging never sees a
 
 **How to check**, before a session that depends on logs:
 - Search the project: `print(` against `Logger(`, `os_log` or `NSLog`.
-- Or start log capture (`start_simulator_logging` or `start_device_logging`), launch the app, and look for a line you know it logs with `query_logs(process=...)`. On a simulator, an empty answer for a running app says why in `note`: a log filter that drops it, a level it never reaches, or `print()`.
+- Or start log capture (`start_simulator_logging` or `start_device_logging`), launch the app, and look for a line you know it logs with `query_logs(process=...)`. On a simulator, an empty answer filtered to a running app's process says why in `note`: a log filter that drops it, a level it never reaches, or `print()`. That is decided from everything the app has logged, not from your query, so an empty search or `since` window on an app that does log gets `note: null` -- it logs, just not that.
 
 **If the app uses `print()`**, tell the user rather than concluding the app is silent, and recommend `os.Logger`, with `privacy: .public` on values worth seeing on a device (they otherwise show as `<private>`), and never on tokens, passwords or personal data. Don't rewrite the app's logging without asking: it's their code. The full advice for the app's developers, including a `print()` diverter for an app that can't switch yet, is in quern's iOS logging guide: https://quern.dev/ios/ios-logging/
 
