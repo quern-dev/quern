@@ -1247,7 +1247,9 @@ only one simulator's, or only some processes. A session proxy captures every nam
 it was started with and stops only once none of them is claimed by anyone, so a
 name you remove can go on being captured (and, in shared mode, seen) while
 another name keeps its proxy running. The answer's stopped lists the names whose
-capture actually ended. Releasing a simulator does this for you.`,
+session proxy stopped -- not proof their capture ended: a name the main proxy's
+local-capture list also matches is still captured there (proxy_status shows that
+list). Releasing a simulator does this for you.`,
     inputSchema: strictParams({
       simulator_udid: z.string().optional().describe("Only this simulator's capture."),
       processes: z.array(z.string()).optional().describe("Only these processes."),
