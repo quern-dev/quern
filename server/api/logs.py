@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -275,7 +276,15 @@ async def query_logs(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     tail: bool = Query(default=False, description="If true, return the last N matching entries"),
-) -> LogQueryResponse:
+    include_raw: bool = Query(
+        default=False,
+        description=(
+            "Include each entry's `raw`, the original unparsed line. Off by "
+            "default: for simulator and oslog entries it is the whole JSON "
+            "record, several times `message` (#630)."
+        ),
+    ),
+) -> LogQueryResponse | JSONResponse:
     """Query historical log entries with filters and pagination."""
     params = LogQueryParams(
         since=since,
@@ -336,13 +345,26 @@ async def query_logs(
     note = None
     if total == 0 and source in (LogSource.SIMULATOR, None):
         note = await _gap_note(request, process, level=level, device_id=device_id, view=view)
-    return LogQueryResponse(
+    return _entries_answer(LogQueryResponse(
         entries=entries,
         total=total,
         has_more=(offset + limit) < total,
         note=note,
         **completeness,
-    )
+    ), include_raw)
+
+
+def _entries_answer(answer: BaseModel, include_raw: bool) -> BaseModel | JSONResponse:
+    """`answer` as sent, without each entry's `raw` unless it was asked for.
+
+    Omitted rather than sent empty, so "not asked for" never reads as "the
+    line was empty". Serialised the way FastAPI would serialise the model.
+    """
+    if include_raw:
+        return answer
+    return JSONResponse(answer.model_dump(
+        mode="json", by_alias=True, exclude={"entries": {"__all__": {"raw"}}},
+    ))
 
 
 async def _gap_note(request: Request, process: str | None, *, level: LogLevel | None,
@@ -508,7 +530,15 @@ async def get_errors(
     since: UtcDatetime | None = None,
     limit: int = Query(default=50, ge=1, le=1000),
     include_crashes: bool = True,
-) -> LogErrorsResponse:
+    include_raw: bool = Query(
+        default=False,
+        description=(
+            "Include each entry's `raw`, the original unparsed line. Off by "
+            "default: for simulator and oslog entries it is the whole JSON "
+            "record, several times `message` (#630)."
+        ),
+    ),
+) -> LogErrorsResponse | JSONResponse:
     """Get error-level entries and crash reports."""
     # Errors endpoint reads from both buffers (server errors are important!)
     buffers = _get_buffers(request, None)
@@ -536,13 +566,13 @@ async def get_errors(
     # happened: the one a caller asking "what is going wrong" came for.
     limited = all_entries[-limit:][::-1]
 
-    return LogErrorsResponse(
+    return _entries_answer(LogErrorsResponse(
         entries=limited,
         total=total,
         # Error-level evictions only: a busy buffer sheds debug lines all the
         # time, and that loses no errors.
         **_completeness(buffers, since, min_level=LogLevel.ERROR),
-    )
+    ), include_raw)
 
 
 # ---------------------------------------------------------------------------
