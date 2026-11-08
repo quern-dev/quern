@@ -104,7 +104,6 @@ APP_LOG_SOURCES = frozenset({
     LogSource.SIMULATOR,
     LogSource.DEVICE,
     LogSource.LOGCAT,
-    LogSource.APP_DRAIN,
     LogSource.CRASH,
 })
 
