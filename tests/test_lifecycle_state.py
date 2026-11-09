@@ -247,6 +247,15 @@ def test_update_state_noop_when_no_file(tmp_state_dir):
     assert read_state() is None
 
 
+def _opener(**open_kw):
+    """A loopback_opener whose open() is a MagicMock: is_server_healthy asks
+    through client.loopback_opener (#634), so stubbing urlopen reached a real
+    socket on 9100 and the failure tests passed on whatever answered there."""
+    opener = MagicMock()
+    opener.open = MagicMock(**open_kw)
+    return patch("server.remote.client.loopback_opener", return_value=opener)
+
+
 def test_is_server_healthy_success():
     """is_server_healthy should return True when health endpoint responds 200."""
     mock_resp = MagicMock()
@@ -254,16 +263,13 @@ def test_is_server_healthy_success():
     mock_resp.__enter__ = MagicMock(return_value=mock_resp)
     mock_resp.__exit__ = MagicMock(return_value=False)
 
-    with patch("server.lifecycle.state.urllib.request.urlopen", return_value=mock_resp):
+    with _opener(return_value=mock_resp):
         assert is_server_healthy(9100) is True
 
 
 def test_is_server_healthy_failure():
     """is_server_healthy should return False when connection fails."""
-    with patch(
-        "server.lifecycle.state.urllib.request.urlopen",
-        side_effect=ConnectionRefusedError,
-    ):
+    with _opener(side_effect=ConnectionRefusedError):
         assert is_server_healthy(9100) is False
 
 
@@ -271,10 +277,7 @@ def test_is_server_healthy_timeout():
     """is_server_healthy should return False on timeout."""
     import urllib.error
 
-    with patch(
-        "server.lifecycle.state.urllib.request.urlopen",
-        side_effect=urllib.error.URLError("timeout"),
-    ):
+    with _opener(side_effect=urllib.error.URLError("timeout")):
         assert is_server_healthy(9100) is False
 
 

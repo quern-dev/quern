@@ -2773,8 +2773,10 @@ def check_tunneld() -> CheckResult:
     running = False
     try:
         import urllib.request
+
+        from server.remote.client import loopback_opener
         req = urllib.request.Request(TUNNELD_URL, method="GET")
-        with urllib.request.urlopen(req, timeout=2) as resp:
+        with loopback_opener().open(req, timeout=2) as resp:     # no proxy (#634)
             running = resp.status == 200
     except Exception:
         pass
@@ -3637,11 +3639,12 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
                         import urllib.request
 
                         from server.device.ios.tunneld import TUNNELD_URL
+                        from server.remote.client import loopback_opener
                         for _ in range(20):
                             time.sleep(0.5)
                             try:
                                 req = urllib.request.Request(TUNNELD_URL, method="GET")
-                                with urllib.request.urlopen(req, timeout=1):
+                                with loopback_opener().open(req, timeout=1):
                                     break
                             except Exception:
                                 print(".", end="", flush=True)

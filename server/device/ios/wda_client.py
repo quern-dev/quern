@@ -527,7 +527,7 @@ class WdaBackend:
             else:
                 # tunneld connection — verify WDA is still reachable
                 try:
-                    async with httpx.AsyncClient() as client:
+                    async with httpx.AsyncClient(trust_env=False) as client:
                         resp = await client.get(
                             f"{conn.base_url}/status", timeout=2.0,
                         )
@@ -618,7 +618,7 @@ class WdaBackend:
 
         # Verify WDA is reachable
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(trust_env=False) as client:
                 resp = await client.get(f"{base_url}/status", timeout=3.0)
                 if resp.status_code == 200:
                     logger.info("WDA reachable via tunnel at %s", base_url)
@@ -683,7 +683,7 @@ class WdaBackend:
                 )
 
             base_url = f"http://localhost:{local_port}"
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(trust_env=False) as client:
                 resp = await client.get(f"{base_url}/status", timeout=3.0)
             if resp.status_code != 200:
                 raise DeviceError(
@@ -737,7 +737,7 @@ class WdaBackend:
 
             base_url = await self._get_base_url(udid)
             try:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(trust_env=False) as client:
                     resp = await client.post(
                         f"{base_url}/session",
                         json={"capabilities": {}},
@@ -775,7 +775,7 @@ class WdaBackend:
             # element query responses include rect, name, value, enabled — not just
             # type and label.
             try:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(trust_env=False) as client:
                     resp = await client.post(
                         f"{base_url}/session/{session_id}/appium/settings",
                         json={"settings": {
@@ -873,7 +873,7 @@ class WdaBackend:
 
         session_id = conn.session_id
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(trust_env=False) as client:
                 await client.delete(
                     f"{conn.base_url}/session/{session_id}",
                     timeout=WDA_TIMEOUT,
@@ -954,7 +954,7 @@ class WdaBackend:
         # and not a newer one another request has since established.
         conn_used = self._connections.get(udid)
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(trust_env=False) as client:
                 resp = await getattr(client, method)(
                     url, timeout=timeout or WDA_TIMEOUT, **kwargs,
                 )
@@ -1169,7 +1169,7 @@ class WdaBackend:
             if attempt:
                 await asyncio.sleep(pause)
             try:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(trust_env=False) as client:
                     resp = await client.get(f"{base_url}/status", timeout=timeout)
                     if resp.status_code == 200:
                         return WdaLiveness.ALIVE
@@ -1278,7 +1278,7 @@ class WdaBackend:
         conn = self._connections.get(udid)
         if conn is None:
             raise DeviceError(f"no WDA connection to {udid[:8]}", tool="wda")
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             resp = await client.get(f"{conn.base_url}/screenshot")
         resp.raise_for_status()
         value = resp.json().get("value")

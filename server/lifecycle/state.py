@@ -415,12 +415,16 @@ def detect_current_ssid() -> str | None:
 def is_server_healthy(port: int, host: str = "127.0.0.1", timeout: float = 2.0) -> bool:
     """Check if a server is responding on the given port.
 
-    Uses stdlib urllib only — no FastAPI/httpx dependency.
+    Uses stdlib urllib only — no FastAPI/httpx dependency. Never through a
+    proxy: one that is down, or blocks loopback, made a running server read
+    as stopped (#634).
     """
+    from server.remote.client import loopback_opener
+
     try:
         url = f"http://{host}:{port}/health"
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with loopback_opener().open(req, timeout=timeout) as resp:
             return resp.status == 200
     except Exception:
         return False
@@ -434,12 +438,14 @@ def fetch_tools(
     Separate from is_server_healthy() because tool probing (e.g. `idb
     list-targets`) can take several seconds — which is exactly why it no longer
     lives on the fast /health path. Returns the parsed JSON dict, or None if the
-    server is unreachable. Uses stdlib urllib only.
+    server is unreachable. Uses stdlib urllib only, and no proxy (#634).
     """
+    from server.remote.client import loopback_opener
+
     try:
         url = f"http://{host}:{port}/tools"
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with loopback_opener().open(req, timeout=timeout) as resp:
             if resp.status != 200:
                 return None
             return json.loads(resp.read().decode())

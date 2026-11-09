@@ -864,6 +864,10 @@ class TestCliTunneld:
             patch("server.device.ios.tunneld.PLIST_PATH") as mock_plist,
         ):
             mock_plist.exists.return_value = False
-            with patch("urllib.request.urlopen", side_effect=Exception("refused")):
+            # tunneld is asked through loopback_opener (#634): stubbing
+            # urlopen asked the real tunneld on this Mac.
+            refused = MagicMock()
+            refused.open.side_effect = Exception("refused")
+            with patch("server.remote.client.loopback_opener", return_value=refused):
                 result = cli_tunneld(["status"])
                 assert result == 0
