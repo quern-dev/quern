@@ -2012,6 +2012,7 @@ def _report_held_sessions() -> None:
 
     from server.__main__ import _server_base_url
     from server.config import API_KEY_FILE
+    from server.remote.client import loopback_opener
 
     print("Held sessions:")
     url = _server_base_url()
@@ -2023,7 +2024,7 @@ def _report_held_sessions() -> None:
         req = urllib.request.Request(url + "/api/v1/sessions",
                                      headers={"Authorization": f"Bearer {key}",
                                               "X-Quern-Session": "cli"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with loopback_opener().open(req, timeout=5) as resp:
             sessions = json.loads(resp.read() or b"{}").get("sessions") or []
     except (OSError, ValueError, urllib.error.URLError) as e:
         print(f"  ? not checked — {e}")

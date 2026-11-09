@@ -327,7 +327,7 @@ class TestTheSharedRule:
         key.write_text("k")
         monkeypatch.setattr("server.config.API_KEY_FILE", key)
         monkeypatch.setattr(main_mod, "_server_base_url", lambda: "http://127.0.0.1:1")
-        monkeypatch.setattr(cli.urllib.request, "urlopen", urlopen)
+        monkeypatch.setattr(cli, "_opener", lambda remote: urlopen)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", self.CLAUDE)
         monkeypatch.delenv("QUERN_SESSION", raising=False)
 

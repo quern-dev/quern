@@ -30,6 +30,7 @@ def _owner_call(method: str, path: str, body: dict | None = None) -> tuple[int, 
     server's own Mac, never remotely."""
     from server.__main__ import _server_base_url
     from server.config import API_KEY_FILE
+    from server.remote.client import loopback_opener
 
     url = _server_base_url()
     if url is None:
@@ -43,7 +44,7 @@ def _owner_call(method: str, path: str, body: dict | None = None) -> tuple[int, 
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
                  "X-Quern-Session": "cli"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with loopback_opener().open(req, timeout=30) as resp:
             return resp.status, json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
         try:
