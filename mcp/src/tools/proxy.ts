@@ -1082,7 +1082,9 @@ patterns and intercepts are kept across that restart; open
 connections are reset and held flows are released unmodified. When the proxy
 was running, the response's restart field says so: connections_reset,
 held_flows_released (a count), and restored: {mock_rules: count,
-bypass_patterns: count, intercept: the pattern or null}, or null itself if the
+bypass_patterns: count, intercepts: count, intercept: the first every-device
+intercept's pattern or null, even when scoped ones were restored}, or null
+itself if the
 proxy failed to come back up or could not be sent them -- the server keeps
 them and sends them at the next start_proxy. The call returns once the new
 proxy is serving with its rules applied, about a second; confirmed: true says
