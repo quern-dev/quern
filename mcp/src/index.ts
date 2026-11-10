@@ -44,6 +44,7 @@ import { registerRecordingTools } from "./tools/recordings.js";
 import { registerProfileTools } from "./tools/profiles.js";
 import { discoverServer } from "./config.js";
 import { readOwnVersion } from "./version.js";
+import { guidePages } from "./guide-pages.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -89,7 +90,7 @@ const BASE_INSTRUCTIONS = [
   "",
   "TROUBLESHOOTING: If tools fail with connection errors, call ensure_server to check/restart the server.",
   "",
-  "For the agent guide, read the quern://guide resource: an overview with a tool map, and the topic guides it points to (quern://guide/ui, /network, /devices, /logs, /performance, /sharing), each read when your task reaches it.",
+  "For the agent guide, read the quern://guide resource: an overview with a tool map, and the topic guides it points to (quern://guide/ui, /network, /devices, /logs, /performance, /sharing). Each topic is a contents list of short pages, one per subject (quern://guide/<topic>/<page>), and the tool map names the exact page for each common job: read only the page your task needs.",
 ];
 
 /** The agent guide's topic resources: quern://guide/<topic>, read from docs/agent-guide/<topic>.md. */
@@ -172,14 +173,30 @@ function buildServer(instructions: string): McpServer {
     })
   );
 
-  // The guide's topics, each its own resource so an agent reads only the one
-  // its task needs; quern://guide names them all. tests/test_agent_guide.py
-  // keeps this list, the files and the overview's links in step.
+  // The guide's topics, each its own resource; quern://guide names them all.
+  // A topic's page is its contents list, and each subject in it is a page of
+  // its own (quern://guide/<topic>/<page>), so an agent reads only the section
+  // its task needs -- measured, that halves the guide text an agent reads at
+  // no cost in correctness. The contents page is the one list of a topic's
+  // pages: each line naming one registers it, with that line as its
+  // description. tests/test_agent_guide.py keeps the lists, the files and the
+  // links in step.
   for (const [topic, description] of AGENT_GUIDE_TOPICS) {
     const uri = `quern://guide/${topic}`;
     server.resource(`guide-${topic}`, uri, { description, mimeType: "text/markdown" }, async () => ({
       contents: [{ uri, mimeType: "text/markdown", text: readResourceFile(`agent-guide/${topic}.md`) }],
     }));
+    for (const [page, about] of guidePages(topic, readResourceFile(`agent-guide/${topic}.md`))) {
+      const pageUri = `${uri}/${page}`;
+      server.resource(`guide-${topic}-${page}`, pageUri, {
+        description: `Agent guide, ${topic}: ${about}`, mimeType: "text/markdown",
+      }, async () => ({
+        contents: [{
+          uri: pageUri, mimeType: "text/markdown",
+          text: readResourceFile(`agent-guide/${topic}/${page}.md`),
+        }],
+      }));
+    }
   }
 
   server.resource(

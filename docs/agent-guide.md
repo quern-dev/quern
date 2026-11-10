@@ -2,7 +2,7 @@
 
 **For**: AI agents using Quern MCP tools for mobile app debugging and testing
 
-This page is the overview: how to start, the principles behind the tools, and which tool fits which job. The detail lives in topic guides, each its own MCP resource. Read one when your task reaches it.
+This page is the overview: how to start, the principles behind the tools, and which tool fits which job. The detail lives in topic guides, and each topic is split into short pages, one per subject, each its own MCP resource. A topic's address (`quern://guide/ui`) is its contents list: one line per page saying what it answers. The table below names the exact page for each common job, so you can usually go straight there.
 
 | Read | When |
 |---|---|
@@ -44,25 +44,32 @@ From there, use the right tool for your task. If any tool fails with a connectio
 
 ## Which tool for which job
 
-| You want to | Reach for | Detail |
+| You want to | Reach for | Read |
 |---|---|---|
-| See what's on screen | `get_screen_summary`, then `get_ui_tree`; `take_annotated_screenshot` when an element can't be found | ui |
-| Read a web view | `get_web_content` (iOS simulators; elsewhere the UI tree covers it) | ui |
-| Tap, type, swipe | `tap_element`, `type_text` (after `clear_text`), `swipe`, `gesture` | ui |
-| Reach an element off screen | `tap_element` (sweeps when the screen scrolls), `scroll_to_element` | ui |
-| Know which screen you're on | `identify_screen`, or `get_screen_summary(identify=true)` | ui |
-| See network traffic | `get_flow_summary`, `query_flows`, `get_flow_detail`; bracket an action with `start_capture_session`; capture an app by process name with `add_session_capture` (every simulator's, so filter by `simulator_udid`) | network |
-| Fake or change a response | `set_mock`; `set_intercept` + `release_flow` to edit a request | network |
-| Read app logs | `get_log_summary`, `query_logs`, `tail_logs`, `get_errors` | logs |
-| See what an action caused | `get_trace` | logs |
-| Investigate a crash | `get_latest_crash`, then logs and flows around it | logs |
-| Keep a whole run | `start_recording` / `stop_recording` | logs |
-| Measure an app | `get_performance`, `start_profile` / `stop_profile`, `get_thread_stacks` | performance |
-| Test under a bad network or a hot phone | `set_device_condition` (physical iPhones) | performance |
-| Slow the network on a simulator | hold requests with `set_intercept`, or the Mac's Network Link Conditioner (ask first) | network |
-| Get or control a device | `resolve_device`, `ensure_devices`, `install_app`, `launch_app`, `build_and_install` | devices |
-| Start an app from a known state | `save_app_state` / `restore_app_state`, plist tools (simulators) | devices |
-| Share a server or use another Mac | `reserve_devices`, `list_remotes`, `use_remote` | sharing |
+| See what's on screen | `get_screen_summary`, then `get_ui_tree`; `take_annotated_screenshot` when an element can't be found | `quern://guide/ui/reading` |
+| Read a web view | `get_web_content` (iOS simulators; elsewhere the UI tree covers it) | `quern://guide/ui/debugging` |
+| Tap, type, swipe | `tap_element`, `type_text` (after `clear_text`), `swipe`, `gesture` | `quern://guide/ui/tapping` |
+| Reach an element off screen | `tap_element` (sweeps when the screen scrolls), `scroll_to_element` | `quern://guide/ui/off-screen` |
+| Know which screen you're on | `identify_screen`, or `get_screen_summary(identify=true)` | `quern://guide/ui/landmarks` |
+| Take a screenshot after every action | `start_screenshot_timeline` / `stop_screenshot_timeline` | `quern://guide/logs/screenshot-timelines` |
+| See network traffic | `get_flow_summary`, `query_flows`, `get_flow_detail`; bracket an action with `start_capture_session`; capture an app by process name with `add_session_capture` (every simulator's, so filter by `simulator_udid`) | `quern://guide/network/capture` |
+| Capture a physical iPhone's traffic | `proxy_setup_guide`, `record_device_proxy_config`, then `wait_for_flow` (ask before installing the CA) | `quern://guide/devices/physical-proxy` |
+| Fake a response | `set_mock`, `update_mock` | `quern://guide/network/mocks` |
+| Hold or change a live request | `set_intercept`, `list_held_flows`, `release_flow`, `clear_intercept` | `quern://guide/network/intercept` |
+| Read app logs | `get_log_summary`, `query_logs`, `tail_logs`, `get_errors` | `quern://guide/logs/reading` |
+| See what an action caused | `get_trace` | `quern://guide/logs/trace` |
+| Investigate a crash | `get_latest_crash`, then logs and flows around it | `quern://guide/logs/crashes` |
+| Keep a whole run | `start_recording` / `stop_recording` | `quern://guide/logs/bug-reports` |
+| Measure an app | `get_performance`, `start_profile` / `stop_profile`, `get_thread_stacks` | `quern://guide/performance/which-tool` |
+| Test under a bad network or a hot phone | `set_device_condition` (physical iPhones) | `quern://guide/performance/device-conditions` |
+| Slow the network on a simulator | hold requests with `set_intercept`, or the Mac's Network Link Conditioner (ask first) | `quern://guide/network/slow-network` |
+| Get a device | `resolve_device`, `ensure_devices` | `quern://guide/devices/pool` |
+| Install, launch or stop an app | `install_app`, `launch_app`, `terminate_app` | `quern://guide/devices/controlling` |
+| Build and install an app | `build_and_install` | `quern://guide/devices/builds` |
+| Change location, permissions or locale | `set_location`, `grant_permission`, `set_simulator_setting`; `set_locale` (Android and physical iPhones, not simulators) | `quern://guide/devices/settings` |
+| Start an app from a known state | `save_app_state` / `restore_app_state`, plist tools (simulators) | `quern://guide/devices/checkpoints` |
+| Share a server with other agents | `reserve_devices`, `release_devices` | `quern://guide/sharing/shared-server` |
+| Use another Mac's server | `list_remotes`, `use_remote` | `quern://guide/sharing/remote-servers` |
 
 ---
 
