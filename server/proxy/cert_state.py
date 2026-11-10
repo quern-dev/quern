@@ -333,13 +333,10 @@ def proxy_before_quern(udid: str) -> tuple[bool, str | None]:
 
 
 def record_proxy_before_quern(udid: str, value: str | None) -> None:
-    """Note the device's proxy as it was before quern's apply. A record already
-    there is kept: a second apply would otherwise read quern's own setting and
-    file it as the one to restore."""
+    """Note the device's proxy as it was before quern's apply, replacing any
+    earlier note: the caller decides which value is the device's own."""
     from server.device.ios.devicectl import canonical_device_id
 
-    if proxy_before_quern(udid)[0]:
-        return
     update_cert_state(canonical_device_id(udid), {"proxy_before_quern": {
         "value": value, "recorded_at": datetime.now(UTC).isoformat()}})
 
@@ -349,6 +346,10 @@ def forget_proxy_before_quern(udid: str) -> None:
     the device, as `forget_device_proxy_configs` does and for the same reason."""
     from server.device.ios.devicectl import canonical_device_id
 
+    if not proxy_before_quern(udid)[0]:
+        # Nothing to forget, and writing a null would file a device that has
+        # no other state as one with an uninstalled CA (review).
+        return
     canonical = canonical_device_id(udid)
     try:
         # Raw keys: the spellings as they sit on disk, which the merged read hides.

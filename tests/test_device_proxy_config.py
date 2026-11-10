@@ -20,6 +20,7 @@ See #265.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1299,12 +1300,44 @@ class TestAProxyThatWasThereBeforeIsPutBack:
 
 
 class TestTheRecordOfTheProxyBeforeQuern:
-    def test_a_second_record_keeps_the_first(self):
+    def test_a_second_record_replaces_the_first(self):
+        """Which value is the device's own is the apply's decision, made from
+        what the device holds now."""
         from server.proxy import cert_state
 
         cert_state.record_proxy_before_quern("PHONE1", "10.0.0.5:3128")
-        cert_state.record_proxy_before_quern("PHONE1", "192.168.1.189:9101")
-        assert cert_state.proxy_before_quern("PHONE1") == (True, "10.0.0.5:3128")
+        cert_state.record_proxy_before_quern("PHONE1", "10.9.9.9:8080")
+        assert cert_state.proxy_before_quern("PHONE1") == (True, "10.9.9.9:8080")
+
+    def test_a_record_survives_a_spelling_that_has_none(self):
+        from server.proxy import cert_state
+
+        with patch("server.device.ios.devicectl.canonical_device_id",
+                   side_effect=lambda u: "CANON" if u in ("RAW", "CANON") else u):
+            cert_state.CERT_STATE_FILE.write_text(json.dumps({
+                "RAW": {"proxy_before_quern": {"value": "10.0.0.5:3128"}},
+                "CANON": {"proxy_before_quern": None}}))
+            assert cert_state.proxy_before_quern("CANON") == (True, "10.0.0.5:3128")
+
+    def test_forgetting_reaches_every_spelling(self):
+        from server.proxy import cert_state
+
+        with patch("server.device.ios.devicectl.canonical_device_id",
+                   side_effect=lambda u: "CANON" if u in ("RAW", "CANON") else u):
+            cert_state.CERT_STATE_FILE.write_text(json.dumps({
+                "RAW": {"proxy_before_quern": {"value": "10.0.0.5:3128"}},
+                "CANON": {"cert_installed": True}}))
+            cert_state.forget_proxy_before_quern("CANON")
+            assert cert_state.proxy_before_quern("RAW") == (False, None)
+
+    def test_forgetting_a_device_with_no_record_writes_nothing(self):
+        """A null written for a device with no other state would list it in
+        cert_setup as one whose CA is not installed."""
+        from server.proxy import cert_state
+
+        cert_state.forget_proxy_before_quern("PHONE1")
+        assert not cert_state.CERT_STATE_FILE.exists() \
+            or json.loads(cert_state.CERT_STATE_FILE.read_text() or "{}") == {}
 
     def test_forgetting_ends_it(self):
         from server.proxy import cert_state
@@ -1313,3 +1346,157 @@ class TestTheRecordOfTheProxyBeforeQuern:
         assert cert_state.proxy_before_quern("PHONE1") == (True, None)
         cert_state.forget_proxy_before_quern("PHONE1")
         assert cert_state.proxy_before_quern("PHONE1") == (False, None)
+
+
+class _FakeDevice:
+    """A device whose proxy setting the adb mocks actually change, so a test
+    reads the outcome rather than which calls were made (#645 review)."""
+
+    def __init__(self, ctrl, value):
+        self.value, self.fail_reads = value, 0
+
+        async def get(udid, strict=False):
+            if self.fail_reads:
+                self.fail_reads -= 1
+                raise RuntimeError("adb: device offline")
+            return self.value
+
+        async def put(udid, v):
+            self.value = v
+
+        async def set_(udid, host, port):
+            self.value = f"{host}:{port}"
+
+        async def delete(udid):
+            self.value = None
+
+        ctrl.adb.get_http_proxy = AsyncMock(side_effect=get)
+        ctrl.adb.put_http_proxy = AsyncMock(side_effect=put)
+        ctrl.adb.set_http_proxy = AsyncMock(side_effect=set_)
+        ctrl.adb.clear_http_proxy = AsyncMock(side_effect=delete)
+
+
+_CORP = "10.0.0.5:3128"
+
+
+def _held_by_a_session(request):
+    session = SimpleNamespace(id="client:a/s1", opened_at="o1", principal="client:a",
+                              reservations=["PHONE1"])
+    holding = {"now": True}
+    request.app.state.sessions = SimpleNamespace(
+        holder_of=lambda u: SimpleNamespace(session=session) if holding["now"] else None)
+    caller = SimpleNamespace(session=session.id, principal="client:a", is_owner=False)
+    return session, holding, patch("server.api.proxy_certs.visibility.current_caller",
+                                   return_value=caller)
+
+
+class TestTheRestoreSurvivesItsFailurePaths:
+    """The adversarial review's repros: each ended with the device's own proxy
+    deleted, which is #645 again."""
+
+    async def _call(self, ctrl, request=None, **flags):
+        a, b = _hosts()
+        with a, b:
+            return await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", **flags), request or _request(ctrl))
+
+    async def test_a_restore_that_could_not_be_read_back_is_not_undone_by_the_release(self):
+        from server.api import sessions as sessions_api
+
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, _CORP)
+        request = _request(ctrl)
+        session, holding, who = _held_by_a_session(request)
+        with who:
+            out = await self._call(ctrl, request, apply=True)
+            assert out["ends_with_hold"] is True
+            dev.fail_reads = 1
+            out = await self._call(ctrl, request, clear=True)
+        assert dev.value == _CORP and out["proxy_verified"] is None
+        holding["now"] = False
+        await sessions_api._end_device_proxy(
+            SimpleNamespace(state=request.app.state), request.app.state.sessions,
+            session, "PHONE1", [])
+        assert dev.value == _CORP
+
+    async def test_a_release_during_the_apply_leaves_the_devices_own_proxy(self):
+        from server.api.proxy_certs import clear_device_proxy
+
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, _CORP)
+        request = _request(ctrl)
+        _, holding, who = _held_by_a_session(request)
+
+        async def bounce(udid):
+            # The session's release runs while the network bounces.
+            if holding["now"]:
+                holding["now"] = False
+                await clear_device_proxy(ctrl, "PHONE1")
+                request.app.state.device_proxy_holds.pop("PHONE1", None)
+            return True
+
+        ctrl.adb.reattach_network = AsyncMock(side_effect=bounce)
+        with who:
+            out = await self._call(ctrl, request, apply=True)
+        assert out.get("hold_ended") is True
+        assert dev.value == _CORP
+
+    async def test_a_proxy_set_after_an_uncleared_apply_is_the_one_kept(self):
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, None)
+        await self._call(ctrl, apply=True)
+        dev.value = "10.9.9.9:8080"     # an admin sets a lab proxy afterwards
+        out = await self._call(ctrl, apply=True)
+        assert out["previous_proxy"] == "10.9.9.9:8080"
+        await self._call(ctrl, clear=True)
+        assert dev.value == "10.9.9.9:8080"
+
+    async def test_an_older_quern_address_is_not_filed_as_the_devices_own(self):
+        from server.proxy.cert_state import record_device_proxy_config
+
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, "192.168.1.50:9101")    # quern, from another Mac address
+        record_device_proxy_config("PHONE1", "MonaLisa", "192.168.1.50", 9101)
+        out = await self._call(ctrl, apply=True)
+        assert out["previous_proxy"] is None
+        await self._call(ctrl, clear=True)
+        assert dev.value is None
+
+    async def test_a_clear_on_a_device_quern_never_recorded_leaves_no_entry(self):
+        from server.proxy import cert_state
+
+        ctrl = _android()
+        _FakeDevice(ctrl, None)
+        await self._call(ctrl, clear=True)
+        assert not cert_state.CERT_STATE_FILE.exists() \
+            or json.loads(cert_state.CERT_STATE_FILE.read_text() or "{}") == {}
+
+    async def test_a_failed_first_write_leaves_no_record(self):
+        from server.proxy.cert_state import proxy_before_quern
+
+        ctrl = _android()
+        _FakeDevice(ctrl, _CORP)
+        ctrl.adb.set_http_proxy = AsyncMock(side_effect=RuntimeError("boom"))
+        with pytest.raises(HTTPException):
+            await self._call(ctrl, apply=True)
+        assert proxy_before_quern("PHONE1") == (False, None)
+
+    async def test_a_failed_second_write_keeps_the_first_record(self):
+        from server.proxy.cert_state import proxy_before_quern
+
+        ctrl = _android()
+        _FakeDevice(ctrl, _CORP)
+        await self._call(ctrl, apply=True)
+        ctrl.adb.set_http_proxy = AsyncMock(side_effect=RuntimeError("boom"))
+        with pytest.raises(HTTPException):
+            await self._call(ctrl, apply=True)
+        assert proxy_before_quern("PHONE1") == (True, _CORP)
+
+    async def test_a_record_that_cannot_be_written_refuses_the_apply(self):
+        ctrl = _android()
+        _FakeDevice(ctrl, _CORP)
+        with patch("server.proxy.cert_state.update_cert_state",
+                   side_effect=PermissionError("read-only")), pytest.raises(HTTPException) as e:
+            await self._call(ctrl, apply=True)
+        assert e.value.status_code == 500 and "Could not record" in e.value.detail
+        ctrl.adb.set_http_proxy.assert_not_awaited()
