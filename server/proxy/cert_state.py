@@ -332,6 +332,35 @@ def proxy_before_quern(udid: str) -> tuple[bool, str | None]:
     return True, record.get("value")
 
 
+def proxy_record(udid: str) -> dict | None:
+    """The whole proxy-before-quern record, or None (#645)."""
+    record = (read_cert_state_for_device(udid) or {}).get("proxy_before_quern")
+    return dict(record) if isinstance(record, dict) else None
+
+
+def put_proxy_record(udid: str, record: dict | None) -> None:
+    """Write a record back as it was, or forget it when there was none: what a
+    failed apply that left the device untouched does with the one it read."""
+    from server.device.ios.devicectl import canonical_device_id
+
+    if record is None:
+        forget_proxy_before_quern(udid)
+    else:
+        update_cert_state(canonical_device_id(udid), {"proxy_before_quern": record})
+
+
+def mark_proxy_restored(udid: str) -> None:
+    """Keep the record after the device was put back, marked so: a second clear
+    then knows there is nothing of quern's to undo, where without a record it
+    would delete the proxy just restored (CodeRabbit)."""
+    from server.device.ios.devicectl import canonical_device_id
+
+    record = proxy_record(udid)
+    if record is not None:
+        update_cert_state(canonical_device_id(udid), {"proxy_before_quern": {
+            **record, "restored": True}})
+
+
 def quern_addresses_applied(udid: str) -> list[str]:
     """The proxy addresses quern has applied to the device while this record
     stood. Kept in the record itself, because the per-network configs are

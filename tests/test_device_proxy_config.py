@@ -1529,3 +1529,56 @@ class TestTheRestoreSurvivesItsFailurePaths:
         assert "PHONE1" in request.app.state.device_proxy_holds
         await self._call(ctrl, request, clear=True)
         assert dev.value == _CORP
+
+    async def test_a_second_clear_leaves_the_restored_proxy_alone(self):
+        """With the record gone after a restore, a second clear deleted the
+        proxy it had just put back (CodeRabbit)."""
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, _CORP)
+        await self._call(ctrl, apply=True)
+        await self._call(ctrl, clear=True)
+        writes, bounces = ctrl.adb.put_http_proxy.await_count, ctrl.adb.reattach_network.await_count
+        out = await self._call(ctrl, clear=True)
+        assert dev.value == _CORP and out["restored_proxy"] == _CORP
+        assert out["proxy_verified"] is True
+        # Nothing to undo, so no write and no Wi-Fi bounce (#652).
+        assert ctrl.adb.put_http_proxy.await_count == writes
+        assert ctrl.adb.reattach_network.await_count == bounces
+
+    async def test_a_late_write_after_the_release_is_undone(self):
+        """The release restores the device while the write is in flight; the
+        write then lands and adb reports it failed (CodeRabbit)."""
+        from server.api.proxy_certs import clear_device_proxy
+
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, _CORP)
+        request = _request(ctrl)
+        _, holding, who = _held_by_a_session(request)
+
+        async def released_then_landed(udid, host, port):
+            holding["now"] = False
+            await clear_device_proxy(ctrl, "PHONE1")
+            request.app.state.device_proxy_holds.pop("PHONE1", None)
+            dev.value = f"{host}:{port}"
+            raise RuntimeError("adb: connection reset")
+
+        ctrl.adb.set_http_proxy = AsyncMock(side_effect=released_then_landed)
+        with who, pytest.raises(HTTPException):
+            await self._call(ctrl, request, apply=True)
+        assert dev.value == _CORP
+
+    async def test_an_untouched_repeat_apply_keeps_the_hold(self):
+        """The device is still on the first apply's proxy, so the release must
+        still put it back (CodeRabbit)."""
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, _CORP)
+        request = _request(ctrl)
+        _, _, who = _held_by_a_session(request)
+        with who:
+            await self._call(ctrl, request, apply=True)
+            ctrl.adb.set_http_proxy = AsyncMock(side_effect=RuntimeError("boom"))
+            with pytest.raises(HTTPException):
+                await self._call(ctrl, request, apply=True)
+        assert "PHONE1" in request.app.state.device_proxy_holds
+        await self._call(ctrl, request, clear=True)
+        assert dev.value == _CORP
