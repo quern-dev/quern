@@ -321,7 +321,9 @@ async def test_a_clients_intercepts_end_with_its_hold():
     assert [r["rule_id"] for r in adapter.intercept_rules()] == [other_device, owners_own]
 
 
-def test_the_addons_held_event_keeps_which_intercept_held_it():
+async def test_the_addons_held_event_keeps_which_intercept_held_it():
+    # Async: the adapter emits its log entry on the running loop, as it does
+    # in the server.
     """The rule_id the addon reports is what a client's release and a
     one-intercept clear go by; dropped here, both act on the wrong flows."""
     adapter = ProxyAdapter(flow_store=FlowStore(), listen_port=9101)
