@@ -120,6 +120,25 @@ class TestReadingTheProxy:
         monkeypatch.setattr(adb, "_run_adb_for_device", _returns(""))
         assert await adb.get_http_proxy("X") is None
 
+    async def test_strict_takes_empty_output_for_a_failed_read(self, adb, monkeypatch):
+        """What a clear later deletes on the strength of (#645)."""
+        from server.models import DeviceError
+
+        monkeypatch.setattr(adb, "_run_adb_for_device", _returns(""))
+        with pytest.raises(DeviceError):
+            await adb.get_http_proxy("X", strict=True)
+
+    async def test_strict_still_reads_null_as_unset(self, adb, monkeypatch):
+        monkeypatch.setattr(adb, "_run_adb_for_device", _returns("null\n"))
+        assert await adb.get_http_proxy("X", strict=True) is None
+
+    async def test_a_value_read_is_written_back_as_it_was(self, adb, monkeypatch):
+        run = _returns("")
+        monkeypatch.setattr(adb, "_run_adb_for_device", run)
+        await adb.put_http_proxy("X", "proxy.corp:3128")
+        run.assert_awaited_once_with(
+            "X", "shell", "settings", "put", "global", "http_proxy", "proxy.corp:3128")
+
 
 class TestTheBounceRefusesToCutItsOwnConnection:
     async def test_a_network_transport_is_not_bounced(self, adb, monkeypatch):

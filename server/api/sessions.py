@@ -723,6 +723,7 @@ async def _end_device_proxy(app: Any, registry: Any, session: Any, udid: str,
         holds.pop(udid, None)
         actions.append({"udid": udid, "action": "device_proxy_cleared", "ok": True,
                         "proxy_verified": cleared["proxy_verified"],
+                        "restored_proxy": cleared["restored_proxy"],
                         "network_reattached": cleared["network_reattached"]})
     except Exception as e:  # noqa: BLE001 -- reported, never raised
         attempts = (record[2] if len(record) > 2 else 0) + 1

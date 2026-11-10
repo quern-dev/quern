@@ -34,6 +34,17 @@ from server.device.controller import DeviceController
 from server.models import DeviceType
 
 
+@pytest.fixture(autouse=True)
+def _own_cert_state(tmp_path, monkeypatch):
+    """A cert-state file per test: an apply records the device's proxy from
+    before quern (#645), and a record left by one test would be the "previous"
+    proxy of the next."""
+    from server.proxy import cert_state
+
+    monkeypatch.setattr(cert_state, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cert_state, "CERT_STATE_FILE", tmp_path / "cert-state.json")
+
+
 def _request(ctrl, port: int = 9101, listen_host: str = "0.0.0.0",
              is_running: bool = True):
     adapter = SimpleNamespace(
@@ -291,7 +302,10 @@ class TestTheResponseReportsTheDeviceNotTheRequest:
                 _request(ctrl, port=9177),
             )
 
-        ctrl.adb.get_http_proxy.assert_awaited_once_with("PHONE1")
+        # Twice: once before the write, to know what to put back (#645), and
+        # once after it, to read back what the device holds.
+        assert [c.args for c in ctrl.adb.get_http_proxy.await_args_list] == [
+            ("PHONE1",), ("PHONE1",)]
         assert out["device_proxy"] == "192.168.1.189:9177"
 
     async def test_a_write_that_did_not_take_is_visible(self):
@@ -638,7 +652,8 @@ class TestQuernMakesTheComparisonItself:
 
     async def test_a_failed_read_back_verifies_nothing_either_way(self):
         ctrl = _android()
-        ctrl.adb.get_http_proxy = AsyncMock(side_effect=RuntimeError("offline"))
+        # The read before the write answers; the read-back after it does not.
+        ctrl.adb.get_http_proxy = AsyncMock(side_effect=[None, RuntimeError("offline")])
         a, b = _hosts()
         with a, b:
             out = await record_device_proxy_config_endpoint(
@@ -848,7 +863,8 @@ class TestAProxyEndsWithTheHoldThatAppliedIt:
         actions = await sessions_api._end_client_work(app, registry, session)
         ctrl.adb.clear_http_proxy.assert_awaited_once_with("PHONE1")
         assert {"udid": "PHONE1", "action": "device_proxy_cleared", "ok": True,
-                "proxy_verified": True, "network_reattached": True} in actions
+                "proxy_verified": True, "restored_proxy": None,
+                "network_reattached": True} in actions
         assert app.state.device_proxy_holds == {"PHONE2": ("other", None)}
 
     async def test_a_later_opening_of_the_session_does_not_clear_an_earlier_ones(self):
@@ -1182,3 +1198,101 @@ async def test_a_failed_clear_after_the_hold_ended_is_reported_and_kept_for_a_re
             RecordDeviceProxyRequest(udid="PHONE1", apply=True), request)
     assert out["hold_ended"] is True and "device offline" in out["hold_ended_clear_error"]
     assert "PHONE1" in request.app.state.device_proxy_holds
+
+
+class TestAProxyThatWasThereBeforeIsPutBack:
+    """#645: apply overwrote a phone's own global proxy (a corporate or lab
+    one) and clear deleted it, leaving the phone off the proxy it needs."""
+
+    async def _apply(self, ctrl):
+        a, b = _hosts()
+        with a, b:
+            return await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), _request(ctrl))
+
+    async def _clear(self, ctrl):
+        return await record_device_proxy_config_endpoint(
+            RecordDeviceProxyRequest(udid="PHONE1", clear=True), _request(ctrl))
+
+    async def test_apply_over_an_existing_proxy_then_clear_puts_it_back(self):
+        ctrl = _android()
+        ctrl.adb.put_http_proxy = AsyncMock()
+        ctrl.adb.get_http_proxy = AsyncMock(side_effect=[
+            "10.0.0.5:3128", "192.168.1.189:9101", "10.0.0.5:3128"])
+        out = await self._apply(ctrl)
+        assert out["previous_proxy"] == "10.0.0.5:3128"
+        assert ctrl.adb.get_http_proxy.await_args_list[0].kwargs == {"strict": True}
+
+        out = await self._clear(ctrl)
+        ctrl.adb.put_http_proxy.assert_awaited_once_with("PHONE1", "10.0.0.5:3128")
+        ctrl.adb.clear_http_proxy.assert_not_awaited()
+        assert out["restored_proxy"] == "10.0.0.5:3128"
+        assert out["proxy_verified"] is True
+
+    async def test_apply_over_none_then_clear_deletes_it(self):
+        ctrl = _android()
+        ctrl.adb.put_http_proxy = AsyncMock()
+        ctrl.adb.get_http_proxy = AsyncMock(side_effect=[None, "192.168.1.189:9101", None])
+        assert (await self._apply(ctrl))["previous_proxy"] is None
+        out = await self._clear(ctrl)
+        ctrl.adb.clear_http_proxy.assert_awaited_once_with("PHONE1")
+        ctrl.adb.put_http_proxy.assert_not_awaited()
+        assert out["restored_proxy"] is None and out["proxy_verified"] is True
+
+    async def test_a_read_that_fails_before_apply_refuses_it(self):
+        ctrl = _android()
+        ctrl.adb.get_http_proxy = AsyncMock(side_effect=RuntimeError("device offline"))
+        with pytest.raises(HTTPException) as e:
+            await self._apply(ctrl)
+        assert e.value.status_code == 502 and "Nothing was changed" in e.value.detail
+        ctrl.adb.set_http_proxy.assert_not_awaited()
+
+    async def test_a_second_apply_keeps_the_first_record(self):
+        """Read again, the device holds quern's own proxy: filing that would
+        put quern's proxy back on clear."""
+        ctrl = _android()
+        ctrl.adb.put_http_proxy = AsyncMock()
+        ctrl.adb.get_http_proxy = AsyncMock(side_effect=[
+            "10.0.0.5:3128", "192.168.1.189:9101",
+            "192.168.1.189:9101", "10.0.0.5:3128"])
+        await self._apply(ctrl)
+        assert (await self._apply(ctrl))["previous_proxy"] == "10.0.0.5:3128"
+        await self._clear(ctrl)
+        ctrl.adb.put_http_proxy.assert_awaited_once_with("PHONE1", "10.0.0.5:3128")
+
+    async def test_quern_s_own_leftover_is_not_filed_as_the_previous_one(self):
+        ctrl = _android()
+        ctrl.adb.get_http_proxy = AsyncMock(return_value="192.168.1.189:9101")
+        assert (await self._apply(ctrl))["previous_proxy"] is None
+
+    async def test_a_restore_that_did_not_take_keeps_the_record_for_a_retry(self):
+        from server.proxy.cert_state import proxy_before_quern
+
+        ctrl = _android()
+        ctrl.adb.put_http_proxy = AsyncMock()
+        ctrl.adb.get_http_proxy = AsyncMock(side_effect=[
+            "10.0.0.5:3128", "192.168.1.189:9101", "192.168.1.189:9101"])
+        await self._apply(ctrl)
+        out = await self._clear(ctrl)
+        assert out["proxy_verified"] is False
+        assert proxy_before_quern("PHONE1") == (True, "10.0.0.5:3128")
+
+    async def test_a_hold_release_restores_it_too(self):
+        from server.api import sessions as sessions_api
+
+        ctrl = _android()
+        ctrl.adb.put_http_proxy = AsyncMock()
+        ctrl.adb.get_http_proxy = AsyncMock(side_effect=["10.0.0.5:3128", "10.0.0.5:3128"])
+        from server.api.proxy_certs import _note_proxy_before_quern
+
+        await _note_proxy_before_quern(ctrl, "PHONE1", "192.168.1.189:9101")
+        opened = 1.0
+        app = SimpleNamespace(state=SimpleNamespace(
+            device_controller=ctrl, device_proxy_holds={"PHONE1": ("ci", opened, 0)}))
+        registry = SimpleNamespace(holder_of=lambda udid: None)
+        session = SimpleNamespace(id="ci", principal="owner", opened_at=opened,
+                                  reservations=["PHONE1"])
+        actions = await sessions_api._end_client_work(app, registry, session)
+        ctrl.adb.put_http_proxy.assert_awaited_once_with("PHONE1", "10.0.0.5:3128")
+        cleared = [a for a in actions if a["action"] == "device_proxy_cleared"]
+        assert cleared and cleared[0]["ok"] and cleared[0]["restored_proxy"] == "10.0.0.5:3128"
