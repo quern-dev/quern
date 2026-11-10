@@ -8,6 +8,8 @@ The app knowledge base is a set of markdown files that capture everything you ne
 
 ## Pages
 
+Loading a knowledge base into quern and identifying screens with it is in the agent guide: `quern://guide/ui/landmarks`.
+
 This guide is split into pages, one per subject. Read the one you need:
 
 - `quern://app-knowledge-guide/getting-started` -- Getting Started: a new or existing knowledge base: config.json and app.md first, then the tour
