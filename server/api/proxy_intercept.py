@@ -171,22 +171,30 @@ async def list_held_flows(
     if adapter is None:
         return InterceptStatusResponse()
 
-    # Long-poll: wait for a held flow if none exist and timeout > 0
-    if timeout > 0 and not adapter.held_count():
-        await adapter.wait_for_held(timeout)
-
-    held = adapter.get_held_flows()
-    rules = adapter.intercept_rules()
-    pattern = adapter._intercept_pattern
     view = visibility.data_view()
-    if not view.everything:
+
+    def visible() -> tuple[list[dict], list[dict]]:
+        rules, held = adapter.intercept_rules(), adapter.get_held_flows()
+        if view.everything:
+            return rules, held
         # Blind (#254): its own intercepts and the flows they hold, which it
         # needs the ids of to release them (#646 review). Others' are the
         # rest of the server's set-up.
         mine = _own_rule_ids(request, rules, view)
-        rules = [r for r in rules if r["rule_id"] in mine]
-        held = [h for h in held if h.get("rule_id") in mine]
-        pattern = None
+        return ([r for r in rules if r["rule_id"] in mine],
+                [h for h in held if h.get("rule_id") in mine])
+
+    # Long-poll: wait for a held flow if none exist and timeout > 0. A blind
+    # caller waits for one of its own: another session's held flow is not
+    # an answer it can see (#646 review).
+    rules, held = visible()
+    if timeout > 0 and not held:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not held and (left := deadline - loop.time()) > 0:
+            await adapter.wait_for_held(left)
+            rules, held = visible()
+    pattern = adapter._intercept_pattern if view.everything else None
     return InterceptStatusResponse(
         pattern=pattern,
         intercepts=[InterceptRuleInfo(rule_id=r["rule_id"], pattern=r["pattern"],

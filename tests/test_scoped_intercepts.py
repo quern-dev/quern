@@ -453,6 +453,31 @@ class TestReviewFindings:
         finally:
             visibility.MODE = before
 
+    def test_a_blind_clients_long_poll_waits_for_a_flow_of_its_own(self, world):
+        from server import visibility
+
+        c, _, adapter, alice, bob = world
+        a = _set(c, alice, simulator_udid=SIM_A).json()["rule_id"]
+        b = _set(c, bob, simulator_udid=SIM_B).json()["rule_id"]
+        _held(adapter, "fb", b)
+        waits = []
+
+        async def wait_for_held(timeout):
+            # The first wake-up is another of Bob's; only the second is hers.
+            waits.append(timeout)
+            _held(adapter, "fb2", b) if len(waits) == 1 else _held(adapter, "fa", a)
+            return True
+
+        adapter.wait_for_held = wait_for_held
+        before, visibility.MODE = visibility.MODE, "blind"
+        try:
+            r = c.get("/api/v1/proxy/intercept/held?timeout=5", headers=_h(alice))
+            assert r.status_code == 200, r.text
+            assert [f["id"] for f in r.json()["held_flows"]] == ["fa"]
+            assert len(waits) == 2
+        finally:
+            visibility.MODE = before
+
     def test_blind_proxy_status_lists_only_the_callers_intercepts(self):
         from datetime import timedelta
 
