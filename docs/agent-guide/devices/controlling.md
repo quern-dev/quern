@@ -11,6 +11,6 @@
 - List installed apps: `list_apps`
 
 - Screenshot: `take_screenshot`
-- Location: `set_location` (simulators only)
-- Permissions: `grant_permission` (simulators only)
+- Location: `set_location` (iOS simulators and Android emulators)
+- Permissions: `grant_permission` (iOS simulators and Android devices)
 - Physical device setup: `setup_wda` (first time only)
