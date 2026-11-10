@@ -319,3 +319,14 @@ async def test_a_clients_intercepts_end_with_its_hold():
     assert {"udid": SIM_A, "action": "intercept_removed", "ok": True, "rule_id": mine} in actions
     # Its intercept on a device it still holds, and the owner's, stay.
     assert [r["rule_id"] for r in adapter.intercept_rules()] == [other_device, owners_own]
+
+
+def test_the_addons_held_event_keeps_which_intercept_held_it():
+    """The rule_id the addon reports is what a client's release and a
+    one-intercept clear go by; dropped here, both act on the wrong flows."""
+    adapter = ProxyAdapter(flow_store=FlowStore(), listen_port=9101)
+    adapter._handle_intercepted({
+        "type": "intercepted", "id": "f_1", "rule_id": "icpt_a", "timestamp": time.time(),
+        "request": {"method": "GET", "url": "https://x.test/", "host": "x.test", "path": "/"}})
+    assert adapter.held_by("f_1") == "icpt_a"
+    assert adapter.get_held_flows()[0]["rule_id"] == "icpt_a"
