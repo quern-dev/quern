@@ -9,6 +9,6 @@ This is a separate issue from identifier reliability. The label is *correct*, bu
 **How to handle dynamic labels:**
 
 - **Document the stable prefix.** If the label always starts with a fixed string (e.g., `"Attributes, "`), record that prefix and note that the rest varies.
-- **Use partial matching.** In `tap_element`, use the stable portion of the label. If quern's `tap_element` requires an exact match, note in the doc that the agent should use `get_ui_tree` to find the element by prefix, then tap by coordinates or identifier instead.
+- **Use partial matching.** In `tap_element`, pass the stable portion as `label_prefix` (or `label_contains` for a stable middle); `label` matches the whole label.
 - **In the Key Elements table**, write the stable portion followed by `...` and explain the dynamic part in Notes. Example: `Attributes, ...` with note "Comma-separated list of cache attributes, varies per cache."
 - **Prefer identifier over label** for dynamic-label elements — this is the one case where identifiers are more reliable than labels, if one exists.

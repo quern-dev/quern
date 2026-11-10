@@ -121,7 +121,8 @@ the new value down.
 the Mastodon instance picker moved from `/communities` to `/servers` between
 knowledge-base revisions. Prefer structural elements -- a heading, a button named by its
 `aria-label` -- over text the site can reword. Quern takes no CSS selectors: `get_web_content` maps
-these to the `Heading` or `Button` type and the label that its tools and landmarks match.
+these to the `Heading` or `Button` type and the label that its tools and landmarks match. Landmark matching sees web elements only for 60 seconds after `get_web_content`, so on a web screen call it
+right before `identify_screen`.
 
 None of this applies on Android, where the accessibility tree does descend into
 a `WebView` and web content appears as ordinary elements.
