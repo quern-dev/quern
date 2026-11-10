@@ -1500,3 +1500,32 @@ class TestTheRestoreSurvivesItsFailurePaths:
             await self._call(ctrl, apply=True)
         assert e.value.status_code == 500 and "Could not record" in e.value.detail
         ctrl.adb.set_http_proxy.assert_not_awaited()
+
+    async def test_querns_earlier_address_is_known_without_an_ssid(self):
+        """A device off Wi-Fi gets no per-network config, so only the record
+        can say quern's last address was quern's (CodeRabbit)."""
+        ctrl = _android(ssid=None)
+        dev = _FakeDevice(ctrl, _CORP)
+        await self._call(ctrl, _request(ctrl, port=9101), apply=True)
+        out = await self._call(ctrl, _request(ctrl, port=9102), apply=True)
+        assert out["previous_proxy"] == _CORP
+        await self._call(ctrl, clear=True)
+        assert dev.value == _CORP
+
+    async def test_a_write_reported_failed_that_landed_keeps_the_record_and_hold(self):
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, _CORP)
+        request = _request(ctrl)
+        _, _, who = _held_by_a_session(request)
+
+        async def landed_then_failed(udid, host, port):
+            dev.value = f"{host}:{port}"
+            raise RuntimeError("adb: connection reset")
+
+        ctrl.adb.set_http_proxy = AsyncMock(side_effect=landed_then_failed)
+        with who, pytest.raises(HTTPException) as e:
+            await self._call(ctrl, request, apply=True)
+        assert "may have reached the device" in e.value.detail
+        assert "PHONE1" in request.app.state.device_proxy_holds
+        await self._call(ctrl, request, clear=True)
+        assert dev.value == _CORP

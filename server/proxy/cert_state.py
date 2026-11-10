@@ -332,13 +332,27 @@ def proxy_before_quern(udid: str) -> tuple[bool, str | None]:
     return True, record.get("value")
 
 
-def record_proxy_before_quern(udid: str, value: str | None) -> None:
+def quern_addresses_applied(udid: str) -> list[str]:
+    """The proxy addresses quern has applied to the device while this record
+    stood. Kept in the record itself, because the per-network configs are
+    written only when the device's Wi-Fi network is known (#645 review)."""
+    record = (read_cert_state_for_device(udid) or {}).get("proxy_before_quern")
+    return list(record.get("quern_addresses") or []) if isinstance(record, dict) else []
+
+
+def record_proxy_before_quern(udid: str, value: str | None, applying: str | None = None) -> None:
     """Note the device's proxy as it was before quern's apply, replacing any
-    earlier note: the caller decides which value is the device's own."""
+    earlier note: the caller decides which value is the device's own.
+    `applying` is the address quern is about to write, added to those the
+    record already lists."""
     from server.device.ios.devicectl import canonical_device_id
 
+    addresses = quern_addresses_applied(udid)
+    if applying and applying not in addresses:
+        addresses.append(applying)
     update_cert_state(canonical_device_id(udid), {"proxy_before_quern": {
-        "value": value, "recorded_at": datetime.now(UTC).isoformat()}})
+        "value": value, "quern_addresses": addresses,
+        "recorded_at": datetime.now(UTC).isoformat()}})
 
 
 def forget_proxy_before_quern(udid: str) -> None:

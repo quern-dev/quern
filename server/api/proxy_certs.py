@@ -695,20 +695,24 @@ async def _read_device_proxy(controller, udid: str) -> tuple[str | None, bool]:
 
 def _quern_addresses(udid: str, ours: str) -> set[str]:
     """The proxy addresses that are quern's on this device: the one it is about
-    to write, and those it recorded writing before, from an older Mac address
-    or proxy port (#645 review). A device holding one of them is still on
-    quern's proxy, not one of its own."""
-    from server.proxy.cert_state import read_cert_state_for_device
+    to write, those its record says it applied, and those its per-network
+    configs name -- an older Mac address or proxy port (#645 review). A device
+    holding one of them is still on quern's proxy, not one of its own."""
+    from server.proxy.cert_state import quern_addresses_applied, read_cert_state_for_device
 
     configs = (read_cert_state_for_device(udid) or {}).get("wifi_proxy_configs") or {}
-    return {ours, *(f"{c.get('proxy_host')}:{c.get('proxy_port')}"
-                    for c in configs.values() if isinstance(c, dict))}
+    return {ours, *quern_addresses_applied(udid),
+            *(f"{c.get('proxy_host')}:{c.get('proxy_port')}"
+              for c in configs.values() if isinstance(c, dict))}
 
 
-async def _note_proxy_before_quern(controller, udid: str, ours: str) -> tuple[str | None, bool]:
+async def _note_proxy_before_quern(
+    controller, udid: str, ours: str,
+) -> tuple[str | None, bool, str | None]:
     """Record the device's proxy as it is before quern's apply, so clearing puts
-    it back rather than deleting it (#645). Returns what will be restored, and
-    whether this call made the record (so a failed write can drop it).
+    it back rather than deleting it (#645). Returns what will be restored,
+    whether this call made the record, and what the device read (so a failed
+    write can tell whether it left the device untouched).
 
     The device is always asked: a record outlives changes quern did not make
     -- an admin setting a lab proxy after an apply nothing cleared -- and
@@ -721,17 +725,18 @@ async def _note_proxy_before_quern(controller, udid: str, ours: str) -> tuple[st
     that a later clear deletes the setting, so it is never assumed."""
     from server.proxy.cert_state import proxy_before_quern, record_proxy_before_quern
 
-    current = await controller.adb.get_http_proxy(udid, strict=True)
+    read = await controller.adb.get_http_proxy(udid, strict=True)
     found, recorded = proxy_before_quern(canonical_device_id(udid))
-    if current in _quern_addresses(udid, ours):
-        if found:
-            return recorded, False
-        current = None
+    previous = read
+    if read in _quern_addresses(udid, ours):
+        previous = recorded if found else None
     try:
-        record_proxy_before_quern(canonical_device_id(udid), current)
+        # Written even when the earlier value stands, to add `ours` to the
+        # addresses the record knows are quern's.
+        record_proxy_before_quern(canonical_device_id(udid), previous, applying=ours)
     except OSError as e:
         raise _RecordFailed(e) from e
-    return current, not found
+    return previous, not found, read
 
 
 class _RecordFailed(Exception):
@@ -1059,7 +1064,7 @@ async def record_device_proxy_config_endpoint(
     previous_proxy: str | None = None
     if body.apply:
         try:
-            previous_proxy, fresh_record = await _note_proxy_before_quern(
+            previous_proxy, fresh_record, read_before = await _note_proxy_before_quern(
                 controller, body.udid, f"{proxy_host}:{port}")
         except _RecordFailed as e:
             raise HTTPException(
@@ -1081,16 +1086,29 @@ async def record_device_proxy_config_endpoint(
             await controller.adb.set_http_proxy(body.udid, proxy_host, port)
             applied = True
         except Exception as e:
-            if tracked:
-                _track_device_proxy(request, body.udid, applied=False)
-            if fresh_record:
-                # Nothing of quern's is on the device to undo.
-                from server.proxy.cert_state import forget_proxy_before_quern
+            # A write adb reports as failed may still have landed, so the
+            # device is asked. Only one that still holds what it held before
+            # is untouched; otherwise the record and the hold stay, so a clear
+            # or the release puts the old proxy back (review).
+            try:
+                untouched = await controller.adb.get_http_proxy(
+                    body.udid, strict=True) == read_before
+            except Exception:  # noqa: BLE001 -- could not tell: assume it landed
+                untouched = False
+            if untouched:
+                if tracked:
+                    _track_device_proxy(request, body.udid, applied=False)
+                if fresh_record:
+                    # Nothing of quern's is on the device to undo.
+                    from server.proxy.cert_state import forget_proxy_before_quern
 
-                forget_proxy_before_quern(canonical_device_id(body.udid))
+                    forget_proxy_before_quern(canonical_device_id(body.udid))
             raise HTTPException(
                 status_code=502,
-                detail=f"Could not set the proxy on {body.udid}: {e}",
+                detail=f"Could not set the proxy on {body.udid}: {e}" + (
+                    "" if untouched else
+                    ". The write may have reached the device anyway; clear=true "
+                    "puts back what it had before."),
             ) from e
         # Not optional. The setting is read when the network attaches, so on a
         # device that is already connected this call alone changes nothing --
