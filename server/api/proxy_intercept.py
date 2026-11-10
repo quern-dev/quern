@@ -52,6 +52,14 @@ def _intercept_owners(request: Request) -> dict[str, str]:
     return request.app.state.intercept_owners
 
 
+def _own_rule_ids(request: Request, rules: list[dict], view) -> set[str]:
+    """The caller's own intercepts among `rules`, on devices it may see."""
+    caller = visibility.current_caller().principal
+    owners = _intercept_owners(request)
+    return {r["rule_id"] for r in rules
+            if owners.get(r["rule_id"]) == caller and view.allows(r.get("simulator_udid"))}
+
+
 def _is_owner_key() -> bool:
     from server import principal
 
@@ -106,6 +114,10 @@ async def delete_intercept(request: Request, rule_id: str) -> dict:
         # 404, as for a mock: a removal that removed nothing must say so, or
         # teardown cannot tell it left an intercept holding traffic (#182).
         raise HTTPException(status_code=404, detail=f"Intercept not found: {rule_id}")
+    if not _is_owner_key() and \
+            _intercept_owners(request).get(rule_id) != visibility.current_caller().principal:
+        raise HTTPException(status_code=403, detail=(
+            f"Intercept {rule_id} is not yours: a client key removes only its own."))
     _check_intercept_scope(adapter, rule)
     held = sum(1 for h in adapter.get_held_flows() if h.get("rule_id") == rule_id)
     await adapter.clear_intercept(rule_id=rule_id)
@@ -121,6 +133,11 @@ async def clear_intercept(request: Request) -> dict:
     adapter = _require_running_proxy(request)
     owners = _intercept_owners(request)
     if _is_owner_key():
+        # Checked first, as a mock clear-all is: an intercept on a device
+        # another session holds is that session's to end (423), and a refusal
+        # leaves every intercept in place rather than some (#646 review).
+        for rule in adapter.intercept_rules():
+            _check_intercept_scope(adapter, rule)
         count, held = len(adapter.intercept_rules()), adapter.held_count()
         await adapter.clear_intercept()
         owners.clear()
@@ -128,9 +145,10 @@ async def clear_intercept(request: Request) -> dict:
                 "note": f"{count} intercept(s) cleared, {held} held flow(s) released."}
     caller = visibility.current_caller().principal
     mine = [r for r in adapter.intercept_rules() if owners.get(r["rule_id"]) == caller]
-    held = 0
     for rule in mine:
         _check_intercept_scope(adapter, rule)
+    held = 0
+    for rule in mine:
         held += sum(1 for h in adapter.get_held_flows() if h.get("rule_id") == rule["rule_id"])
         await adapter.clear_intercept(rule_id=rule["rule_id"])
         owners.pop(rule["rule_id"], None)
@@ -158,11 +176,22 @@ async def list_held_flows(
         await adapter.wait_for_held(timeout)
 
     held = adapter.get_held_flows()
+    rules = adapter.intercept_rules()
+    pattern = adapter._intercept_pattern
+    view = visibility.data_view()
+    if not view.everything:
+        # Blind (#254): its own intercepts and the flows they hold, which it
+        # needs the ids of to release them (#646 review). Others' are the
+        # rest of the server's set-up.
+        mine = _own_rule_ids(request, rules, view)
+        rules = [r for r in rules if r["rule_id"] in mine]
+        held = [h for h in held if h.get("rule_id") in mine]
+        pattern = None
     return InterceptStatusResponse(
-        pattern=adapter._intercept_pattern,
+        pattern=pattern,
         intercepts=[InterceptRuleInfo(rule_id=r["rule_id"], pattern=r["pattern"],
                                       simulator_udid=r.get("simulator_udid"))
-                    for r in adapter.intercept_rules()],
+                    for r in rules],
         held_flows=[
             HeldFlow(
                 id=h["id"],

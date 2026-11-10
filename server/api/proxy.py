@@ -419,7 +419,10 @@ async def _blind_status(request: Request, status: ProxyStatusResponse,
         "intercepts": [i for i in status.intercepts if view.allows(i.simulator_udid)
                        and (getattr(request.app.state, "intercept_owners", {}) or {}).get(
                            i.rule_id) == visibility.current_caller().principal],
-        "held_flows_count": 0,
+        "held_flows_count": sum(
+            1 for h in (adapter.get_held_flows() if hasattr(adapter, "get_held_flows") else [])
+            if (getattr(request.app.state, "intercept_owners", {}) or {}).get(h.get("rule_id"))
+            == visibility.current_caller().principal),
         "mock_rules_count": sum(
             1 for r in rules if view.allows(r.get("simulator_udid"))
             and (getattr(request.app.state, "mock_owners", {}) or {}).get(r.get("rule_id"))

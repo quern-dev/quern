@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { currentRemote } from "../config.js";
 import { apiRequest } from "../http.js";
 import { forgetAllMocks, forgetMock, recordMock, updateMock } from "../carried.js";
 // Mock changes wait for a switch under way: one made on the new server while
@@ -7,9 +8,18 @@ import { forgetAllMocks, forgetMock, recordMock, updateMock } from "../carried.j
 import { betweenSwitches } from "./system.js";
 import { strictParams, errorText } from "./helpers.js";
 
-// The intercepts this session set on the server it talks to (#646), so a
-// bare clear_intercept removes these and leaves other agents' alone.
-const mine = new Set<string>();
+// The intercepts this session set (#646), by the server it set them on, so a
+// bare clear_intercept removes these from the server in use and leaves other
+// agents' alone. Keyed by server: after use_remote, the old server's ids mean
+// nothing on the new one, and stay listed for when the session goes back.
+const mineByServer = new Map<string, Set<string>>();
+function mine(): Set<string> {
+  const key = currentRemote() ?? "local";
+  let ids = mineByServer.get(key);
+  if (!ids) mineByServer.set(key, (ids = new Set()));
+  return ids;
+}
+const notFound = (e: unknown) => e instanceof Error && e.message.startsWith("HTTP 404");
 
 export function registerInterceptTools(server: McpServer): void {
   server.registerTool(
@@ -46,7 +56,7 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
           undefined,
           body
         )) as { rule_id?: unknown };
-        if (typeof data?.rule_id === "string") mine.add(data.rule_id);
+        if (typeof data?.rule_id === "string") mine().add(data.rule_id);
 
         return {
           content: [
@@ -87,39 +97,52 @@ With no arguments it removes the intercepts this session set (#646), and leaves 
         if (rule_id) {
           try {
             data = await apiRequest("DELETE", `/api/v1/proxy/intercept/${encodeURIComponent(rule_id)}`);
-          } finally {
-            mine.delete(rule_id);
+            mine().delete(rule_id);
+          } catch (e) {
+            // Gone is forgotten; a refusal (423, 503) is kept, so a later
+            // clear_intercept tries it again.
+            if (notFound(e)) mine().delete(rule_id);
+            throw e;
           }
         } else if (all) {
           data = await apiRequest("DELETE", "/api/v1/proxy/intercept");
-          mine.clear();
+          mine().clear();
         } else {
           // This session's own, by id: the server cannot tell one owner-key
           // agent's intercepts from another's (as for mocks, #576).
           const removed: string[] = [];
           const gone: string[] = [];
+          const failed: Array<{ rule_id: string; error: string }> = [];
           let released = 0;
-          for (const id of [...mine]) {
+          for (const id of [...mine()]) {
             try {
               const r = (await apiRequest("DELETE", `/api/v1/proxy/intercept/${encodeURIComponent(id)}`)) as
                 { held_flows_released?: number };
               removed.push(id);
               released += r?.held_flows_released ?? 0;
+              mine().delete(id);
             } catch (e) {
               // Already gone -- its hold ended, or someone cleared it -- is
-              // still not ours to remove again; anything else is reported.
-              if (!(e instanceof Error && e.message.startsWith("HTTP 404"))) throw e;
-              gone.push(id);
+              // forgotten. Anything else is reported with the rest, and kept
+              // to be tried again, rather than ending the loop and losing
+              // what was already removed (review).
+              if (notFound(e)) {
+                gone.push(id);
+                mine().delete(id);
+              } else {
+                failed.push({ rule_id: id, error: errorText(e) });
+              }
             }
-            mine.delete(id);
           }
           data = {
-            status: "accepted", count: removed.length, rule_ids: removed,
-            held_flows_released: released,
+            status: failed.length ? "partial" : "accepted", count: removed.length,
+            rule_ids: removed, held_flows_released: released,
             ...(gone.length ? { already_gone: gone } : {}),
-            note: removed.length || gone.length
-              ? `${removed.length} of this session's intercept(s) cleared, ${released} held flow(s) released.`
-              : "This session set no intercepts. all=true removes every intercept on the server.",
+            ...(failed.length ? { failed } : {}),
+            note: removed.length || gone.length || failed.length
+              ? `${removed.length} of this session's intercept(s) cleared, ${released} held flow(s) released` +
+                (failed.length ? `; ${failed.length} could not be removed (see failed), and stay set.` : ".")
+              : "This session set no intercepts on this server. all=true removes every intercept on the server.",
           };
         }
 

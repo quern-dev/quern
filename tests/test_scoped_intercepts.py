@@ -231,10 +231,18 @@ class TestTheRoutes:
         assert [x["rule_id"] for x in adapter.intercept_rules()] == [b]
         assert set(adapter._held_flows) == {"fb"}
 
-    def test_the_owners_clear_removes_every_one(self, world):
+    def test_the_owners_clear_waits_for_the_devices_holders(self, world, registry):  # noqa: F811
+        """As a mock clear-all does (#646 review): an intercept on a device
+        another session holds is that session's to end, and a refusal leaves
+        every intercept in place, not some."""
         c, app, adapter, alice, bob = world
         _set(c, alice, simulator_udid=SIM_A)
         _set(c, bob, simulator_udid=SIM_B)
+        r = c.delete("/api/v1/proxy/intercept", headers=_h(KEY, session=None))
+        assert r.status_code == 423, r.text
+        assert len(adapter.intercept_rules()) == 2
+        registry.release("alice:s1")
+        registry.release("bob:s1")
         r = c.delete("/api/v1/proxy/intercept", headers=_h(KEY, session=None))
         assert r.status_code == 200 and r.json()["count"] == 2
         assert adapter.intercept_rules() == [] and app.state.intercept_owners == {}
@@ -312,10 +320,14 @@ async def test_a_clients_intercepts_end_with_its_hold():
     app = SimpleNamespace(state=SimpleNamespace(
         device_controller=None, session_proxies=None, proxy_adapter=adapter,
         recordings=None, mock_owners={}, intercept_owners=owners, device_proxy_holds={}))
+    # Released from both devices; SIM_B is still the key's through another
+    # session, so its intercept there stays (review: this was untested).
     session = SimpleNamespace(id="alice:s1", principal="client:alice", opened_at=object(),
-                              reservations=[SIM_A])
-    actions = await sessions_api._end_client_work(
-        app, SimpleNamespace(holder_of=lambda udid: None, get=lambda sid: None), session)
+                              reservations=[SIM_A, SIM_B])
+    still_hers = SimpleNamespace(session=SimpleNamespace(principal="client:alice"))
+    holds = SimpleNamespace(holder_of=lambda udid: still_hers if udid == SIM_B else None,
+                            get=lambda sid: None)
+    actions = await sessions_api._end_client_work(app, holds, session)
     assert {"udid": SIM_A, "action": "intercept_removed", "ok": True, "rule_id": mine} in actions
     # Its intercept on a device it still holds, and the owner's, stay.
     assert [r["rule_id"] for r in adapter.intercept_rules()] == [other_device, owners_own]
@@ -358,3 +370,125 @@ async def test_setting_a_scoped_intercept_does_not_report_it_as_every_devices():
     await adapter._handle_status_event({"type": "status", "event": "intercept_set",
                                         "pattern": "~d a.test", "simulator_udid": SIM_A})
     assert adapter._intercept_pattern is None
+
+
+# ---------------------------------------------------------------------------
+# Gaps an adversarial review found (#646)
+# ---------------------------------------------------------------------------
+
+
+class TestReviewFindings:
+    def test_a_scoped_intercept_on_an_emulator_holds_once_its_serial_is_known(self, addon):
+        """The deferred path: the emulator is told off the hook's thread, and
+        the request is held then, with the intercept that held it."""
+        import server.proxy.addon as addon_module
+
+        addon._intercept_rules = [_rule("emu", "emulator-5554")]
+        flow = _flow()
+        with patch.object(addon_module, "_flow_emulator_serial_now",
+                          return_value=addon_module._UNDECIDED), \
+                patch.object(addon_module, "_flow_emulator_serial_waiting",
+                             return_value="emulator-5554"), \
+                patch.object(addon_module._SCOPE_POOL, "submit", side_effect=lambda fn: fn()):
+            addon.request(flow)
+        flow.intercept.assert_called()
+        assert list(addon._held_rule.values()) == ["emu"]
+        flow.resume.assert_not_called()
+
+    def test_a_clear_between_choosing_an_intercept_and_holding_wins(self, addon):
+        """The rule is chosen outside the lock; a clear that lands before the
+        hold must leave the request unheld, not held by a rule that is gone."""
+        rule = _rule("a")
+        matched = rule["compiled"]
+
+        def compiled_then_cleared(flow):
+            hit = matched(flow)
+            addon._handle_clear_intercept({"rule_id": "a"})
+            return hit
+
+        rule["compiled"] = compiled_then_cleared
+        addon._intercept_rules = [rule]
+        flow = _flow()
+        with _from(None):
+            addon.request(flow)
+        flow.intercept.assert_not_called()
+        assert addon._held_flows == {} and addon._held_rule == {}
+
+    def test_a_decoy_udid_does_not_make_an_unscoped_intercept_a_clients(self, world):
+        c, _, adapter, alice, _ = world
+        r = c.post("/api/v1/proxy/intercept", headers=_h(alice),
+                   json={"pattern": "~d x.test", "udid": SIM_A})
+        assert r.status_code == 403 and "simulator_udid" in r.json()["detail"]
+        assert adapter.intercept_rules() == []
+
+    def test_a_client_may_not_remove_the_owners_intercept_on_its_device(self, world, registry):  # noqa: F811
+        """Clear, release and remove agree: a client's own only."""
+        c, _, adapter, alice, _ = world
+        registry.release("alice:s1")
+        owner = _set(c, KEY, simulator_udid=SIM_A).json()["rule_id"]
+        _hold(registry, "alice:s1", "client:alice", SIM_A)
+        r = c.delete(f"/api/v1/proxy/intercept/{owner}", headers=_h(alice))
+        assert r.status_code == 403 and "not yours" in r.json()["detail"]
+        assert [x["rule_id"] for x in adapter.intercept_rules()] == [owner]
+
+    def test_a_blind_client_sees_and_so_can_release_its_own_held_flows(self, world):
+        from server import visibility
+
+        c, _, adapter, alice, bob = world
+        a = _set(c, alice, simulator_udid=SIM_A).json()["rule_id"]
+        b = _set(c, bob, simulator_udid=SIM_B).json()["rule_id"]
+        _held(adapter, "fa", a)
+        _held(adapter, "fb", b)
+        before, visibility.MODE = visibility.MODE, "blind"
+        try:
+            r = c.get("/api/v1/proxy/intercept/held", headers=_h(alice))
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert [f["id"] for f in body["held_flows"]] == ["fa"]
+            assert [i["rule_id"] for i in body["intercepts"]] == [a]
+            assert body["pattern"] is None
+            ok = c.post("/api/v1/proxy/intercept/release", headers=_h(alice),
+                        json={"flow_id": "fa"})
+            assert ok.status_code == 200, ok.text
+        finally:
+            visibility.MODE = before
+
+    def test_blind_proxy_status_lists_only_the_callers_intercepts(self):
+        from datetime import timedelta
+
+        from server import visibility
+        from server.api.proxy import _blind_status
+        from server.models import InterceptRuleInfo, ProxyStatusResponse
+
+        adapter = ProxyAdapter(flow_store=FlowStore(), listen_port=9101)
+        for flow_id, rule_id in (("fa", "ia"), ("fb", "ib")):
+            _held(adapter, flow_id, rule_id)
+        app = SimpleNamespace(state=SimpleNamespace(
+            flow_store=None, proxy_adapter=adapter,
+            intercept_owners={"ia": "client:alice", "ib": "client:bob"}, mock_owners={}))
+        status = ProxyStatusResponse(status="running", intercepts=[
+            InterceptRuleInfo(rule_id="ia", pattern="~d a", simulator_udid=SIM_A),
+            InterceptRuleInfo(rule_id="ib", pattern="~d b", simulator_udid=SIM_B)])
+        view = visibility.View(since={SIM_A: datetime.now(UTC) - timedelta(seconds=30)})
+        alice = visibility.Caller(session=None, principal="client:alice")
+        with patch("server.visibility.current_caller", return_value=alice):
+            import asyncio
+            out = asyncio.run(_blind_status(SimpleNamespace(app=app), status, view))
+        assert [i.rule_id for i in out.intercepts] == ["ia"]
+        assert out.held_flows_count == 1
+
+
+async def test_a_restart_waits_for_every_intercept_to_be_confirmed():
+    """Counted, not just present: two intercepts sent and one echoed is a
+    restart that did not bring them all back."""
+    from collections import Counter
+
+    adapter = ProxyAdapter(flow_store=FlowStore(), listen_port=9101)
+    adapter._intercept_rules = [{"rule_id": "a"}, {"rule_id": "b"}]
+    adapter._running = True
+    adapter.restart_confirm_timeout = 0.2
+    before = Counter()
+    adapter._addon_events = Counter({"running": 1, "intercept_set": 1})
+    assert await adapter._serving_with_rules(before) is False
+    adapter._addon_events["intercept_set"] = 2
+    assert await adapter._serving_with_rules(before) is True

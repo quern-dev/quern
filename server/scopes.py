@@ -403,9 +403,12 @@ BLIND: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/screenshots"): "filtered",
     ("GET", "/api/v1/recordings/{recording_id}/files/{name}"): "filtered",
     ("GET", "/api/v1/trace"): "filtered",
+    # The caller's own intercepts and the flows they hold (#646): it needs
+    # their ids to release them.
+    ("GET", "/api/v1/proxy/intercept/held"): "filtered",
     # The owner's set-up: which apps have knowledge bases, which hosts are
-    # bypassed or filtered, what builds ran, the flows held for intercept
-    # (which carry no device), app checkpoints, the Mac's tool layout.
+    # bypassed or filtered, what builds ran, app checkpoints, the Mac's tool
+    # layout.
     ("GET", "/api/v1/device/app/state/list"): "hidden",
     ("GET", "/api/v1/device/app/state/plist/watch/config"): "hidden",
     ("GET", "/api/v1/device/build-progress"): "hidden",
@@ -414,7 +417,6 @@ BLIND: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/landmarks/validate"): "hidden",
     ("GET", "/api/v1/logs/filter"): "hidden",
     ("GET", "/api/v1/proxy/bypass"): "hidden",
-    ("GET", "/api/v1/proxy/intercept/held"): "hidden",
     ("GET", "/api/v1/system/channel"): "shared",
     ("GET", "/api/v1/system/disk"): "filtered",
 }

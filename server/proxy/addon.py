@@ -1471,8 +1471,14 @@ class IOSDebugAddon:
                 if not matched:
                     continue
             flow_id = f"f_{uuid.uuid4().hex[:12]}"
-            flow.intercept()
             with self._held_lock:
+                # Decided outside the lock -- a scope can take a process
+                # lookup -- so confirmed here, under the lock a clear takes:
+                # a clear in between would otherwise leave this flow held by
+                # an intercept that no longer exists (#646 review).
+                if not any(r is rule for r in self._intercept_rules):
+                    continue
+                flow.intercept()
                 self._held_flows[flow_id] = (flow, time.time())
                 self._held_rule[flow_id] = rule["rule_id"]
             _write_json({
