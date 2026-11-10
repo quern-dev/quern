@@ -17,7 +17,7 @@ export function registerAppKnowledgeTools(server: McpServer): void {
 If the target directory already contains a .quern/knowledge/ folder, returns its current contents summary.
 If not, copies the template structure from quern's templates into the target.
 
-After initialization, read the quern://app-knowledge-guide resource for instructions on how to conduct a guided tour of the app with the user.`,
+After initialization, read quern://app-knowledge-guide/getting-started and quern://app-knowledge-guide/tour for how to conduct a guided tour of the app with the user; quern://app-knowledge-guide lists the guide's other pages, one per subject (landmarks, navigation edges, web views, deep links...).`,
     inputSchema: strictParams({
       project_dir: z.string().describe(
         "Absolute path to the app project's root directory (where the knowledge base should live)"
@@ -100,7 +100,7 @@ After initialization, read the quern://app-knowledge-guide resource for instruct
         ? "Read the existing files to understand what's documented, then continue the guided tour to fill gaps."
         : [
             "Next steps:",
-            "1. Read the quern://app-knowledge-guide resource for the full guided tour process.",
+            "1. Read quern://app-knowledge-guide/getting-started and quern://app-knowledge-guide/tour; quern://app-knowledge-guide lists the other pages.",
             "2. Fill in .quern/config.json with the app's bundle ID, app name, workspace, and schemes, and check its platform (\"ios\" or \"android\").",
             "3. Fill in app.md with entry points, global navigation, and test accounts.",
             "4. Launch the app and begin documenting screens with the user.",
