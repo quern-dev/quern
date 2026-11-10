@@ -484,6 +484,8 @@ class TestTheGuardCoversEveryRoute:
     ID_ROUTES = {
         ("PATCH", "/api/v1/proxy/mocks/{rule_id}"): "route checks the rule's simulator_udid",
         ("DELETE", "/api/v1/proxy/mocks/{rule_id}"): "route checks the rule's simulator_udid",
+        ("DELETE", "/api/v1/proxy/intercept/{rule_id}"):
+            "route checks the intercept's simulator_udid (#646)",
         ("POST", "/api/v1/recordings/{recording_id}/stop"): "route checks the recording's udid",
         ("POST", "/api/v1/profiles/{profile_id}/stop"): "route checks the profile's udid",
         ("POST", "/api/v1/recordings/{recording_id}/keyframe"): "route checks the recording's udid",
