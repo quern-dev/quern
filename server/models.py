@@ -1511,8 +1511,9 @@ class ProxyStatusResponse(BaseModel):
     flow_store: dict[str, Any] | None = None
     active_filter: str | None = None
     active_intercept: str | None = None
-    """The every-device intercept's pattern, or None; every intercept,
-    scoped ones included, is in `intercepts` (#646)."""
+    """The first every-device intercept's pattern, or None; every intercept,
+    scoped ones and any further every-device ones included, is in
+    `intercepts` (#646)."""
     intercepts: list[InterceptRuleInfo] = Field(default_factory=list)
     held_flows_count: int = 0
     tls_rejections: list[TlsRejection] = Field(default_factory=list)
