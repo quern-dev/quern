@@ -10,7 +10,7 @@ Accessibility identifiers in real apps are frequently misleading, reused, or mis
 
 1. Note it in both elements' documentation.
 2. In tool calls, prefer `tap_element` with `label` (the visible text) rather than relying on the identifier.
-3. If neither label nor identifier uniquely identifies the element, document the position or use a combination: element_type + label + parent context via `children_of`.
+3. If neither label nor identifier uniquely identifies the element, document the position or use a combination: element_type + label. `children_of` scopes a `get_ui_tree` read to one parent, which tells duplicates apart, but `tap_element` takes no parent: tap the element's coordinates from that scoped read instead.
 
 **Missing identifiers.** Some elements have no identifier at all. Use `label` (visible text) + `element_type` as the primary selector. Document this so agents don't waste time searching for an identifier that doesn't exist.
 

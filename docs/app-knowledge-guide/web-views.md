@@ -2,7 +2,7 @@
 
 *`quern://app-knowledge-guide/web-views` -- part of `quern://app-knowledge-guide`, the app knowledge base guide. Start from `quern://app-knowledge-guide`.*
 
-A screen built on web content looks almost empty to `get_ui_tree`: on iOS the
+A screen built on web content looks almost empty to `get_ui_tree` on an iOS simulator (on Android and physical iPhones, `get_ui_tree` already sees web content; this page is about simulators): the
 accessibility tree does not descend into a `WKWebView`, and out-of-process hosts
 are not in the app's hierarchy at all — a settings page presented in
 `SFSafariViewController` reports **one** element, the Application. The failure
@@ -119,8 +119,9 @@ the new value down.
 
 **Note when the URL is third-party.** It can change without an app release —
 the Mastodon instance picker moved from `/communities` to `/servers` between
-knowledge-base revisions. Prefer structural selectors (`h1`,
-`button[aria-label]`) over text the site can reword.
+knowledge-base revisions. Prefer structural elements -- a heading, a button named by its
+`aria-label` -- over text the site can reword. Quern takes no CSS selectors: `get_web_content` maps
+these to the `Heading` or `Button` type and the label that its tools and landmarks match.
 
 None of this applies on Android, where the accessibility tree does descend into
 a `WebView` and web content appears as ordinary elements.

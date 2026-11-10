@@ -5,7 +5,7 @@
 Prepare the device before launching the app. Skipping this causes unnecessary interruptions during the tour.
 
 1. **Resolve a device.** Use `resolve_device` to find or boot a simulator (or connect a physical device).
-2. **Pre-grant permissions.** On simulators, use `grant_permission` to pre-accept common permission prompts before launching:
+2. **Pre-grant permissions.** On simulators, use `grant_permission` to pre-accept common permission prompts before launching (the app must be installed first; `list_apps` shows it):
    ```
    grant_permission bundle_id="..." permission="location-always"
    grant_permission bundle_id="..." permission="photos"
