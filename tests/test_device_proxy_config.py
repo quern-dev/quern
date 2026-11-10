@@ -1582,3 +1582,25 @@ class TestTheRestoreSurvivesItsFailurePaths:
         assert "PHONE1" in request.app.state.device_proxy_holds
         await self._call(ctrl, request, clear=True)
         assert dev.value == _CORP
+
+    async def test_a_release_that_cannot_confirm_the_restore_retries(self):
+        """A read-back that failed is not a confirmation (CodeRabbit)."""
+        from server.api import sessions as sessions_api
+
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, _CORP)
+        request = _request(ctrl)
+        session, holding, who = _held_by_a_session(request)
+        with who:
+            await self._call(ctrl, request, apply=True)
+        holding["now"] = False
+        app = SimpleNamespace(state=request.app.state)
+        dev.fail_reads = 1
+        actions: list = []
+        await sessions_api._end_device_proxy(app, request.app.state.sessions, session,
+                                             "PHONE1", actions)
+        assert actions[-1]["ok"] is False and "PHONE1" in request.app.state.device_proxy_holds
+        await sessions_api._end_device_proxy(app, request.app.state.sessions, session,
+                                             "PHONE1", actions)
+        assert actions[-1]["ok"] is True and actions[-1]["proxy_verified"] is True
+        assert dev.value == _CORP and "PHONE1" not in request.app.state.device_proxy_holds

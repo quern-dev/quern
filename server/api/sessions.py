@@ -720,6 +720,10 @@ async def _end_device_proxy(app: Any, registry: Any, session: Any, udid: str,
                 f"the device did not answer within {_PROXY_CLEAR_TIMEOUT_S:g}s") from None
         if cleared["proxy_verified"] is False:
             raise RuntimeError(f"its proxy still reads {cleared['device_proxy']} after the clear")
+        if cleared["proxy_verified"] is not True:
+            # Not confirmed is not done: the record stays live, and the next
+            # release attempt clears again (CodeRabbit on #651).
+            raise RuntimeError("its proxy could not be read back after the clear")
         holds.pop(udid, None)
         actions.append({"udid": udid, "action": "device_proxy_cleared", "ok": True,
                         "proxy_verified": cleared["proxy_verified"],
