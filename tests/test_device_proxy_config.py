@@ -1296,3 +1296,20 @@ class TestAProxyThatWasThereBeforeIsPutBack:
         ctrl.adb.put_http_proxy.assert_awaited_once_with("PHONE1", "10.0.0.5:3128")
         cleared = [a for a in actions if a["action"] == "device_proxy_cleared"]
         assert cleared and cleared[0]["ok"] and cleared[0]["restored_proxy"] == "10.0.0.5:3128"
+
+
+class TestTheRecordOfTheProxyBeforeQuern:
+    def test_a_second_record_keeps_the_first(self):
+        from server.proxy import cert_state
+
+        cert_state.record_proxy_before_quern("PHONE1", "10.0.0.5:3128")
+        cert_state.record_proxy_before_quern("PHONE1", "192.168.1.189:9101")
+        assert cert_state.proxy_before_quern("PHONE1") == (True, "10.0.0.5:3128")
+
+    def test_forgetting_ends_it(self):
+        from server.proxy import cert_state
+
+        cert_state.record_proxy_before_quern("PHONE1", None)
+        assert cert_state.proxy_before_quern("PHONE1") == (True, None)
+        cert_state.forget_proxy_before_quern("PHONE1")
+        assert cert_state.proxy_before_quern("PHONE1") == (False, None)
