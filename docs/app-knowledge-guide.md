@@ -13,12 +13,12 @@ This guide is split into pages, one per subject. Read the one you need:
 - `quern://app-knowledge-guide/getting-started` -- Getting Started: a new or existing knowledge base: config.json and app.md first, then the tour
 - `quern://app-knowledge-guide/before-you-start` -- Before You Start: preparing the device: resolving it, and pre-granting permissions so prompts do not interrupt the tour
 - `quern://app-knowledge-guide/tour` -- The Guided Tour: the guided tour with the user: how it works and the order to cover the app in
-- `quern://app-knowledge-guide/config-json` -- Updating config.json During the Tour: keeping .quern/config.json current: plist watch targets, state flags
+- `quern://app-knowledge-guide/config-json` -- Updating config.json During the Tour: keeping .quern/config.json current: plist watch targets, state flags, saved checkpoints, environments
 - `quern://app-knowledge-guide/element-types` -- Common iOS Element Types: element types from the accessibility tree vs XCUITest (start_driver), and which to use where
 - `quern://app-knowledge-guide/per-screen` -- What to Capture Per Screen: what to record for each screen: identification, key elements, navigation, states, dynamic content, quirks
 - `quern://app-knowledge-guide/asking` -- What to Ask the User: what to ask the user, and when, instead of a checklist
 - `quern://app-knowledge-guide/stubs` -- Stubs: Tracking Undiscovered Screens: stub files for screens you know about but have not visited
-- `quern://app-knowledge-guide/navigation-edges` -- Writing Navigation Edges: leads_to edges: their format, and how tap_element checks them
+- `quern://app-knowledge-guide/navigation-edges` -- Writing Navigation Edges: leads_to and app.md's global_leads_to: their format, and how tap_element checks them
 - `quern://app-knowledge-guide/screen-documents` -- Writing Screen Documents: screen documents from the template; landmarks is the field matching uses
 - `quern://app-knowledge-guide/choosing-landmarks` -- Choosing Landmarks: which elements make good landmarks, in order of strength
 - `quern://app-knowledge-guide/no-landmarks` -- When a Knowledge Base Has No Landmarks: load_landmarks returning screens: 0 and what each skipped[] reason means

@@ -15,8 +15,8 @@ The knowledge base is a living artifact, not a one-time setup. App teams ship UI
 1. Navigate to the affected screen (use `reachable_from` from the screen file as the recipe).
 2. `wait_for_element` on a likely-stable element to handle mid-transition states.
 3. Call `get_ui_tree` (with `include_raw=true` if you need to debug the platform normalizer) to see what the screen actually exposes now.
-4. Re-author the `landmarks:` block — drop selectors that no longer exist, swap in current identifiers, prefer structural elements (nav title, unique button identifier) over copy-dependent labels.
-5. Re-run `load_landmarks` and `identify_screen` to confirm `confidence: "exact"`.
+4. Re-author the `landmarks:` block — drop selectors that no longer exist, swap in current identifiers, prefer structural elements (nav title, unique button identifier) over copy-dependent labels. (What makes a good landmark: `quern://app-knowledge-guide/choosing-landmarks`.)
+5. Re-run `load_landmarks` and `identify_screen` to confirm `confidence: "exact"`. Check on both backends, as `quern://app-knowledge-guide/auditing` does in its step 4.
 
 If the file still carries an `identify_by:` block, delete it while you are there. Nothing reads it, and one left pointing at renamed identifiers misleads the next person who opens the file.
 

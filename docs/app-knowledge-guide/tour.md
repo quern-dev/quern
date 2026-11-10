@@ -20,10 +20,12 @@ Avoid asking a long list of questions at every screen. The user knows the app �
 Start from the app's entry point and work outward:
 
 1. **Launch screen** — What does the user see on cold launch? Document it.
-2. **Primary navigation** — Tab bar? Sidebar? Document `app.md`'s global navigation table.
+2. **Primary navigation** — Tab bar? Sidebar? Document `app.md`'s global navigation table. (Its format, `global_leads_to`: `quern://app-knowledge-guide/navigation-edges`.)
 3. **States and environments** — Before going deep, ask the user about app-wide states (auth, subscription, onboarding) and available environments (staging, production). Fill in `states.md` and `environments.md`. Also update `.quern/config.json`: add each environment to the `environments` object with its domain and deep link pattern.
 4. **Each top-level screen** — Visit each tab/section. Document screens as you go. Create stubs for screens you discover but don't visit yet. As you encounter domain-specific terms (codes, ratings, feature names, acronyms), add them to `glossary.md` — don't wait until the end.
 5. **Alerts** — As you encounter any dialog, popup, permission prompt, or coaching overlay, document it in `alerts/` immediately. Also ask: "Are there other popups I should know about on this screen?"
 6. **Key flows** — After screens are documented, trace the most important user flows (login, core feature, settings changes) and document them.
 7. **Deep links** — Deep links are not discoverable from the UI. Ask the user: "Does this app have deep links or universal links? Can you point me to the routing code or AASA file?" Extracting paths from source code is the fastest way to populate `deep-links/deep_links.json`. If source isn't available, the user can provide paths directly. Then verify each link on the simulator (see `quern://app-knowledge-guide/deep-links`).
-8. **Quirks** — As you encounter anything unexpected, document it immediately. Also ask: "Are there any known quirks or device-specific issues with this screen?"
+8. **Quirks** — As you encounter anything unexpected, document it immediately. Also ask: "Are there any known quirks or device-specific issues with this screen?" 
+
+Pages for these steps: screens `quern://app-knowledge-guide/per-screen` and `quern://app-knowledge-guide/screen-documents`, stubs `quern://app-knowledge-guide/stubs`, alerts `quern://app-knowledge-guide/alerts`, states `quern://app-knowledge-guide/app-states`, environments `quern://app-knowledge-guide/environments`, flows `quern://app-knowledge-guide/flows`, deep links `quern://app-knowledge-guide/deep-links`.

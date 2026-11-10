@@ -23,7 +23,7 @@ Deep links are stored as structured JSON in `deep-links/deep_links.json`, not as
 }
 ```
 
-Key fields: `path` (appended to domain), `lands_on` (screen doc reference), `verify` (`wait_for_element` kwargs to confirm the landing screen), `premium_gated` (whether Basic accounts see an upsell), `caveats` (edge cases and gotchas).
+Key fields: `path` (appended to the app's URL scheme or universal-link domain, from `.quern/config.json`: `quern://app-knowledge-guide/getting-started`), `lands_on` (screen doc reference), `verify` (`wait_for_element` kwargs to confirm the landing screen), `premium_gated` (whether Basic accounts see an upsell), `caveats` (edge cases and gotchas).
 
 Use separate arrays for different link categories (e.g. `coord_info_links`, `special_links`) when the app has distinct deep link families with different URL patterns or behaviors.
 

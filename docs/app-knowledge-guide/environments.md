@@ -2,7 +2,7 @@
 
 *`quern://app-knowledge-guide/environments` -- part of `quern://app-knowledge-guide`, the app knowledge base guide. Start from `quern://app-knowledge-guide`.*
 
-`environments.md` captures the available server environments and how to switch between them. Not all apps have multiple environments — if the app only targets one backend, skip this file.
+`environments.md` captures the available server environments and how to switch between them. Add each one to `.quern/config.json`'s `environments` object as well, with its domain and deep-link pattern (`quern://app-knowledge-guide/tour`, step 3). Not all apps have multiple environments — if the app only targets one backend, skip this file.
 
 **What to capture:**
 
