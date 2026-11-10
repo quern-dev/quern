@@ -240,7 +240,7 @@ Deep links live in a single structured registry at `deep-links/deep_links.json` 
 
 The field that earns its keep is `verify`: it holds `wait_for_element` keyword arguments confirming the landing screen, which is exactly the check Android's silent success makes mandatory. `lands_on` is a plain path to a screen doc, not a wikilink. Use separate arrays alongside `deep_links` when an app has distinct link families with different URL patterns.
 
-See [`docs/app-knowledge-guide.md`](https://github.com/quern-dev/quern/blob/main/docs/app-knowledge-guide.md#documenting-deep-links) for the full field list — it is the authoring reference and is not published to this site.
+See [`docs/app-knowledge-guide/deep-links.md`](https://github.com/quern-dev/quern/blob/main/docs/app-knowledge-guide/deep-links.md) for the full field list — it is the authoring reference and is not published to this site.
 
 ## Tips
 

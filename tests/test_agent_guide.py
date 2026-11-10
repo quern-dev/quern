@@ -23,6 +23,11 @@ INDEX_TS = REPO_ROOT / "mcp" / "src" / "index.ts"
 TOOLS_DIR = REPO_ROOT / "mcp" / "src" / "tools"
 OVERVIEW = REPO_ROOT / "docs" / "agent-guide.md"
 TOPICS_DIR = REPO_ROOT / "docs" / "agent-guide"
+# The app knowledge base guide is laid out the same way: a contents page whose
+# lines register its pages.
+KB_GUIDE = REPO_ROOT / "docs" / "app-knowledge-guide.md"
+KB_DIR = REPO_ROOT / "docs" / "app-knowledge-guide"
+KB_BASE = "quern://app-knowledge-guide"
 
 # The whole address: a longer one must not pass as the registered prefix.
 _URI = re.compile(r"quern://[a-z][a-z0-9-]*(?:/[a-z][a-z0-9-]*)*(?![a-z0-9/-])")
@@ -34,23 +39,35 @@ def _topics() -> list[str]:
     return re.findall(r'\[\s*"([a-z][a-z0-9-]*)"\s*,', block.group(1))
 
 
+def _listed(base: str, contents: Path) -> list[str]:
+    """The pages a contents page names: the same rule as guidePages() in
+    mcp/src/guide-pages.ts, which registers them."""
+    line = re.compile(rf"^- `{re.escape(base)}/([a-z][a-z0-9-]*)` -- .+$", re.M)
+    return line.findall(contents.read_text())
+
+
 def _section_pages(topic: str) -> list[str]:
-    """The pages a topic's contents list names: the same rule as guidePages()
-    in mcp/src/guide-pages.ts, which registers them."""
-    line = re.compile(rf"^- `quern://guide/{topic}/([a-z][a-z0-9-]*)` -- .+$", re.M)
-    return line.findall((TOPICS_DIR / f"{topic}.md").read_text())
+    return _listed(f"quern://guide/{topic}", TOPICS_DIR / f"{topic}.md")
+
+
+def _contents_pages() -> list[tuple[str, Path, Path]]:
+    """Every contents page: (its address, its file, the directory of its pages)."""
+    return [*((f"quern://guide/{t}", TOPICS_DIR / f"{t}.md", TOPICS_DIR / t) for t in _topics()),
+            (KB_BASE, KB_GUIDE, KB_DIR)]
 
 
 def _registered() -> set[str]:
     src = INDEX_TS.read_text()
     fixed = set(re.findall(r'server\.resource\(\s*"[^"]+",\s*"(quern://[^"]+)"', src))
     topics = {f"quern://guide/{t}" for t in _topics()}
-    pages = {f"quern://guide/{t}/{p}" for t in _topics() for p in _section_pages(t)}
+    pages = {f"{base}/{p}" for base, contents, _ in _contents_pages()
+             for p in _listed(base, contents)}
     return fixed | topics | pages
 
 
 def _guide_pages() -> list[Path]:
-    return [OVERVIEW, *sorted(TOPICS_DIR.glob("*.md")), *sorted(TOPICS_DIR.glob("*/*.md"))]
+    return [OVERVIEW, *sorted(TOPICS_DIR.glob("*.md")), *sorted(TOPICS_DIR.glob("*/*.md")),
+            KB_GUIDE, *sorted(KB_DIR.glob("*.md"))]
 
 
 def test_every_topic_has_its_file_and_every_file_is_a_topic():
@@ -92,25 +109,27 @@ def test_guide_pages_use_no_relative_links():
 
 
 def test_every_listed_page_has_its_file_and_every_file_is_listed():
-    for topic in _topics():
-        listed = _section_pages(topic)
-        files = {p.stem for p in (TOPICS_DIR / topic).glob("*.md")}
-        assert listed, f"{topic}: its contents page lists no pages"
-        assert len(listed) == len(set(listed)), f"{topic}: a page listed twice: {listed}"
+    for base, contents, folder in _contents_pages():
+        listed = _listed(base, contents)
+        files = {p.stem for p in folder.glob("*.md")}
+        where = folder.relative_to(REPO_ROOT).as_posix()
+        assert listed, f"{base}: its contents page lists no pages"
+        assert len(listed) == len(set(listed)), f"{base}: a page listed twice: {listed}"
         assert not set(listed) - files, (
-            f"{topic}: listed, no file in docs/agent-guide/{topic}/: {sorted(set(listed) - files)}")
+            f"{base}: listed, no file in {where}/: {sorted(set(listed) - files)}")
         assert not files - set(listed), (
-            f"{topic}: files its contents page never lists, so nothing serves them: "
+            f"{base}: files its contents page never lists, so nothing serves them: "
             f"{sorted(files - set(listed))}")
 
 
 def test_every_page_says_where_it_sits():
     """A page read on its own says what it is part of and where to start."""
-    for topic in _topics():
-        for page in _section_pages(topic):
-            head = (TOPICS_DIR / topic / f"{page}.md").read_text()[:400]
-            assert f"`quern://guide/{topic}/{page}`" in head and "`quern://guide`" in head, (
-                f"{topic}/{page}: its header does not name its own address and the overview")
+    for base, contents, folder in _contents_pages():
+        start = "`quern://guide`" if base.startswith("quern://guide/") else f"`{base}`"
+        for page in _listed(base, contents):
+            head = (folder / f"{page}.md").read_text()[:400]
+            assert f"`{base}/{page}`" in head and start in head, (
+                f"{base}/{page}: its header does not name its own address and where to start")
 
 
 def test_the_overview_tool_map_points_at_pages_that_exist():

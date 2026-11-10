@@ -428,7 +428,7 @@ To audit:
 3. **Set `landmark_conventions: 2`** on each file once it is fixed, and reload to confirm it reports `current`.
 4. **Optionally, confirm behaviour as well as form.** Identify the live screen on the default backend, then again after `start_driver`. A landmark that identifies the screen on only one of them is the thing this exists to catch.
 
-Steps 1–3 check the file against the conventions; step 4 checks it against the app. A file can pass the first three and still be wrong about the app — see [Keeping Landmarks in Sync](app-knowledge-guide.md#keeping-landmarks-in-sync).
+Steps 1–3 check the file against the conventions; step 4 checks it against the app. A file can pass the first three and still be wrong about the app — see [Keeping Landmarks in Sync](app-knowledge-guide/landmarks-sync.md).
 
 Two views, two questions: `grep -L "landmark_conventions: 2" screens/*.md` lists the files nobody has migrated, with nothing loaded; the `conventions` block says which files actually comply.
 

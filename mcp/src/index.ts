@@ -186,7 +186,7 @@ function buildServer(instructions: string): McpServer {
     server.resource(`guide-${topic}`, uri, { description, mimeType: "text/markdown" }, async () => ({
       contents: [{ uri, mimeType: "text/markdown", text: readResourceFile(`agent-guide/${topic}.md`) }],
     }));
-    for (const [page, about] of guidePages(topic, readResourceFile(`agent-guide/${topic}.md`))) {
+    for (const [page, about] of guidePages(uri, readResourceFile(`agent-guide/${topic}.md`))) {
       const pageUri = `${uri}/${page}`;
       server.resource(`guide-${topic}-${page}`, pageUri, {
         description: `Agent guide, ${topic}: ${about}`, mimeType: "text/markdown",
@@ -236,6 +236,19 @@ function buildServer(instructions: string): McpServer {
       ],
     })
   );
+  // Its contents page lists its pages, one per subject, as the agent guide's
+  // topics do, and each line registers one.
+  for (const [page, about] of guidePages("quern://app-knowledge-guide", readResourceFile("app-knowledge-guide.md"))) {
+    const pageUri = `quern://app-knowledge-guide/${page}`;
+    server.resource(`app-knowledge-guide-${page}`, pageUri, {
+      description: `App knowledge base guide: ${about}`, mimeType: "text/markdown",
+    }, async () => ({
+      contents: [{
+        uri: pageUri, mimeType: "text/markdown",
+        text: readResourceFile(`app-knowledge-guide/${page}.md`),
+      }],
+    }));
+  }
 
   server.resource(
     "troubleshooting",
