@@ -1515,10 +1515,19 @@ class ProxyAdapter(BaseSourceAdapter):
             self._addon_trusted = None if udids is None else [str(u).upper() for u in udids]
             self._addon_trust_seq += 1
         elif event == "intercept_set":
-            self._intercept_pattern = data.get("pattern")
+            # The server's record is the intercepts it set; an echo of a
+            # scoped one is not the every-device pattern (#646).
+            pass
         elif event == "intercept_cleared":
-            self._intercept_pattern = None
-            self._held_flows.clear()
+            # One intercept's clear releases only the flows it held: the
+            # others' are still held, and listed until their own `released`.
+            rule_id = data.get("rule_id")
+            if rule_id:
+                for flow_id in [f for f, info in self._held_flows.items()
+                                if info.get("rule_id") == rule_id]:
+                    self._held_flows.pop(flow_id, None)
+            else:
+                self._held_flows.clear()
         elif event == "mock_set":
             # Already tracked in set_mock(), but handle for completeness
             pass

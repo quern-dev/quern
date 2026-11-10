@@ -330,3 +330,29 @@ def test_the_addons_held_event_keeps_which_intercept_held_it():
         "request": {"method": "GET", "url": "https://x.test/", "host": "x.test", "path": "/"}})
     assert adapter.held_by("f_1") == "icpt_a"
     assert adapter.get_held_flows()[0]["rule_id"] == "icpt_a"
+
+
+async def test_clearing_one_intercept_keeps_the_others_held_flows_listed():
+    """Found live: the addon's intercept_cleared event used to empty the
+    server's whole list, so a flow another intercept still held vanished from
+    list_held_flows while the request hung on."""
+    adapter = ProxyAdapter(flow_store=FlowStore(), listen_port=9101)
+    for flow_id, rule_id in (("fa", "icpt_a"), ("fu", "icpt_all")):
+        adapter._handle_intercepted({
+            "type": "intercepted", "id": flow_id, "rule_id": rule_id, "timestamp": time.time(),
+            "request": {"method": "GET", "url": "https://x.test/", "host": "x.test", "path": "/"}})
+    await adapter._handle_status_event({"type": "status", "event": "intercept_cleared",
+                                        "rule_id": "icpt_a"})
+    assert [h["id"] for h in adapter.get_held_flows()] == ["fu"]
+    await adapter._handle_status_event({"type": "status", "event": "intercept_cleared",
+                                        "rule_id": None})
+    assert adapter.get_held_flows() == []
+
+
+async def test_setting_a_scoped_intercept_does_not_report_it_as_every_devices():
+    adapter = ProxyAdapter(flow_store=FlowStore(), listen_port=9101)
+    adapter.broadcast = AsyncMock()
+    await adapter.set_intercept("~d a.test", simulator_udid=SIM_A)
+    await adapter._handle_status_event({"type": "status", "event": "intercept_set",
+                                        "pattern": "~d a.test", "simulator_udid": SIM_A})
+    assert adapter._intercept_pattern is None
