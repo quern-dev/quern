@@ -881,8 +881,12 @@ the background and can be re-enabled with configure_system_proxy.`,
     `since the setting is only read when the network attaches. ` +
     `On iOS the proxy is still configured by hand in Settings > Wi-Fi; call this afterwards to record it, ` +
     `and apply/clear are refused rather than silently ignored. ` +
-    `Pass clear=true to unset it — the setting survives reboots, and a device left pointing at a proxy ` +
+    `Pass clear=true to undo it — the setting survives reboots, and a device left pointing at a proxy ` +
     `that is no longer listening has no working network. ` +
+    `An Android device that already had a global proxy (a corporate or lab one) gets it back on clear: ` +
+    `apply reads it first and reports it as previous_proxy, and clear puts it back (restored_proxy) or ` +
+    `deletes the setting when there was none. Apply is refused, changing nothing, when the device's ` +
+    `current setting cannot be read (502) or recorded (500). ` +
     `On Android, ssid and client_ip are read off the device when omitted, so prefer omitting them to guessing. ` +
     `The proxy host is the Mac interface on the device's own subnet; the port comes from the running proxy. ` +
     `Check network_reattached and hint in the response: applied means the setting was written, ` +
@@ -921,7 +925,8 @@ the background and can be re-enabled with configure_system_proxy.`,
         .boolean()
         .optional()
         .describe(
-          "Android only: unset the device's proxy and forget every config recorded for it. " +
+          "Android only: put back the proxy the device had before apply (or unset it if it had none), " +
+          "and forget every config recorded for it. " +
           "Use this to undo apply, and to rescue a device pointing at a proxy that is gone."
         ),
     }),

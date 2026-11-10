@@ -157,9 +157,11 @@ Physical devices keep their own addresses and are unaffected either way, so
 
 The proxy setting lives in Android's global settings and **survives reboots**,
 so it stays until something changes it. A device left pointing at a proxy that
-is no longer listening has no working network, so unset it when you are done:
-call `record_device_proxy_config` with `clear=true`, which unsets the proxy and
-forgets every network config quern recorded for that device.
+is no longer listening has no working network, so undo it when you are done:
+call `record_device_proxy_config` with `clear=true`. It puts back the proxy the
+device had before quern's, such as a corporate or lab one, or unsets it if
+there was none, and forgets every network config quern recorded for that
+device.
 
 The certificate is designed to persist and affects nothing outside the device.
 

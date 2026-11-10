@@ -28,6 +28,7 @@ CERT_STATE_FILE = CONFIG_DIR / "cert-state.json"
 _CANONICAL_FIELDS = frozenset({
     "name", "cert_installed", "fingerprint",
     "installed_at", "verified_at", "wifi_proxy_configs",
+    "proxy_before_quern",
 })
 
 
@@ -122,9 +123,13 @@ def _canonicalised(state: dict[str, dict]) -> dict[str, dict]:
             merged[key].get("wifi_proxy_configs") or {},
             record.get("wifi_proxy_configs") or {},
         )
+        before = merged[key].get("proxy_before_quern")
         merged[key] = {**merged[key], **record}
         if configs:
             merged[key]["wifi_proxy_configs"] = configs
+        if before and not record.get("proxy_before_quern"):
+            # A setting to put back outlives a spelling that has none (#645).
+            merged[key]["proxy_before_quern"] = before
     return merged
 
 
@@ -312,6 +317,90 @@ def forget_device_proxy_configs(udid: str) -> list[str]:
         "wifi_proxy_configs"
     ) or {})
     return sorted(before - after)
+
+
+def proxy_before_quern(udid: str) -> tuple[bool, str | None]:
+    """Whether quern recorded what an Android device's global proxy was before
+    it applied its own, and that value (None for nothing set) (#645).
+
+    On disk, not in memory: the device keeps the setting across reboots and
+    quern restarts, so a clear after either must still know what to put back.
+    """
+    record = (read_cert_state_for_device(udid) or {}).get("proxy_before_quern")
+    if not isinstance(record, dict):
+        return False, None
+    return True, record.get("value")
+
+
+def proxy_record(udid: str) -> dict | None:
+    """The whole proxy-before-quern record, or None (#645)."""
+    record = (read_cert_state_for_device(udid) or {}).get("proxy_before_quern")
+    return dict(record) if isinstance(record, dict) else None
+
+
+def put_proxy_record(udid: str, record: dict | None) -> None:
+    """Write a record back as it was, or forget it when there was none: what a
+    failed apply that left the device untouched does with the one it read."""
+    from server.device.ios.devicectl import canonical_device_id
+
+    if record is None:
+        forget_proxy_before_quern(udid)
+    else:
+        update_cert_state(canonical_device_id(udid), {"proxy_before_quern": record})
+
+
+def mark_proxy_restored(udid: str) -> None:
+    """Keep the record after the device was put back, marked so: a second clear
+    then knows there is nothing of quern's to undo, where without a record it
+    would delete the proxy just restored (CodeRabbit)."""
+    from server.device.ios.devicectl import canonical_device_id
+
+    record = proxy_record(udid)
+    if record is not None:
+        update_cert_state(canonical_device_id(udid), {"proxy_before_quern": {
+            **record, "restored": True}})
+
+
+def quern_addresses_applied(udid: str) -> list[str]:
+    """The proxy addresses quern has applied to the device while this record
+    stood. Kept in the record itself, because the per-network configs are
+    written only when the device's Wi-Fi network is known (#645 review)."""
+    record = (read_cert_state_for_device(udid) or {}).get("proxy_before_quern")
+    return list(record.get("quern_addresses") or []) if isinstance(record, dict) else []
+
+
+def record_proxy_before_quern(udid: str, value: str | None, applying: str | None = None) -> None:
+    """Note the device's proxy as it was before quern's apply, replacing any
+    earlier note: the caller decides which value is the device's own.
+    `applying` is the address quern is about to write, added to those the
+    record already lists."""
+    from server.device.ios.devicectl import canonical_device_id
+
+    addresses = quern_addresses_applied(udid)
+    if applying and applying not in addresses:
+        addresses.append(applying)
+    update_cert_state(canonical_device_id(udid), {"proxy_before_quern": {
+        "value": value, "quern_addresses": addresses,
+        "recorded_at": datetime.now(UTC).isoformat()}})
+
+
+def forget_proxy_before_quern(udid: str) -> None:
+    """Drop the record once the device has been put back, on every spelling of
+    the device, as `forget_device_proxy_configs` does and for the same reason."""
+    from server.device.ios.devicectl import canonical_device_id
+
+    if not proxy_before_quern(udid)[0]:
+        # Nothing to forget, and writing a null would file a device that has
+        # no other state as one with an uninstalled CA (review).
+        return
+    canonical = canonical_device_id(udid)
+    try:
+        # Raw keys: the spellings as they sit on disk, which the merged read hides.
+        raw = json.loads(CERT_STATE_FILE.read_text() or "{}") if CERT_STATE_FILE.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        raw = {}
+    for key in [k for k in raw if canonical_device_id(k) == canonical] or [canonical]:
+        update_cert_state(key, {"proxy_before_quern": None})
 
 
 def _create_and_open():

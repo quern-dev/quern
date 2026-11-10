@@ -1363,11 +1363,16 @@ rm -rf /data/local/tmp/tmp-ca-copy
         requests; the same after `reattach_network()` produced twenty. Callers
         that want it to take effect must reattach.
         """
+        await self.put_http_proxy(serial, f"{host}:{port}")
+
+    async def put_http_proxy(self, serial: str, value: str) -> None:
+        """Write the global HTTP proxy as given -- the form a value read with
+        `get_http_proxy` comes back in, so one that was there before quern can
+        be put back as it was (#645)."""
         await self._run_adb_for_device(
-            serial, "shell", "settings", "put", "global",
-            "http_proxy", f"{host}:{port}",
+            serial, "shell", "settings", "put", "global", "http_proxy", value,
         )
-        logger.info("Set HTTP proxy on %s to %s:%d", serial, host, port)
+        logger.info("Set HTTP proxy on %s to %s", serial, value)
 
     async def clear_http_proxy(self, serial: str) -> None:
         """Remove the global HTTP proxy.
@@ -1387,18 +1392,25 @@ rm -rf /data/local/tmp/tmp-ca-copy
         )
         logger.info("Cleared HTTP proxy on %s", serial)
 
-    async def get_http_proxy(self, serial: str) -> str | None:
+    async def get_http_proxy(self, serial: str, *, strict: bool = False) -> str | None:
         """What the device's global proxy is set to, or None.
 
         `settings get` prints the string `null` for an unset key, which is not
         the same as the empty output a failed read gives. Both are reported as
         None here, deliberately: a caller wanting to know whether the *read*
         worked should catch the error rather than read a sentinel.
+
+        `strict` raises on the empty output instead. A caller that will act on
+        "nothing was set" -- deleting the setting later, on the strength of
+        this read (#645) -- must not take a read that said nothing for one
+        that said `null`.
         """
         stdout, _ = await self._run_adb_for_device(
             serial, "shell", "settings", "get", "global", "http_proxy",
         )
         value = (stdout or "").strip()
+        if strict and not value:
+            raise DeviceError(f"Reading {serial}'s proxy setting printed nothing", tool="adb")
         return None if value in ("", "null") else value
 
     @staticmethod
