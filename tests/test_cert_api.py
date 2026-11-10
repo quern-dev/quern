@@ -1067,6 +1067,7 @@ class TestLocalCaptureIsGatedToo:
         adapter.listen_port = 9101
         adapter.started_at = None
         adapter._intercept_pattern = None
+        adapter._intercept_rules = []
         adapter._active_filter = None
         adapter._mock_rules = []
         adapter._held_flows = {}
@@ -1557,6 +1558,7 @@ class TestSettingCaptureSaysWhatItDropped:
         adapter.listen_port = 9101
         adapter.started_at = None
         adapter._intercept_pattern = None
+        adapter._intercept_rules = []
         adapter._active_filter = None
         adapter._mock_rules = []
         adapter._held_flows = {}
@@ -1687,6 +1689,7 @@ class TestStartingTheSystemProxyIsGatedToo:
         adapter.listen_port = 9101
         adapter.started_at = None
         adapter._intercept_pattern = None
+        adapter._intercept_rules = []
         adapter._active_filter = None
         adapter._mock_rules = []
         adapter._held_flows = {}
@@ -1841,6 +1844,7 @@ class TestAutoInstallCertClearsEveryHttpGate:
         adapter.listen_port = 9101
         adapter.started_at = None
         adapter._intercept_pattern = None
+        adapter._intercept_rules = []
         adapter._active_filter = None
         adapter._mock_rules = []
         adapter._held_flows = {}
@@ -1945,6 +1949,7 @@ class TestStartProxyKeepsItsOldContract:
         adapter.listen_port = 9101
         adapter.started_at = None
         adapter._intercept_pattern = None
+        adapter._intercept_rules = []
         adapter._active_filter = None
         adapter._mock_rules = []
         adapter._held_flows = {}
@@ -2022,6 +2027,7 @@ class TestARecordedWifiProxyConfigIsVisible:
         adapter.listen_port = 9101
         adapter.started_at = None
         adapter._intercept_pattern = None
+        adapter._intercept_rules = []
         adapter._active_filter = None
         adapter._mock_rules = []
         adapter._held_flows = {}

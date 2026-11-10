@@ -510,6 +510,7 @@ def mock_proxy_adapter():
     adapter.started_at = datetime.now(UTC)
     adapter._error = None
     adapter._intercept_pattern = None
+    adapter._intercept_rules = []
     adapter._held_flows = {}
     adapter._mock_rules = []
     return adapter

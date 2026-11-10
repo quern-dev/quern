@@ -274,9 +274,14 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("DELETE", "/api/v1/proxy/mocks"): _OWNER,
     ("POST", "/api/v1/proxy/bypass"): _OWNER,
     ("DELETE", "/api/v1/proxy/bypass"): _OWNER,
-    ("POST", "/api/v1/proxy/intercept"): _OWNER,
-    ("DELETE", "/api/v1/proxy/intercept"): _OWNER,
-    ("POST", "/api/v1/proxy/intercept/release"): _OWNER,
+    # Scoped to a device the session holds, as for mocks (#646); unscoped it
+    # holds every device's requests: owner-only. The rest check the
+    # intercept's owner and device in the route: a client clears and
+    # releases only its own.
+    ("POST", "/api/v1/proxy/intercept"): _named("simulator_udid"),
+    ("DELETE", "/api/v1/proxy/intercept"): _PATH_ID,
+    ("DELETE", "/api/v1/proxy/intercept/{rule_id}"): _PATH_ID,
+    ("POST", "/api/v1/proxy/intercept/release"): _PATH_ID,
     ("POST", "/api/v1/proxy/intercept/release-all"): _OWNER,
     ("POST", "/api/v1/proxy/replay/{flow_id}"): _OWNER,      # a request sent from the Mac
     ("POST", "/api/v1/proxy/configure-system"): _OWNER,

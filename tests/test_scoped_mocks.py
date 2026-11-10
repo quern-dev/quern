@@ -971,6 +971,7 @@ async def test_a_phones_address_is_sent_again_to_a_restarted_proxy(adapter):
     adapter.leader = None
     adapter._bypass_patterns = []
     adapter._intercept_pattern = None
+    adapter._intercept_rules = []
     adapter._mock_rules = [{"rule_id": "r1", "pattern": "~d x", "response": {},
                             "simulator_udid": PHONE, "client_ip": PHONE_IP}]
     assert await adapter._send_rules()

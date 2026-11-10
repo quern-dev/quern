@@ -260,6 +260,7 @@ async def _get_proxy_status(
             flows_captured=flow_store.size if flow_store else 0,
             flow_store=flow_store.stats() if flow_store else None,
             active_intercept=adapter._intercept_pattern,
+            intercepts=_intercept_infos(adapter),
             held_flows_count=adapter.held_count(),
             tls_rejections=adapter.tls_rejections(),
             simulator_tls=sim_tls_report,
@@ -284,6 +285,7 @@ async def _get_proxy_status(
             flows_captured=flow_store.size if flow_store else 0,
             flow_store=flow_store.stats() if flow_store else None,
             active_intercept=adapter._intercept_pattern,
+            intercepts=_intercept_infos(adapter),
             held_flows_count=adapter.held_count(),
             tls_rejections=adapter.tls_rejections(),
             simulator_tls=sim_tls_report,
@@ -383,6 +385,15 @@ async def proxy_status(
     return status
 
 
+def _intercept_infos(adapter) -> list:
+    """The intercepts set, for proxy_status (#646)."""
+    from server.models import InterceptRuleInfo
+
+    rules = adapter.intercept_rules() if hasattr(adapter, "intercept_rules") else []
+    return [InterceptRuleInfo(rule_id=r["rule_id"], pattern=r["pattern"],
+                              simulator_udid=r.get("simulator_udid")) for r in rules]
+
+
 async def _blind_status(request: Request, status: ProxyStatusResponse,
                         view: visibility.View) -> ProxyStatusResponse:
     """The proxy status a blind client may see (#254): its own devices' TLS and
@@ -404,6 +415,10 @@ async def _blind_status(request: Request, status: ProxyStatusResponse,
         "flow_store": None,
         "active_filter": None,
         "active_intercept": None,
+        # Its own intercepts on its own devices, as for its mock rules (#646).
+        "intercepts": [i for i in status.intercepts if view.allows(i.simulator_udid)
+                       and (getattr(request.app.state, "intercept_owners", {}) or {}).get(
+                           i.rule_id) == visibility.current_caller().principal],
         "held_flows_count": 0,
         "mock_rules_count": sum(
             1 for r in rules if view.allows(r.get("simulator_udid"))

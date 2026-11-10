@@ -1156,10 +1156,12 @@ class IOSDebugAddon:
         self._trust_lock = threading.Lock()
         self._simulators_only = os.environ.get(SIMULATORS_ONLY_ENV) == "1"
 
-        # Intercept state — protected by _held_lock
-        self._intercept_pattern: str | None = None
-        self._intercept_compiled: Any | None = None  # flowfilter result, callable
+        # Intercept state — protected by _held_lock. Several intercepts may be
+        # set at once (#646), each scoped to one device or to every device:
+        # [{rule_id, pattern_str, compiled, simulator_udid, client_ip}].
+        self._intercept_rules: list[dict] = []
         self._held_flows: dict[str, tuple[http.HTTPFlow, float]] = {}  # id -> (flow, held_at)
+        self._held_rule: dict[str, str] = {}  # flow id -> the intercept that held it
         self._held_lock = threading.Lock()
 
         # Mock state — protected by _mock_lock
@@ -1207,6 +1209,7 @@ class IOSDebugAddon:
                     "timestamp": time.time(),
                 })
             self._held_flows.clear()
+            self._held_rule.clear()
         _write_json({"type": "status", "event": "stopped", "timestamp": time.time()})
 
     def _is_bypassed(self, host: str) -> bool:
@@ -1451,19 +1454,35 @@ class IOSDebugAddon:
             _mark_mocked(flow, rule["rule_id"], scope)
             return "mocked"
 
-        # 2. Check intercept pattern
+        # 2. Check intercepts: scoped ones first, as for mocks, and each scope
+        # decided the way a scoped mock's is -- failing closed (#646).
         with self._held_lock:
-            if self._intercept_compiled and self._intercept_compiled(flow):
-                flow_id = f"f_{uuid.uuid4().hex[:12]}"
-                flow.intercept()
+            intercepts = sorted(self._intercept_rules,
+                                key=lambda r: r.get("simulator_udid") is None)
+        for rule in intercepts:
+            compiled = rule["compiled"]
+            if not (compiled and compiled(flow)):
+                continue
+            if rule.get("simulator_udid") is not None:
+                matched = _scope_matches(rule, flow, requester)
+                if matched is _UNDECIDED:
+                    self._defer(flow, requester)
+                    return "deferred"
+                if not matched:
+                    continue
+            flow_id = f"f_{uuid.uuid4().hex[:12]}"
+            flow.intercept()
+            with self._held_lock:
                 self._held_flows[flow_id] = (flow, time.time())
-                _write_json({
-                    "type": "intercepted",
-                    "id": flow_id,
-                    "timestamp": time.time(),
-                    "request": _serialize_request(flow.request),
-                })
-                return "held"
+                self._held_rule[flow_id] = rule["rule_id"]
+            _write_json({
+                "type": "intercepted",
+                "id": flow_id,
+                "rule_id": rule["rule_id"],
+                "timestamp": time.time(),
+                "request": _serialize_request(flow.request),
+            })
+            return "held"
         return "passed"
 
     def _defer(self, flow: http.HTTPFlow, requester: dict) -> None:
@@ -1666,6 +1685,7 @@ class IOSDebugAddon:
                     if now - held_at >= self._timeout_seconds:
                         expired.append((flow_id, flow))
                         del self._held_flows[flow_id]
+                        self._held_rule.pop(flow_id, None)
 
             # Resume outside the lock to avoid holding it during I/O
             for flow_id, flow in expired:
@@ -1706,7 +1726,7 @@ class IOSDebugAddon:
                 elif action == "set_intercept":
                     self._handle_set_intercept(cmd)
                 elif action == "clear_intercept":
-                    self._handle_clear_intercept()
+                    self._handle_clear_intercept(cmd)
                 elif action == "release_flow":
                     self._handle_release_flow(cmd)
                 elif action == "modify_and_release":
@@ -1732,8 +1752,20 @@ class IOSDebugAddon:
             pass  # stdin closed or broken pipe
 
     def _handle_set_intercept(self, cmd: dict) -> None:
-        """Compile and set an intercept filter pattern."""
+        """Compile and add an intercept, or replace the one with its rule_id.
+
+        `simulator_udid` scopes it to one device, decided as a scoped mock's
+        is, and `client_ip` is how a physical Android phone's requests are
+        told. A command with no rule_id is the one every-device intercept the
+        server used to send: rule "intercept", replaced where it stands.
+        """
         pattern = cmd.get("pattern", "")
+        rule_id = cmd.get("rule_id") or "intercept"
+        raw_scope = cmd.get("simulator_udid")
+        scope = raw_scope if isinstance(raw_scope, str) and raw_scope else None
+        if scope and _UUID_SCOPE_RE.match(scope):
+            scope = scope.upper()
+        client_ip = cmd.get("client_ip") if scope else None
         try:
             compiled = flowfilter.parse(pattern)
         except ValueError:
@@ -1743,31 +1775,54 @@ class IOSDebugAddon:
                 "type": "error",
                 "event": "invalid_intercept_pattern",
                 "pattern": pattern,
+                "rule_id": rule_id,
                 "timestamp": time.time(),
             })
             return
 
+        rule = {
+            "rule_id": rule_id,
+            "pattern_str": pattern,
+            "compiled": compiled,
+            "simulator_udid": scope,
+            "client_ip": client_ip if isinstance(client_ip, str) and client_ip else None,
+        }
         with self._held_lock:
-            self._intercept_pattern = pattern
-            self._intercept_compiled = compiled
+            for i, existing in enumerate(self._intercept_rules):
+                if existing["rule_id"] == rule_id:
+                    self._intercept_rules[i] = rule
+                    break
+            else:
+                self._intercept_rules.append(rule)
 
         _write_json({
             "type": "status",
             "event": "intercept_set",
+            "rule_id": rule_id,
             "pattern": pattern,
+            "simulator_udid": scope,
             "timestamp": time.time(),
         })
 
-    def _handle_clear_intercept(self) -> None:
-        """Clear intercept pattern and release all held flows."""
+    def _handle_clear_intercept(self, cmd: dict | None = None) -> None:
+        """Remove one intercept (`rule_id`) and release the flows it held, or
+        every intercept and every held flow."""
+        rule_id = (cmd or {}).get("rule_id")
         released: list[tuple[str, http.HTTPFlow]] = []
 
         with self._held_lock:
-            self._intercept_pattern = None
-            self._intercept_compiled = None
-            for flow_id, (flow, _) in list(self._held_flows.items()):
-                released.append((flow_id, flow))
-            self._held_flows.clear()
+            if rule_id:
+                self._intercept_rules = [r for r in self._intercept_rules
+                                         if r["rule_id"] != rule_id]
+                ids = [f for f, r in self._held_rule.items() if r == rule_id]
+            else:
+                self._intercept_rules.clear()
+                ids = list(self._held_flows)
+            for flow_id in ids:
+                entry = self._held_flows.pop(flow_id, None)
+                self._held_rule.pop(flow_id, None)
+                if entry is not None:
+                    released.append((flow_id, entry[0]))
 
         for flow_id, flow in released:
             try:
@@ -1784,6 +1839,7 @@ class IOSDebugAddon:
         _write_json({
             "type": "status",
             "event": "intercept_cleared",
+            "rule_id": rule_id,
             "timestamp": time.time(),
         })
 
@@ -1792,6 +1848,7 @@ class IOSDebugAddon:
         flow_id = cmd.get("flow_id", "")
         with self._held_lock:
             entry = self._held_flows.pop(flow_id, None)
+            self._held_rule.pop(flow_id, None)
 
         if entry is None:
             return  # Already released or timed out
@@ -1815,6 +1872,7 @@ class IOSDebugAddon:
 
         with self._held_lock:
             entry = self._held_flows.pop(flow_id, None)
+            self._held_rule.pop(flow_id, None)
 
         if entry is None:
             return
@@ -1851,6 +1909,7 @@ class IOSDebugAddon:
             for flow_id, (flow, _) in list(self._held_flows.items()):
                 released.append((flow_id, flow))
             self._held_flows.clear()
+            self._held_rule.clear()
 
         for flow_id, flow in released:
             try:

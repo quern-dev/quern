@@ -13,6 +13,7 @@ from server import visibility
 from server.api.actions import logged_action
 from server.models import (
     HeldFlow,
+    InterceptRuleInfo,
     InterceptSetRequest,
     InterceptStatusResponse,
     MockListResponse,
@@ -43,33 +44,98 @@ def _require_running_proxy(request: Request):
 # ---------------------------------------------------------------------------
 
 
+def _intercept_owners(request: Request) -> dict[str, str]:
+    """Whose each intercept is, by rule_id (#646): a client key's end with its
+    hold, and it may clear and release only its own."""
+    if not hasattr(request.app.state, "intercept_owners"):
+        request.app.state.intercept_owners = {}
+    return request.app.state.intercept_owners
+
+
+def _is_owner_key() -> bool:
+    from server import principal
+
+    return principal.label_of(visibility.current_caller().principal) is None
+
+
 @router.post("/intercept")
 @logged_action("set_intercept", category="proxy")
 async def set_intercept(request: Request, body: InterceptSetRequest) -> dict:
-    """Set an intercept pattern. Matching requests will be held."""
+    """Add an intercept. Matching requests are held -- only one device's when
+    `simulator_udid` is given, every device's otherwise (owner key only, which
+    the route's access rule enforces). Several may be set at once (#646)."""
     adapter = _require_running_proxy(request)
+    client_ip = await _android_mock_scope(request, body.simulator_udid, "intercept")
     try:
-        await adapter.set_intercept(body.pattern)
+        rule_id = await adapter.set_intercept(
+            body.pattern, simulator_udid=body.simulator_udid, client_ip=client_ip)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {
-        "status": "accepted",
-        "pattern": body.pattern,
+    _intercept_owners(request)[rule_id] = visibility.current_caller().principal
+    result = {
+        "status": "accepted", "rule_id": rule_id, "pattern": body.pattern,
+        "simulator_udid": body.simulator_udid,
+        "platform": _scope_platform(body.simulator_udid),
         "note": "Matching requests will be held. Use GET /proxy/intercept/held to see them.",
     }
+    warning = await _mock_scope_warning(request, body.simulator_udid, "intercept")
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+def _check_intercept_scope(adapter, rule: dict) -> None:
+    """Refuse to change an intercept scoped to a device another session
+    holds, or, from a client key, one that holds every device's requests --
+    as for mock rules (#254)."""
+    from server import device_access
+
+    if rule.get("simulator_udid"):
+        device_access.check(rule["simulator_udid"])
+    else:
+        device_access.require_owner("changing an intercept with no simulator_udid")
+
+
+@router.delete("/intercept/{rule_id}")
+@logged_action("delete_intercept", category="proxy")
+async def delete_intercept(request: Request, rule_id: str) -> dict:
+    """Remove one intercept, releasing the flows it held."""
+    adapter = _require_running_proxy(request)
+    rule = next((r for r in adapter.intercept_rules() if r["rule_id"] == rule_id), None)
+    if rule is None:
+        # 404, as for a mock: a removal that removed nothing must say so, or
+        # teardown cannot tell it left an intercept holding traffic (#182).
+        raise HTTPException(status_code=404, detail=f"Intercept not found: {rule_id}")
+    _check_intercept_scope(adapter, rule)
+    held = sum(1 for h in adapter.get_held_flows() if h.get("rule_id") == rule_id)
+    await adapter.clear_intercept(rule_id=rule_id)
+    _intercept_owners(request).pop(rule_id, None)
+    return {"status": "deleted", "rule_id": rule_id, "held_flows_released": held}
 
 
 @router.delete("/intercept")
 @logged_action("clear_intercept", category="proxy")
 async def clear_intercept(request: Request) -> dict:
-    """Clear the intercept pattern and release all held flows."""
+    """Remove intercepts and release the flows they held. The owner key
+    clears every intercept; a client key clears its own (#646)."""
     adapter = _require_running_proxy(request)
-    count = adapter.held_count()
-    await adapter.clear_intercept()
-    return {
-        "status": "accepted",
-        "note": f"Intercept cleared. {count} held flow(s) released.",
-    }
+    owners = _intercept_owners(request)
+    if _is_owner_key():
+        count, held = len(adapter.intercept_rules()), adapter.held_count()
+        await adapter.clear_intercept()
+        owners.clear()
+        return {"status": "accepted", "count": count, "held_flows_released": held,
+                "note": f"{count} intercept(s) cleared, {held} held flow(s) released."}
+    caller = visibility.current_caller().principal
+    mine = [r for r in adapter.intercept_rules() if owners.get(r["rule_id"]) == caller]
+    held = 0
+    for rule in mine:
+        _check_intercept_scope(adapter, rule)
+        held += sum(1 for h in adapter.get_held_flows() if h.get("rule_id") == rule["rule_id"])
+        await adapter.clear_intercept(rule_id=rule["rule_id"])
+        owners.pop(rule["rule_id"], None)
+    return {"status": "accepted", "count": len(mine), "held_flows_released": held,
+            "note": f"{len(mine)} of your intercept(s) cleared, {held} held flow(s) released."}
 
 
 @router.get("/intercept/held", response_model=InterceptStatusResponse)
@@ -94,12 +160,16 @@ async def list_held_flows(
     held = adapter.get_held_flows()
     return InterceptStatusResponse(
         pattern=adapter._intercept_pattern,
+        intercepts=[InterceptRuleInfo(rule_id=r["rule_id"], pattern=r["pattern"],
+                                      simulator_udid=r.get("simulator_udid"))
+                    for r in adapter.intercept_rules()],
         held_flows=[
             HeldFlow(
                 id=h["id"],
                 held_at=h["held_at"],
                 age_seconds=h["age_seconds"],
                 request=h["request"],
+                rule_id=h.get("rule_id"),
             )
             for h in held
         ],
@@ -115,6 +185,13 @@ async def release_flow(request: Request, body: ReleaseFlowRequest) -> dict:
 
     if not adapter.holds(body.flow_id):
         raise HTTPException(status_code=404, detail=f"Flow {body.flow_id} not held")
+    if not _is_owner_key():
+        # A client key releases only what its own intercepts held (#646).
+        rule_id = adapter.held_by(body.flow_id)
+        if _intercept_owners(request).get(rule_id or "") != visibility.current_caller().principal:
+            raise HTTPException(status_code=403, detail=(
+                f"Flow {body.flow_id} was held by an intercept that is not yours; "
+                "only the session that set it, or the owner, may release it."))
 
     await adapter.release_flow(body.flow_id, modifications=body.modifications)
     # Remove from server-side tracking (addon will also emit a released event)
@@ -208,7 +285,9 @@ async def replay_flow(
 _SCOPE_LISTING_TIMEOUT_S = 5.0
 
 
-async def _android_mock_scope(request: Request, scope: str | None) -> str | None:
+async def _android_mock_scope(
+    request: Request, scope: str | None, what: str = "mock",
+) -> str | None:
     """Check a mock scope that names an Android device, and return how its
     requests are told (#582): None for an emulator, which its QEMU process
     identifies, or a physical phone's Wi-Fi address, which is the peer of
@@ -239,7 +318,7 @@ async def _android_mock_scope(request: Request, scope: str | None) -> str | None
     if kind not in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE):
         raise HTTPException(422, (
             f"{scope} is not a simulator UDID or the serial of an Android device "
-            "quern can see (list_devices). A mock scoped to it would never fire."))
+            f"quern can see (list_devices). A {what} scoped to it would never fire."))
     if controller.adb.is_console_serial(scope):
         return None
     host = scope.rsplit(":", 1)[0] if ":" in scope else ""
@@ -249,7 +328,7 @@ async def _android_mock_scope(request: Request, scope: str | None) -> str | None
         raise HTTPException(422, (
             f"{scope} is an emulator reached over TCP. Its traffic is attributed "
             "to its console serial, emulator-<port>, on the Mac running it: scope "
-            "the mock to that."))
+            f"the {what} to that."))
     ip = await controller.adb.get_lan_ip(scope)
     if not ip:
         from server.proxy.cert_state import read_cert_state_for_device
@@ -265,7 +344,7 @@ async def _android_mock_scope(request: Request, scope: str | None) -> str | None
         raise HTTPException(422, (
             f"Could not find {scope}'s network address, which is how its requests "
             "are told apart. Route it through the proxy with device-proxy-config "
-            "(apply=true), which reads and records it, then set the mock."))
+            f"(apply=true), which reads and records it, then set the {what}."))
     return ip
 
 
@@ -279,7 +358,7 @@ def _scope_platform(scope: str | None) -> str | None:
     return "ios" if is_simulator_scope(scope) else "android"
 
 
-async def _android_scope_warning(request: Request, serial: str) -> str | None:
+async def _android_scope_warning(request: Request, serial: str, what: str = "mock") -> str | None:
     """Why a mock scoped to an Android device may not fire: it is not routed
     through this proxy, as far as adb can tell."""
     from server.api.proxy_certs import _read_device_proxy
@@ -292,15 +371,15 @@ async def _android_scope_warning(request: Request, serial: str) -> str | None:
     port = getattr(adapter, "listen_port", None)
     if not read:
         return (f"Could not read {serial}'s proxy setting, so whether its traffic "
-                "reaches this proxy is unknown. The mock applies only if it does.")
+                f"reaches this proxy is unknown. The {what} applies only if it does.")
     if not proxy or (port and not proxy.endswith(f":{port}")):
         return (f"{serial} is not routed through this proxy (its proxy setting is "
-                f"{proxy or 'empty'}), so the mock cannot see its requests. Apply "
+                f"{proxy or 'empty'}), so the {what} cannot see its requests. Apply "
                 "device-proxy-config with apply=true first.")
     return None
 
 
-async def _mock_scope_warning(request: Request, udid: str | None) -> str | None:
+async def _mock_scope_warning(request: Request, udid: str | None, what: str = "mock") -> str | None:
     """Why a mock scoped to `udid` may not fire, or None if nothing is known.
 
     A scoped rule fails closed, so a scope that cannot match is a mock that
@@ -313,16 +392,16 @@ async def _mock_scope_warning(request: Request, udid: str | None) -> str | None:
     from server.models import is_simulator_scope
 
     if not is_simulator_scope(udid):
-        return await _android_scope_warning(request, udid)
+        return await _android_scope_warning(request, udid, what)
     reasons: list[str] = []
 
     adapter = getattr(request.app.state, "proxy_adapter", None)
     if adapter is not None and not getattr(adapter, "local_capture", False):
         reasons.append(
-            "Local capture is off. A scoped mock is decided from the process "
+            f"Local capture is off. A scoped {what} is decided from the process "
             "that opened the connection; under the system proxy that is looked "
             "up after the connection opens and may not be ready when the "
-            "request arrives, and then the request is not mocked."
+            f"request arrives, and then the {what} does not apply to it."
         )
 
     try:
@@ -336,7 +415,8 @@ async def _mock_scope_warning(request: Request, udid: str | None) -> str | None:
         reasons.append(
             f"Simulator {udid}'s HTTPS is passed through, not decrypted "
             f"({entry.reason or 'it does not trust the CA'}), so an HTTPS "
-            "request from it cannot be mocked. Install the CA on it first."
+            f"request from it cannot be {'mocked' if what == 'mock' else 'held'}. "
+            "Install the CA on it first."
         )
 
     controller = getattr(request.app.state, "device_controller", None)
@@ -354,20 +434,20 @@ async def _mock_scope_warning(request: Request, udid: str | None) -> str | None:
         # listing is "could not check", never "no such simulator".
         reasons.append(
             f"Could not list this Mac's simulators to confirm {udid} exists. The "
-            "mock applies only to requests attributed to that simulator."
+            f"{what} applies only to requests attributed to that simulator."
         )
     else:
         match = next((d for d in sims if d.udid.upper() == udid), None)
         if match is None:
             reasons.append(
-                f"No simulator with UDID {udid} in simctl's list, so this mock "
+                f"No simulator with UDID {udid} in simctl's list, so this {what} "
                 "fires only if one exists that it does not list (an XCTest "
                 "parallel-testing clone, for example). Check the UDID with "
                 "list_devices."
             )
         elif getattr(match.state, "value", match.state) != "booted":
             reasons.append(
-                f"Simulator {udid} ({match.name}) is not booted; the mock "
+                f"Simulator {udid} ({match.name}) is not booted; the {what} "
                 "applies once it is."
             )
     return " ".join(reasons) or None

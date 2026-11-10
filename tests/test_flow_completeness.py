@@ -491,6 +491,7 @@ async def test_proxy_status_reports_store_stats_in_every_production_branch(state
     adapter.listen_port, adapter.listen_host = 9101, "0.0.0.0"
     adapter.started_at = datetime.now(UTC)
     adapter._intercept_pattern, adapter._held_flows, adapter._mock_rules = None, {}, []
+    adapter._intercept_rules = []
 
     store = FlowStore(max_size=2)
     for i in range(3):

@@ -248,7 +248,8 @@ async def test_a_new_proxy_gets_the_rules_already_set(tmp_path):
     sent = m.made[0].sent
     assert [c["rule_id"] for c in sent if c["action"] == "set_mock"] == ["m1"]
     assert {"action": "set_bypass", "patterns": ["apple.com"]} in sent
-    assert {"action": "set_intercept", "pattern": "~d auth.example.com"} in sent
+    assert [(c["pattern"], c["simulator_udid"]) for c in sent if c["action"] == "set_intercept"] \
+        == [("~d auth.example.com", None)]
 
 
 async def test_a_rule_set_later_reaches_every_proxy(tmp_path):

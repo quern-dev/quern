@@ -460,6 +460,7 @@ def _running_adapter():
     a.is_running = False
     a.listen_host, a.listen_port = "0.0.0.0", 9101
     a.started_at = a._intercept_pattern = a._active_filter = None
+    a._intercept_rules = []
     a._mock_rules, a._held_flows, a._error = [], {}, None
     a.get_bypass_patterns = MagicMock(return_value=[])
     a.local_capture = []

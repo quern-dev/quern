@@ -64,7 +64,7 @@ It's all or nothing: **409** names the holder of any device another session has.
 - **What counts as a change:** any request that isn't a GET, apart from a few POSTs that only watch a device (UI waits, landmark identify/validate, flow waits, previews, screenshot timelines, log capture).
 - **Reads stay open to everyone:** screenshots, the UI tree, logs.
 - **Every route is covered:** a device a request names (`udid`, `udids`, `device_id`, `simulator_udid`, `device_serial` or `serial`, in the query string or any body that parses as JSON) is checked before the handler runs, and the device a request doesn't name (the active device, the pool's pick) is checked when it's resolved. Routes that reach a device another way check it themselves: stopping a recording, capture, timeline or every preview; changing a mock rule scoped to a simulator; cert install; boot by name; WDA's automatic restarts; build-and-install, re-checked after the build. The pool never picks a device another session holds.
-- **Two known limits:** releasing an intercepted flow isn't tied to a reservation, because held flows carry no device. And a USB iPhone's preview is filed by its name, not its udid, so stopping every preview can't tell it's held.
+- **A known limit:** a USB iPhone's preview is filed by its name, not its udid, so stopping every preview can't tell it's held.
 
 **Seeing who holds what:**
 
@@ -89,7 +89,7 @@ Give it to the client as `QUERN_CLIENT_KEY` (not `QUERN_API_KEY`, which `quern e
 - **Watch everything a shared server shows:** devices, screenshots, UI trees, logs, flows, crashes, recordings, the trace.
 - **Hold sessions and reserve devices**, as above.
 - **Change only devices its own session holds.** A free device is refused with **403** ("reserve it first"), not only one someone else holds (423). A change that names no device goes to the session's active device, which must be one it holds; a session with nothing reserved is refused before the route runs.
-- **Nothing Mac-wide**, which is **403 owner-only**: starting or stopping the proxy, the system proxy, local capture, intercepts and bypasses, mock rules and capture sessions that don't name a simulator (by `simulator_udid`, not just any device field), host logs (oslog), log filters and log presets, updates, server-wide landmark sets (a client loads an uploaded knowledge base for its own session only, #560), the device pool's resolve/ensure (reserve instead), **builds** (`build_and_install` runs a project's scripts, so code on the Mac), unless the owner sets `remote.client_builds` (below), app-state checkpoints (one store every caller shares), and anything that reads or writes a path on the Mac (`parse-file`, a recording's `output_dir`, recordings and traces by directory, `validate_landmarks`' `source`).
+- **Nothing Mac-wide**, which is **403 owner-only**: starting or stopping the proxy, the system proxy, local capture, bypasses, intercepts, mock rules and capture sessions that don't name a simulator (by `simulator_udid`, not just any device field), host logs (oslog), log filters and log presets, updates, server-wide landmark sets (a client loads an uploaded knowledge base for its own session only, #560), the device pool's resolve/ensure (reserve instead), **builds** (`build_and_install` runs a project's scripts, so code on the Mac), unless the owner sets `remote.client_builds` (below), app-state checkpoints (one store every caller shares), and anything that reads or writes a path on the Mac (`parse-file`, a recording's `output_dir`, recordings and traces by directory, `validate_landmarks`' `source`).
 
 - **Revoking a key** ends its sessions and frees their devices within a second, closes its session sockets, and ends its open streams -- video at the next frame, logs and flows at their next entry or 15-second heartbeat; the next request is refused with 401.
 - **Every request must carry `X-Quern-Session`** (400 otherwise). The server puts a client's session ids in its own namespace, `<label>:<id>`, so one client can never name, release or take over another's session or active device. A client's sessions appear under those names in `GET /api/v1/sessions` and in 423 bodies.
@@ -478,10 +478,10 @@ holds in `flow_store`. `flows_captured` is only what survived.
 
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
-| `set_intercept` | POST | `/api/v1/proxy/intercept` | Set intercept pattern |
-| `clear_intercept` | DELETE | `/api/v1/proxy/intercept` | Clear intercept |
-| `list_held_flows` | GET | `/api/v1/proxy/intercept/held` | List held flows |
-| `release_flow` | POST | `/api/v1/proxy/intercept/release` | Release a held flow |
+| `set_intercept` | POST | `/api/v1/proxy/intercept` | Add an intercept; `simulator_udid` scopes it to one device, as for a mock (#646). Several may be set at once, and each answers its `rule_id`. Unscoped, it holds every device's matching requests (owner key only) |
+| `clear_intercept` | DELETE | `/api/v1/proxy/intercept` | Remove intercepts and release the flows they held: every one from the owner key, a client key's own from a client key. `DELETE /api/v1/proxy/intercept/{rule_id}` removes one (404 if there is no such intercept) |
+| `list_held_flows` | GET | `/api/v1/proxy/intercept/held` | List held flows, each with the `rule_id` of the intercept that held it, and the intercepts set |
+| `release_flow` | POST | `/api/v1/proxy/intercept/release` | Release a held flow. A client key may release only a flow its own intercept held (403 otherwise) |
 | `replay_flow` | POST | `/api/v1/proxy/replay/{id}` | Replay a captured flow |
 | `set_mock` | POST | `/api/v1/proxy/mocks` | Add mock rule. Optional `simulator_udid` mocks only that device's requests -- a simulator's UDID, or an Android emulator's or phone's serial -- failing closed when a request cannot be attributed; a UDID that is not a booted simulator, or an Android device not routed through the proxy, is accepted with a `warning`. A serial that is not an Android device quern can see, or a phone whose network address cannot be found (route it with `device-proxy-config` first), is a 422. The answer's `platform` says which kind of device the scope is (`ios`, `android`, or null when unscoped). |
 | `list_mocks` | GET | `/api/v1/proxy/mocks` | List mock rules, each with its `simulator_udid` scope (null = every device), and for a rule scoped to a phone the `client_ip` it is matched by, as when the rule was set |
@@ -674,4 +674,5 @@ public probes, and a few operations the CLI uses directly.
 | POST | `/api/v1/devices/refresh` | Refresh pool from simctl |
 | POST | `/api/v1/proxy/filter` | Set proxy capture filters |
 | POST | `/api/v1/proxy/intercept/release-all` | Release all held flows |
+| DELETE | `/api/v1/proxy/intercept/{rule_id}` | Remove one intercept and release the flows it held; 404 if there is no such intercept. Also reached through `clear_intercept(rule_id)` |
 | POST | `/api/v1/recordings/{id}/viewer` | Another LAN viewer link for a recording that is filming (#449): `{"viewer_url"}`. **409** when it isn't filming, **503** when the viewer is off or its listener isn't running, with the reason |
