@@ -13,7 +13,7 @@ Prepare the device before launching the app. Skipping this causes unnecessary in
    grant_permission bundle_id="..." permission="notifications"
    ```
    This prevents system alerts from interrupting the tour. Not all apps need all permissions — ask the user which ones the app requests, or grant the obvious ones and handle any remaining prompts as you encounter them.
-   Note: `grant_permission` is simulator-only. On physical devices, you'll need to accept permission prompts via the UI during the tour.
+   Note: `grant_permission` works on iOS simulators and Android devices. On a physical iPhone, you'll need to accept permission prompts via the UI during the tour.
 3. **Disable password autofill.** On simulators, the password autofill/keychain dialog can appear over login fields and block interaction. Disable it before starting:
    ```
    # Navigate to Settings > Passwords > Password Options > toggle off AutoFill Passwords
