@@ -13,6 +13,8 @@ export function registerInterceptTools(server: McpServer): void {
     {
       description: `Set an intercept pattern on the proxy. Matching requests will be held (paused) until you release them.
 
+There is one intercept pattern for the whole server. Setting one replaces any other session's, and it holds matching requests from every device and agent, not only yours: check proxy_status's active_intercept first, and ask before replacing someone else's. A held request is released by itself after 30 seconds. Call clear_intercept when you are done; it releases every held flow.
+
 Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code), ~h (header), ~t (content-type), ~b (body). Combine with & (and), | (or), ! (not). Note: ~p is not a valid operator — use ~u for path matching.`,
       inputSchema: strictParams({
         pattern: z
