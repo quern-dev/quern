@@ -885,8 +885,8 @@ the background and can be re-enabled with configure_system_proxy.`,
     `that is no longer listening has no working network. ` +
     `An Android device that already had a global proxy (a corporate or lab one) gets it back on clear: ` +
     `apply reads it first and reports it as previous_proxy, and clear puts it back (restored_proxy) or ` +
-    `deletes the setting when there was none. Apply is refused with 502, changing nothing, when the ` +
-    `device's current setting cannot be read. ` +
+    `deletes the setting when there was none. Apply is refused, changing nothing, when the device's ` +
+    `current setting cannot be read (502) or recorded (500). ` +
     `On Android, ssid and client_ip are read off the device when omitted, so prefer omitting them to guessing. ` +
     `The proxy host is the Mac interface on the device's own subnet; the port comes from the running proxy. ` +
     `Check network_reattached and hint in the response: applied means the setting was written, ` +
