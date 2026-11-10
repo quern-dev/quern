@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { currentRemote } from "../config.js";
 import { apiRequest } from "../http.js";
 import { forgetAllMocks, forgetMock, recordMock, updateMock } from "../carried.js";
 // Mock changes wait for a switch under way: one made on the new server while
@@ -7,31 +8,55 @@ import { forgetAllMocks, forgetMock, recordMock, updateMock } from "../carried.j
 import { betweenSwitches } from "./system.js";
 import { strictParams, errorText } from "./helpers.js";
 
+// The intercepts this session set (#646), by the server it set them on, so a
+// bare clear_intercept removes these from the server in use and leaves other
+// agents' alone. Keyed by server: after use_remote, the old server's ids mean
+// nothing on the new one, and stay listed for when the session goes back.
+const mineByServer = new Map<string, Set<string>>();
+function mine(): Set<string> {
+  const key = currentRemote() ?? "local";
+  let ids = mineByServer.get(key);
+  if (!ids) mineByServer.set(key, (ids = new Set()));
+  return ids;
+}
+const notFound = (e: unknown) => e instanceof Error && e.message.startsWith("HTTP 404");
+
 export function registerInterceptTools(server: McpServer): void {
   server.registerTool(
     "set_intercept",
     {
-      description: `Set an intercept pattern on the proxy. Matching requests will be held (paused) until you release them.
+      description: `Add an intercept: matching requests are held (paused) until you release them with release_flow, or for 30 seconds, after which each is released unchanged.
 
-There is one intercept pattern for the whole server. Setting one replaces any other session's, and it holds matching requests from every device and agent, not only yours: check proxy_status's active_intercept first, and ask before replacing someone else's. A held request is released by itself after 30 seconds. Call clear_intercept when you are done; it releases every held flow.
+Several intercepts can be set at once. Each answer has its rule_id, and each held flow says which intercept held it.
 
-Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code), ~h (header), ~t (content-type), ~b (body). Combine with & (and), | (or), ! (not). Note: ~p is not a valid operator — use ~u for path matching.`,
+Pass simulator_udid to hold only that device's requests -- a simulator's UDID, or an Android emulator's or phone's serial -- decided as for a scoped mock: a request whose device cannot be told is not held. Prefer it. Without it, the intercept holds every device's and every agent's matching requests, which is owner-key only: check proxy_status's intercepts first, and do not leave one set. A physical iPhone cannot be named here; scope to it in the pattern by its address instead, with ~src <client_ip> (for example "~d api.example.com & ~src 192.168.1.23").
+
+A client key may intercept only on simulators it holds, and its intercepts end with its hold. Call clear_intercept when you are done: releasing one flow leaves its intercept in place.
+
+Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code), ~h (header), ~t (content-type), ~b (body), ~src (client address). Combine with & (and), | (or), ! (not). Note: ~p is not a valid operator — use ~u for path matching.`,
       inputSchema: strictParams({
         pattern: z
           .string()
           .describe(
             'Filter pattern (e.g. "~d api.example.com & ~u /v1/users", "~m POST & ~d api.example.com")'
           ),
+        simulator_udid: z
+          .string()
+          .optional()
+          .describe("Hold only this device's requests: a simulator's UDID, or an Android emulator's or phone's serial. Omit to hold every device's (owner key only)."),
       }),
     },
-    async ({ pattern }) => {
+    async ({ pattern, simulator_udid }) => {
       try {
-        const data = await apiRequest(
+        const body: Record<string, unknown> = { pattern };
+        if (simulator_udid) body.simulator_udid = simulator_udid;
+        const data = (await apiRequest(
           "POST",
           "/api/v1/proxy/intercept",
           undefined,
-          { pattern }
-        );
+          body
+        )) as { rule_id?: unknown };
+        if (typeof data?.rule_id === "string") mine().add(data.rule_id);
 
         return {
           content: [
@@ -55,12 +80,71 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
   server.registerTool(
     "clear_intercept",
     {
-      description: `Clear the intercept pattern and release all held flows. Flows will complete normally.`,
-      inputSchema: strictParams({}),
+      description: `Remove intercepts and release the flows they held; the flows complete normally.
+
+With no arguments it removes the intercepts this session set (#646), and leaves other sessions' alone. rule_id removes one, and errors with 404 if there is no such intercept. all=true removes every intercept on the server: from the owner key that is everyone's, from a client key its own.`,
+      inputSchema: strictParams({
+        rule_id: z.string().optional().describe("The intercept to remove, from set_intercept or list_held_flows."),
+        all: z
+          .union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")])
+          .optional()
+          .describe("Remove every intercept on the server, not only this session's."),
+      }),
     },
-    async () => {
+    async ({ rule_id, all }) => {
       try {
-        const data = await apiRequest("DELETE", "/api/v1/proxy/intercept");
+        let data: unknown;
+        if (rule_id) {
+          try {
+            data = await apiRequest("DELETE", `/api/v1/proxy/intercept/${encodeURIComponent(rule_id)}`);
+            mine().delete(rule_id);
+          } catch (e) {
+            // Gone is forgotten; a refusal (423, 503) is kept, so a later
+            // clear_intercept tries it again.
+            if (notFound(e)) mine().delete(rule_id);
+            throw e;
+          }
+        } else if (all) {
+          data = await apiRequest("DELETE", "/api/v1/proxy/intercept");
+          mine().clear();
+        } else {
+          // This session's own, by id: the server cannot tell one owner-key
+          // agent's intercepts from another's (as for mocks, #576).
+          const removed: string[] = [];
+          const gone: string[] = [];
+          const failed: Array<{ rule_id: string; error: string }> = [];
+          let released = 0;
+          for (const id of [...mine()]) {
+            try {
+              const r = (await apiRequest("DELETE", `/api/v1/proxy/intercept/${encodeURIComponent(id)}`)) as
+                { held_flows_released?: number };
+              removed.push(id);
+              released += r?.held_flows_released ?? 0;
+              mine().delete(id);
+            } catch (e) {
+              // Already gone -- its hold ended, or someone cleared it -- is
+              // forgotten. Anything else is reported with the rest, and kept
+              // to be tried again, rather than ending the loop and losing
+              // what was already removed (review).
+              if (notFound(e)) {
+                gone.push(id);
+                mine().delete(id);
+              } else {
+                failed.push({ rule_id: id, error: errorText(e) });
+              }
+            }
+          }
+          data = {
+            status: failed.length ? "partial" : "accepted", count: removed.length,
+            rule_ids: removed, held_flows_released: released,
+            ...(gone.length ? { already_gone: gone } : {}),
+            ...(failed.length ? { failed } : {}),
+            note: removed.length || gone.length || failed.length
+              ? `${removed.length} of this session's intercept(s) cleared, ${released} held flow(s) released` +
+                (failed.length ? `; ${failed.length} could not be removed (see failed), and stay set.` : ".")
+              : "This session set no intercepts on this server. all=true removes every intercept on the server.",
+          };
+        }
 
         return {
           content: [
@@ -84,7 +168,7 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
   server.registerTool(
     "list_held_flows",
     {
-      description: `List flows currently held by the intercept filter. Supports long-polling: set timeout > 0 to block until a flow is intercepted or timeout expires. This is the recommended approach for MCP agents — make a single blocking call instead of rapid polling.`,
+      description: `List flows currently held by intercepts, each with the rule_id of the intercept that held it, and the intercepts set. Supports long-polling: set timeout > 0 to block until a flow is intercepted or timeout expires. This is the recommended approach for MCP agents — make a single blocking call instead of rapid polling.`,
       inputSchema: strictParams({
         timeout: z
           .coerce.number()
@@ -124,7 +208,7 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
   server.registerTool(
     "release_flow",
     {
-      description: `Release a held flow, optionally modifying the request before it continues. Modifications can include changes to headers, body, URL, or method.`,
+      description: `Release a held flow, optionally modifying the request before it continues. Modifications can include changes to headers, body, URL, or method. A client key may release only flows its own intercepts held (403 otherwise).`,
       inputSchema: strictParams({
         flow_id: z.string().describe("The held flow ID to release"),
         modifications: z

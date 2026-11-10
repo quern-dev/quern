@@ -274,9 +274,14 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("DELETE", "/api/v1/proxy/mocks"): _OWNER,
     ("POST", "/api/v1/proxy/bypass"): _OWNER,
     ("DELETE", "/api/v1/proxy/bypass"): _OWNER,
-    ("POST", "/api/v1/proxy/intercept"): _OWNER,
-    ("DELETE", "/api/v1/proxy/intercept"): _OWNER,
-    ("POST", "/api/v1/proxy/intercept/release"): _OWNER,
+    # Scoped to a device the session holds, as for mocks (#646); unscoped it
+    # holds every device's requests: owner-only. The rest check the
+    # intercept's owner and device in the route: a client clears and
+    # releases only its own.
+    ("POST", "/api/v1/proxy/intercept"): _named("simulator_udid"),
+    ("DELETE", "/api/v1/proxy/intercept"): _PATH_ID,
+    ("DELETE", "/api/v1/proxy/intercept/{rule_id}"): _PATH_ID,
+    ("POST", "/api/v1/proxy/intercept/release"): _PATH_ID,
     ("POST", "/api/v1/proxy/intercept/release-all"): _OWNER,
     ("POST", "/api/v1/proxy/replay/{flow_id}"): _OWNER,      # a request sent from the Mac
     ("POST", "/api/v1/proxy/configure-system"): _OWNER,
@@ -398,9 +403,12 @@ BLIND: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/screenshots"): "filtered",
     ("GET", "/api/v1/recordings/{recording_id}/files/{name}"): "filtered",
     ("GET", "/api/v1/trace"): "filtered",
+    # The caller's own intercepts and the flows they hold (#646): it needs
+    # their ids to release them.
+    ("GET", "/api/v1/proxy/intercept/held"): "filtered",
     # The owner's set-up: which apps have knowledge bases, which hosts are
-    # bypassed or filtered, what builds ran, the flows held for intercept
-    # (which carry no device), app checkpoints, the Mac's tool layout.
+    # bypassed or filtered, what builds ran, app checkpoints, the Mac's tool
+    # layout.
     ("GET", "/api/v1/device/app/state/list"): "hidden",
     ("GET", "/api/v1/device/app/state/plist/watch/config"): "hidden",
     ("GET", "/api/v1/device/build-progress"): "hidden",
@@ -409,7 +417,6 @@ BLIND: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/landmarks/validate"): "hidden",
     ("GET", "/api/v1/logs/filter"): "hidden",
     ("GET", "/api/v1/proxy/bypass"): "hidden",
-    ("GET", "/api/v1/proxy/intercept/held"): "hidden",
     ("GET", "/api/v1/system/channel"): "shared",
     ("GET", "/api/v1/system/disk"): "filtered",
 }

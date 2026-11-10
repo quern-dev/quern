@@ -51,6 +51,12 @@ class CapturedOutput:
         return [m for m in self.lines if m.get("type") == msg_type]
 
 
+def _intercept(compiled, pattern="~d api.example.com", rule_id="intercept", scope=None):
+    """An intercept as the addon stores it (#646)."""
+    return {"rule_id": rule_id, "pattern_str": pattern, "compiled": compiled,
+            "simulator_udid": scope, "client_ip": None}
+
+
 def _make_mock_flow(
     method: str = "GET",
     host: str = "api.example.com",
@@ -119,8 +125,8 @@ def test_request_matching_intercept_holds(addon, output):
     """Matching intercept pattern should hold the flow and emit event."""
     # Use a lambda to test addon logic without depending on flowfilter's
     # internal matching against MagicMock flows
-    addon._intercept_compiled = lambda f: f.request.pretty_host == "api.example.com"
-    addon._intercept_pattern = "~d api.example.com"
+    addon._intercept_rules = [
+        _intercept(lambda f: f.request.pretty_host == "api.example.com", "~d api.example.com")]
 
     flow = _make_mock_flow(host="api.example.com")
     addon.request(flow)
@@ -137,8 +143,8 @@ def test_request_matching_intercept_holds(addon, output):
 
 def test_request_non_matching_intercept_passthrough(addon, output):
     """Non-matching intercept pattern should not hold the flow."""
-    addon._intercept_compiled = lambda f: f.request.pretty_host == "other.example.com"
-    addon._intercept_pattern = "~d other.example.com"
+    addon._intercept_rules = [
+        _intercept(lambda f: f.request.pretty_host == "other.example.com", "~d other.example.com")]
 
     flow = _make_mock_flow(host="api.example.com")
     addon.request(flow)
@@ -217,8 +223,8 @@ def test_request_mock_custom_status_code(addon, output):
 
 def test_mock_priority_over_intercept(addon, output):
     """When both mock and intercept match, mock should win."""
-    addon._intercept_compiled = lambda f: f.request.pretty_host == "api.example.com"
-    addon._intercept_pattern = "~d api.example.com"
+    addon._intercept_rules = [
+        _intercept(lambda f: f.request.pretty_host == "api.example.com", "~d api.example.com")]
 
     addon._mock_rules.append(
         {
@@ -280,8 +286,8 @@ def test_handle_set_intercept_valid(addon, output):
     addon._handle_set_intercept({"pattern": "~d api.example.com"})
 
     with addon._held_lock:
-        assert addon._intercept_pattern == "~d api.example.com"
-        assert addon._intercept_compiled is not None
+        assert [r["pattern_str"] for r in addon._intercept_rules] == ["~d api.example.com"]
+        assert addon._intercept_rules[0]["compiled"] is not None
 
     events = output.of_type("status")
     assert any(e.get("event") == "intercept_set" for e in events)
@@ -292,8 +298,7 @@ def test_handle_set_intercept_invalid(addon, output):
     addon._handle_set_intercept({"pattern": "~invalid_garbage !!!"})
 
     with addon._held_lock:
-        assert addon._intercept_pattern is None
-        assert addon._intercept_compiled is None
+        assert addon._intercept_rules == []
 
     errors = output.of_type("error")
     assert len(errors) == 1
@@ -306,7 +311,7 @@ def test_handle_clear_intercept_releases_all(addon, output):
     flow2 = _make_mock_flow()
 
     with addon._held_lock:
-        addon._intercept_pattern = "~d api.example.com"
+        addon._intercept_rules = [_intercept(lambda f: True)]
         addon._held_flows["f_1"] = (flow1, time.time())
         addon._held_flows["f_2"] = (flow2, time.time())
 
@@ -316,7 +321,7 @@ def test_handle_clear_intercept_releases_all(addon, output):
     flow2.resume.assert_called_once()
 
     with addon._held_lock:
-        assert addon._intercept_pattern is None
+        assert addon._intercept_rules == []
         assert len(addon._held_flows) == 0
 
     released = output.of_type("released")

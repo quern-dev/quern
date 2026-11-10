@@ -187,9 +187,14 @@ class ProxyAdapter(BaseSourceAdapter):
         self._events_transport: asyncio.ReadTransport | None = None
         self._bad_lines = 0
 
-        # Intercept state (server-side mirror of addon state)
+        # Intercept state (server-side mirror of addon state). Several at once
+        # (#646): [{rule_id, pattern, simulator_udid, client_ip}], each scoped
+        # to one device or to every device. `_intercept_pattern` is the
+        # every-device one's pattern, or None -- what `active_intercept` has
+        # always meant -- kept in step by `_sync_intercept_pattern`.
+        self._intercept_rules: list[dict] = []
         self._intercept_pattern: str | None = None
-        self._held_flows: dict[str, dict] = {}  # flow_id -> {id, held_at, request}
+        self._held_flows: dict[str, dict] = {}  # flow_id -> {id, held_at, request, rule_id}
         #: Clients that refused our certificate, newest last. Collapsed by
         #: (host, device) and bounded, so a retrying app cannot crowd out the
         #: other devices' rejections.
@@ -555,10 +560,8 @@ class ProxyAdapter(BaseSourceAdapter):
                 await self.send_command({
                     "action": "set_bypass", "patterns": list(rules._bypass_patterns),
                 })
-            if rules._intercept_pattern is not None:
-                await self.send_command({
-                    "action": "set_intercept", "pattern": rules._intercept_pattern,
-                })
+            for rule in rules._intercept_rules:
+                await self.send_command({"action": "set_intercept", **rule})
         except Exception:
             logger.exception("Could not send the proxy rules to mitmdump")
             return False
@@ -619,6 +622,7 @@ class ProxyAdapter(BaseSourceAdapter):
         # as it shuts down.
         self._held_flows.clear()
         if not keep_rules:
+            self._intercept_rules.clear()
             self._intercept_pattern = None
             self._mock_rules.clear()
             self._bypass_patterns.clear()
@@ -777,6 +781,7 @@ class ProxyAdapter(BaseSourceAdapter):
                 "mock_rules": len(self._mock_rules),
                 "bypass_patterns": len(self._bypass_patterns),
                 "intercept": self._intercept_pattern,
+                "intercepts": len(self._intercept_rules),
             } if sent else None
             confirmed = sent and await self._serving_with_rules(before)
             return {
@@ -793,8 +798,8 @@ class ProxyAdapter(BaseSourceAdapter):
         want = {"running": 1, "mock_set": len(rules._mock_rules)}
         if rules._bypass_patterns:
             want["bypass_updated"] = 1
-        if rules._intercept_pattern is not None:
-            want["intercept_set"] = 1
+        if rules._intercept_rules:
+            want["intercept_set"] = len(rules._intercept_rules)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.restart_confirm_timeout
         while any(self._addon_events[k] - before[k] < n for k, n in want.items()):
@@ -808,20 +813,67 @@ class ProxyAdapter(BaseSourceAdapter):
         process = self._process
         return self.is_running and (process is None or process.returncode is None)
 
-    @_rules_locked
-    async def set_intercept(self, pattern: str) -> None:
-        """Set an intercept pattern on the addon. Raises ValueError if pattern is invalid."""
-        validate_filter_pattern(pattern)
-        self._intercept_pattern = pattern
-        await self.broadcast({"action": "set_intercept", "pattern": pattern})
+    def _sync_intercept_pattern(self) -> None:
+        self._intercept_pattern = next(
+            (r["pattern"] for r in self._intercept_rules if not r.get("simulator_udid")), None)
 
     @_rules_locked
-    async def clear_intercept(self) -> None:
-        """Clear the intercept pattern and release all held flows."""
-        self._intercept_pattern = None
+    async def set_intercept(
+        self, pattern: str, *,
+        simulator_udid: str | None = None,
+        client_ip: str | None = None,
+    ) -> str:
+        """Add an intercept, alongside any others (#646). Returns its rule_id.
+
+        `simulator_udid` scopes it to one device's requests, as for a mock --
+        a simulator, or an Android device by its serial, with `client_ip`
+        telling a physical phone's -- and the addon fails closed on a request
+        it cannot attribute. Unscoped, it holds every device's matching
+        requests. Raises ValueError if the pattern is invalid.
+        """
+        validate_filter_pattern(pattern)
+        rule = {
+            "rule_id": f"icpt_{uuid.uuid4().hex[:8]}", "pattern": pattern,
+            "simulator_udid": simulator_udid, "client_ip": client_ip,
+        }
+        self._intercept_rules.append(rule)
+        self._sync_intercept_pattern()
+        await self.broadcast({"action": "set_intercept", **rule})
+        return rule["rule_id"]
+
+    @_rules_locked
+    async def clear_intercept(self, rule_id: str | None = None) -> int:
+        """Remove one intercept, releasing the flows it held, or every one and
+        every held flow. Returns how many intercepts went, so a clear of one
+        that was never there is detectable (as for mocks, #182)."""
+        if rule_id:
+            before = len(self._intercept_rules)
+            self._intercept_rules = [r for r in self._intercept_rules
+                                     if r["rule_id"] != rule_id]
+            removed = before - len(self._intercept_rules)
+            for adapter in self._all():
+                for flow_id in [f for f, info in adapter._held_flows.items()
+                                if info.get("rule_id") == rule_id]:
+                    adapter._held_flows.pop(flow_id, None)
+        else:
+            removed = len(self._intercept_rules)
+            self._intercept_rules.clear()
+            for adapter in self._all():
+                adapter._held_flows.clear()
+        self._sync_intercept_pattern()
+        await self.broadcast({"action": "clear_intercept", "rule_id": rule_id})
+        return removed
+
+    def intercept_rules(self) -> list[dict]:
+        """The intercepts set, oldest first: copies, for reporting."""
+        return [dict(r) for r in self._intercept_rules]
+
+    def held_by(self, flow_id: str) -> str | None:
+        """The rule_id of the intercept holding `flow_id`, or None."""
         for adapter in self._all():
-            adapter._held_flows.clear()
-        await self.broadcast({"action": "clear_intercept"})
+            if flow_id in adapter._held_flows:
+                return adapter._held_flows[flow_id].get("rule_id")
+        return None
 
     async def release_flow(self, flow_id: str, modifications: dict | None = None) -> None:
         """Release a single held flow, optionally with modifications. Sent to the
@@ -1027,6 +1079,7 @@ class ProxyAdapter(BaseSourceAdapter):
                 "held_at": held_at,
                 "age_seconds": round(age, 1),
                 "request": info["request"],
+                "rule_id": info.get("rule_id"),
             })
         return result
 
@@ -1408,6 +1461,7 @@ class ProxyAdapter(BaseSourceAdapter):
             "id": flow_id,
             "held_at": held_at,
             "request": req_data,
+            "rule_id": data.get("rule_id"),
         }
         self._intercept_event.set()
         if self.leader is not None:
@@ -1461,10 +1515,19 @@ class ProxyAdapter(BaseSourceAdapter):
             self._addon_trusted = None if udids is None else [str(u).upper() for u in udids]
             self._addon_trust_seq += 1
         elif event == "intercept_set":
-            self._intercept_pattern = data.get("pattern")
+            # The server's record is the intercepts it set; an echo of a
+            # scoped one is not the every-device pattern (#646).
+            pass
         elif event == "intercept_cleared":
-            self._intercept_pattern = None
-            self._held_flows.clear()
+            # One intercept's clear releases only the flows it held: the
+            # others' are still held, and listed until their own `released`.
+            rule_id = data.get("rule_id")
+            if rule_id:
+                for flow_id in [f for f, info in self._held_flows.items()
+                                if info.get("rule_id") == rule_id]:
+                    self._held_flows.pop(flow_id, None)
+            else:
+                self._held_flows.clear()
         elif event == "mock_set":
             # Already tracked in set_mock(), but handle for completeness
             pass

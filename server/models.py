@@ -1423,7 +1423,8 @@ class ProxyRestart(BaseModel):
     connections_reset: bool = True
     held_flows_released: int = 0
     #: What was re-sent to the new process: counts of mock rules and bypass
-    #: patterns, and the intercept pattern. Sent, not confirmed by the addon.
+    #: patterns, the every-device intercept's pattern and how many intercepts.
+    #: Sent, not confirmed by the addon.
     #: None when the proxy did not come back up or could not be sent them --
     #: the server keeps them and sends them at the next start, and
     #: `status`/`error` say why.
@@ -1476,6 +1477,15 @@ class SessionCaptureResponse(BaseModel):
     warnings: list[str] = []
 
 
+class InterceptRuleInfo(BaseModel):
+    """One intercept that is set."""
+
+    rule_id: str
+    pattern: str
+    simulator_udid: str | None = None
+    """The device it holds requests from; None for every device."""
+
+
 class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 
@@ -1501,6 +1511,10 @@ class ProxyStatusResponse(BaseModel):
     flow_store: dict[str, Any] | None = None
     active_filter: str | None = None
     active_intercept: str | None = None
+    """The first every-device intercept's pattern, or None; every intercept,
+    scoped ones and any further every-device ones included, is in
+    `intercepts` (#646)."""
+    intercepts: list[InterceptRuleInfo] = Field(default_factory=list)
     held_flows_count: int = 0
     tls_rejections: list[TlsRejection] = Field(default_factory=list)
     """Clients that refused our certificate since the proxy started."""
@@ -1688,21 +1702,36 @@ class InterceptSetRequest(BaseModel):
     """Request body for POST /api/v1/proxy/intercept."""
 
     pattern: str
+    simulator_udid: str | None = None
+    """Hold only this device's matching requests: a simulator's UDID, or an
+    Android emulator's or phone's serial, told apart as for a scoped mock
+    (#646). A request whose device cannot be determined is not held -- the
+    intercept fails closed. Omit to hold every device's (owner key only)."""
+
+    @field_validator("simulator_udid")
+    @classmethod
+    def _check_scope(cls, value: str | None) -> str | None:
+        return _normalise_mock_scope(value)
 
 
 class HeldFlow(BaseModel):
-    """A flow currently held by the intercept filter."""
+    """A flow currently held by an intercept."""
 
     id: str
     held_at: datetime
     age_seconds: float
     request: FlowRequest
+    rule_id: str | None = None
+    """The intercept that held it."""
 
 
 class InterceptStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/intercept/held."""
 
     pattern: str | None = None
+    """The every-device intercept's pattern, or None. Scoped ones are in
+    `intercepts`."""
+    intercepts: list[InterceptRuleInfo] = Field(default_factory=list)
     held_flows: list[HeldFlow] = Field(default_factory=list)
     total_held: int = 0
 

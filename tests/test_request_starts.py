@@ -141,8 +141,10 @@ class TestTheAddon:
     def test_a_held_request_is_in_flight(self, output):
         addon = IOSDebugAddon()
         addon._running = True
-        addon._intercept_compiled = lambda f: f.request.pretty_host == "api.example.com"
-        addon._intercept_pattern = "~d api.example.com"
+        addon._intercept_rules = [{
+            "rule_id": "intercept", "pattern_str": "~d api.example.com",
+            "compiled": lambda f: f.request.pretty_host == "api.example.com",
+            "simulator_udid": None, "client_ip": None}]
         addon.request(_real_flow())
         assert len(output.of_type("intercepted")) == 1
         assert len(_wait_for(output, "request_started")) == 1

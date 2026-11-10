@@ -512,7 +512,7 @@ def _group_members(group: str, devices: list, pool) -> list:
 
 async def _end_client_work(app: FastAPI, registry: SessionRegistry,
                            session: HeldSession) -> list[dict]:
-    """A client key's mock rules, recordings and profiles on a device end when its hold
+    """A client key's mock rules, intercepts, recordings and profiles on a device end when its hold
     on the device does. Left in place, the next holder's traffic was answered
     by the previous holder's rules -- whose patterns and bodies a blind
     server then showed it -- and the previous holder's recording went on
@@ -570,6 +570,23 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
                                 "rule_id": rule["rule_id"]})
             except Exception as e:  # noqa: BLE001 -- reported, never raised
                 actions.append({"udid": udid, "action": "mock_removed", "ok": False,
+                                "rule_id": rule.get("rule_id"), "error": str(e)})
+        # Its intercepts scoped to the device go too (#646), releasing what
+        # they held: left, the next holder's requests would be held by them.
+        icpt_owners = getattr(app.state, "intercept_owners", {}) or {}
+        rules = adapter.intercept_rules() if is_client and hasattr(adapter, "intercept_rules") \
+            else []
+        for rule in rules:
+            if rule.get("simulator_udid") != udid or icpt_owners.get(rule.get("rule_id")) \
+                    != session.principal:
+                continue
+            try:
+                await adapter.clear_intercept(rule_id=rule["rule_id"])
+                icpt_owners.pop(rule["rule_id"], None)
+                actions.append({"udid": udid, "action": "intercept_removed", "ok": True,
+                                "rule_id": rule["rule_id"]})
+            except Exception as e:  # noqa: BLE001 -- reported, never raised
+                actions.append({"udid": udid, "action": "intercept_removed", "ok": False,
                                 "rule_id": rule.get("rule_id"), "error": str(e)})
         for rec in list(manager.list() if manager is not None else []) if is_client else []:
             if rec.udid != udid or rec.principal != session.principal \

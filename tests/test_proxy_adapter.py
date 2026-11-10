@@ -410,18 +410,19 @@ async def test_wait_for_held_signal(adapter):
 
 @pytest.mark.asyncio
 async def test_handle_status_event_intercept_set(adapter):
-    """intercept_set status should update pattern."""
-    await adapter._handle_status_event({"event": "intercept_set", "pattern": "~d test.com"})
-    assert adapter._intercept_pattern == "~d test.com"
+    """The addon's echo does not change what the server reports: its record is
+    the intercepts it set, and an echo of a scoped one is not the every-device
+    pattern (#646)."""
+    await adapter._handle_status_event({"event": "intercept_set", "pattern": "~d test.com",
+                                        "simulator_udid": "32593887-01F3-47B8-AF34-B2D444DB37FA"})
+    assert adapter._intercept_pattern is None
 
 
 @pytest.mark.asyncio
 async def test_handle_status_event_intercept_cleared(adapter):
-    """intercept_cleared status should clear pattern and held flows."""
-    adapter._intercept_pattern = "~d test.com"
+    """A clear of every intercept empties the held list."""
     adapter._held_flows["f_1"] = {"id": "f_1"}
     await adapter._handle_status_event({"event": "intercept_cleared"})
-    assert adapter._intercept_pattern is None
     assert len(adapter._held_flows) == 0
 
 

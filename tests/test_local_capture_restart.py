@@ -101,7 +101,8 @@ async def test_restart_resends_every_rule_to_the_new_process():
     ]
     assert mocks[0]["response"] == {"status_code": 503}
     assert {"action": "set_bypass", "patterns": ["~d apple.com"]} in a.sent
-    assert {"action": "set_intercept", "pattern": "~d auth.example.com"} in a.sent
+    assert [(c["pattern"], c["simulator_udid"]) for c in a.sent if c["action"] == "set_intercept"] \
+        == [("~d auth.example.com", None)]
     # The server's own view agrees with what mitmdump was sent.
     assert [r["rule_id"] for r in a._mock_rules] == ["m1", "m2"]
     assert a.get_bypass_patterns() == ["~d apple.com"]
@@ -109,7 +110,7 @@ async def test_restart_resends_every_rule_to_the_new_process():
     assert result == {
         "held_flows_released": 1,
         "restored": {"mock_rules": 2, "bypass_patterns": 1,
-                     "intercept": "~d auth.example.com"},
+                     "intercept": "~d auth.example.com", "intercepts": 1},
         "confirmed": True,
     }
 
@@ -121,7 +122,7 @@ async def test_restart_with_no_rules_sends_nothing():
     assert a.sent == []
     assert result == {
         "held_flows_released": 0,
-        "restored": {"mock_rules": 0, "bypass_patterns": 0, "intercept": None},
+        "restored": {"mock_rules": 0, "bypass_patterns": 0, "intercept": None, "intercepts": 0},
         "confirmed": True,
     }
 
@@ -260,7 +261,8 @@ async def test_a_start_after_a_failed_restart_sends_the_kept_rules():
 
     assert [c["rule_id"] for c in a.sent if c["action"] == "set_mock"] == ["m1", "m2"]
     assert {"action": "set_bypass", "patterns": ["~d apple.com"]} in a.sent
-    assert {"action": "set_intercept", "pattern": "~d auth.example.com"} in a.sent
+    assert [(c["pattern"], c["simulator_udid"]) for c in a.sent if c["action"] == "set_intercept"] \
+        == [("~d auth.example.com", None)]
 
 
 @pytest.mark.asyncio
