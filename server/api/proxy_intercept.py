@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from server import visibility
+from server import rule_owners, visibility
 from server.api.actions import logged_action
 from server.models import (
     HeldFlow,
@@ -79,7 +79,7 @@ async def set_intercept(request: Request, body: InterceptSetRequest) -> dict:
             body.pattern, simulator_udid=body.simulator_udid, client_ip=client_ip)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    _intercept_owners(request)[rule_id] = visibility.current_caller().principal
+    rule_owners.record(request.app, "intercept", rule_id)
     result = {
         "status": "accepted", "rule_id": rule_id, "pattern": body.pattern,
         "simulator_udid": body.simulator_udid,
@@ -121,7 +121,7 @@ async def delete_intercept(request: Request, rule_id: str) -> dict:
     _check_intercept_scope(adapter, rule)
     held = sum(1 for h in adapter.get_held_flows() if h.get("rule_id") == rule_id)
     await adapter.clear_intercept(rule_id=rule_id)
-    _intercept_owners(request).pop(rule_id, None)
+    rule_owners.forget(request.app, "intercept", rule_id)
     return {"status": "deleted", "rule_id": rule_id, "held_flows_released": held}
 
 
@@ -140,7 +140,7 @@ async def clear_intercept(request: Request) -> dict:
             _check_intercept_scope(adapter, rule)
         count, held = len(adapter.intercept_rules()), adapter.held_count()
         await adapter.clear_intercept()
-        owners.clear()
+        rule_owners.forget_all(request.app, "intercept")
         return {"status": "accepted", "count": count, "held_flows_released": held,
                 "note": f"{count} intercept(s) cleared, {held} held flow(s) released."}
     caller = visibility.current_caller().principal
@@ -151,7 +151,7 @@ async def clear_intercept(request: Request) -> dict:
     for rule in mine:
         held += sum(1 for h in adapter.get_held_flows() if h.get("rule_id") == rule["rule_id"])
         await adapter.clear_intercept(rule_id=rule["rule_id"])
-        owners.pop(rule["rule_id"], None)
+        rule_owners.forget(request.app, "intercept", rule["rule_id"])
     return {"status": "accepted", "count": len(mine), "held_flows_released": held,
             "note": f"{len(mine)} of your intercept(s) cleared, {held} held flow(s) released."}
 
@@ -198,7 +198,8 @@ async def list_held_flows(
     return InterceptStatusResponse(
         pattern=pattern,
         intercepts=[InterceptRuleInfo(rule_id=r["rule_id"], pattern=r["pattern"],
-                                      simulator_udid=r.get("simulator_udid"))
+                                      simulator_udid=r.get("simulator_udid"),
+                                      **rule_owners.label(request.app, "intercept", r["rule_id"]))
                     for r in rules],
         held_flows=[
             HeldFlow(
@@ -507,9 +508,7 @@ async def set_mock(request: Request, body: SetMockRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
     # Whose rule it is (#254): a blind server lists a client's rules to it
     # alone, and a client's rules end with its hold on the device.
-    if not hasattr(request.app.state, "mock_owners"):
-        request.app.state.mock_owners = {}
-    request.app.state.mock_owners[rule_id] = visibility.current_caller().principal
+    rule_owners.record(request.app, "mock", rule_id)
     result = {
         "status": "accepted", "rule_id": rule_id, "pattern": body.pattern,
         "simulator_udid": body.simulator_udid,
@@ -535,6 +534,7 @@ async def list_mocks(request: Request) -> MockListResponse:
             response=MockResponseSpec(**r["response"]) if r.get("response") else MockResponseSpec(),
             simulator_udid=r.get("simulator_udid"),
             client_ip=r.get("client_ip"),
+            **rule_owners.label(request.app, "mock", r["rule_id"]),
         )
         for r in adapter._mock_rules
     ]
@@ -633,6 +633,7 @@ async def delete_mock(request: Request, rule_id: str) -> dict:
         raise HTTPException(
             status_code=404, detail=f"Mock rule not found: {rule_id}",
         )
+    rule_owners.forget(request.app, "mock", rule_id)
     return {"status": "deleted", "rule_id": rule_id}
 
 
@@ -645,6 +646,7 @@ async def delete_all_mocks(request: Request) -> dict:
     # Clearing an empty set is legitimately a success here, unlike the
     # single-rule case: the caller asked for "none left", and none are left.
     count = await adapter.clear_mock()
+    rule_owners.forget_all(request.app, "mock")
     return {"status": "deleted", "count": count}
 
 

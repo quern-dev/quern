@@ -1484,6 +1484,11 @@ class InterceptRuleInfo(BaseModel):
     pattern: str
     simulator_udid: str | None = None
     """The device it holds requests from; None for every device."""
+    owner: str | None = None
+    """Who set it (#650): a client key's label, or "owner"; None when unknown."""
+    session: str | None = None
+    """The held session that set it, whose end ends it; None for one set with
+    no session (curl, a script), which stays until cleared."""
 
 
 class ProxyStatusResponse(BaseModel):
@@ -1908,6 +1913,11 @@ class MockRuleInfo(BaseModel):
     requests are matched by, as it was when the rule was set (#582). A phone
     that moves to another address needs the rule re-scoped (update_mock
     naming its serial again), which reads the address afresh."""
+    owner: str | None = None
+    """Who set it (#650): a client key's label, or "owner"; None when unknown."""
+    session: str | None = None
+    """The held session that set it, whose end ends it; None for one set with
+    no session (curl, a script), which stays until cleared."""
 
 
 class MockListResponse(BaseModel):
