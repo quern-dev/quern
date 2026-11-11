@@ -5,6 +5,7 @@ import { switchHeldSession } from "../held-session.js";
 import { SESSION_ID, ServerTimeout, ServerUnreachable, apiRequest, serverFetch } from "../http.js";
 import { loadRemote } from "../remote.js";
 import { cleanUpStranded, moveOut } from "../carried.js";
+import { settleLoss } from "./intercept.js";
 import { osMatches, parseOs, platformOf, type Platform } from "../platform.js";
 
 /** Run after a switch is live: loads this project's knowledge base on the new
@@ -213,6 +214,9 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
         "freed when its connection closes or its grace period ends.";
     }
   }
+  // A lost session's ended mocks are forgotten before anything is carried
+  // (#650): carried, the next reservation would set them up again there.
+  await settleLoss({ orDrop: true });
   const before = selectedServer();
   const old = discoverServer();         // the server being left, for its mocks
   selectServer(target);
