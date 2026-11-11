@@ -31,7 +31,7 @@ Several intercepts can be set at once. Each answer has its rule_id, and each hel
 
 Pass simulator_udid to hold only that device's requests -- a simulator's UDID, or an Android emulator's or phone's serial -- decided as for a scoped mock: a request whose device cannot be told is not held. Prefer it. Without it, the intercept holds every device's and every agent's matching requests, which is owner-key only: check proxy_status's intercepts first, and do not leave one set. A physical iPhone cannot be named here; scope to it in the pattern by its address instead, with ~src <client_ip> (for example "~d api.example.com & ~src 192.168.1.23").
 
-A client key may intercept only on devices it holds -- simulators, and Android emulators or phones -- and its intercepts end with its hold. Every intercept also ends when the session that set it ends -- this MCP exiting, or its server session expiring -- whichever key's it is (#650); one set with no session (curl, a script) stays until cleared, unless it is a client key's, which still ends with its hold on the device. Call clear_intercept when you are done: releasing one flow leaves its intercept in place.
+A client key may intercept only on devices it holds -- simulators, and Android emulators or phones -- and its intercepts end with its hold. Every intercept also ends when the session that set it ends -- this MCP exiting, or its server session expiring -- whichever key's it is (#650); one set with no session (curl, a script) stays until cleared, unless it is a client key's, which still ends with its hold on the device. That clean-up is best effort: a removal that fails, or a rule set just as its session ended, can leave an intercept in place, and proxy_status lists it. Call clear_intercept when you are done: releasing one flow leaves its intercept in place.
 
 Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code), ~h (header), ~t (content-type), ~b (body), ~src (client address). Combine with & (and), | (or), ! (not). Note: ~p is not a valid operator — use ~u for path matching.`,
       inputSchema: strictParams({
@@ -316,7 +316,7 @@ ORDER: rules scoped to the requesting device -- a simulator or an Android device
 
 A mocked request is recorded once, like any other flow, with mock_rule_id set and the tag "mocked", so captured traffic tells synthetic responses from real ones.
 
-LIFETIME: a rule ends when the session that set it ends -- this MCP exiting, or its server session expiring -- whichever key's it is (#650); a client key's scoped rules also end with its hold on the device. One set with no session (curl, a script) stays until cleared, unless it is a client key's scoped rule, which still ends with its hold on the device. list_mocks shows each rule's owner and session.`,
+LIFETIME: a rule ends when the session that set it ends -- this MCP exiting, or its server session expiring -- whichever key's it is (#650); a client key's scoped rules also end with its hold on the device. One set with no session (curl, a script) stays until cleared, unless it is a client key's scoped rule, which still ends with its hold on the device. That clean-up is best effort: a removal that fails, or a rule set just as its session ended, can leave a mock in place. list_mocks shows each rule's owner and session, and clear_mocks removes what is left.`,
       inputSchema: strictParams({
         pattern: z
           .string()
