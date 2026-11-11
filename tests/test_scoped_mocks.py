@@ -821,6 +821,7 @@ class TestScopingAMockToAnAndroidDevice:
             is_console_serial=lambda s: s.startswith("emulator-"),
             get_lan_ip=AsyncMock(return_value=PHONE_IP),
             get_http_proxy=AsyncMock(return_value="192.168.1.188:9101"),
+            get_proxy_in_use=AsyncMock(return_value=(False, None)),
         )
         ctrl = client.app.state.device_controller
         ctrl._device_type = kinds.get

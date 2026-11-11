@@ -132,6 +132,45 @@ class TestReadingTheProxy:
         monkeypatch.setattr(adb, "_run_adb_for_device", _returns("null\n"))
         assert await adb.get_http_proxy("X", strict=True) is None
 
+    async def test_a_zero_row_is_no_proxy(self, adb, monkeypatch):
+        """`:0` is how a proxy is switched off (#652)."""
+        monkeypatch.setattr(adb, "_run_adb_for_device", _returns(":0\n"))
+        assert await adb.get_http_proxy("X") is None
+
+    async def test_clearing_writes_zero_and_then_deletes(self, adb, monkeypatch):
+        """A delete alone leaves Android's copy, which the device goes on
+        using (#652)."""
+        run = _returns("")
+        monkeypatch.setattr(adb, "_run_adb_for_device", run)
+        await adb.clear_http_proxy("X")
+        assert [c.args for c in run.await_args_list] == [
+            ("X", "shell", "settings", "put", "global", "http_proxy", ":0"),
+            ("X", "shell", "settings", "delete", "global", "http_proxy"),
+        ]
+
+    async def test_a_failed_delete_after_zero_is_not_raised(self, adb, monkeypatch):
+        from server.models import DeviceError
+
+        run = AsyncMock(side_effect=[("", ""), DeviceError("gone", tool="adb")])
+        monkeypatch.setattr(adb, "_run_adb_for_device", run)
+        await adb.clear_http_proxy("X")
+
+    @pytest.mark.parametrize("out, expected", [
+        ("h=192.168.1.189 p=9101\n", (True, "192.168.1.189:9101")),
+        ("h= p=0\n", (True, None)),            # emptied by `:0`
+        ("h=null p=null\n", (False, None)),    # never set: no copy kept
+    ])
+    async def test_the_proxy_in_use(self, adb, monkeypatch, out, expected):
+        monkeypatch.setattr(adb, "_run_adb_for_device", _returns(out))
+        assert await adb.get_proxy_in_use("X") == expected
+
+    async def test_a_proxy_in_use_read_that_says_nothing_raises(self, adb, monkeypatch):
+        from server.models import DeviceError
+
+        monkeypatch.setattr(adb, "_run_adb_for_device", _returns(""))
+        with pytest.raises(DeviceError):
+            await adb.get_proxy_in_use("X")
+
     async def test_a_value_read_is_written_back_as_it_was(self, adb, monkeypatch):
         run = _returns("")
         monkeypatch.setattr(adb, "_run_adb_for_device", run)

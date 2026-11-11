@@ -69,6 +69,8 @@ def _android(udid: str = "PHONE1", *, ssid="MonaLisa", ip="192.168.1.244"):
     ctrl.adb.is_network_transport = MagicMock(return_value=False)
     ctrl.adb.clear_http_proxy = AsyncMock()
     ctrl.adb.get_http_proxy = AsyncMock(return_value=None)
+    # No copy of its own unless a test says so: the row is the answer (#652).
+    ctrl.adb.get_proxy_in_use = AsyncMock(return_value=(False, None))
     ctrl.adb.is_rootable = AsyncMock(return_value=True)
     ctrl.adb._get_cert_hash = AsyncMock(return_value="c8750f0d")
     ctrl.adb.system_cert_state = AsyncMock(return_value=True)
@@ -1370,10 +1372,28 @@ class _FakeDevice:
         async def delete(udid):
             self.value = None
 
+        async def in_use(udid):
+            return (True, self.copy) if self.keeps_copy else (False, None)
+
         ctrl.adb.get_http_proxy = AsyncMock(side_effect=get)
+        ctrl.adb.get_proxy_in_use = AsyncMock(side_effect=in_use)
         ctrl.adb.put_http_proxy = AsyncMock(side_effect=put)
         ctrl.adb.set_http_proxy = AsyncMock(side_effect=set_)
         ctrl.adb.clear_http_proxy = AsyncMock(side_effect=delete)
+
+    # Android's own copy of the proxy (#652), off unless a test turns it on:
+    # a write sets it, `:0` empties it, and a plain delete leaves it.
+    keeps_copy = False
+    _copy = None
+
+    @property
+    def copy(self):
+        return self._copy
+
+    def __setattr__(self, name, v):
+        object.__setattr__(self, name, v)
+        if name == "value" and getattr(self, "keeps_copy", False) and v is not None:
+            object.__setattr__(self, "_copy", None if v == ":0" else v)
 
 
 _CORP = "10.0.0.5:3128"
@@ -1604,3 +1624,55 @@ class TestTheRestoreSurvivesItsFailurePaths:
                                              "PHONE1", actions)
         assert actions[-1]["ok"] is True and actions[-1]["proxy_verified"] is True
         assert dev.value == _CORP and "PHONE1" not in request.app.state.device_proxy_holds
+
+
+class TestTheProxyInUseIsWhatCounts:
+    """#652: Android keeps its own copy of the proxy, and a plain delete
+    leaves it, so a device can read no proxy while it still uses quern's."""
+
+    async def _call(self, ctrl, **flags):
+        a, b = _hosts()
+        with a, b:
+            return await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", **flags), _request(ctrl))
+
+    def _device(self, value=None):
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, None)
+        dev.keeps_copy = True
+        dev.value = value
+        return ctrl, dev
+
+    async def test_a_delete_that_leaves_the_copy_is_not_verified(self):
+        ctrl, dev = self._device()
+        await self._call(ctrl, apply=True)
+
+        async def delete_only(udid):        # the clear as it was before #652
+            object.__setattr__(dev, "value", None)
+
+        ctrl.adb.clear_http_proxy = AsyncMock(side_effect=delete_only)
+        out = await self._call(ctrl, clear=True)
+        assert out["proxy_verified"] is False
+        assert out["device_proxy"] == "192.168.1.189:9101"
+
+    async def test_a_clear_that_empties_the_copy_is_verified(self):
+        ctrl, dev = self._device()
+        await self._call(ctrl, apply=True)
+
+        async def zero_then_delete(udid):
+            dev.value = ":0"
+            object.__setattr__(dev, "value", None)
+
+        ctrl.adb.clear_http_proxy = AsyncMock(side_effect=zero_then_delete)
+        out = await self._call(ctrl, clear=True)
+        assert out["proxy_verified"] is True and out["device_proxy"] is None
+
+    async def test_a_policy_proxy_in_the_copy_alone_is_put_back(self):
+        """Device policy sets the copy, not the row (#645 meets #652)."""
+        ctrl, dev = self._device()
+        object.__setattr__(dev, "_copy", "10.0.0.5:3128")
+        out = await self._call(ctrl, apply=True)
+        assert out["previous_proxy"] == "10.0.0.5:3128"
+        out = await self._call(ctrl, clear=True)
+        ctrl.adb.put_http_proxy.assert_awaited_with("PHONE1", "10.0.0.5:3128")
+        assert dev.copy == "10.0.0.5:3128" and out["proxy_verified"] is True

@@ -687,10 +687,24 @@ async def _read_device_proxy(controller, udid: str) -> tuple[str | None, bool]:
     succeeded -- but it must not be allowed to masquerade as confirmation.
     """
     try:
-        return await controller.adb.get_http_proxy(udid), True
+        return await _proxy_in_effect(controller, udid), True
     except Exception:
         _logger.debug("Could not read back the proxy on %s", udid, exc_info=True)
         return None, False
+
+
+async def _proxy_in_effect(controller, udid: str, *, strict: bool = False) -> str | None:
+    """The proxy the device actually uses: Android's own copy where it keeps
+    one, else the `http_proxy` row (#652).
+
+    The row alone is not the answer. After a plain delete it read null on an
+    Android 10 phone that went on using the old proxy, so a clear checked
+    against the row reported success on a device still routed to quern. A
+    proxy set by device policy lives only in the copy, so this is also what
+    a restore has to capture (#645). Raises when either read fails."""
+    row = await controller.adb.get_http_proxy(udid, strict=strict)
+    keeps_copy, in_use = await controller.adb.get_proxy_in_use(udid)
+    return in_use if keeps_copy else row
 
 
 def _quern_addresses(udid: str, ours: str) -> set[str]:
@@ -725,7 +739,7 @@ async def _note_proxy_before_quern(
     that a later clear deletes the setting, so it is never assumed."""
     from server.proxy.cert_state import proxy_record, record_proxy_before_quern
 
-    read = await controller.adb.get_http_proxy(udid, strict=True)
+    read = await _proxy_in_effect(controller, udid, strict=True)
     prior = proxy_record(canonical_device_id(udid))
     previous = read
     if read in _quern_addresses(udid, ours):
@@ -992,7 +1006,8 @@ async def record_device_proxy_config_endpoint(
                 networked=controller.adb.is_network_transport(body.udid),
             ),
             #: Read back from the device rather than inferred from the call
-            #: returning. Success is `restored_proxy`: None when the device
+            #: returning: the proxy it uses, Android's own copy where it keeps
+            #: one (#652). Success is `restored_proxy`: None when the device
             #: had no proxy before quern's.
             "device_proxy": cleared_proxy,
             #: The proxy the device had before quern's apply, put back (#645);
@@ -1138,8 +1153,8 @@ async def record_device_proxy_config_endpoint(
             # is untouched; otherwise the record and the hold stay, so a clear
             # or the release puts the old proxy back (review).
             try:
-                untouched = await controller.adb.get_http_proxy(
-                    body.udid, strict=True) == read_before
+                untouched = await _proxy_in_effect(
+                    controller, body.udid, strict=True) == read_before
             except Exception:  # noqa: BLE001 -- could not tell: assume it landed
                 untouched = False
             await _after_a_failed_write(
@@ -1222,8 +1237,10 @@ async def record_device_proxy_config_endpoint(
         #: cannot reach this address, that is the thing to check, and a caller
         #: should not have to infer which address quern chose.
         "proxy_reachable_at": f"{proxy_host}:{port}",
-        #: What the device actually holds, read back over adb rather than
-        #: inferred from `set_http_proxy` returning without raising. None when
+        #: What the device actually uses -- Android's own copy of the proxy
+        #: where it keeps one, not only the `http_proxy` row (#652) -- read
+        #: back over adb rather than inferred from `set_http_proxy` returning
+        #: without raising. None when
         #: nothing was applied. Asserting something positive happened is the
         #: point: a write that silently did not take looks exactly like one
         #: that did.
