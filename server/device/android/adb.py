@@ -1387,7 +1387,9 @@ rm -rf /data/local/tmp/tmp-ca-copy
 
         The delete then removes the `:0` row, which would otherwise read as a
         deliberate "no proxy" setting rather than an absence. If it fails the
-        proxy is already off, so that is logged rather than raised.
+        proxy is already off, so that is logged rather than raised. A copy not
+        seen to empty -- still set after the wait, or unreadable -- raises
+        before the delete.
 
         This is the half #265 records as missing entirely: the setting lives in
         the global settings provider and survives reboots, so without an unset
@@ -1408,10 +1410,13 @@ rm -rf /data/local/tmp/tmp-ca-copy
                 break
             await asyncio.sleep(0.3)
         if not emptied:
-            # Deleted anyway, so the row is gone; but the device may still use
-            # the old proxy, and only a read-back would say so (CodeRabbit).
-            logger.warning("Android on %s was not seen to empty its copy of the proxy "
-                           "after `:0`; it may still use the old one", serial)
+            # Raised before the delete, and so before the caller bounces Wi-Fi:
+            # a device still on the old proxy would send the reattach's
+            # requests through it (CodeRabbit). The `:0` row stays, and reads
+            # as no proxy; a retry clears again.
+            raise DeviceError(
+                f"Android on {serial} was not seen to empty its copy of the proxy after "
+                "`:0`; it may still use the old one", tool="adb")
         try:
             await self._run_adb_for_device(
                 serial, "shell", "settings", "delete", "global", "http_proxy",

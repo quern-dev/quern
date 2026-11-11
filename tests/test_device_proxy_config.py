@@ -1704,3 +1704,18 @@ class TestTheProxyInUseIsWhatCounts:
         out = await self._call(ctrl, clear=True)
         ctrl.adb.put_http_proxy.assert_awaited_with("PHONE1", "10.0.0.5:3128")
         assert dev.copy == "10.0.0.5:3128" and out["proxy_verified"] is True
+
+    async def test_an_unconfirmed_clear_does_not_bounce_and_is_refused(self):
+        """A clear that fails before the delete is a 502, with no Wi-Fi bounce
+        to send requests through the old proxy (CodeRabbit on #653)."""
+        from server.models import DeviceError
+
+        ctrl, _ = self._device()
+        await self._call(ctrl, apply=True)
+        bounces = ctrl.adb.reattach_network.await_count
+        ctrl.adb.clear_http_proxy = AsyncMock(
+            side_effect=DeviceError("not seen to empty", tool="adb"))
+        with pytest.raises(HTTPException) as e:
+            await self._call(ctrl, clear=True)
+        assert e.value.status_code == 502
+        assert ctrl.adb.reattach_network.await_count == bounces
