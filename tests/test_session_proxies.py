@@ -1175,7 +1175,7 @@ async def test_a_clients_mock_on_its_emulator_ends_with_its_hold():
     actions = await sessions_api._end_client_work(app, registry, session)
     assert removed == ["r-emu"]
     assert {"udid": "emulator-5554", "action": "mock_removed", "ok": True,
-            "rule_id": "r-emu"} in actions
+            "rule_id": "r-emu", "reason": "hold_ended"} in actions
 
 
 @pytest.mark.parametrize("kind, says", [

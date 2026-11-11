@@ -538,6 +538,11 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
             actions.append({"action": "knowledge_dropped", "ok": True, "apps": dropped})
     owners = getattr(app.state, "mock_owners", {}) or {}
     adapter = getattr(app.state, "proxy_adapter", None)
+    # A rule removed below because its hold ended was also set by this
+    # opening of a session that has ended: said as such (CodeRabbit on #655).
+    opened = getattr(session, "opened_at", None)
+    ended_mocks = rule_owners.set_by(app, "mock", session.id, opened) if ended else set()
+    ended_icpts = rule_owners.set_by(app, "intercept", session.id, opened) if ended else set()
     manager = getattr(app.state, "recordings", None)
     for udid in session.reservations:
         # First: the proxy record is the session's, not the key's, so it is
@@ -567,7 +572,8 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
                 await adapter.clear_mock(rule_id=rule["rule_id"])
                 rule_owners.forget(app, "mock", rule["rule_id"])
                 actions.append({"udid": udid, "action": "mock_removed", "ok": True,
-                                "rule_id": rule["rule_id"]})
+                                "rule_id": rule["rule_id"], "reason": "session_ended"
+                                if rule["rule_id"] in ended_mocks else "hold_ended"})
             except Exception as e:  # noqa: BLE001 -- reported, never raised
                 actions.append({"udid": udid, "action": "mock_removed", "ok": False,
                                 "rule_id": rule.get("rule_id"), "error": str(e)})
@@ -584,7 +590,8 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
                 await adapter.clear_intercept(rule_id=rule["rule_id"])
                 rule_owners.forget(app, "intercept", rule["rule_id"])
                 actions.append({"udid": udid, "action": "intercept_removed", "ok": True,
-                                "rule_id": rule["rule_id"]})
+                                "rule_id": rule["rule_id"], "reason": "session_ended"
+                                if rule["rule_id"] in ended_icpts else "hold_ended"})
             except Exception as e:  # noqa: BLE001 -- reported, never raised
                 actions.append({"udid": udid, "action": "intercept_removed", "ok": False,
                                 "rule_id": rule.get("rule_id"), "error": str(e)})

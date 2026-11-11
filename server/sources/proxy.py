@@ -643,14 +643,25 @@ class ProxyAdapter(BaseSourceAdapter):
     async def broadcast(self, command: dict) -> None:
         """Send a command to this mitmdump and every session proxy following it
         (#558). A follower that cannot take it is logged, not raised: it is going
-        away, and the next start sends it the rules from here anyway."""
-        await self.send_command(command)
+        away, and the next start sends it the rules from here anyway.
+
+        The followers are sent it even when this mitmdump could not take it,
+        and that failure is raised after: raised first, a removal never reached
+        them, and a session proxy went on applying a rule the server had
+        already dropped from its record (CodeRabbit on #655)."""
+        failed: BaseException | None = None
+        try:
+            await self.send_command(command)
+        except Exception as e:
+            failed = e
         for follower in list(self.followers):
             try:
                 await follower.send_command(command)
             except Exception:
                 logger.exception("Could not send %s to a session proxy",
                                  command.get("action"))
+        if failed is not None:
+            raise failed
 
     @property
     def trusted_simulators(self) -> list[str] | None:

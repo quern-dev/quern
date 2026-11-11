@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { currentRemote } from "../config.js";
 import { apiRequest } from "../http.js";
-import { forgetAllMocks, forgetMock, recordMock, updateMock } from "../carried.js";
+import { endedWith, forgetAllMocks, forgetEndedMocks, forgetMock, recordMock, updateMock } from "../carried.js";
 import { whenLost } from "../held-session.js";
 // Mock changes wait for a switch under way: one made on the new server while
 // the switch was still moving the old one's was moved as well (CodeRabbit).
@@ -24,11 +24,26 @@ const notFound = (e: unknown) => e instanceof Error && e.message.startsWith("HTT
 
 // A lost session took its mocks and intercepts with it (#650): tracked still,
 // a later use_remote would set the mocks up again on the next server, and a
-// bare clear_intercept would report them as already gone.
-whenLost(() => {
-  mineByServer.delete(currentRemote() ?? "local");
-  forgetAllMocks();
+// bare clear_intercept would report them as already gone. Reconciled with
+// the server rather than all dropped (CodeRabbit on #655): one set while the
+// session was gone has no session and stays, so it stays tracked. Read by
+// its label, not by whether it is still listed: the server's clean-up may not
+// have run yet. Nothing is dropped when the server cannot be read.
+whenLost((lostId) => {
+  void forgetEndedRules(currentRemote() ?? "local", lostId).catch(() => {});
 });
+
+async function forgetEndedRules(key: string, lostId: string): Promise<void> {
+  type Listed = { rule_id: string; session?: string | null };
+  const [mocks, held] = await Promise.all([
+    apiRequest("GET", "/api/v1/proxy/mocks") as Promise<{ rules?: Listed[] } | null>,
+    apiRequest("GET", "/api/v1/proxy/intercept/held") as Promise<{ intercepts?: Listed[] } | null>,
+  ]);
+  const icpt = endedWith(lostId, held?.intercepts ?? []);
+  const ids = mineByServer.get(key);
+  for (const id of [...(ids ?? [])]) if (icpt(id)) ids?.delete(id);
+  forgetEndedMocks(endedWith(lostId, mocks?.rules ?? []));
+}
 
 export function registerInterceptTools(server: McpServer): void {
   server.registerTool(
@@ -400,7 +415,7 @@ LIFETIME: a rule ends when the session that set it ends -- this MCP exiting, or 
   server.registerTool(
     "list_mocks",
     {
-      description: `List all active mock response rules, each with its simulator_udid scope (null means it mocks every device), its owner (a client key's label, or "owner") and the session that set it (null: set with no session, so it stays until cleared; otherwise it ends with that session).`,
+      description: `List all active mock response rules, each with its simulator_udid scope (null means it mocks every device), its owner (a client key's label, "owner", or null when quern does not know) and the session that set it (null: set with no session, so it stays until cleared; otherwise it ends with that session).`,
       inputSchema: strictParams({}),
     },
     async () => {

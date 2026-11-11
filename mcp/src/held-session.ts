@@ -36,6 +36,12 @@ const MAX_BACKOFF_MS = 5_000;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 
 let token: string | null = null;
+/** The session's id as the server knows it -- a client key's is qualified
+ * with its label (`alice:<id>`) -- from the answer that opened it. */
+let serverId: string | null = null;
+export function heldSessionId(): string {
+  return serverId ?? SESSION_ID;
+}
 let socket: WebSocket | null = null;
 let stopping = false;
 let backoffMs = 1000;
@@ -67,11 +73,11 @@ const LOSS_NOTICE =
   "and the mocks and intercepts you set ended with it (#650). Reserve the devices " +
   "again with reserve_devices, and set the mocks and intercepts again, if you need them.";
 
-/** Run when the session was lost: what this client tracks as set by it --
- * its mocks and intercepts, which the server ended with the session (#650)
- * -- is no longer there to move or clear. */
-const onLost: (() => void)[] = [];
-export function whenLost(fn: () => void): void {
+/** Run when the session was lost, with its id on the server: what this
+ * client tracks as set by it -- its mocks and intercepts, which the server
+ * ends with the session (#650) -- is no longer there to move or clear. */
+const onLost: ((lostId: string) => void)[] = [];
+export function whenLost(fn: (lostId: string) => void): void {
   onLost.push(fn);
 }
 
@@ -98,12 +104,13 @@ export async function openHeldSession(): Promise<boolean> {
   try {
     const opened = (await apiRequest("POST", "/api/v1/sessions", undefined, {
       name: SESSION_ID,
-    }, 5000)) as { resume_token?: string } | null;
+    }, 5000)) as { resume_token?: string; id?: string } | null;
     // Opened on a server this client has since left (use_remote): its token
     // must not be presented to the new one (review).
     if (gen !== generation) return false;
     if (!opened?.resume_token) return false;
     token = opened.resume_token;
+    serverId = opened.id ?? null;
     return true;
   } catch {
     return false;
@@ -191,10 +198,12 @@ async function open(): Promise<void> {
   try {
     const opened = (await apiRequest("POST", "/api/v1/sessions", undefined, {
       name: SESSION_ID,
-    })) as { resume_token?: string; resumed?: boolean } | null;
+    })) as { resume_token?: string; resumed?: boolean; id?: string } | null;
     if (gen !== generation) return;   // moved to another server meanwhile
     if (!opened?.resume_token) throw new Error("no resume token in the answer");
+    const lostId = heldSessionId();     // read before the new answer replaces it
     token = opened.resume_token;
+    serverId = opened.id ?? null;
     // A client that has held a session before and is handed a *new* one has
     // lost what it held -- whichever way it got here: a 4404, or reopening
     // after failed handshakes while the server was down, which never saw a
@@ -202,7 +211,7 @@ async function open(): Promise<void> {
     if (everAttached && opened.resumed === false) {
       notice(LOSS_NOTICE);
       for (const fn of onLost) {
-        try { fn(); } catch { /* never into the reconnect */ }
+        try { fn(lostId); } catch { /* never into the reconnect */ }
       }
       // The session exists again (it was just opened), so what was loaded
       // for the old one can be loaded for this one. Never awaited here, and

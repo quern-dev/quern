@@ -205,3 +205,75 @@ class TestReviewFindings:
         actions = await sessions_api._end_client_work(app, registry, one)
         assert [a["ok"] for a in actions if a.get("rule_id") == m] == [False]
         assert rule_owners.label(app, "mock", m) == {"owner": None, "session": None}
+
+
+class TestRoundOneOfReview:
+    """CodeRabbit on #655."""
+
+    async def test_a_rule_whose_session_ended_while_it_was_set_is_removed(self, world):
+        from unittest.mock import patch
+
+        c, app, adapter, _, _ = world
+        registry = app.state.sessions
+        _owner_session(registry, "agent-1")
+        real = adapter.set_mock
+
+        async def session_ends_meanwhile(*a, **k):
+            rule_id = await real(*a, **k)
+            registry.release("agent-1")
+            return rule_id
+
+        with patch.object(adapter, "set_mock", side_effect=session_ends_meanwhile):
+            r = c.post("/api/v1/proxy/mocks", headers=_h(KEY, "agent-1"), json=_MOCK)
+        assert r.status_code == 409 and "session ended" in r.json()["detail"]
+        assert _mock_ids(adapter) == set()
+
+    async def test_a_new_opening_meanwhile_does_not_adopt_the_rule(self, world):
+        from unittest.mock import patch
+
+        c, app, adapter, _, _ = world
+        registry = app.state.sessions
+        _owner_session(registry, "agent-1")
+        real = adapter.set_intercept
+
+        async def reopened_meanwhile(*a, **k):
+            rule_id = await real(*a, **k)
+            registry.release("agent-1")
+            _owner_session(registry, "agent-1")
+            return rule_id
+
+        with patch.object(adapter, "set_intercept", side_effect=reopened_meanwhile):
+            r = c.post("/api/v1/proxy/intercept", headers=_h(KEY, "agent-1"),
+                       json={"pattern": "~d x.test"})
+        assert r.status_code == 409
+        assert _intercept_ids(adapter) == set()
+
+    async def test_a_clients_rule_ended_with_its_session_says_so(self, world):
+        c, app, adapter, alice, _ = world
+        registry = app.state.sessions
+        m = _mock(c, alice, "s1", simulator_udid=SIM_A)
+        held = registry.get("alice:s1")
+        registry.release("alice:s1")
+        actions = await sessions_api._end_client_work(app, registry, held)
+        assert [a.get("reason") for a in actions if a.get("rule_id") == m] == ["session_ended"]
+
+
+class TestTheBroadcastReachesEveryProxy:
+    async def test_a_removal_the_main_proxy_refuses_still_reaches_the_followers(self):
+        """Raised first, a session proxy kept a rule the server had dropped
+        (CodeRabbit on #655)."""
+        from unittest.mock import AsyncMock
+
+        import pytest
+
+        from server.proxy.flow_store import FlowStore
+        from server.sources.proxy import ProxyAdapter
+
+        leader = ProxyAdapter(flow_store=FlowStore(), listen_port=9101)
+        leader.send_command = AsyncMock(side_effect=BrokenPipeError("gone"))
+        follower = ProxyAdapter(flow_store=FlowStore(), listen_port=9102)
+        follower.send_command = AsyncMock()
+        leader.followers = [follower]
+        with pytest.raises(BrokenPipeError):
+            await leader.broadcast({"action": "clear_mock", "rule_id": "m1"})
+        follower.send_command.assert_awaited_once_with({"action": "clear_mock", "rule_id": "m1"})

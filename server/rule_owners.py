@@ -30,17 +30,40 @@ def _map(app: Any, name: str) -> dict:
     return found
 
 
-def record(app: Any, kind: str, rule_id: str) -> None:
-    """The caller set `rule_id`: note its key, and its held session if it has
-    one. A session id the registry does not hold -- the CLI and scripts send
-    one without opening a session -- is no session to end with."""
-    owners, sessions = _MAPS[kind]
+def capture(app: Any) -> tuple[str, tuple | None]:
+    """The caller's key and held session (its id and opening), read when a
+    request to set a rule arrives -- before anything is awaited, so a session
+    that ends while the rule is being set is still the one it belongs to
+    (CodeRabbit on #655). A session id the registry does not hold -- the CLI
+    and scripts send one without opening a session -- is no session."""
     caller = visibility.current_caller()
-    _map(app, owners)[rule_id] = caller.principal
     registry = getattr(app.state, "sessions", None)
     live = registry.get(caller.session) if registry is not None and caller.session else None
-    if live is not None and live.principal == caller.principal:
-        _map(app, sessions)[rule_id] = (live.id, live.opened_at)
+    held = (live.id, live.opened_at) if live is not None \
+        and live.principal == caller.principal else None
+    return caller.principal, held
+
+
+def still_open(app: Any, captured: tuple[str, tuple | None]) -> bool:
+    """Whether the session a rule was set from is still that opening; true
+    for a rule set with no session."""
+    held = captured[1]
+    if held is None:
+        return True
+    registry = getattr(app.state, "sessions", None)
+    live = registry.get(held[0]) if registry is not None else None
+    return live is not None and live.opened_at == held[1]
+
+
+def record(app: Any, kind: str, rule_id: str,
+           captured: tuple[str, tuple | None] | None = None) -> None:
+    """Note who set `rule_id`: `captured` as `capture` read it when the
+    request arrived, or the caller now."""
+    owners, sessions = _MAPS[kind]
+    key, held = captured if captured is not None else capture(app)
+    _map(app, owners)[rule_id] = key
+    if held is not None:
+        _map(app, sessions)[rule_id] = held
     else:
         _map(app, sessions).pop(rule_id, None)
 
