@@ -165,32 +165,6 @@ export function forgetMock(ruleId: string): void {
   if (!mock.rules.size && !mock.waiting) mocks = mocks.filter((m) => m !== mock);
 }
 
-/** Which tracked rules a lost session (#650) ended, from the server's listing
- * of rules with their sessions: one listed under the lost session, or not
- * listed at all. One listed with no session -- set while the session was gone
- * -- or under another stays. Read by label, not by whether it is listed: the
- * server's clean-up may not have run yet (CodeRabbit on #655). */
-export function endedWith(lostId: string,
-                          listed: { rule_id: string; session?: string | null }[]):
-    (ruleId: string) => boolean {
-  const live = new Map(listed.map((r) => [r.rule_id, r.session ?? null]));
-  return (id) => !live.has(id) || live.get(id) === lostId;
-}
-
-/** The rule ids tracked as standing on the server now, for tests. */
-export function trackedMockRules(): string[] {
-  return mocks.flatMap((m) => [...m.rules.values()]);
-}
-
-/** After a lost session (#650): forget the rules the server ended with it,
- * as if each had been removed -- in place, so a setup in flight for a mock
- * still waiting is untouched. */
-export function forgetEndedMocks(ended: (ruleId: string) => boolean): void {
-  for (const id of mocks.flatMap((m) => [...m.rules.values()])) {
-    if (ended(id)) forgetMock(id);
-  }
-}
-
 /** clear_mocks with no id: none of them, here or waiting to be set up. */
 export function forgetAllMocks(): void {
   mocks = [];

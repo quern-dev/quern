@@ -11,8 +11,6 @@ and is listed with its `owner` and `session`.
 
 from __future__ import annotations
 
-import pytest
-
 from server import rule_owners
 from server.api import sessions as sessions_api
 from tests.test_scoped_intercepts import SIM_A, world  # noqa: F401 -- fixture
@@ -190,24 +188,6 @@ class TestReviewFindings:
         assert c.delete("/api/v1/proxy/intercept", headers=_h(alice)).status_code == 200
         assert i not in app.state.intercept_owners and i not in app.state.intercept_sessions
 
-    async def test_a_failed_removal_that_took_the_rule_anyway_is_forgotten(self, world):
-        from unittest.mock import AsyncMock
-
-        c, app, adapter, _, _ = world
-        registry = app.state.sessions
-        one = _owner_session(registry, "agent-1")
-        m = _mock(c, KEY, "agent-1")
-        registry.release("agent-1")
-
-        async def gone_then_failed(rule_id=None):
-            adapter._mock_rules[:] = [r for r in adapter._mock_rules if r["rule_id"] != rule_id]
-            raise RuntimeError("broadcast failed")
-
-        adapter.clear_mock = AsyncMock(side_effect=gone_then_failed)
-        actions = await sessions_api._end_client_work(app, registry, one)
-        assert [a["ok"] for a in actions if a.get("rule_id") == m] == [False]
-        assert rule_owners.label(app, "mock", m) == {"owner": None, "session": None}
-
 
 class TestRoundOneOfReview:
     """CodeRabbit on #655."""
@@ -258,60 +238,3 @@ class TestRoundOneOfReview:
         registry.release("alice:s1")
         actions = await sessions_api._end_client_work(app, registry, held)
         assert [a.get("reason") for a in actions if a.get("rule_id") == m] == ["session_ended"]
-
-
-class TestTheBroadcastReachesEveryProxy:
-    async def test_a_removal_the_main_proxy_refuses_still_reaches_the_followers(self):
-        """Raised first, a session proxy kept a rule the server had dropped
-        (CodeRabbit on #655)."""
-        from unittest.mock import AsyncMock
-
-        from server.proxy.flow_store import FlowStore
-        from server.sources.proxy import ProxyAdapter
-
-        leader = ProxyAdapter(flow_store=FlowStore(), listen_port=9101)
-        leader.send_command = AsyncMock(side_effect=BrokenPipeError("gone"))
-        follower = ProxyAdapter(flow_store=FlowStore(), listen_port=9102)
-        follower.send_command = AsyncMock()
-        leader.followers = [follower]
-        with pytest.raises(BrokenPipeError):
-            await leader.broadcast({"action": "clear_mock", "rule_id": "m1"})
-        follower.send_command.assert_awaited_once_with({"action": "clear_mock", "rule_id": "m1"})
-
-    async def test_a_follower_that_cannot_take_a_command_is_stopped(self):
-        from unittest.mock import AsyncMock
-
-        from server.proxy.flow_store import FlowStore
-        from server.sources.proxy import ProxyAdapter
-
-        leader = ProxyAdapter(flow_store=FlowStore(), listen_port=9101)
-        leader.send_command = AsyncMock()
-        follower = ProxyAdapter(flow_store=FlowStore(), listen_port=9102)
-        follower.send_command = AsyncMock(side_effect=BrokenPipeError("stdin gone"))
-        follower.stop = AsyncMock()
-        leader.followers = [follower]
-        await leader.broadcast({"action": "clear_mock", "rule_id": "m1"})
-        follower.stop.assert_awaited_once()
-
-    @pytest.mark.parametrize("kind", ["mock", "intercept"])
-    async def test_a_create_the_main_proxy_refuses_is_taken_back_everywhere(self, kind):
-        """The followers got the rule; raised with it still recorded, no route
-        registered an owner for it, and it never ended (CodeRabbit on #655)."""
-        from unittest.mock import AsyncMock
-
-        from server.proxy.flow_store import FlowStore
-        from server.sources.proxy import ProxyAdapter
-
-        leader = ProxyAdapter(flow_store=FlowStore(), listen_port=9101)
-        leader.send_command = AsyncMock(side_effect=BrokenPipeError("gone"))
-        follower = ProxyAdapter(flow_store=FlowStore(), listen_port=9102)
-        follower.send_command = AsyncMock()
-        leader.followers = [follower]
-        with pytest.raises(BrokenPipeError):
-            if kind == "mock":
-                await leader.set_mock("~d x.test", {"status_code": 418})
-            else:
-                await leader.set_intercept("~d x.test")
-        assert leader._mock_rules == [] and leader.intercept_rules() == []
-        sent = [c.args[0]["action"] for c in follower.send_command.await_args_list]
-        assert sent == [f"set_{kind}", f"clear_{kind}"]

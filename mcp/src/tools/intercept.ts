@@ -2,10 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { currentRemote } from "../config.js";
 import { apiRequest } from "../http.js";
-import {
-  endedWith, forgetAllMocks, forgetEndedMocks, forgetMock, recordMock, trackedMockRules, updateMock,
-} from "../carried.js";
-import { whenLost } from "../held-session.js";
+import { forgetAllMocks, forgetMock, recordMock, updateMock } from "../carried.js";
 // Mock changes wait for a switch under way: one made on the new server while
 // the switch was still moving the old one's was moved as well (CodeRabbit).
 import { betweenSwitches } from "./system.js";
@@ -23,69 +20,6 @@ function mine(): Set<string> {
   return ids;
 }
 const notFound = (e: unknown) => e instanceof Error && e.message.startsWith("HTTP 404");
-
-// A lost session took its mocks and intercepts with it (#650): tracked still,
-// a later use_remote would set the mocks up again on the next server, and a
-// bare clear_intercept would report them as already gone. Reconciled with the
-// server rather than all dropped (CodeRabbit on #655):
-//   - only the rules tracked at the moment of loss are candidates, so one set
-//     while the listings are read is never judged by them;
-//   - a candidate listed with no session, set while the session was gone,
-//     stays (see endedWith);
-//   - a server that cannot be read leaves the loss pending, and use_remote
-//     settles it before carrying anything, dropping the candidates if the
-//     server still cannot say: they were set under the session that ended.
-type Loss = { key: string; lostId: string; mocks: Set<string>; intercepts: Set<string> };
-let pendingLoss: Loss | null = null;
-
-whenLost((lostId) => {
-  noteLoss(lostId);
-  void settleLoss().catch(() => {});
-});
-
-/** Record a loss: its candidates are what is tracked as set on this server now. */
-export function noteLoss(lostId: string): void {
-  const key = currentRemote() ?? "local";
-  pendingLoss = { key, lostId, mocks: new Set(trackedMockRules()),
-                  intercepts: new Set(mineByServer.get(key) ?? []) };
-}
-
-type Listed = { rule_id: string; session?: string | null };
-async function readListings(): Promise<[Listed[], Listed[]]> {
-  const [mocks, held] = await Promise.all([
-    apiRequest("GET", "/api/v1/proxy/mocks") as Promise<{ rules?: Listed[] } | null>,
-    apiRequest("GET", "/api/v1/proxy/intercept/held") as
-      Promise<{ intercepts?: Listed[] } | null>,
-  ]);
-  return [mocks?.rules ?? [], held?.intercepts ?? []];
-}
-
-/** Forget what the lost session's end took, if a loss is pending. With
- * `orDrop`, a server that cannot be read drops every candidate rather than
- * leaving them to be carried. `read` is the server's listings, for tests. */
-export async function settleLoss(
-  { orDrop = false, read = readListings }: { orDrop?: boolean; read?: typeof readListings } = {},
-): Promise<void> {
-  const loss = pendingLoss;
-  if (!loss) return;
-  let listed: [Listed[], Listed[]] | null;
-  try {
-    listed = await read();
-  } catch {
-    if (!orDrop) return;
-    listed = null;
-  }
-  // Settled meanwhile by another caller, superseded by a later loss, or the
-  // session has moved to another server: nothing here to apply.
-  if (pendingLoss !== loss) return;
-  pendingLoss = null;
-  if ((currentRemote() ?? "local") !== loss.key) return;
-  const mockEnded = listed ? endedWith(loss.lostId, listed[0]) : () => true;
-  const icptEnded = listed ? endedWith(loss.lostId, listed[1]) : () => true;
-  const ids = mineByServer.get(loss.key);
-  for (const id of loss.intercepts) if (icptEnded(id)) ids?.delete(id);
-  forgetEndedMocks((id) => loss.mocks.has(id) && mockEnded(id));
-}
 
 export function registerInterceptTools(server: McpServer): void {
   server.registerTool(
@@ -159,7 +93,6 @@ With no arguments it removes the intercepts this session set (#646), and leaves 
     },
     async ({ rule_id, all }) => {
       try {
-        await settleLoss();
         let data: unknown;
         if (rule_id) {
           try {

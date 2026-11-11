@@ -642,52 +642,15 @@ class ProxyAdapter(BaseSourceAdapter):
 
     async def broadcast(self, command: dict) -> None:
         """Send a command to this mitmdump and every session proxy following it
-        (#558). A follower that cannot take it is stopped, and that is logged,
-        not raised: a session proxy quern can no longer command would go on
-        applying whatever rules it had -- the addon's command reader can end
-        without mitmdump exiting -- including ones the server has removed
-        (CodeRabbit on #655). Stopped, it holds nothing; its claims see it gone.
-
-        The followers are sent it even when this mitmdump could not take it,
-        and that failure is raised after: raised first, a removal never reached
-        them, and a session proxy went on applying a rule the server had
-        already dropped from its record (CodeRabbit on #655)."""
-        failed: BaseException | None = None
-        try:
-            await self.send_command(command)
-        except Exception as e:
-            failed = e
+        (#558). A follower that cannot take it is logged, not raised: it is going
+        away, and the next start sends it the rules from here anyway."""
+        await self.send_command(command)
         for follower in list(self.followers):
             try:
                 await follower.send_command(command)
             except Exception:
-                logger.exception("Could not send %s to a session proxy; stopping it",
+                logger.exception("Could not send %s to a session proxy",
                                  command.get("action"))
-                try:
-                    await follower.stop()
-                except Exception:
-                    logger.exception("Could not stop a session proxy that stopped "
-                                     "taking commands")
-        if failed is not None:
-            raise failed
-
-    async def _undo_failed_set(self, kind: str, rule_id: str) -> None:
-        """A rule this adapter recorded, and whose broadcast failed: out of the
-        record, and its removal sent to every proxy. The followers were sent
-        the rule even though this mitmdump was not, so raising with the rule
-        still recorded left a rule no route had registered an owner for, which
-        would never end (CodeRabbit on #655)."""
-        if kind == "mock":
-            self._mock_rules = [r for r in self._mock_rules if r["rule_id"] != rule_id]
-        else:
-            self._intercept_rules = [r for r in self._intercept_rules
-                                     if r["rule_id"] != rule_id]
-            self._sync_intercept_pattern()
-        try:
-            await self.broadcast({"action": f"clear_{kind}", "rule_id": rule_id})
-        except Exception:
-            logger.warning("Could not send the removal of %s %s that failed to set",
-                           kind, rule_id, exc_info=True)
 
     @property
     def trusted_simulators(self) -> list[str] | None:
@@ -875,11 +838,7 @@ class ProxyAdapter(BaseSourceAdapter):
         }
         self._intercept_rules.append(rule)
         self._sync_intercept_pattern()
-        try:
-            await self.broadcast({"action": "set_intercept", **rule})
-        except Exception:
-            await self._undo_failed_set("intercept", rule["rule_id"])
-            raise
+        await self.broadcast({"action": "set_intercept", **rule})
         return rule["rule_id"]
 
     @_rules_locked
@@ -959,18 +918,14 @@ class ProxyAdapter(BaseSourceAdapter):
             "response": response, "simulator_udid": simulator_udid,
             "client_ip": client_ip,
         })
-        try:
-            await self.broadcast({
-                "action": "set_mock",
-                "rule_id": rule_id,
-                "pattern": pattern,
-                "response": response,
-                "simulator_udid": simulator_udid,
-                "client_ip": client_ip,
-            })
-        except Exception:
-            await self._undo_failed_set("mock", rule_id)
-            raise
+        await self.broadcast({
+            "action": "set_mock",
+            "rule_id": rule_id,
+            "pattern": pattern,
+            "response": response,
+            "simulator_udid": simulator_udid,
+            "client_ip": client_ip,
+        })
         return rule_id
 
     @_rules_locked
