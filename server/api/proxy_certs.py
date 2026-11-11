@@ -702,9 +702,17 @@ async def _proxy_in_effect(controller, udid: str, *, strict: bool = False) -> st
     against the row reported success on a device still routed to quern. A
     proxy set by device policy lives only in the copy, so this is also what
     a restore has to capture (#645). Raises when either read fails."""
+    row, keeps_copy, in_use = await _proxy_state(controller, udid, strict=strict)
+    return in_use if keeps_copy else row
+
+
+async def _proxy_state(controller, udid: str, *, strict: bool = False) -> tuple:
+    """The `http_proxy` row and Android's copy, as read: what a failed write
+    compares to tell whether it changed anything, since the copy follows the
+    row a moment later (review)."""
     row = await controller.adb.get_http_proxy(udid, strict=strict)
     keeps_copy, in_use = await controller.adb.get_proxy_in_use(udid)
-    return in_use if keeps_copy else row
+    return row, keeps_copy, in_use
 
 
 def _quern_addresses(udid: str, ours: str) -> set[str]:
@@ -726,7 +734,7 @@ async def _note_proxy_before_quern(
     """Record the device's proxy as it is before quern's apply, so clearing puts
     it back rather than deleting it (#645). Returns what will be restored, the
     record as it was before this call (so a failed write that left the device
-    untouched can put it back), and what the device read.
+    untouched can put it back), and the row and copy as the device read them.
 
     The device is always asked: a record outlives changes quern did not make
     -- an admin setting a lab proxy after an apply nothing cleared -- and
@@ -739,7 +747,8 @@ async def _note_proxy_before_quern(
     that a later clear deletes the setting, so it is never assumed."""
     from server.proxy.cert_state import proxy_record, record_proxy_before_quern
 
-    read = await _proxy_in_effect(controller, udid, strict=True)
+    state = await _proxy_state(controller, udid, strict=True)
+    read = state[2] if state[1] else state[0]
     prior = proxy_record(canonical_device_id(udid))
     previous = read
     if read in _quern_addresses(udid, ours):
@@ -750,7 +759,7 @@ async def _note_proxy_before_quern(
         record_proxy_before_quern(canonical_device_id(udid), previous, applying=ours)
     except OSError as e:
         raise _RecordFailed(e) from e
-    return previous, prior, read
+    return previous, prior, state
 
 
 async def _after_a_failed_write(
@@ -1153,7 +1162,9 @@ async def record_device_proxy_config_endpoint(
             # is untouched; otherwise the record and the hold stay, so a clear
             # or the release puts the old proxy back (review).
             try:
-                untouched = await _proxy_in_effect(
+                # Both the row and the copy, unchanged: the copy follows the
+                # row a moment later, so it alone can still read as before.
+                untouched = await _proxy_state(
                     controller, body.udid, strict=True) == read_before
             except Exception:  # noqa: BLE001 -- could not tell: assume it landed
                 untouched = False

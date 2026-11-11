@@ -1394,6 +1394,17 @@ rm -rf /data/local/tmp/tmp-ca-copy
         it is the device's configuration until something else changes it.
         """
         await self.put_http_proxy(serial, ":0")
+        # Android empties its copy when it gets to the change, reading the row
+        # as it is then -- so a delete that lands first leaves the copy in
+        # place (review). Wait, briefly, for the copy to empty.
+        for _ in range(10):
+            try:
+                keeps_copy, in_use = await self.get_proxy_in_use(serial)
+            except Exception:
+                break
+            if not keeps_copy or in_use is None:
+                break
+            await asyncio.sleep(0.3)
         try:
             await self._run_adb_for_device(
                 serial, "shell", "settings", "delete", "global", "http_proxy",
@@ -1422,9 +1433,13 @@ rm -rf /data/local/tmp/tmp-ca-copy
         if match is None:
             raise DeviceError(f"Could not read {serial}'s proxy in use", tool="adb")
         host, port = match.groups()
+        if not port:
+            # A read that failed: an emptied copy prints port 0, and an empty
+            # one would read as "no proxy" without anything having been read.
+            raise DeviceError(f"Could not read {serial}'s proxy port in use", tool="adb")
         if host == "null" and port == "null":
             return False, None
-        if host in ("", "null") or port in ("", "null", "0"):
+        if host in ("", "null") or port in ("null", "0"):
             return True, None
         return True, f"{host}:{port}"
 

@@ -1361,7 +1361,7 @@ class _FakeDevice:
             if self.fail_reads:
                 self.fail_reads -= 1
                 raise RuntimeError("adb: device offline")
-            return self.value
+            return None if self.value == ":0" else self.value
 
         async def put(udid, v):
             self.value = v
@@ -1655,17 +1655,45 @@ class TestTheProxyInUseIsWhatCounts:
         assert out["proxy_verified"] is False
         assert out["device_proxy"] == "192.168.1.189:9101"
 
-    async def test_a_clear_that_empties_the_copy_is_verified(self):
+    async def test_the_real_clear_empties_the_copy_and_is_verified(self):
+        """quern's own clear_http_proxy against a device whose delete leaves
+        the copy, as the phone's did (review: a stand-in clear proved nothing)."""
+        from server.device.android.adb import AdbBackend
+
         ctrl, dev = self._device()
         await self._call(ctrl, apply=True)
 
-        async def zero_then_delete(udid):
-            dev.value = ":0"
-            object.__setattr__(dev, "value", None)
+        async def run(serial, *args, timeout=None):
+            assert args[:4] == ("shell", "settings", "delete", "global")
+            object.__setattr__(dev, "value", None)      # the row only
+            return "", ""
 
-        ctrl.adb.clear_http_proxy = AsyncMock(side_effect=zero_then_delete)
+        adb = SimpleNamespace(put_http_proxy=ctrl.adb.put_http_proxy,
+                              get_proxy_in_use=ctrl.adb.get_proxy_in_use,
+                              _run_adb_for_device=run)
+        ctrl.adb.clear_http_proxy = lambda udid: AdbBackend.clear_http_proxy(adb, udid)
         out = await self._call(ctrl, clear=True)
+        assert dev.copy is None and dev.value is None
         assert out["proxy_verified"] is True and out["device_proxy"] is None
+
+    async def test_a_failed_write_that_changed_only_the_row_is_not_untouched(self):
+        """The copy follows the row a moment later, so a copy that still reads
+        as before is no proof the write did not land (review)."""
+        ctrl, dev = self._device("10.0.0.5:3128")
+        request = _request(ctrl)
+        _, _, who = _held_by_a_session(request)
+
+        async def row_landed_then_failed(udid, host, port):
+            object.__setattr__(dev, "value", f"{host}:{port}")   # copy not yet
+            raise RuntimeError("adb: connection reset")
+
+        ctrl.adb.set_http_proxy = AsyncMock(side_effect=row_landed_then_failed)
+        a, b = _hosts()
+        with a, b, who, pytest.raises(HTTPException) as e:
+            await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), request)
+        assert "may have reached the device" in e.value.detail
+        assert "PHONE1" in request.app.state.device_proxy_holds
 
     async def test_a_policy_proxy_in_the_copy_alone_is_put_back(self):
         """Device policy sets the copy, not the row (#645 meets #652)."""
