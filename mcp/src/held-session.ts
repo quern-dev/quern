@@ -63,8 +63,17 @@ function notice(text: string): void {
 
 const LOSS_NOTICE =
   "Your quern session ended on the server (it was released, the server restarted, " +
-  "or its grace period ran out), so any devices you reserved are no longer yours. " +
-  "Reserve them again with reserve_devices if you need them.";
+  "or its grace period ran out), so any devices you reserved are no longer yours, " +
+  "and the mocks and intercepts you set ended with it (#650). Reserve the devices " +
+  "again with reserve_devices, and set the mocks and intercepts again, if you need them.";
+
+/** Run when the session was lost: what this client tracks as set by it --
+ * its mocks and intercepts, which the server ended with the session (#650)
+ * -- is no longer there to move or clear. */
+const onLost: (() => void)[] = [];
+export function whenLost(fn: () => void): void {
+  onLost.push(fn);
+}
 
 /** Run when the session had to be opened afresh after a loss: what was loaded
  * for the old one -- its knowledge base (#560) -- is gone with it. */
@@ -192,6 +201,9 @@ async function open(): Promise<void> {
     // 4404 at all (found live, after that path was added).
     if (everAttached && opened.resumed === false) {
       notice(LOSS_NOTICE);
+      for (const fn of onLost) {
+        try { fn(); } catch { /* never into the reconnect */ }
+      }
       // The session exists again (it was just opened), so what was loaded
       // for the old one can be loaded for this one. Never awaited here, and
       // never allowed to throw into the reconnect.

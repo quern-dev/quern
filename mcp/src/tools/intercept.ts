@@ -3,6 +3,7 @@ import { z } from "zod";
 import { currentRemote } from "../config.js";
 import { apiRequest } from "../http.js";
 import { forgetAllMocks, forgetMock, recordMock, updateMock } from "../carried.js";
+import { whenLost } from "../held-session.js";
 // Mock changes wait for a switch under way: one made on the new server while
 // the switch was still moving the old one's was moved as well (CodeRabbit).
 import { betweenSwitches } from "./system.js";
@@ -20,6 +21,14 @@ function mine(): Set<string> {
   return ids;
 }
 const notFound = (e: unknown) => e instanceof Error && e.message.startsWith("HTTP 404");
+
+// A lost session took its mocks and intercepts with it (#650): tracked still,
+// a later use_remote would set the mocks up again on the next server, and a
+// bare clear_intercept would report them as already gone.
+whenLost(() => {
+  mineByServer.delete(currentRemote() ?? "local");
+  forgetAllMocks();
+});
 
 export function registerInterceptTools(server: McpServer): void {
   server.registerTool(

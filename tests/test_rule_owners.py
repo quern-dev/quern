@@ -155,3 +155,53 @@ class TestForgetting:
         assert c.delete("/api/v1/proxy/mocks", headers=_h(KEY)).status_code == 200
         assert c.delete("/api/v1/proxy/intercept", headers=_h(KEY)).status_code == 200
         assert app.state.mock_sessions == {} and app.state.intercept_sessions == {}
+
+
+class TestReviewFindings:
+    def test_the_owner_naming_a_clients_session_is_not_recorded_under_it(self, world):
+        """Recorded under alice's session, the owner's every-device mock would
+        end when alice disconnected (review)."""
+        c, app, adapter, _, _ = world
+        m = _mock(c, KEY, "alice:s1")
+        assert rule_owners.label(app, "mock", m) == {"owner": "owner", "session": None}
+
+    async def test_a_client_rule_ended_with_its_hold_is_forgotten(self, world):
+        c, app, adapter, alice, _ = world
+        registry = app.state.sessions
+        m = _mock(c, alice, "s1", simulator_udid=SIM_A)
+        held = registry.get("alice:s1")
+        registry.release("alice:s1")
+        await sessions_api._end_client_work(app, registry, held)
+        assert m not in _mock_ids(adapter)
+        assert m not in app.state.mock_owners and m not in app.state.mock_sessions
+
+    def test_deleting_one_intercept_forgets_its_owner(self, world):
+        c, app, adapter, _, _ = world
+        _owner_session(app.state.sessions, "agent-1")
+        i = _intercept(c, KEY, "agent-1")
+        assert c.delete(f"/api/v1/proxy/intercept/{i}", headers=_h(KEY)).status_code == 200
+        assert i not in app.state.intercept_owners and i not in app.state.intercept_sessions
+
+    def test_a_clients_clear_forgets_the_owners_of_what_it_cleared(self, world):
+        c, app, adapter, alice, _ = world
+        i = _intercept(c, alice, "s1", simulator_udid=SIM_A)
+        assert c.delete("/api/v1/proxy/intercept", headers=_h(alice)).status_code == 200
+        assert i not in app.state.intercept_owners and i not in app.state.intercept_sessions
+
+    async def test_a_failed_removal_that_took_the_rule_anyway_is_forgotten(self, world):
+        from unittest.mock import AsyncMock
+
+        c, app, adapter, _, _ = world
+        registry = app.state.sessions
+        one = _owner_session(registry, "agent-1")
+        m = _mock(c, KEY, "agent-1")
+        registry.release("agent-1")
+
+        async def gone_then_failed(rule_id=None):
+            adapter._mock_rules[:] = [r for r in adapter._mock_rules if r["rule_id"] != rule_id]
+            raise RuntimeError("broadcast failed")
+
+        adapter.clear_mock = AsyncMock(side_effect=gone_then_failed)
+        actions = await sessions_api._end_client_work(app, registry, one)
+        assert [a["ok"] for a in actions if a.get("rule_id") == m] == [False]
+        assert rule_owners.label(app, "mock", m) == {"owner": None, "session": None}
