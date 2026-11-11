@@ -1375,22 +1375,85 @@ rm -rf /data/local/tmp/tmp-ca-copy
         logger.info("Set HTTP proxy on %s to %s", serial, value)
 
     async def clear_http_proxy(self, serial: str) -> None:
-        """Remove the global HTTP proxy.
+        """Remove the global HTTP proxy: write `:0`, then delete the row.
 
-        `settings delete` rather than writing `:0`. The written-sentinel form
-        leaves a row saying "proxy: none", which reads to anyone inspecting the
-        device as a deliberate configuration rather than an absence -- and it
-        is what `settings get` returns instead of `null`, so quern could not
-        tell a cleared device from one that had never been set.
+        Both halves are needed (#652). Writing `http_proxy` makes Android store
+        the proxy again as `global_http_proxy_host`/`_port`, and that copy is
+        what the device uses; a delete removes only the row. Measured on an
+        Android 10 phone: after a delete it read `http_proxy` null while Chrome
+        still went through the old proxy, and failed once that proxy stopped.
+        Writing `:0` makes Android empty the copy, and the next request goes
+        direct.
+
+        The delete then removes the `:0` row, which would otherwise read as a
+        deliberate "no proxy" setting rather than an absence. If it fails the
+        proxy is already off, so that is logged rather than raised. A copy not
+        seen to empty -- still set after the wait, or unreadable -- raises
+        before the delete.
 
         This is the half #265 records as missing entirely: the setting lives in
         the global settings provider and survives reboots, so without an unset
         it is the device's configuration until something else changes it.
         """
-        await self._run_adb_for_device(
-            serial, "shell", "settings", "delete", "global", "http_proxy",
-        )
+        await self.put_http_proxy(serial, ":0")
+        # Android empties its copy when it gets to the change, reading the row
+        # as it is then -- so a delete that lands first leaves the copy in
+        # place (review). Wait, briefly, for the copy to empty.
+        emptied = False
+        for _ in range(10):
+            try:
+                keeps_copy, in_use = await self.get_proxy_in_use(serial)
+            except Exception:
+                break
+            if not keeps_copy or in_use is None:
+                emptied = True
+                break
+            await asyncio.sleep(0.3)
+        if not emptied:
+            # Raised before the delete, and so before the caller bounces Wi-Fi:
+            # a device still on the old proxy would send the reattach's
+            # requests through it (CodeRabbit). The `:0` row stays, and reads
+            # as no proxy; a retry clears again.
+            raise DeviceError(
+                f"Android on {serial} was not seen to empty its copy of the proxy after "
+                "`:0`; it may still use the old one", tool="adb")
+        try:
+            await self._run_adb_for_device(
+                serial, "shell", "settings", "delete", "global", "http_proxy",
+            )
+        except Exception:
+            logger.warning("Cleared the proxy on %s, but could not delete its `:0` row",
+                           serial, exc_info=True)
         logger.info("Cleared HTTP proxy on %s", serial)
+
+    async def get_proxy_in_use(self, serial: str) -> tuple[bool, str | None]:
+        """Android's own copy of the global proxy, the one the device uses
+        (#652): whether the device keeps one, and its value (None for none).
+
+        Read in one shell line with both values labelled, because `settings
+        get` prints an emptied host as an empty line, which can't be told from
+        a read that printed nothing. A device that has never had a proxy reads
+        `null` for both, and is reported as keeping no copy, so callers go by
+        `http_proxy` alone. Raises when the output is not the labelled line.
+        """
+        stdout, _ = await self._run_adb_for_device(
+            serial, "shell",
+            "echo h=$(settings get global global_http_proxy_host)"
+            " p=$(settings get global global_http_proxy_port)",
+        )
+        match = re.fullmatch(r"h=(\S*) p=(\S*)", (stdout or "").strip())
+        if match is None:
+            raise DeviceError(f"Could not read {serial}'s proxy in use", tool="adb")
+        host, port = match.groups()
+        if not port:
+            # A read that failed: an emptied copy prints port 0, and an empty
+            # one would read as "no proxy" without anything having been read.
+            raise DeviceError(f"Could not read {serial}'s proxy port in use", tool="adb")
+        if host == "null" and port == "null":
+            return False, None
+        if host in ("", "null") or port in ("null", "0"):
+            return True, None
+        return True, f"{host}:{port}"
 
     async def get_http_proxy(self, serial: str, *, strict: bool = False) -> str | None:
         """What the device's global proxy is set to, or None.
@@ -1411,7 +1474,8 @@ rm -rf /data/local/tmp/tmp-ca-copy
         value = (stdout or "").strip()
         if strict and not value:
             raise DeviceError(f"Reading {serial}'s proxy setting printed nothing", tool="adb")
-        return None if value in ("", "null") else value
+        # `:0` is how a proxy is switched off (#652): no proxy, not one at ":0".
+        return None if value in ("", "null", ":0") else value
 
     @staticmethod
     def is_network_transport(serial: str) -> bool:

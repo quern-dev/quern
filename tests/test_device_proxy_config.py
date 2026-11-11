@@ -69,6 +69,8 @@ def _android(udid: str = "PHONE1", *, ssid="MonaLisa", ip="192.168.1.244"):
     ctrl.adb.is_network_transport = MagicMock(return_value=False)
     ctrl.adb.clear_http_proxy = AsyncMock()
     ctrl.adb.get_http_proxy = AsyncMock(return_value=None)
+    # No copy of its own unless a test says so: the row is the answer (#652).
+    ctrl.adb.get_proxy_in_use = AsyncMock(return_value=(False, None))
     ctrl.adb.is_rootable = AsyncMock(return_value=True)
     ctrl.adb._get_cert_hash = AsyncMock(return_value="c8750f0d")
     ctrl.adb.system_cert_state = AsyncMock(return_value=True)
@@ -1359,7 +1361,7 @@ class _FakeDevice:
             if self.fail_reads:
                 self.fail_reads -= 1
                 raise RuntimeError("adb: device offline")
-            return self.value
+            return None if self.value == ":0" else self.value
 
         async def put(udid, v):
             self.value = v
@@ -1370,10 +1372,28 @@ class _FakeDevice:
         async def delete(udid):
             self.value = None
 
+        async def in_use(udid):
+            return (True, self.copy) if self.keeps_copy else (False, None)
+
         ctrl.adb.get_http_proxy = AsyncMock(side_effect=get)
+        ctrl.adb.get_proxy_in_use = AsyncMock(side_effect=in_use)
         ctrl.adb.put_http_proxy = AsyncMock(side_effect=put)
         ctrl.adb.set_http_proxy = AsyncMock(side_effect=set_)
         ctrl.adb.clear_http_proxy = AsyncMock(side_effect=delete)
+
+    # Android's own copy of the proxy (#652), off unless a test turns it on:
+    # a write sets it, `:0` empties it, and a plain delete leaves it.
+    keeps_copy = False
+    _copy = None
+
+    @property
+    def copy(self):
+        return self._copy
+
+    def __setattr__(self, name, v):
+        object.__setattr__(self, name, v)
+        if name == "value" and getattr(self, "keeps_copy", False) and v is not None:
+            object.__setattr__(self, "_copy", None if v == ":0" else v)
 
 
 _CORP = "10.0.0.5:3128"
@@ -1604,3 +1624,98 @@ class TestTheRestoreSurvivesItsFailurePaths:
                                              "PHONE1", actions)
         assert actions[-1]["ok"] is True and actions[-1]["proxy_verified"] is True
         assert dev.value == _CORP and "PHONE1" not in request.app.state.device_proxy_holds
+
+
+class TestTheProxyInUseIsWhatCounts:
+    """#652: Android keeps its own copy of the proxy, and a plain delete
+    leaves it, so a device can read no proxy while it still uses quern's."""
+
+    async def _call(self, ctrl, **flags):
+        a, b = _hosts()
+        with a, b:
+            return await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", **flags), _request(ctrl))
+
+    def _device(self, value=None):
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, None)
+        dev.keeps_copy = True
+        dev.value = value
+        return ctrl, dev
+
+    async def test_a_delete_that_leaves_the_copy_is_not_verified(self):
+        ctrl, dev = self._device()
+        await self._call(ctrl, apply=True)
+
+        async def delete_only(udid):        # the clear as it was before #652
+            object.__setattr__(dev, "value", None)
+
+        ctrl.adb.clear_http_proxy = AsyncMock(side_effect=delete_only)
+        out = await self._call(ctrl, clear=True)
+        assert out["proxy_verified"] is False
+        assert out["device_proxy"] == "192.168.1.189:9101"
+
+    async def test_the_real_clear_empties_the_copy_and_is_verified(self):
+        """quern's own clear_http_proxy against a device whose delete leaves
+        the copy, as the phone's did (review: a stand-in clear proved nothing)."""
+        from server.device.android.adb import AdbBackend
+
+        ctrl, dev = self._device()
+        await self._call(ctrl, apply=True)
+
+        async def run(serial, *args, timeout=None):
+            assert args[:4] == ("shell", "settings", "delete", "global")
+            object.__setattr__(dev, "value", None)      # the row only
+            return "", ""
+
+        adb = SimpleNamespace(put_http_proxy=ctrl.adb.put_http_proxy,
+                              get_proxy_in_use=ctrl.adb.get_proxy_in_use,
+                              _run_adb_for_device=run)
+        ctrl.adb.clear_http_proxy = lambda udid: AdbBackend.clear_http_proxy(adb, udid)
+        out = await self._call(ctrl, clear=True)
+        assert dev.copy is None and dev.value is None
+        assert out["proxy_verified"] is True and out["device_proxy"] is None
+
+    async def test_a_failed_write_that_changed_only_the_row_is_not_untouched(self):
+        """The copy follows the row a moment later, so a copy that still reads
+        as before is no proof the write did not land (review)."""
+        ctrl, dev = self._device("10.0.0.5:3128")
+        request = _request(ctrl)
+        _, _, who = _held_by_a_session(request)
+
+        async def row_landed_then_failed(udid, host, port):
+            object.__setattr__(dev, "value", f"{host}:{port}")   # copy not yet
+            raise RuntimeError("adb: connection reset")
+
+        ctrl.adb.set_http_proxy = AsyncMock(side_effect=row_landed_then_failed)
+        a, b = _hosts()
+        with a, b, who, pytest.raises(HTTPException) as e:
+            await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", apply=True), request)
+        assert "may have reached the device" in e.value.detail
+        assert "PHONE1" in request.app.state.device_proxy_holds
+
+    async def test_a_policy_proxy_in_the_copy_alone_is_put_back(self):
+        """Device policy sets the copy, not the row (#645 meets #652)."""
+        ctrl, dev = self._device()
+        object.__setattr__(dev, "_copy", "10.0.0.5:3128")
+        out = await self._call(ctrl, apply=True)
+        assert out["previous_proxy"] == "10.0.0.5:3128"
+        out = await self._call(ctrl, clear=True)
+        ctrl.adb.put_http_proxy.assert_awaited_with("PHONE1", "10.0.0.5:3128")
+        assert dev.copy == "10.0.0.5:3128" and out["proxy_verified"] is True
+
+    async def test_an_unconfirmed_clear_does_not_bounce_and_is_refused(self):
+        """A clear that fails before the delete is a 502, with no Wi-Fi bounce
+        to send requests through the old proxy (CodeRabbit on #653)."""
+        from server.models import DeviceError
+
+        ctrl, _ = self._device()
+        await self._call(ctrl, apply=True)
+        bounces = ctrl.adb.reattach_network.await_count
+        ctrl.adb.clear_http_proxy = AsyncMock(
+            side_effect=DeviceError("not seen to empty", tool="adb"))
+        with pytest.raises(HTTPException) as e:
+            await self._call(ctrl, clear=True)
+        assert e.value.status_code == 502
+        assert ctrl.adb.reattach_network.await_count == bounces
