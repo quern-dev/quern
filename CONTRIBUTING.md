@@ -50,7 +50,7 @@ templates/   The app-knowledge scaffold `init_app_knowledge` writes
 scripts/     Review, merge and release tooling, and the git hooks
 ```
 
-The MCP server is thin where it can be: device, proxy and log logic lives in the Python server. What only the agent's side can know lives in the MCP: which server it talks to (`use_remote`), which mocks and session capture *this* agent set -- the server cannot tell one owner-key agent's from another's (#576) -- and the project's knowledge base on the agent's disk (#560). `server/device/` has outgrown its name; #396 tracks splitting it.
+The MCP server is thin where it can be: device, proxy and log logic lives in the Python server. What only the agent's side can know lives in the MCP: which server it talks to (`use_remote`), which mocks and session capture *this* agent set -- the server could not tell one owner-key agent's from another's (#576); since #650 it records the held session behind each mock and intercept, and ends them with it -- and the project's knowledge base on the agent's disk (#560). `server/device/` has outgrown its name; #396 tracks splitting it.
 
 One answer is deliberately built on both sides: `list_remotes` asks each server from the MCP itself (`mcp/src/remote-status.ts`, #605), so it works without the `quern` CLI on the agent's machine, and `quern remote list` builds the same rows in `server/remote/status.py`. They are kept in step by one fixture, `tests/fixtures/remote-status.json`, which both suites run; a change to either side changes the fixture and the other side with it.
 

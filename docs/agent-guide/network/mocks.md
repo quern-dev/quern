@@ -10,7 +10,7 @@ Use `set_mock` to return synthetic responses for specific endpoints. This lets y
 
 A mocked request is recorded once, with `mock_rule_id` set and the tag `mocked`, so captured traffic distinguishes synthetic responses from real ones.
 
-Mock rules take priority over intercept rules. Clear them with `clear_mocks` when done.
+Mock rules take priority over intercept rules. Clear them with `clear_mocks` when done. A rule you leave set ends with your session anyway, when your MCP exits or its session expires, as do your intercepts; `list_mocks` shows each rule's `owner` and `session`, so you can tell yours from another agent's.
 Clearing one rule by id now **errors with 404** if no such rule exists, where it used to
 report success — so teardown can tell "removed it" from "it was never there", and a rule
 you failed to remove does not go on quietly matching traffic. Do not retry that error: the

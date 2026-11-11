@@ -4,7 +4,7 @@
 
 If another agent or a CI job may use the same quern server, **reserve your devices first** with `reserve_devices`, for example `reserve_devices(count=1, device_type="simulator")` or `reserve_devices(udids=[...])`. While you hold a device, nobody else can change it: their taps and installs get 423 naming you. Reading it (screenshots, UI tree, logs) still works for everyone. Reserving one device makes it your active device, so later tools need no `udid`.
 
-- You don't have to release: your reservation ends with your session. A brief network drop keeps it for a grace period (3 minutes by default). `release_devices` frees devices sooner.
+- You don't have to release: your reservation ends with your session. A brief network drop keeps it for a grace period (3 minutes by default). `release_devices` frees devices sooner. The mocks and intercepts you set also end with your session, on the owner key too (`release_devices` alone leaves the owner's); `list_mocks` and `proxy_status` show whose each rule is.
 - A 423 on a device means someone else holds it. `session_status(all=true)` or `list_devices` (its `reservation` field) shows who. Pick a free device rather than waiting.
 - A 409 saying the device "is being cleaned up after its last hold" is brief: the last holder's release is removing what it installed. Retry in a moment.
 - **What a client installs is removed when its hold ends** (the owner's `sessions.client_release`, `uninstall` by default; `erase` erases a simulator). Reserving the device again later means installing again. An install is refused with 503 when the device's apps can't be listed first, since its release couldn't tell what to remove; retry, or pick another device.
