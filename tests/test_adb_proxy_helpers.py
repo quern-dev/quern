@@ -172,6 +172,25 @@ class TestReadingTheProxy:
         kinds = ["read" if c[1].startswith("echo h=") else c[2] for c in calls]
         assert kinds == ["put", "read", "read", "read", "delete"]
 
+    @pytest.mark.parametrize("copies", [["h=192.168.1.189 p=9101"], ["error: closed"]])
+    async def test_a_copy_not_seen_to_empty_is_warned_about(self, adb, monkeypatch, caplog,
+                                                              copies):
+        """Still there after the wait, or unreadable: the delete goes ahead,
+        and the log says the device may still use the old proxy (CodeRabbit)."""
+        monkeypatch.setattr("server.device.android.adb.asyncio.sleep", AsyncMock())
+        run, _ = self._device(copies)
+        monkeypatch.setattr(adb, "_run_adb_for_device", run)
+        with caplog.at_level("WARNING"):
+            await adb.clear_http_proxy("X")
+        assert "not seen to empty" in caplog.text
+
+    async def test_an_emptied_copy_is_not_warned_about(self, adb, monkeypatch, caplog):
+        run, _ = self._device(["h= p=0"])
+        monkeypatch.setattr(adb, "_run_adb_for_device", run)
+        with caplog.at_level("WARNING"):
+            await adb.clear_http_proxy("X")
+        assert "not seen to empty" not in caplog.text
+
     async def test_a_failed_delete_after_zero_is_not_raised(self, adb, monkeypatch):
         from server.models import DeviceError
 

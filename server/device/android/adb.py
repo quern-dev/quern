@@ -1397,14 +1397,21 @@ rm -rf /data/local/tmp/tmp-ca-copy
         # Android empties its copy when it gets to the change, reading the row
         # as it is then -- so a delete that lands first leaves the copy in
         # place (review). Wait, briefly, for the copy to empty.
+        emptied = False
         for _ in range(10):
             try:
                 keeps_copy, in_use = await self.get_proxy_in_use(serial)
             except Exception:
                 break
             if not keeps_copy or in_use is None:
+                emptied = True
                 break
             await asyncio.sleep(0.3)
+        if not emptied:
+            # Deleted anyway, so the row is gone; but the device may still use
+            # the old proxy, and only a read-back would say so (CodeRabbit).
+            logger.warning("Android on %s was not seen to empty its copy of the proxy "
+                           "after `:0`; it may still use the old one", serial)
         try:
             await self._run_adb_for_device(
                 serial, "shell", "settings", "delete", "global", "http_proxy",
