@@ -622,6 +622,11 @@ class RecordDeviceProxyRequest(BaseModel):
     #: pointed at a proxy that is no longer listening has no working network
     #: at all. Android only, and refused alongside `apply`.
     clear: bool = False
+    #: With `clear`: false removes the proxy outright rather than putting back
+    #: the one quern recorded from before its apply, and drops that record
+    #: (#654) -- a reset to a known state, for a device whose history quern
+    #: cannot vouch for (a shared or remote one). Refused without `clear`.
+    restore: bool = True
 
 
 def _bound_loopback_only(adapter) -> bool:
@@ -805,7 +810,8 @@ class _RecordFailed(Exception):
 _RECORDED = object()
 
 
-async def clear_device_proxy(controller, udid: str, previous=_RECORDED) -> dict:
+async def clear_device_proxy(controller, udid: str, previous=_RECORDED, *,
+                             discard: bool = False) -> dict:
     """Undo quern's proxy on an Android device: put back the setting it had
     before quern's apply, or delete it when it had none (#645); then forget the
     per-network records, re-attach its network and read the setting back.
@@ -814,14 +820,24 @@ async def clear_device_proxy(controller, udid: str, previous=_RECORDED) -> dict:
 
     `previous` is the value to put back, when the caller read it itself: an
     apply whose hold ended under it, whose release may already have restored
-    the device and dropped the record (review). Otherwise the record says."""
+    the device and dropped the record (review). Otherwise the record says.
+
+    `discard` removes the proxy outright instead (#654), and drops the record
+    once the removal is written -- read back or not, since a later release
+    would otherwise put the old proxy back after a reset. The answer's
+    `discarded_proxy` is the recorded value that was not put back."""
     from server.proxy.cert_state import (
         forget_device_proxy_configs,
+        forget_proxy_before_quern,
         mark_proxy_restored,
         proxy_record,
     )
 
-    if previous is _RECORDED:
+    discarded = None
+    if discard:
+        discarded = (proxy_record(canonical_device_id(udid)) or {}).get("value")
+        previous = None
+    elif previous is _RECORDED:
         record = proxy_record(canonical_device_id(udid)) or {}
         previous = record.get("value")
         if record.get("restored"):
@@ -838,18 +854,21 @@ async def clear_device_proxy(controller, udid: str, previous=_RECORDED) -> dict:
         await controller.adb.put_http_proxy(udid, previous)
     else:
         await controller.adb.clear_http_proxy(udid)
+    if discard:
+        forget_proxy_before_quern(canonical_device_id(udid))
     forgotten = forget_device_proxy_configs(canonical_device_id(udid))
     reattached = await controller.adb.reattach_network(udid)
     cleared_proxy, cleared_ok = await _read_device_proxy(controller, udid)
     verified = (cleared_proxy == previous) if cleared_ok else None
-    if verified is True:
+    if verified is True and not discard:
         # Only once the device says so: a restore that did not take, or could
         # not be read back, keeps the record live for the retry -- without it
         # the retry would delete the proxy just put back (review).
         mark_proxy_restored(canonical_device_id(udid))
     return {"forgot_ssids": forgotten, "network_reattached": reattached,
             "device_proxy": cleared_proxy, "restored_proxy": previous,
-            "proxy_verified": verified}
+            "proxy_verified": verified,
+            **({"discarded_proxy": discarded} if discard else {})}
 
 
 async def _https_readiness(controller, udid: str) -> dict:
@@ -963,6 +982,13 @@ async def record_device_proxy_config_endpoint(
             status_code=400,
             detail="apply and clear are opposites; pass one or neither.",
         )
+    if not body.restore and not body.clear:
+        # Said rather than ignored: restore only says what a clear does.
+        raise HTTPException(
+            status_code=400,
+            detail="restore=false is for clear=true: it removes the proxy outright "
+                   "instead of putting back the one from before quern's apply.",
+        )
 
     if body.clear and not is_android:
         raise HTTPException(
@@ -978,7 +1004,7 @@ async def record_device_proxy_config_endpoint(
         # demanding one would make a device that has dropped off Wi-Fi --
         # exactly what a bad proxy causes -- impossible to put right.
         try:
-            cleared = await clear_device_proxy(controller, body.udid)
+            cleared = await clear_device_proxy(controller, body.udid, discard=not body.restore)
         except Exception as e:
             raise HTTPException(
                 status_code=502,
@@ -1022,9 +1048,14 @@ async def record_device_proxy_config_endpoint(
             #: The proxy the device had before quern's apply, put back (#645);
             #: None when it had none and the setting was deleted.
             "restored_proxy": cleared["restored_proxy"],
+            #: With restore=false (#654): the proxy quern had recorded from
+            #: before its apply, which was not put back; None when there was
+            #: none, or when the clear restored.
+            "discarded_proxy": cleared.get("discarded_proxy"),
             #: True only when the device was actually asked and answered that
-            #: it holds what it had before quern. A read that failed returns
-            #: None here rather than borrowing the success value.
+            #: it holds what it had before quern -- or, with restore=false,
+            #: no proxy. A read that failed returns None here rather than
+            #: borrowing the success value.
             "proxy_verified": cleared["proxy_verified"],
             "https": None,
             "ends_with_hold": False,
@@ -1278,6 +1309,7 @@ async def record_device_proxy_config_endpoint(
         #: too when nothing was applied.
         "previous_proxy": previous_proxy,
         "restored_proxy": None,
+        "discarded_proxy": None,
         #: The hold that applied it ended while it was applied, so it was
         #: cleared again rather than left on a device nobody holds.
         **({"hold_ended": True} if hold_ended else {}),

@@ -1719,3 +1719,59 @@ class TestTheProxyInUseIsWhatCounts:
             await self._call(ctrl, clear=True)
         assert e.value.status_code == 502
         assert ctrl.adb.reattach_network.await_count == bounces
+
+
+class TestAResetToNoProxy:
+    """clear=true, restore=false (#654): no proxy, whatever quern recorded --
+    for a shared or remote device whose history quern cannot vouch for."""
+
+    async def _call(self, ctrl, request=None, **flags):
+        a, b = _hosts()
+        with a, b:
+            return await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="PHONE1", **flags), request or _request(ctrl))
+
+    async def test_it_removes_the_proxy_instead_of_restoring_it(self):
+        from server.proxy.cert_state import proxy_before_quern
+
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, _CORP)
+        await self._call(ctrl, apply=True)
+        out = await self._call(ctrl, clear=True, restore=False)
+        assert dev.value is None and out["proxy_verified"] is True
+        assert out["discarded_proxy"] == _CORP and out["restored_proxy"] is None
+        assert proxy_before_quern("PHONE1") == (False, None)
+
+    async def test_a_plain_clear_still_restores(self):
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, _CORP)
+        await self._call(ctrl, apply=True)
+        out = await self._call(ctrl, clear=True)
+        assert dev.value == _CORP and out["discarded_proxy"] is None
+
+    async def test_restore_false_without_clear_is_refused(self):
+        ctrl = _android()
+        with pytest.raises(HTTPException) as e:
+            await self._call(ctrl, restore=False)
+        assert e.value.status_code == 400 and "clear=true" in e.value.detail
+
+    async def test_a_reset_that_could_not_be_read_back_is_not_undone_by_the_release(self):
+        """The record goes once the removal is written: kept, the hold's
+        release would have put the old proxy back after a reset."""
+        from server.api import sessions as sessions_api
+
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, _CORP)
+        request = _request(ctrl)
+        session, holding, who = _held_by_a_session(request)
+        with who:
+            await self._call(ctrl, request, apply=True)
+            dev.fail_reads = 1
+            out = await self._call(ctrl, request, clear=True, restore=False)
+        assert out["proxy_verified"] is None and dev.value is None
+        assert "PHONE1" in request.app.state.device_proxy_holds    # the release retries
+        holding["now"] = False
+        await sessions_api._end_device_proxy(
+            SimpleNamespace(state=request.app.state), request.app.state.sessions,
+            session, "PHONE1", [])
+        assert dev.value is None
