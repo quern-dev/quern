@@ -929,13 +929,23 @@ the background and can be re-enabled with configure_system_proxy.`,
           "and forget every config recorded for it. " +
           "Use this to undo apply, and to rescue a device pointing at a proxy that is gone."
         ),
+      restore: z
+        .boolean()
+        .optional()
+        .describe(
+          "With clear=true only: false removes the proxy outright instead of putting back the one " +
+          "from before apply, and forgets that one (discarded_proxy says what it was). Use it to " +
+          "reset a shared or remote device to no proxy when its history is unknown; not on a " +
+          "phone whose own proxy (a corporate or lab one) its user needs."
+        ),
     }),
-  }, async ({ udid, ssid, client_ip, apply, clear }) => betweenSwitches(async () => {
+  }, async ({ udid, ssid, client_ip, apply, clear, restore }) => betweenSwitches(async () => {
     try {
       const body: Record<string, unknown> = { udid };
       if (ssid !== undefined) body.ssid = ssid;
       if (apply !== undefined) body.apply = apply;
       if (clear !== undefined) body.clear = clear;
+      if (restore !== undefined) body.restore = restore;
       if (client_ip !== undefined) body.client_ip = client_ip;
       const data = await apiRequest(
         "POST",
