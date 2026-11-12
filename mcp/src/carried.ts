@@ -352,8 +352,11 @@ export async function moveOut(
           ", so it is not carried; it is still there unless that server ended it" });
       continue;
     } else {
+      // Left to that server too: its clean-up of the opening that set it
+      // removes it, and removing it here contradicted "left behind" (CodeRabbit).
       leftBehind.push({ pattern: mock.pattern, simulator_udid: scopes,
         why: `it ended with an earlier opening of your session on ${oldName}` });
+      continue;
     }
     for (const [scope, ruleId] of mock.rules) {
       if (gone) {

@@ -259,12 +259,17 @@ test("the old server's list is read before the release ends this session's mocks
   assert.equal(r.away.carried.mocks, 2);
   assert.equal(r.away.carried.left_behind, undefined);
   const local = r.logs.local;
-  assert.ok(local.indexOf("GET /api/v1/proxy/mocks") < local.indexOf("DELETE /api/v1/sessions/agent-1/reservations"),
-    `read before the release: ${local.join(", ")}`);
+  const read = local.indexOf("GET /api/v1/proxy/mocks");
+  const release = local.indexOf("DELETE /api/v1/sessions/agent-1/reservations");
+  // Both asked, then in order: an absent read is -1, which sorts first (CodeRabbit).
+  assert.ok(read >= 0 && release >= 0, `both asked: ${local.join(", ")}`);
+  assert.ok(read < release, `read before the release: ${local.join(", ")}`);
 });
 
 test("a mock an earlier opening of the session set is not carried (#656)", async () => {
   const r = await run("carry-lost-opening");
+  // Left on that server for its own clean-up, not removed by the switch.
+  assert.ok(!r.logs.local.includes("DELETE /api/v1/proxy/mocks/mock_local1"));
   assert.equal(r.away.carried.mocks, 2, "this opening's and the sessionless one");
   assert.deepEqual(r.away.carried.left_behind.map((m) => m.pattern), ["~u /earlier"]);
   assert.match(r.away.carried.left_behind[0].why, /earlier opening of your session/);

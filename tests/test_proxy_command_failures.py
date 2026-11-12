@@ -57,7 +57,11 @@ class TestTheMainProxy:
     async def test_a_burst_of_failures_restarts_it_once(self):
         leader, _ = _proxies(leader_fails=True)
         gate = asyncio.Event()
-        leader.restart = AsyncMock(side_effect=lambda: gate.wait())
+
+        async def held_restart():
+            await gate.wait()             # still restarting when the next ones fail
+
+        leader.restart = AsyncMock(side_effect=held_restart)
         for _ in range(3):
             with pytest.raises(BrokenPipeError):
                 await leader.broadcast({"action": "clear_mock", "rule_id": "m1"})
