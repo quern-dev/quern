@@ -62,13 +62,15 @@ class TestTheMainProxy:
             await gate.wait()             # still restarting when the next ones fail
 
         leader.restart = AsyncMock(side_effect=held_restart)
-        for _ in range(3):
-            with pytest.raises(BrokenPipeError):
-                await leader.broadcast({"action": "clear_mock", "rule_id": "m1"})
-        await _settle()
-        assert leader.restart.await_count == 1
-        gate.set()
-        await _settle()
+        try:
+            for _ in range(3):
+                with pytest.raises(BrokenPipeError):
+                    await leader.broadcast({"action": "clear_mock", "rule_id": "m1"})
+            await _settle()
+            assert leader.restart.await_count == 1
+        finally:
+            gate.set()                        # never left waiting, pass or fail
+            await asyncio.wait_for(leader._restart_task, 2)
 
     async def test_a_stopped_proxy_is_not_restarted(self):
         """Not running: a stop someone asked for is not undone."""

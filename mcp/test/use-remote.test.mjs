@@ -271,8 +271,10 @@ test("a mock an earlier opening of the session set is not carried (#656)", async
   // Left on that server for its own clean-up, not removed by the switch.
   assert.ok(!r.logs.local.includes("DELETE /api/v1/proxy/mocks/mock_local1"));
   assert.equal(r.away.carried.mocks, 2, "this opening's and the sessionless one");
-  assert.deepEqual(r.away.carried.left_behind.map((m) => m.pattern), ["~u /earlier"]);
+  assert.deepEqual(r.away.carried.left_behind.map((m) => m.pattern), ["~u /earlier", "~u /gone"]);
   assert.match(r.away.carried.left_behind[0].why, /earlier opening of your session/);
+  // Not listed at all says so, without guessing why (CodeRabbit).
+  assert.match(r.away.carried.left_behind[1].why, /no longer on local/);
 });
 
 test("rules a switch could not remove are removed when the agent comes back", async () => {

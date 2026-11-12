@@ -354,8 +354,13 @@ export async function moveOut(
     } else {
       // Left to that server too: its clean-up of the opening that set it
       // removes it, and removing it here contradicted "left behind" (CodeRabbit).
+      // Said by what the list shows, not guessed: a rule absent from it may
+      // have been cleared during this opening (CodeRabbit).
+      const ids = [...mock.rules.values()];
+      const earlier = ids.some((id) => listed.get(id)?.session === standing!.leaving.id);
       leftBehind.push({ pattern: mock.pattern, simulator_udid: scopes,
-        why: `it ended with an earlier opening of your session on ${oldName}` });
+        why: earlier ? `it ended with an earlier opening of your session on ${oldName}`
+          : `it is no longer on ${oldName}: removed there, or ended with your session` });
       continue;
     }
     for (const [scope, ruleId] of mock.rules) {

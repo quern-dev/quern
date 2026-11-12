@@ -470,6 +470,7 @@ if (scenario === "leave-unreachable" || scenario === "leave-erroring") {
   await tools.set_mock({ pattern: "~u /earlier", simulator_udid: "SIM-L", status_code: 200, body: "E" });
   await tools.set_mock({ pattern: "~u /now", simulator_udid: "SIM-L", status_code: 200, body: "N" });
   await tools.set_mock({ pattern: "~u /gap", simulator_udid: "SIM-L", status_code: 200, body: "G" });
+  await tools.set_mock({ pattern: "~u /gone", simulator_udid: "SIM-L", status_code: 200, body: "X" });
   result.away = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);
 } else if (scenario === "carry-release-ends") {
   for (const p of ["/1", "/2"]) {
