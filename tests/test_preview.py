@@ -157,6 +157,38 @@ class TestBuildBundle:
         preview.build_preview_bundle()
         assert captured.get("timeout"), "swiftc was launched with no timeout"
 
+    def test_each_build_stages_apart_beside_the_bundle(self, tmp_path, monkeypatch):
+        """Two builds never share a staged file, and neither stages outside the
+        bundle's directory -- a shared name let overlapping builds clobber each
+        other, and a rename across filesystems fails."""
+        from server.device.media import preview
+
+        bundle = tmp_path / "Quern Preview.app"
+        binary = bundle / "Contents" / "MacOS" / "ios-preview"
+        source = tmp_path / "main.swift"
+        source.write_text("// source")
+        outputs: list[Path] = []
+
+        def fake_run(cmd, **kwargs):
+            out = Path(cmd[cmd.index("-o") + 1])
+            outputs.append(out)
+            out.write_text("x")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(preview, "_find_source", lambda: source)
+        monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [])
+        monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
+        monkeypatch.setattr(preview.shutil, "which", lambda _: "/usr/bin/swiftc")
+        monkeypatch.setattr(preview.subprocess, "run", fake_run)
+
+        for _ in range(2):
+            preview.build_preview_bundle()
+            binary.unlink()                             # off the fast path again
+
+        assert len(outputs) == 2 and outputs[0] != outputs[1]
+        assert all(o.parent.parent == tmp_path for o in outputs)
+        assert not list(tmp_path.glob(".ios-preview*"))     # staging removed
+
 
 #: A CoreMediaIO unique ID. Sessions are keyed by this, never by the name --
 #: two phones of the same model report the same name.

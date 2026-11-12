@@ -27,6 +27,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -255,43 +256,61 @@ def build_preview_bundle() -> Path:
     # Compiled beside the bundle, not in it: the bundle is created only once
     # there is a binary to put in it. Made first, a failed compile left a
     # bundle with no executable, which the menu bar offered as Screen Mirror
-    # and macOS refused to open as corrupt (#659).
-    QUERN_BIN_DIR.mkdir(parents=True, exist_ok=True)
-    staged = QUERN_BIN_DIR / f".{BINARY_NAME}.building"
+    # and macOS refused to open as corrupt (#659). A directory of its own per
+    # build, so two overlapping builds never share a staged file, and on the
+    # bundle's filesystem, so the final rename cannot cross devices.
+    try:
+        bundle.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(
+            prefix=f".{BINARY_NAME}-", suffix=".building", dir=bundle.parent
+        ))
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not stage the ios-preview build in {bundle.parent}: {exc}"
+        ) from exc
+    staged = staging / BINARY_NAME
     logger.info("Compiling ios-preview: %s -> %s", source, binary)
 
     try:
-        proc = subprocess.run(  # noqa: S603
-            [
-                swiftc,
-                "-o", str(staged),
-                *[str(p) for p in sources],
-                "-framework", "AVFoundation",
-                "-framework", "CoreMediaIO",
-                "-framework", "AppKit",
-            ],
-            capture_output=True,
-            text=True,
-            # The compile takes ~1.5s. A minute is not a performance budget,
-            # it is the line past which swiftc is stuck rather than slow --
-            # and unbounded, a stuck compiler hangs `quern setup` with no
-            # output and no way to tell it apart from a hang in Quern itself.
-            timeout=60,
-        )
-    except subprocess.TimeoutExpired as e:
-        staged.unlink(missing_ok=True)
-        raise RuntimeError(
-            "swiftc did not finish within 60s while building the screen-mirror "
-            "app. Try `xcode-select -p` to check the active toolchain."
-        ) from e
-    if proc.returncode != 0 or not staged.exists():
-        staged.unlink(missing_ok=True)
-        err = proc.stderr.strip() or proc.stdout.strip() or "swiftc produced no binary"
-        raise RuntimeError(f"Failed to compile ios-preview:\n{err}")
+        try:
+            proc = subprocess.run(  # noqa: S603
+                [
+                    swiftc,
+                    "-o", str(staged),
+                    *[str(p) for p in sources],
+                    "-framework", "AVFoundation",
+                    "-framework", "CoreMediaIO",
+                    "-framework", "AppKit",
+                ],
+                capture_output=True,
+                text=True,
+                # The compile takes ~1.5s. A minute is not a performance budget,
+                # it is the line past which swiftc is stuck rather than slow --
+                # and unbounded, a stuck compiler hangs `quern setup` with no
+                # output and no way to tell it apart from a hang in Quern itself.
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                "swiftc did not finish within 60s while building the screen-mirror "
+                "app. Try `xcode-select -p` to check the active toolchain."
+            ) from e
+        except OSError as e:
+            raise RuntimeError(f"Could not run swiftc: {e}") from e
+        if proc.returncode != 0 or not staged.exists():
+            err = proc.stderr.strip() or proc.stdout.strip() or "swiftc produced no binary"
+            raise RuntimeError(f"Failed to compile ios-preview:\n{err}")
 
-    logger.info("ios-preview compiled successfully")
-    binary.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(staged, binary)
+        logger.info("ios-preview compiled successfully")
+        try:
+            binary.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged, binary)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not install the compiled ios-preview at {binary}: {exc}"
+            ) from exc
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     write_app_bundle(bundle)
     return binary
 
