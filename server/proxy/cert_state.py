@@ -403,6 +403,38 @@ def forget_proxy_before_quern(udid: str) -> None:
         update_cert_state(key, {"proxy_before_quern": None})
 
 
+def blank_proxy_before_quern(udid: str) -> None:
+    """Set the recorded value to none on every spelling of the device that
+    holds a record, keeping quern's addresses: what a reset to no proxy
+    (#654) does before it writes, so a write that fails leaves nothing a
+    retry or release would put back. Every spelling, as forgetting does: the
+    merged read takes a later spelling's record over the canonical one's
+    (CodeRabbit), so blanking only the canonical key could leave the old
+    value readable."""
+    from server.device.ios.devicectl import canonical_device_id
+
+    canonical = canonical_device_id(udid)
+    try:
+        raw = json.loads(CERT_STATE_FILE.read_text() or "{}") if CERT_STATE_FILE.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        raw = {}
+    keys = [k for k, entry in raw.items() if canonical_device_id(k) == canonical
+            and isinstance(entry, dict) and isinstance(entry.get("proxy_before_quern"), dict)]
+    # Every spelling's addresses, not the merged read's one list: that took a
+    # single spelling's, and blanking wrote it over the others' (CodeRabbit).
+    addresses: list[str] = []
+    for key in keys:
+        for address in raw[key]["proxy_before_quern"].get("quern_addresses") or []:
+            if address not in addresses:
+                addresses.append(address)
+    if not keys:
+        addresses = quern_addresses_applied(udid)
+    for key in keys or [canonical]:
+        update_cert_state(key, {"proxy_before_quern": {
+            "value": None, "quern_addresses": addresses,
+            "recorded_at": datetime.now(UTC).isoformat()}})
+
+
 def _create_and_open():
     """Create cert state file and return file handle opened for read/write."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)

@@ -885,7 +885,8 @@ the background and can be re-enabled with configure_system_proxy.`,
     `that is no longer listening has no working network. ` +
     `An Android device that already had a global proxy (a corporate or lab one) gets it back on clear: ` +
     `apply reads it first and reports it as previous_proxy, and clear puts it back (restored_proxy) or ` +
-    `deletes the setting when there was none. Apply is refused, changing nothing, when the device's ` +
+    `deletes the setting when there was none -- unless restore=false, which removes it outright and ` +
+    `forgets the old one: the reset for a shared or remote device. Apply is refused, changing nothing, when the device's ` +
     `current setting cannot be read (502) or recorded (500). ` +
     `On Android, ssid and client_ip are read off the device when omitted, so prefer omitting them to guessing. ` +
     `The proxy host is the Mac interface on the device's own subnet; the port comes from the running proxy. ` +
@@ -925,17 +926,28 @@ the background and can be re-enabled with configure_system_proxy.`,
         .boolean()
         .optional()
         .describe(
-          "Android only: put back the proxy the device had before apply (or unset it if it had none), " +
+          "Android only: put back the proxy the device had before apply (or unset it if it had none; " +
+          "with restore=false, unset it regardless), " +
           "and forget every config recorded for it. " +
           "Use this to undo apply, and to rescue a device pointing at a proxy that is gone."
         ),
+      restore: z
+        .boolean()
+        .optional()
+        .describe(
+          "With clear=true only: false removes the proxy outright instead of putting back the one " +
+          "from before apply, and forgets that one (discarded_proxy says what it was). Use it to " +
+          "reset a shared or remote device to no proxy when its history is unknown; not on a " +
+          "phone whose own proxy (a corporate or lab one) its user needs."
+        ),
     }),
-  }, async ({ udid, ssid, client_ip, apply, clear }) => betweenSwitches(async () => {
+  }, async ({ udid, ssid, client_ip, apply, clear, restore }) => betweenSwitches(async () => {
     try {
       const body: Record<string, unknown> = { udid };
       if (ssid !== undefined) body.ssid = ssid;
       if (apply !== undefined) body.apply = apply;
       if (clear !== undefined) body.clear = clear;
+      if (restore !== undefined) body.restore = restore;
       if (client_ip !== undefined) body.client_ip = client_ip;
       const data = await apiRequest(
         "POST",
