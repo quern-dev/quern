@@ -254,6 +254,15 @@ test("a retry adopts its own session's rule, not another agent's identical one (
   assert.equal(r.made, 2, "the other agent's rule and this one's: nothing made twice");
 });
 
+test("the old server's list is read before the release ends this session's mocks there (#656)", async () => {
+  const r = await run("carry-release-ends");
+  assert.equal(r.away.carried.mocks, 2);
+  assert.equal(r.away.carried.left_behind, undefined);
+  const local = r.logs.local;
+  assert.ok(local.indexOf("GET /api/v1/proxy/mocks") < local.indexOf("DELETE /api/v1/sessions/agent-1/reservations"),
+    `read before the release: ${local.join(", ")}`);
+});
+
 test("a mock an earlier opening of the session set is not carried (#656)", async () => {
   const r = await run("carry-lost-opening");
   assert.equal(r.away.carried.mocks, 2, "this opening's and the sessionless one");
@@ -299,11 +308,12 @@ test("leaving a server that does not answer asks it once, not three times", asyn
   assert.ok(r.seconds < 9, `one 5 s timeout, not three: ${r.seconds}s`);
   // Unconfirmed, the mocks are not carried (#656): a lost session's end may
   // have taken them, so they are named as left behind rather than set up
-  // again on a guess -- and named as still there, for clean-up on return.
+  // again on a guess -- and left where they are, not queued for removal on
+  // return, which would lose them everywhere (review).
   assert.equal(r.away.carried.mocks, 0);
   assert.equal(r.away.carried.left_behind.length, 2);
-  assert.match(r.away.carried.left_behind[0].why, /could not confirm it on local/);
-  assert.deepEqual(r.away.carried.still_on_old, ["mock_local1", "mock_local2"]);
+  assert.match(r.away.carried.left_behind[0].why, /could not reach local/);
+  assert.equal(r.away.carried.still_on_old, undefined);
   assert.match(r.away.note, /Could not reach local to release/);
 });
 

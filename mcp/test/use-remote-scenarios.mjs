@@ -198,6 +198,17 @@ const plans = {
                              { rule_id: "mock_local2", session: "agent-1", session_opened: "T2" },
                              { rule_id: "mock_local3", session: null }] }) },
                          { "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // A real server ends a session's mocks once the switch releases it (#650),
+  // so its list must be read before then (#656 review): local lists them,
+  // labelled with this session, only until the release arrives.
+  "carry-release-ends": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+                           "GET /api/v1/sessions/agent-1": json(200, { reservations: [{ udid: "SIM-L" }] }),
+                           "DELETE /api/v1/sessions/agent-1/reservations": async () => {
+                             globalThis.releasedOnLocal = true; return [200, { freed: ["SIM-L"] }]; },
+                           "GET /api/v1/proxy/mocks": async () => [200, { rules: globalThis.releasedOnLocal
+                             ? [] : [{ rule_id: "mock_local1", session: "agent-1" },
+                                     { rule_id: "mock_local2", session: "agent-1" }] }] },
+                         { "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   // local stays up but refuses to give up its rules at the first switch; on the
   // way back one is removed, one is gone already, one refuses again.
   "carry-stranded": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
@@ -460,6 +471,11 @@ if (scenario === "leave-unreachable" || scenario === "leave-erroring") {
   await tools.set_mock({ pattern: "~u /now", simulator_udid: "SIM-L", status_code: 200, body: "N" });
   await tools.set_mock({ pattern: "~u /gap", simulator_udid: "SIM-L", status_code: 200, body: "G" });
   result.away = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);
+} else if (scenario === "carry-release-ends") {
+  for (const p of ["/1", "/2"]) {
+    await tools.set_mock({ pattern: `~u ${p}`, simulator_udid: "SIM-L", status_code: 200, body: p });
+  }
+  result.away = JSON.parse(text(await tools.use_remote({ name: "romulus", release: true })).text);
 } else if (scenario === "carry-race") {
   await tools.set_mock({ pattern: "~u /old", simulator_udid: "SIM-L", status_code: 200, body: "O" });
   await tools.add_session_capture({ simulator_udid: "SIM-L", processes: ["Metatext"] });

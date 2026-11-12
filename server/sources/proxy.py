@@ -147,13 +147,19 @@ def _signal(process: asyncio.subprocess.Process, method: str) -> None:
 
 async def _stop_and_check(adapter: ProxyAdapter) -> None:
     """Stop a session proxy quern can no longer command, and make sure its
-    mitmdump is gone (#656): `stop` escalates to a kill, and a process that
-    outlives even that is reported, since it may still apply stale rules."""
+    mitmdump is gone (#656).
+
+    The lock-free `_stop`, not `stop`: a session proxy shares the main
+    proxy's rules lock, which `broadcast`'s callers already hold, so `stop`
+    waited on itself and every later rule change hung behind it (review).
+    The process is taken before the stop, which clears it -- read after, the
+    check below never ran (review) -- and one that outlives the stop's own
+    terminate-then-kill is killed again, waited on, and reported if it lives."""
+    process = adapter._process
     try:
-        await adapter.stop()
+        await adapter._stop(keep_rules=False)
     except Exception:
         logger.exception("Stopping a session proxy that stopped taking commands failed")
-    process = adapter._process
     if process is not None and process.returncode is None:
         _signal(process, "kill")
         try:
@@ -720,6 +726,11 @@ class ProxyAdapter(BaseSourceAdapter):
             self._intercept_rules = [r for r in self._intercept_rules
                                      if r["rule_id"] != rule_id]
             self._sync_intercept_pattern()
+            # As clear_intercept does: what it held anywhere is let go.
+            for adapter in self._all():
+                for flow_id in [f for f, info in adapter._held_flows.items()
+                                if info.get("rule_id") == rule_id]:
+                    adapter._held_flows.pop(flow_id, None)
         try:
             await self.broadcast({"action": f"clear_{kind}", "rule_id": rule_id})
         except Exception:
@@ -1052,14 +1063,28 @@ class ProxyAdapter(BaseSourceAdapter):
         # behind rules set after it -- so updating a scoped rule's body could
         # leave it shadowed by a catch-all.
         self._mock_rules = [updated if r["rule_id"] == rule_id else r for r in self._mock_rules]
-        await self.broadcast({
-            "action": "set_mock",
-            "rule_id": rule_id,
-            "pattern": new_pattern,
-            "response": new_response,
-            "simulator_udid": new_scope,
-            "client_ip": new_client_ip,
-        })
+        try:
+            await self.broadcast({
+                "action": "set_mock",
+                "rule_id": rule_id,
+                "pattern": new_pattern,
+                "response": new_response,
+                "simulator_udid": new_scope,
+                "client_ip": new_client_ip,
+            })
+        except Exception:
+            # Raised as a failure, so not applied: the record goes back, and so
+            # does every proxy that took it. Left, the restart from the record
+            # applied an update the caller was told had failed (review).
+            self._mock_rules = [rule if r["rule_id"] == rule_id else r for r in self._mock_rules]
+            try:
+                await self.broadcast({"action": "set_mock", **{
+                    k: rule.get(k) for k in
+                    ("rule_id", "pattern", "response", "simulator_udid", "client_ip")}})
+            except Exception:
+                logger.warning("Could not put mock %s back after a failed update; the proxy "
+                               "restarts from the record", rule_id, exc_info=True)
+            raise
         return updated
 
     @_rules_locked

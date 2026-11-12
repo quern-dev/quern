@@ -4,7 +4,7 @@ import { LOCAL, currentRemote, discoverServer, selectServer, selectedServer } fr
 import { heldSessionId, heldSessionOpening, switchHeldSession } from "../held-session.js";
 import { SESSION_ID, ServerTimeout, ServerUnreachable, apiRequest, serverFetch } from "../http.js";
 import { loadRemote } from "../remote.js";
-import { cleanUpStranded, moveOut } from "../carried.js";
+import { cleanUpStranded, moveOut, readStanding } from "../carried.js";
 import { osMatches, parseOs, platformOf, type Platform } from "../platform.js";
 
 /** Run after a switch is live: loads this project's knowledge base on the new
@@ -197,6 +197,13 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
     return reply(`You hold ${held.join(", ")} on ${from}. Release them first ` +
       `(release_devices), or call use_remote(name="${target}", release=true).`, true);
   }
+  // Which mocks still stand for this agent on the server being left (#656),
+  // read now: the release below and the switch's closing of the session
+  // there end that opening's mocks, and a client key stops seeing those on
+  // devices it releases (review).
+  const standing = await readStanding(
+    discoverServer(), { id: heldSessionId(), opened: heldSessionOpening() },
+    { unreachable: oldUnreachable });
   let released: string[] = [];
   let releaseNote = "";
   if (release && oldUnreachable) {
@@ -215,9 +222,6 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
   }
   const before = selectedServer();
   const old = discoverServer();         // the server being left, for its mocks
-  // Which opening of this session set the mocks there, read before the
-  // switch opens a session on the new server (#656).
-  const leaving = { id: heldSessionId(), opened: heldSessionOpening() };
   selectServer(target);
   if (!(await switchHeldSession())) {
     // Requests would go to a server where nothing can be reserved: go back,
@@ -231,7 +235,7 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
   }
   // What this agent set up follows it: its mocks leave the old server and,
   // with its session capture, are set up again at its next reservation here.
-  const carried = await moveOut(old, from, { unreachable: oldUnreachable, leaving });
+  const carried = await moveOut(old, from, { unreachable: oldUnreachable, standing });
   // Rules an earlier switch left here, when it could not reach this server.
   const strandedHere = await cleanUpStranded(target);
   let knowledge: unknown;
@@ -244,7 +248,7 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
   const waiting = carried.mocks + carried.session_capture + (carried.device_proxy ? 1 : 0);
   return reply({
     current: target, server_url: url, version, ...(released.length ? { released } : {}),
-    ...(waiting || carried.still_on_old ? { carried } : {}),
+    ...(waiting || carried.still_on_old || carried.left_behind ? { carried } : {}),
     ...(strandedHere ? { left_here_earlier: strandedHere } : {}),
     ...(knowledge !== undefined ? { knowledge } : {}),
     proxy: there,
@@ -255,6 +259,9 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
         : "") +
       (carried.device_proxy ? " The Android devices of your next reservation here are routed " +
         "through this server's proxy, as you routed devices on the last one." : "") +
+      (carried.left_behind ? ` ${carried.left_behind.length} of your mock(s) were not ` +
+        `carried: carried.left_behind says which and why. Set them again here if you ` +
+        "still want them." : "") +
       (carried.still_on_old ? ` Could not remove ${carried.still_on_old.join(", ")} from ` +
         `${from}: they still answer traffic there. Switching back there tries again to remove ` +
         "them (see left_here_earlier then)." : "") +

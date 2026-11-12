@@ -291,46 +291,70 @@ export function pending(): { mocks: number; session_capture: number; device_prox
 
 /** At a switch: take this agent's mocks off `old` and keep them, with its
  * session capture, for the next reservation on the new server. Never throws. */
+/** The server being left's own record of the mocks, read before the switch
+ * releases anything or closes the session there (#656): after, the server has
+ * ended that opening's mocks -- every one of them would read as ended -- and
+ * a client key no longer sees the rules on devices it released (review). */
+export interface Standing {
+  leaving: LeavingSession;
+  /** Its mock list by rule id; null when it could not be read. */
+  listed: Map<string, ServerMock> | null;
+  /** The read timed out or the server could not be reached. */
+  unreachable: boolean;
+}
+
+export async function readStanding(old: Server, leaving: LeavingSession,
+                                   { unreachable = false } = {}): Promise<Standing> {
+  if (unreachable || !mocks.some((m) => m.rules.size)) {
+    return { leaving, listed: unreachable ? null : new Map(), unreachable };
+  }
+  try {
+    const rules = ((await apiRequest("GET", "/api/v1/proxy/mocks", undefined, undefined,
+      5000, old)) as { rules?: ServerMock[] } | null)?.rules ?? [];
+    return { leaving, listed: new Map(rules.map((r) => [r.rule_id, r])), unreachable: false };
+  } catch (e) {
+    return { leaving, listed: null,
+             unreachable: e instanceof ServerTimeout || e instanceof ServerUnreachable };
+  }
+}
+
 export async function moveOut(
   old: Server, oldName: string,
-  { unreachable = false, leaving }: { unreachable?: boolean; leaving?: LeavingSession } = {},
+  { unreachable = false, standing }: { unreachable?: boolean; standing?: Standing } = {},
 ): Promise<{
   mocks: number; session_capture: number; device_proxy?: boolean; still_on_old?: string[];
-  left_behind?: { pattern: string; simulator_udid: string | null; why: string }[];
+  left_behind?: { pattern: string; simulator_udid: (string | null)[]; why: string }[];
 }> {
   const stillThere: string[] = [];
   // A server that timed out or cannot be reached is not asked again for each
   // rule: that held every switch and reservation behind it (CodeRabbit). One
   // the switch already found unreachable is not asked at all.
-  let gone = unreachable;
+  let gone = unreachable || (standing?.unreachable ?? false);
   const left: Stranded[] = [];
-  // Which mocks still stand for this agent there (#656): one its lost
-  // session's end took is not set up again on the next server. Read once,
-  // from the server's own record; a mock that cannot be confirmed -- the list
-  // unreadable -- stays behind and is said, rather than carried on a guess.
-  const leftBehind: { pattern: string; simulator_udid: string | null; why: string }[] = [];
-  let listed: Map<string, ServerMock> | null = null;
-  if (leaving && mocks.some((m) => m.rules.size) && !gone) {
-    try {
-      const rules = ((await apiRequest("GET", "/api/v1/proxy/mocks", undefined, undefined,
-        5000, old)) as { rules?: ServerMock[] } | null)?.rules ?? [];
-      listed = new Map(rules.map((r) => [r.rule_id, r]));
-    } catch (e) {
-      if (e instanceof ServerTimeout || e instanceof ServerUnreachable) gone = true;
-    }
-  }
+  // Which mocks still stand for this agent there (#656), from `standing`: one
+  // its lost session's end took is not set up again on the next server. One
+  // that cannot be confirmed -- the list unreadable -- is not carried on a
+  // guess either, and is left where it is: not removed, and not named for
+  // removal on return (review: removed and dropped, it was lost everywhere).
+  const leftBehind: { pattern: string; simulator_udid: (string | null)[]; why: string }[] = [];
   const keep: Mock[] = [];
   for (const mock of mocks) {
     const scopes = [...mock.rules.keys()];
-    const verified = !leaving || !mock.rules.size ||
-      (listed !== null && [...mock.rules.values()].some((id) => stillOurs(listed?.get(id), leaving)));
+    const listed = standing?.listed ?? null;
+    const verified = !standing || !mock.rules.size ||
+      (listed !== null && [...mock.rules.values()].some(
+        (id) => stillOurs(listed.get(id), standing.leaving)));
     if (verified) keep.push(mock);
-    else leftBehind.push({
-      pattern: mock.pattern, simulator_udid: scopes[0] ?? null,
-      why: listed === null
-        ? `could not confirm it on ${oldName}, whose mock list could not be read`
-        : `it ended with an earlier opening of your session on ${oldName}`,
-    });
+    else if (listed === null) {
+      leftBehind.push({ pattern: mock.pattern, simulator_udid: scopes,
+        why: (standing?.unreachable
+          ? `could not reach ${oldName}` : `could not read ${oldName}'s mock list`) +
+          ", so it is not carried; it is still there unless that server ended it" });
+      continue;
+    } else {
+      leftBehind.push({ pattern: mock.pattern, simulator_udid: scopes,
+        why: `it ended with an earlier opening of your session on ${oldName}` });
+    }
     for (const [scope, ruleId] of mock.rules) {
       if (gone) {
         stillThere.push(ruleId);

@@ -88,33 +88,67 @@ class TestTheMainProxy:
         assert sent == [f"set_{kind}", f"clear_{kind}"]
 
 
+class _Process:
+    """A mitmdump stand-in: `ignores` lists the signals it shrugs off."""
+
+    def __init__(self, ignores=()):
+        self.pid, self.returncode, self.ignores, self.signals = 4242, None, set(ignores), []
+        self.stdin = None
+
+    def _signal(self, name):
+        self.signals.append(name)
+        if name not in self.ignores:
+            self.returncode = -9 if name == "kill" else -15
+
+    def terminate(self):
+        self._signal("terminate")
+
+    def kill(self):
+        self._signal("kill")
+
+    async def wait(self):
+        return self.returncode
+
+
+def _wired_as_session_capture_wires_it(follower_process):
+    """A follower sharing the main proxy's rules lock, as SessionProxies._start
+    makes one -- what the first version's own-lock test double hid (review)."""
+    leader, follower = _proxies(follower_fails=True)
+    follower.stop = ProxyAdapter.stop.__get__(follower)          # the real one
+    follower._rules_lock = leader._rules_lock
+    follower._running = True
+    follower._process = follower_process
+    return leader, follower
+
+
 class TestASessionProxy:
+    async def test_a_rule_change_it_fails_does_not_hang(self):
+        leader, follower = _wired_as_session_capture_wires_it(_Process())
+        await asyncio.wait_for(leader.set_mock("~d x.test", {"status_code": 418}), 3)
+        assert follower._running is False
+
     async def test_one_that_cannot_take_a_command_is_stopped(self):
-        leader, follower = _proxies(follower_fails=True)
-        await leader.broadcast({"action": "clear_mock", "rule_id": "m1"})
-        follower.stop.assert_awaited_once()
+        process = _Process()
+        leader, _ = _wired_as_session_capture_wires_it(process)
+        await asyncio.wait_for(leader.broadcast({"action": "clear_mock", "rule_id": "m1"}), 3)
+        assert process.returncode is not None
 
-    @pytest.mark.parametrize("stop_raises", [False, True])
-    async def test_one_whose_process_outlives_the_stop_is_killed(self, stop_raises):
-        """The stop mocked out above says nothing about the process: here the
-        process is still running after it, and is killed (review)."""
-        leader, follower = _proxies(follower_fails=True)
-        if stop_raises:
-            follower.stop = AsyncMock(side_effect=RuntimeError("stop failed"))
+    async def test_one_whose_process_shrugs_off_the_stop_is_killed_again(self):
+        """The stop clears _process; checked after it, this never ran (review)."""
+        process = _Process(ignores={"terminate"})
+        leader, _ = _wired_as_session_capture_wires_it(process)
+        await asyncio.wait_for(leader.broadcast({"action": "clear_mock", "rule_id": "m1"}), 10)
+        assert process.returncode == -9 and "kill" in process.signals
 
-        class Process:
-            pid, returncode = 4242, None
-            signals: list[str] = []
 
-            def kill(self):
-                self.signals.append("kill")
-                self.returncode = -9
-
-            terminate = kill
-
-            async def wait(self):
-                return self.returncode
-
-        follower._process = Process()
-        await leader.broadcast({"action": "clear_mock", "rule_id": "m1"})
-        assert follower._process.returncode == -9
+class TestAFailedUpdate:
+    async def test_the_record_goes_back_to_the_rule_as_it_was(self):
+        leader, follower = _proxies()
+        await leader.set_mock("~d x.test", {"status_code": 418})
+        rule_id = leader._mock_rules[0]["rule_id"]
+        leader.send_command = AsyncMock(side_effect=BrokenPipeError("gone"))
+        with pytest.raises(BrokenPipeError):
+            await leader.update_mock(rule_id=rule_id, pattern="~d y.test")
+        assert leader._mock_rules[0]["pattern"] == "~d x.test"
+        last = follower.send_command.await_args_list[-1].args[0]
+        assert last["action"] == "set_mock" and last["pattern"] == "~d x.test"
