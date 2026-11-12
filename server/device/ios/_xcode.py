@@ -26,6 +26,11 @@ def xcode_available() -> bool:
     """Return True iff Xcode / CLT is installed and ``xcrun`` will work
     without triggering the macOS install dialog.
 
+    The same goes for ``/usr/bin/swift`` and ``swiftc``: they are stubs that
+    exist on every Mac, so ``shutil.which`` finds them whether or not a
+    toolchain is installed, and running one shows the dialog (#659). Gate on
+    this, never on ``which``.
+
     Checks ``xcode-select -p`` (safe — never triggers the dialog) and the
     ``DEVELOPER_DIR`` environment variable (which Quern's setup script
     sets as a runtime fix-up when Xcode lives somewhere ``xcode-select``
@@ -33,7 +38,7 @@ def xcode_available() -> bool:
     after mutating ``DEVELOPER_DIR`` or installing Xcode mid-session.
     """
     if os.environ.get("DEVELOPER_DIR"):
-        return True
+        return os.path.isdir(os.environ["DEVELOPER_DIR"])
     try:
         result = subprocess.run(
             ["xcode-select", "-p"],
@@ -41,4 +46,7 @@ def xcode_available() -> bool:
         )
     except Exception:
         return False
-    return result.returncode == 0 and bool(result.stdout.strip())
+    # The directory has to exist too: after Xcode is deleted, xcode-select
+    # still prints its old path, and the stubs then show the dialog (#659).
+    path = result.stdout.strip()
+    return result.returncode == 0 and bool(path) and os.path.isdir(path)

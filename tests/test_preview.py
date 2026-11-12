@@ -81,6 +81,51 @@ class TestBuildBundle:
         with pytest.raises(RuntimeError, match="did not finish within 60s"):
             preview.build_preview_bundle()
 
+    def test_without_the_developer_tools_the_swiftc_stub_is_never_run(
+            self, tmp_path, monkeypatch):
+        """/usr/bin/swiftc exists on every Mac, so `which` finds it with no
+        toolchain; running it shows macOS's install dialog (#659)."""
+        from server.device.media import preview
+
+        bundle = tmp_path / "Quern Preview.app"
+        binary = bundle / "Contents" / "MacOS" / "ios-preview"
+        source = tmp_path / "main.swift"
+        source.write_text("// source")
+        monkeypatch.setattr(preview, "_find_source", lambda: source)
+        monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [])
+        monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
+        monkeypatch.setattr(preview, "QUERN_BIN_DIR", tmp_path)
+        monkeypatch.setattr(preview, "xcode_available", lambda: False)
+        monkeypatch.setattr(preview.shutil, "which", lambda _: "/usr/bin/swiftc")
+        ran: list = []
+        monkeypatch.setattr(preview.subprocess, "run", lambda *a, **k: ran.append(a))
+
+        with pytest.raises(RuntimeError, match="xcode-select --install"):
+            preview.build_preview_bundle()
+        assert ran == [] and not bundle.exists()
+
+    def test_a_failed_compile_leaves_no_bundle(self, tmp_path, monkeypatch):
+        """The menu bar offers Screen Mirror whenever the bundle exists; one
+        with no executable cannot be opened (#659)."""
+        from server.device.media import preview
+
+        bundle = tmp_path / "Quern Preview.app"
+        binary = bundle / "Contents" / "MacOS" / "ios-preview"
+        source = tmp_path / "main.swift"
+        source.write_text("// source")
+        monkeypatch.setattr(preview, "_find_source", lambda: source)
+        monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [])
+        monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
+        monkeypatch.setattr(preview, "QUERN_BIN_DIR", tmp_path)
+        monkeypatch.setattr(preview.shutil, "which", lambda _: "/usr/bin/swiftc")
+        monkeypatch.setattr(preview.subprocess, "run",
+                            lambda cmd, **k: subprocess.CompletedProcess(cmd, 1, "", "boom"))
+
+        with pytest.raises(RuntimeError, match="boom"):
+            preview.build_preview_bundle()
+        assert not bundle.exists()
+        assert not list(tmp_path.glob(".ios-preview*"))     # nothing staged left behind
+
     def test_the_compile_is_actually_given_a_timeout(self, tmp_path, monkeypatch):
         """A timeout that is never passed to subprocess.run protects nothing."""
         from server.device.media import preview
@@ -93,8 +138,9 @@ class TestBuildBundle:
 
         def fake_run(cmd, **kwargs):
             captured.update(kwargs)
-            binary.parent.mkdir(parents=True, exist_ok=True)
-            binary.write_text("x")
+            out = Path(cmd[cmd.index("-o") + 1])        # where swiftc writes (#659)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("x")
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         monkeypatch.setattr(preview, "_find_source", lambda: source)
@@ -698,7 +744,7 @@ class TestSharedSourceFreshness:
 
         def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
             compiled.append(cmd)
-            binary.write_text("recompiled")
+            Path(cmd[cmd.index("-o") + 1]).write_text("recompiled")   # where swiftc writes
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         monkeypatch.setattr(preview, "_find_source", lambda: source)

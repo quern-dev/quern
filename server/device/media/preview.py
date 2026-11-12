@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -242,21 +243,28 @@ def build_preview_bundle() -> Path:
         write_app_bundle(bundle)
         return binary
 
-    swiftc = shutil.which("swiftc")
+    # Asked before `which`: /usr/bin/swiftc is a stub on every Mac, and running
+    # it without the developer tools shows macOS's install dialog (#659).
+    swiftc = shutil.which("swiftc") if xcode_available() else None
     if swiftc is None:
         raise RuntimeError(
             "swiftc not found. Install Xcode or Xcode Command Line Tools: "
             "xcode-select --install"
         )
 
-    (bundle / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
+    # Compiled beside the bundle, not in it: the bundle is created only once
+    # there is a binary to put in it. Made first, a failed compile left a
+    # bundle with no executable, which the menu bar offered as Screen Mirror
+    # and macOS refused to open as corrupt (#659).
+    QUERN_BIN_DIR.mkdir(parents=True, exist_ok=True)
+    staged = QUERN_BIN_DIR / f".{BINARY_NAME}.building"
     logger.info("Compiling ios-preview: %s -> %s", source, binary)
 
     try:
         proc = subprocess.run(  # noqa: S603
             [
                 swiftc,
-                "-o", str(binary),
+                "-o", str(staged),
                 *[str(p) for p in sources],
                 "-framework", "AVFoundation",
                 "-framework", "CoreMediaIO",
@@ -271,15 +279,19 @@ def build_preview_bundle() -> Path:
             timeout=60,
         )
     except subprocess.TimeoutExpired as e:
+        staged.unlink(missing_ok=True)
         raise RuntimeError(
             "swiftc did not finish within 60s while building the screen-mirror "
             "app. Try `xcode-select -p` to check the active toolchain."
         ) from e
-    if proc.returncode != 0:
-        err = proc.stderr.strip() or proc.stdout.strip()
+    if proc.returncode != 0 or not staged.exists():
+        staged.unlink(missing_ok=True)
+        err = proc.stderr.strip() or proc.stdout.strip() or "swiftc produced no binary"
         raise RuntimeError(f"Failed to compile ios-preview:\n{err}")
 
     logger.info("ios-preview compiled successfully")
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(staged, binary)
     write_app_bundle(bundle)
     return binary
 

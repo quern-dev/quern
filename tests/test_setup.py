@@ -1852,6 +1852,31 @@ class TestBuildPreviewApp:
         build.assert_called_once()
         assert result.status == CheckStatus.OK
 
+    def test_the_swiftc_stub_alone_does_not_count_as_a_toolchain(self):
+        """`which` finds /usr/bin/swiftc on every Mac; building then ran the
+        stub, and macOS showed its install dialog unasked (#659)."""
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
+             patch("server.lifecycle.setup.xcode_available", return_value=False), \
+             patch("server.lifecycle.setup._prompt_yn", return_value=False), \
+             patch("server.device.media.preview.build_preview_bundle") as build:
+            result = build_preview_app()
+
+        build.assert_not_called()
+        assert result.status == CheckStatus.SKIPPED
+
+    def test_the_swift_stub_alone_does_not_build_the_preview_engine(self):
+        from server.lifecycle.setup import build_simulator_preview_engine
+
+        with patch("server.lifecycle.setup._which", return_value="/usr/bin/swift"), \
+             patch("server.lifecycle.setup.xcode_available", return_value=False), \
+             patch("server.device.media.media_engine.build_media_engine_sync") as build:
+            result = build_simulator_preview_engine()
+
+        build.assert_not_called()
+        assert result.status == CheckStatus.SKIPPED
+
     def test_missing_command_line_tools_is_skipped_not_failed(self):
         """A machine without swiftc has a missing convenience, not a broken
         install -- the same call scrcpy gets for Android preview."""

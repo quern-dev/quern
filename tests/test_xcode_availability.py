@@ -6,6 +6,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+#: The developer directories these tests treat as present. The check also
+#: asks that the directory exist (#659), and the real filesystem differs
+#: between a Mac with Xcode and the Linux CI runner.
+EXISTING = {"/Applications/Xcode.app/Contents/Developer", "/dir"}
+
 
 @pytest.fixture(autouse=True)
 def _clear_xcode_cache(monkeypatch):
@@ -15,6 +20,7 @@ def _clear_xcode_cache(monkeypatch):
     _xcode.xcode_available.cache_clear()
     # Clear DEVELOPER_DIR so its presence doesn't shortcut the check.
     monkeypatch.delenv("DEVELOPER_DIR", raising=False)
+    monkeypatch.setattr(_xcode.os.path, "isdir", lambda p: p in EXISTING)
     yield
     _xcode.xcode_available.cache_clear()
 
@@ -97,3 +103,18 @@ def test_cache_clear_forces_reprobe():
         xcode_available.cache_clear()
         xcode_available()
     assert run_mock.call_count == 2
+
+
+def test_a_developer_dir_that_no_longer_exists_is_not_available():
+    """After Xcode is deleted, xcode-select still prints its old path; the
+    swift stubs then show macOS's install dialog (#659)."""
+    from server.device.ios._xcode import xcode_available
+    with patch("subprocess.run",
+               return_value=_xcode_select_result(0, "/Applications/Gone.app/Contents/Developer\n")):
+        assert xcode_available() is False
+
+
+def test_a_developer_dir_env_var_naming_nothing_is_not_available(monkeypatch):
+    from server.device.ios._xcode import xcode_available
+    monkeypatch.setenv("DEVELOPER_DIR", "/Applications/Gone.app/Contents/Developer")
+    assert xcode_available() is False

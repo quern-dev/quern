@@ -625,12 +625,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// The screen-mirror bundle quern installs alongside its other binaries,
-    /// or nil if this install doesn't have one.
+    /// or nil if this install doesn't have one that can run.
+    ///
+    /// Its executable, not just the folder: a build that failed -- no Swift
+    /// toolchain on a non-developer's Mac -- could leave the folder with
+    /// nothing in it, and the menu offered an item macOS then refused to open
+    /// as corrupt (#659).
     static var screenMirrorApp: URL? {
         let url = StateReader.quernDir
             .appendingPathComponent("bin", isDirectory: true)
             .appendingPathComponent("Quern Preview.app", isDirectory: true)
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        let executable = url.appendingPathComponent("Contents/MacOS/ios-preview")
+        return FileManager.default.isExecutableFile(atPath: executable.path) ? url : nil
     }
 
     /// Launch the mirror straight from its bundle rather than through the CLI.

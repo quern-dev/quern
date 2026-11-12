@@ -256,6 +256,7 @@ def _default_xcode_available(monkeypatch):
         "server.device.ios.devicectl.xcode_available",
         "server.lifecycle.setup.xcode_available",
         "server.device.media.preview.xcode_available",
+        "server.device.media.media_engine.xcode_available",
     ):
         monkeypatch.setattr(path, _make_stub())
 
