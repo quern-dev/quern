@@ -7,6 +7,7 @@ import logging
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -808,7 +809,13 @@ class _RecordFailed(Exception):
     """The device was read, but what it held could not be written down."""
 
 
-_RECORDED = object()
+class _Recorded:
+    """The default of `clear_device_proxy`'s `previous`: put back what the
+    record says, as opposed to a value the caller read itself (None among
+    them, meaning "delete")."""
+
+
+_RECORDED = _Recorded()
 
 
 #: One clear or reset at a time per device (#654): a clear that read the old
@@ -817,7 +824,8 @@ _RECORDED = object()
 _proxy_locks: dict[str, asyncio.Lock] = {}
 
 
-async def clear_device_proxy(controller, udid: str, previous=_RECORDED, *,
+async def clear_device_proxy(controller: Any, udid: str,
+                             previous: str | None | _Recorded = _RECORDED, *,
                              discard: bool = False) -> dict:
     """Undo quern's proxy on an Android device; see `_clear_device_proxy`.
     Serialised per device: the read of the record, the write and the
@@ -827,7 +835,8 @@ async def clear_device_proxy(controller, udid: str, previous=_RECORDED, *,
         return await _clear_device_proxy(controller, udid, previous, discard=discard)
 
 
-async def _clear_device_proxy(controller, udid: str, previous=_RECORDED, *,
+async def _clear_device_proxy(controller: Any, udid: str,
+                              previous: str | None | _Recorded = _RECORDED, *,
                               discard: bool = False) -> dict:
     """Undo quern's proxy on an Android device: put back the setting it had
     before quern's apply, or delete it when it had none (#645); then forget the
@@ -864,7 +873,7 @@ async def _clear_device_proxy(controller, udid: str, previous=_RECORDED, *,
             # since its proxy may still be on the device if the write never
             # landed.
             blank_proxy_before_quern(canonical_device_id(udid))
-    elif previous is _RECORDED:
+    elif isinstance(previous, _Recorded):
         record = proxy_record(canonical_device_id(udid)) or {}
         previous = record.get("value")
         if record.get("restored"):

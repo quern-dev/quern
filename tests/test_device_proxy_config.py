@@ -1838,15 +1838,18 @@ class TestAResetToNoProxy:
 
         async def slow_put(udid, value):
             started.set()
-            await release.wait()
+            await asyncio.wait_for(release.wait(), 5)     # fails, never hangs
             await real_put(udid, value)
 
         ctrl.adb.put_http_proxy = AsyncMock(side_effect=slow_put)
         restoring = asyncio.ensure_future(self._call(ctrl, clear=True))
-        await asyncio.wait_for(started.wait(), 2)
-        resetting = asyncio.ensure_future(self._call(ctrl, clear=True, restore=False))
-        await asyncio.sleep(0.05)
-        assert not resetting.done()                  # waits for the clear in flight
-        release.set()
+        resetting = None
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            resetting = asyncio.ensure_future(self._call(ctrl, clear=True, restore=False))
+            await asyncio.sleep(0.05)
+            assert not resetting.done()              # waits for the clear in flight
+        finally:
+            release.set()                            # nothing left waiting, pass or fail
         await asyncio.wait_for(asyncio.gather(restoring, resetting), 5)
         assert dev.value is None                     # the reset is what lasts
