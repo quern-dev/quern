@@ -1489,6 +1489,9 @@ class InterceptRuleInfo(BaseModel):
     session: str | None = None
     """The held session that set it, whose end ends it; None for one set with
     no session (curl, a script), which stays until cleared."""
+    session_opened: str | None = None
+    """When that session was opened (ISO 8601): one opening of a session name
+    from the next, since a name can be opened again after it ended (#656)."""
 
 
 class ProxyStatusResponse(BaseModel):
@@ -1918,6 +1921,9 @@ class MockRuleInfo(BaseModel):
     session: str | None = None
     """The held session that set it, whose end ends it; None for one set with
     no session (curl, a script), which stays until cleared."""
+    session_opened: str | None = None
+    """When that session was opened (ISO 8601): one opening of a session name
+    from the next, since a name can be opened again after it ended (#656)."""
 
 
 class MockListResponse(BaseModel):

@@ -291,16 +291,78 @@ export function pending(): { mocks: number; session_capture: number; device_prox
 
 /** At a switch: take this agent's mocks off `old` and keep them, with its
  * session capture, for the next reservation on the new server. Never throws. */
-export async function moveOut(old: Server, oldName: string, { unreachable = false } = {}): Promise<{
+/** The server being left's own record of the mocks, read before the switch
+ * releases anything or closes the session there (#656): after, the server has
+ * ended that opening's mocks -- every one of them would read as ended -- and
+ * a client key no longer sees the rules on devices it released (review). */
+export interface Standing {
+  leaving: LeavingSession;
+  /** Its mock list by rule id; null when it could not be read. */
+  listed: Map<string, ServerMock> | null;
+  /** The read timed out or the server could not be reached. */
+  unreachable: boolean;
+}
+
+export async function readStanding(old: Server, leaving: LeavingSession,
+                                   { unreachable = false } = {}): Promise<Standing> {
+  if (unreachable || !mocks.some((m) => m.rules.size)) {
+    return { leaving, listed: unreachable ? null : new Map(), unreachable };
+  }
+  try {
+    const rules = ((await apiRequest("GET", "/api/v1/proxy/mocks", undefined, undefined,
+      5000, old)) as { rules?: ServerMock[] } | null)?.rules ?? [];
+    return { leaving, listed: new Map(rules.map((r) => [r.rule_id, r])), unreachable: false };
+  } catch (e) {
+    return { leaving, listed: null,
+             unreachable: e instanceof ServerTimeout || e instanceof ServerUnreachable };
+  }
+}
+
+export async function moveOut(
+  old: Server, oldName: string,
+  { unreachable = false, standing }: { unreachable?: boolean; standing?: Standing } = {},
+): Promise<{
   mocks: number; session_capture: number; device_proxy?: boolean; still_on_old?: string[];
+  left_behind?: { pattern: string; simulator_udid: (string | null)[]; why: string }[];
 }> {
   const stillThere: string[] = [];
   // A server that timed out or cannot be reached is not asked again for each
   // rule: that held every switch and reservation behind it (CodeRabbit). One
   // the switch already found unreachable is not asked at all.
-  let gone = unreachable;
+  let gone = unreachable || (standing?.unreachable ?? false);
   const left: Stranded[] = [];
+  // Which mocks still stand for this agent there (#656), from `standing`: one
+  // its lost session's end took is not set up again on the next server. One
+  // that cannot be confirmed -- the list unreadable -- is not carried on a
+  // guess either, and is left where it is: not removed, and not named for
+  // removal on return (review: removed and dropped, it was lost everywhere).
+  const leftBehind: { pattern: string; simulator_udid: (string | null)[]; why: string }[] = [];
+  const keep: Mock[] = [];
   for (const mock of mocks) {
+    const scopes = [...mock.rules.keys()];
+    const listed = standing?.listed ?? null;
+    const verified = !standing || !mock.rules.size ||
+      (listed !== null && [...mock.rules.values()].some(
+        (id) => stillOurs(listed.get(id), standing.leaving)));
+    if (verified) keep.push(mock);
+    else if (listed === null) {
+      leftBehind.push({ pattern: mock.pattern, simulator_udid: scopes,
+        why: (standing?.unreachable
+          ? `could not reach ${oldName}` : `could not read ${oldName}'s mock list`) +
+          ", so it is not carried; it is still there unless that server ended it" });
+      continue;
+    } else {
+      // Left to that server too: its clean-up of the opening that set it
+      // removes it, and removing it here contradicted "left behind" (CodeRabbit).
+      // Said by what the list shows, not guessed: a rule absent from it may
+      // have been cleared during this opening (CodeRabbit).
+      const ids = [...mock.rules.values()];
+      const earlier = ids.some((id) => listed.get(id)?.session === standing!.leaving.id);
+      leftBehind.push({ pattern: mock.pattern, simulator_udid: scopes,
+        why: earlier ? `it ended with an earlier opening of your session on ${oldName}`
+          : `it is no longer on ${oldName}: removed there, or ended with your session` });
+      continue;
+    }
     for (const [scope, ruleId] of mock.rules) {
       if (gone) {
         stillThere.push(ruleId);
@@ -324,6 +386,7 @@ export async function moveOut(old: Server, oldName: string, { unreachable = fals
     mock.removed = new Set();
     mock.waiting = true;
   }
+  mocks = keep;
   for (const c of captures) {
     for (const udid of c.on) c.from.add(udid);
     c.on = new Set();
@@ -338,7 +401,8 @@ export async function moveOut(old: Server, oldName: string, { unreachable = fals
     deviceProxy = { on: new Set(), removed: new Set(), failed: new Set(), waiting: true };
   }
   if (left.length) stranded.set(oldName, [...(stranded.get(oldName) ?? []), ...left]);
-  return { ...pending(), ...(stillThere.length ? { still_on_old: stillThere } : {}) };
+  return { ...pending(), ...(stillThere.length ? { still_on_old: stillThere } : {}),
+           ...(leftBehind.length ? { left_behind: leftBehind } : {}) };
 }
 
 /** After a switch to `name`: remove the rules an earlier switch left on it.
@@ -394,6 +458,26 @@ interface ServerMock {
   rule_id: string; pattern: string; response: unknown; simulator_udid?: string | null;
   /** The session that set it (#650); absent from a server older than that. */
   session?: string | null;
+  /** When that session was opened (#656); absent from a server older than that. */
+  session_opened?: string | null;
+}
+
+/** The session a mock's rules were set from on the server being left: its
+ * id there, and when it was opened. */
+export interface LeavingSession { id: string; opened: string | null }
+
+/** Whether a rule listed on the server being left still stands for this
+ * agent (#656): set by this opening of its session, or with no session (one
+ * set while the session was gone), or on a server too old to say. A rule set
+ * by an earlier opening ended with it -- or will, once that server's
+ * clean-up runs -- and is not carried. */
+export function stillOurs(listed: ServerMock | undefined, leaving: LeavingSession): boolean {
+  if (!listed) return false;                         // gone: ended already
+  if (listed.session === undefined) return true;     // a server before #650
+  if (listed.session === null) return true;          // set with no session: stays
+  if (listed.session !== leaving.id) return false;
+  return listed.session_opened === undefined || leaving.opened === null ||
+    listed.session_opened === leaving.opened;
 }
 
 /** A response as text, keys sorted, so two that say the same compare equal. */

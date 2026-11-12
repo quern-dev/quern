@@ -25,6 +25,7 @@ const base = (name) => ({
 
 function fake(name, secure, routes, { attach = true, dropFirstAfter = 0 } = {}) {
   let sockets = 0;
+  const made = [];
   const log = [];
   const bodies = [];
   const handler = async (req, res) => {
@@ -32,8 +33,14 @@ function fake(name, secure, routes, { attach = true, dropFirstAfter = 0 } = {}) 
     for await (const chunk of req) raw += chunk;
     log.push(`${req.method} ${req.url.split("?")[0]}`);
     if (raw) bodies.push({ path: `${req.method} ${req.url.split("?")[0]}`, body: JSON.parse(raw) });
-    const r = routes[`${req.method} ${req.url.split("?")[0]}`] ?? json(200, { from: name });
+    const route = `${req.method} ${req.url.split("?")[0]}`;
+    // Unless a scenario says otherwise, a server lists the mocks it made, as
+    // a server before #650 did -- no session -- so a switch carries them.
+    const r = routes[route] ?? (route === "GET /api/v1/proxy/mocks"
+      ? json(200, { rules: made.map((id) => ({ rule_id: id })) })
+      : json(200, { from: name }));
     const [status, data, delay] = await r(raw ? JSON.parse(raw) : undefined);
+    if (route === "POST /api/v1/proxy/mocks" && status === 200 && data?.rule_id) made.push(data.rule_id);
     if (delay) await sleep(delay);
     res.writeHead(status, { "content-type": "application/json" });
     res.end(JSON.stringify(data));
@@ -180,6 +187,28 @@ const plans = {
                         },
                         "GET /api/v1/proxy/mocks": async () => [200, { rules: globalThis.made, total: globalThis.made.length }],
                         "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // After a lost session (#656): local's list labels three mocks -- one an
+  // earlier opening of the session set, one this opening set, one set with
+  // no session. Only the last two follow the agent.
+  "carry-lost-opening": [{ "POST /api/v1/sessions": json(200, { id: "agent-1", resume_token: "t",
+                                                                   opened_at: "T2", resumed: false }),
+                           "POST /api/v1/proxy/mocks": mockIds("local"),
+                           "GET /api/v1/proxy/mocks": json(200, { rules: [
+                             { rule_id: "mock_local1", session: "agent-1", session_opened: "T1" },
+                             { rule_id: "mock_local2", session: "agent-1", session_opened: "T2" },
+                             { rule_id: "mock_local3", session: null }] }) },
+                         { "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // A real server ends a session's mocks once the switch releases it (#650),
+  // so its list must be read before then (#656 review): local lists them,
+  // labelled with this session, only until the release arrives.
+  "carry-release-ends": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+                           "GET /api/v1/sessions/agent-1": json(200, { reservations: [{ udid: "SIM-L" }] }),
+                           "DELETE /api/v1/sessions/agent-1/reservations": async () => {
+                             globalThis.releasedOnLocal = true; return [200, { freed: ["SIM-L"] }]; },
+                           "GET /api/v1/proxy/mocks": async () => [200, { rules: globalThis.releasedOnLocal
+                             ? [] : [{ rule_id: "mock_local1", session: "agent-1" },
+                                     { rule_id: "mock_local2", session: "agent-1" }] }] },
+                         { "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   // local stays up but refuses to give up its rules at the first switch; on the
   // way back one is removed, one is gone already, one refuses again.
   "carry-stranded": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
@@ -437,6 +466,17 @@ if (scenario === "leave-unreachable" || scenario === "leave-erroring") {
   result.first = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;
   result.second = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;
   result.made = globalThis.made.length;
+} else if (scenario === "carry-lost-opening") {
+  await tools.set_mock({ pattern: "~u /earlier", simulator_udid: "SIM-L", status_code: 200, body: "E" });
+  await tools.set_mock({ pattern: "~u /now", simulator_udid: "SIM-L", status_code: 200, body: "N" });
+  await tools.set_mock({ pattern: "~u /gap", simulator_udid: "SIM-L", status_code: 200, body: "G" });
+  await tools.set_mock({ pattern: "~u /gone", simulator_udid: "SIM-L", status_code: 200, body: "X" });
+  result.away = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);
+} else if (scenario === "carry-release-ends") {
+  for (const p of ["/1", "/2"]) {
+    await tools.set_mock({ pattern: `~u ${p}`, simulator_udid: "SIM-L", status_code: 200, body: p });
+  }
+  result.away = JSON.parse(text(await tools.use_remote({ name: "romulus", release: true })).text);
 } else if (scenario === "carry-race") {
   await tools.set_mock({ pattern: "~u /old", simulator_udid: "SIM-L", status_code: 200, body: "O" });
   await tools.add_session_capture({ simulator_udid: "SIM-L", processes: ["Metatext"] });

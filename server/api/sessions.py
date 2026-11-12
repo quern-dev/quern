@@ -165,7 +165,7 @@ async def open_session(request: Request, body: OpenRequest | None = None) -> dic
     # and all. False is a new session -- for a client that held one before,
     # the server restarted or its grace ran out, so its devices are gone.
     return {"id": session.id, "resume_token": token, "grace_seconds": registry.grace_seconds,
-            "resumed": existed,
+            "resumed": existed, "opened_at": session.opened_at.isoformat(),
             "live_path": f"/api/v1/sessions/{session.id}/live",
             "reservations": [r.udid for r in session.reservations.values()]}
 
@@ -682,8 +682,10 @@ async def _end_session_rules(app: Any, adapter: Any, session: HeldSession,
                              actions: list[dict]) -> None:
     """Remove the mock rules and intercepts an ended session set (#650).
     Reported per rule, never raised. A failure carries the rule's `scope` but
-    no `udid`: the session holds nothing to keep back for a retry, and the
-    rule's owner record is kept."""
+    no `udid`: the session holds nothing to keep back for a retry. A rule the
+    record no longer holds is forgotten -- a proxy that missed its removal is
+    restarted from the record or stopped (#656) -- and one still recorded
+    keeps its owner, so it stays listed for someone to clear."""
     opened = getattr(session, "opened_at", None)
     mine = rule_owners.set_by(app, "mock", session.id, opened)
     for rule in [r for r in list(getattr(adapter, "_mock_rules", []) or [])
@@ -694,6 +696,9 @@ async def _end_session_rules(app: Any, adapter: Any, session: HeldSession,
             actions.append({"action": "mock_removed", "ok": True, "rule_id": rule["rule_id"],
                             "scope": rule.get("simulator_udid"), "reason": "session_ended"})
         except Exception as e:  # noqa: BLE001 -- reported, never raised
+            if not any(r.get("rule_id") == rule["rule_id"]
+                       for r in getattr(adapter, "_mock_rules", []) or []):
+                rule_owners.forget(app, "mock", rule["rule_id"])
             actions.append({"action": "mock_removed", "ok": False, "rule_id": rule["rule_id"],
                             "scope": rule.get("simulator_udid"), "error": str(e)})
     mine = rule_owners.set_by(app, "intercept", session.id, opened)
@@ -706,6 +711,8 @@ async def _end_session_rules(app: Any, adapter: Any, session: HeldSession,
                             "rule_id": rule["rule_id"], "scope": rule.get("simulator_udid"),
                             "reason": "session_ended"})
         except Exception as e:  # noqa: BLE001 -- reported, never raised
+            if not any(r.get("rule_id") == rule["rule_id"] for r in adapter.intercept_rules()):
+                rule_owners.forget(app, "intercept", rule["rule_id"])
             actions.append({"action": "intercept_removed", "ok": False,
                             "rule_id": rule["rule_id"], "scope": rule.get("simulator_udid"),
                             "error": str(e)})

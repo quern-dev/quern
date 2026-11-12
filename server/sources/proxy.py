@@ -145,6 +145,30 @@ def _signal(process: asyncio.subprocess.Process, method: str) -> None:
         getattr(process, method)()
 
 
+async def _stop_and_check(adapter: ProxyAdapter) -> None:
+    """Stop a session proxy quern can no longer command, and make sure its
+    mitmdump is gone (#656).
+
+    The lock-free `_stop`, not `stop`: a session proxy shares the main
+    proxy's rules lock, which `broadcast`'s callers already hold, so `stop`
+    waited on itself and every later rule change hung behind it (review).
+    The process is taken before the stop, which clears it -- read after, the
+    check below never ran (review) -- and one that outlives the stop's own
+    terminate-then-kill is killed again, waited on, and reported if it lives."""
+    process = adapter._process
+    try:
+        await adapter._stop(keep_rules=False)
+    except Exception:
+        logger.exception("Stopping a session proxy that stopped taking commands failed")
+    if process is not None and process.returncode is None:
+        _signal(process, "kill")
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2.0)
+        except TimeoutError:
+            logger.error("A session proxy (pid %s) that stopped taking commands could not "
+                         "be stopped and may still apply rules quern removed", process.pid)
+
+
 def _rules_locked(method):
     """Run a rule-changing method under the adapter's rules lock (#562)."""
     @functools.wraps(method)
@@ -216,6 +240,8 @@ class ProxyAdapter(BaseSourceAdapter):
         #: the main adapter; a session proxy has `leader` instead.
         self.followers: list[ProxyAdapter] = []
         self.leader: ProxyAdapter | None = None
+        #: The restart a failed command scheduled (#656), if one is running.
+        self._restart_task: asyncio.Task | None = None
         #: Requests this run has in flight, so a stop drops only its own: the
         #: store is shared with the other proxies.
         self._pending_ids: set[str] = set()
@@ -642,15 +668,74 @@ class ProxyAdapter(BaseSourceAdapter):
 
     async def broadcast(self, command: dict) -> None:
         """Send a command to this mitmdump and every session proxy following it
-        (#558). A follower that cannot take it is logged, not raised: it is going
-        away, and the next start sends it the rules from here anyway."""
-        await self.send_command(command)
+        (#558), raising if this one could not take it.
+
+        A proxy quern cannot command must not go on serving: the addon's
+        command reader can end while mitmdump keeps running, applying the last
+        rules it had -- including ones quern has since removed (#656). So:
+
+        - every follower is sent the command even when this mitmdump failed,
+          and that failure is raised after, not before;
+        - a follower that fails is stopped, and checked to have exited;
+        - this mitmdump, when it fails and is the main proxy, is restarted
+          from quern's record of the rules, which the caller has already
+          brought up to date. The restart runs as a task: callers hold the
+          rules lock, which the restart takes too.
+        """
+        failed: BaseException | None = None
+        try:
+            await self.send_command(command)
+        except Exception as e:
+            failed = e
         for follower in list(self.followers):
             try:
                 await follower.send_command(command)
             except Exception:
-                logger.exception("Could not send %s to a session proxy",
+                logger.exception("Could not send %s to a session proxy; stopping it",
                                  command.get("action"))
+                await _stop_and_check(follower)
+        if failed is not None:
+            if self.leader is None and self._running:
+                self._schedule_restart(command.get("action"))
+            raise failed
+
+    def _schedule_restart(self, action: str | None) -> None:
+        """Restart this mitmdump from the record once the current rule change
+        has finished. One at a time: a burst of failed commands restarts once."""
+        if self._restart_task is not None and not self._restart_task.done():
+            return
+        logger.warning("The proxy could not take %s; restarting it from quern's rules",
+                       action)
+
+        async def run() -> None:
+            try:
+                await self.restart()
+            except Exception:
+                logger.exception("Could not restart the proxy after a failed command")
+        self._restart_task = asyncio.get_running_loop().create_task(run())
+
+    async def _undo_failed_set(self, kind: str, rule_id: str) -> None:
+        """A rule recorded here whose broadcast failed: taken back out of the
+        record, and its removal sent to every proxy. The followers were sent
+        the rule, and the route that asked for it raises without registering
+        an owner, so left recorded it would never end (#656). The main proxy
+        restarts from the record, without it."""
+        if kind == "mock":
+            self._mock_rules = [r for r in self._mock_rules if r["rule_id"] != rule_id]
+        else:
+            self._intercept_rules = [r for r in self._intercept_rules
+                                     if r["rule_id"] != rule_id]
+            self._sync_intercept_pattern()
+            # As clear_intercept does: what it held anywhere is let go.
+            for adapter in self._all():
+                for flow_id in [f for f, info in adapter._held_flows.items()
+                                if info.get("rule_id") == rule_id]:
+                    adapter._held_flows.pop(flow_id, None)
+        try:
+            await self.broadcast({"action": f"clear_{kind}", "rule_id": rule_id})
+        except Exception:
+            logger.warning("Could not send the removal of %s %s that failed to set; "
+                           "the proxy restarts without it", kind, rule_id, exc_info=True)
 
     @property
     def trusted_simulators(self) -> list[str] | None:
@@ -838,7 +923,11 @@ class ProxyAdapter(BaseSourceAdapter):
         }
         self._intercept_rules.append(rule)
         self._sync_intercept_pattern()
-        await self.broadcast({"action": "set_intercept", **rule})
+        try:
+            await self.broadcast({"action": "set_intercept", **rule})
+        except Exception:
+            await self._undo_failed_set("intercept", rule["rule_id"])
+            raise
         return rule["rule_id"]
 
     @_rules_locked
@@ -918,14 +1007,18 @@ class ProxyAdapter(BaseSourceAdapter):
             "response": response, "simulator_udid": simulator_udid,
             "client_ip": client_ip,
         })
-        await self.broadcast({
-            "action": "set_mock",
-            "rule_id": rule_id,
-            "pattern": pattern,
-            "response": response,
-            "simulator_udid": simulator_udid,
-            "client_ip": client_ip,
-        })
+        try:
+            await self.broadcast({
+                "action": "set_mock",
+                "rule_id": rule_id,
+                "pattern": pattern,
+                "response": response,
+                "simulator_udid": simulator_udid,
+                "client_ip": client_ip,
+            })
+        except Exception:
+            await self._undo_failed_set("mock", rule_id)
+            raise
         return rule_id
 
     @_rules_locked
@@ -970,14 +1063,28 @@ class ProxyAdapter(BaseSourceAdapter):
         # behind rules set after it -- so updating a scoped rule's body could
         # leave it shadowed by a catch-all.
         self._mock_rules = [updated if r["rule_id"] == rule_id else r for r in self._mock_rules]
-        await self.broadcast({
-            "action": "set_mock",
-            "rule_id": rule_id,
-            "pattern": new_pattern,
-            "response": new_response,
-            "simulator_udid": new_scope,
-            "client_ip": new_client_ip,
-        })
+        try:
+            await self.broadcast({
+                "action": "set_mock",
+                "rule_id": rule_id,
+                "pattern": new_pattern,
+                "response": new_response,
+                "simulator_udid": new_scope,
+                "client_ip": new_client_ip,
+            })
+        except Exception:
+            # Raised as a failure, so not applied: the record goes back, and so
+            # does every proxy that took it. Left, the restart from the record
+            # applied an update the caller was told had failed (review).
+            self._mock_rules = [rule if r["rule_id"] == rule_id else r for r in self._mock_rules]
+            try:
+                await self.broadcast({"action": "set_mock", **{
+                    k: rule.get(k) for k in
+                    ("rule_id", "pattern", "response", "simulator_udid", "client_ip")}})
+            except Exception:
+                logger.warning("Could not put mock %s back after a failed update; the proxy "
+                               "restarts from the record", rule_id, exc_info=True)
+            raise
         return updated
 
     @_rules_locked

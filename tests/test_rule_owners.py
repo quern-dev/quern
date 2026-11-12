@@ -18,6 +18,9 @@ from tests.test_scopes import KEY, _h, keys, registry  # noqa: F401 -- fixtures
 
 _MOCK = {"pattern": "~d x.test", "response": {"status_code": 418}}
 SIM_C = "0F6C9B2E-5B1A-4C1D-9E7F-3A2B1C0D9E8F"   # held by nobody
+#: The labels of an owner rule set with no held session, and of one quern has no record of.
+_SESSIONLESS = {"owner": "owner", "session": None, "session_opened": None}
+_UNKNOWN = {"owner": None, "session": None, "session_opened": None}
 
 
 def _owner_session(registry, name):
@@ -59,6 +62,9 @@ class TestEachRuleSaysWhoSetIt:
         held = c.get("/api/v1/proxy/intercept/held", headers=_h(KEY)).json()["intercepts"]
         assert [(r["rule_id"], r["owner"], r["session"]) for r in held] == [
             (i, "owner", "agent-1")]
+        # Which opening of the name (#656): what the MCP checks before carrying.
+        opened = app.state.sessions.get("agent-1").opened_at.isoformat()
+        assert listed[0]["session_opened"] == opened and held[0]["session_opened"] == opened
 
     def test_a_client_keys_rule_is_labelled_with_its_key(self, world):
         c, app, adapter, alice, _ = world
@@ -71,7 +77,7 @@ class TestEachRuleSaysWhoSetIt:
         """curl or a script: no session to end with, so it stays."""
         c, app, adapter, _, _ = world
         m = _mock(c, KEY, "")
-        assert rule_owners.label(app, "mock", m) == {"owner": "owner", "session": None}
+        assert rule_owners.label(app, "mock", m) == _SESSIONLESS
 
     def test_proxy_status_labels_its_intercepts(self, world):
         from server.api.proxy import _intercept_infos
@@ -100,7 +106,7 @@ class TestAnOwnerSessionsRulesEndWithIt:
         removed = {(a["action"], a["rule_id"]) for a in actions if a.get("ok")}
         assert {("mock_removed", m1), ("mock_removed", m1s),
                 ("intercept_removed", i1)} <= removed
-        assert rule_owners.label(app, "mock", m1) == {"owner": None, "session": None}
+        assert rule_owners.label(app, "mock", m1) == _UNKNOWN
 
     async def test_a_release_that_does_not_end_the_session_keeps_them(self, world):
         """An owner agent may release its devices and go on working."""
@@ -163,7 +169,7 @@ class TestReviewFindings:
         end when alice disconnected (review)."""
         c, app, adapter, _, _ = world
         m = _mock(c, KEY, "alice:s1")
-        assert rule_owners.label(app, "mock", m) == {"owner": "owner", "session": None}
+        assert rule_owners.label(app, "mock", m) == _SESSIONLESS
 
     async def test_a_client_rule_ended_with_its_hold_is_forgotten(self, world):
         c, app, adapter, alice, _ = world
