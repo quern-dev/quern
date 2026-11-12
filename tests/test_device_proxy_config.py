@@ -20,6 +20,7 @@ See #265.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1771,10 +1772,14 @@ class TestAResetToNoProxy:
         assert out["proxy_verified"] is None and dev.value is None
         assert "PHONE1" in request.app.state.device_proxy_holds    # the release retries
         holding["now"] = False
+        clears = ctrl.adb.clear_http_proxy.await_count
         await sessions_api._end_device_proxy(
             SimpleNamespace(state=request.app.state), request.app.state.sessions,
             session, "PHONE1", [])
         assert dev.value is None
+        # It did retry, and by removing, not restoring (CodeRabbit).
+        assert ctrl.adb.clear_http_proxy.await_count == clears + 1
+        ctrl.adb.put_http_proxy.assert_not_awaited()
 
 
     async def test_a_reset_whose_write_raises_is_not_undone_by_the_release(self):
@@ -1805,3 +1810,43 @@ class TestAResetToNoProxy:
             session, "PHONE1", [])
         assert dev.value is None
         ctrl.adb.put_http_proxy.assert_not_awaited()
+
+
+    async def test_a_reset_blanks_the_record_under_every_spelling(self):
+        """The merged read takes a later spelling's record over the canonical
+        one's: blanking only the canonical key left the old value readable
+        (CodeRabbit)."""
+        from server.proxy import cert_state
+
+        with patch("server.device.ios.devicectl.canonical_device_id",
+                   side_effect=lambda u: "CANON" if u in ("RAW", "CANON") else u):
+            cert_state.CERT_STATE_FILE.write_text(json.dumps({
+                "CANON": {"proxy_before_quern": {"value": _CORP, "quern_addresses": ["q:1"]}},
+                "RAW": {"proxy_before_quern": {"value": _CORP, "quern_addresses": ["q:1"]}}}))
+            cert_state.blank_proxy_before_quern("CANON")
+            assert cert_state.proxy_before_quern("CANON") == (True, None)
+            assert cert_state.quern_addresses_applied("CANON") == ["q:1"]
+
+    async def test_a_clear_and_a_reset_of_one_device_take_turns(self):
+        """A clear that read the old proxy and paused while writing it back
+        landed after a reset had removed it (CodeRabbit)."""
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, _CORP)
+        await self._call(ctrl, apply=True)
+        started, release = asyncio.Event(), asyncio.Event()
+        real_put = ctrl.adb.put_http_proxy.side_effect
+
+        async def slow_put(udid, value):
+            started.set()
+            await release.wait()
+            await real_put(udid, value)
+
+        ctrl.adb.put_http_proxy = AsyncMock(side_effect=slow_put)
+        restoring = asyncio.ensure_future(self._call(ctrl, clear=True))
+        await asyncio.wait_for(started.wait(), 2)
+        resetting = asyncio.ensure_future(self._call(ctrl, clear=True, restore=False))
+        await asyncio.sleep(0.05)
+        assert not resetting.done()                  # waits for the clear in flight
+        release.set()
+        await asyncio.wait_for(asyncio.gather(restoring, resetting), 5)
+        assert dev.value is None                     # the reset is what lasts
