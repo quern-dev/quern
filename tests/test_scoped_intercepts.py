@@ -328,7 +328,8 @@ async def test_a_clients_intercepts_end_with_its_hold():
     holds = SimpleNamespace(holder_of=lambda udid: still_hers if udid == SIM_B else None,
                             get=lambda sid: None)
     actions = await sessions_api._end_client_work(app, holds, session)
-    assert {"udid": SIM_A, "action": "intercept_removed", "ok": True, "rule_id": mine} in actions
+    assert {"udid": SIM_A, "action": "intercept_removed", "ok": True, "rule_id": mine,
+            "reason": "hold_ended"} in actions
     # Its intercept on a device it still holds, and the owner's, stay.
     assert [r["rule_id"] for r in adapter.intercept_rules()] == [other_device, owners_own]
 

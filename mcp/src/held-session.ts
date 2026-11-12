@@ -36,6 +36,12 @@ const MAX_BACKOFF_MS = 5_000;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 
 let token: string | null = null;
+/** The session's id as the server knows it -- a client key's is qualified
+ * with its label (`alice:<id>`) -- from the answer that opened it. */
+let serverId: string | null = null;
+export function heldSessionId(): string {
+  return serverId ?? SESSION_ID;
+}
 let socket: WebSocket | null = null;
 let stopping = false;
 let backoffMs = 1000;
@@ -63,8 +69,10 @@ function notice(text: string): void {
 
 const LOSS_NOTICE =
   "Your quern session ended on the server (it was released, the server restarted, " +
-  "or its grace period ran out), so any devices you reserved are no longer yours. " +
-  "Reserve them again with reserve_devices if you need them.";
+  "or its grace period ran out), so any devices you reserved are no longer yours, " +
+  "and the mocks and intercepts you set ended with it (#650). Reserve the devices " +
+  "again with reserve_devices, and set the mocks and intercepts again, if you need them.";
+
 
 /** Run when the session had to be opened afresh after a loss: what was loaded
  * for the old one -- its knowledge base (#560) -- is gone with it. */
@@ -89,12 +97,13 @@ export async function openHeldSession(): Promise<boolean> {
   try {
     const opened = (await apiRequest("POST", "/api/v1/sessions", undefined, {
       name: SESSION_ID,
-    }, 5000)) as { resume_token?: string } | null;
+    }, 5000)) as { resume_token?: string; id?: string } | null;
     // Opened on a server this client has since left (use_remote): its token
     // must not be presented to the new one (review).
     if (gen !== generation) return false;
     if (!opened?.resume_token) return false;
     token = opened.resume_token;
+    serverId = opened.id ?? null;
     return true;
   } catch {
     return false;
@@ -182,10 +191,11 @@ async function open(): Promise<void> {
   try {
     const opened = (await apiRequest("POST", "/api/v1/sessions", undefined, {
       name: SESSION_ID,
-    })) as { resume_token?: string; resumed?: boolean } | null;
+    })) as { resume_token?: string; resumed?: boolean; id?: string } | null;
     if (gen !== generation) return;   // moved to another server meanwhile
     if (!opened?.resume_token) throw new Error("no resume token in the answer");
     token = opened.resume_token;
+    serverId = opened.id ?? null;
     // A client that has held a session before and is handed a *new* one has
     // lost what it held -- whichever way it got here: a 4404, or reopening
     // after failed handshakes while the server was down, which never saw a

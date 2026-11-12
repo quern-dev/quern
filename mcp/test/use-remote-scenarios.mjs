@@ -168,6 +168,18 @@ const plans = {
                         },
                         "GET /api/v1/proxy/mocks": async () => [200, { rules: globalThis.made, total: globalThis.made.length }],
                         "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // As carry-ambiguous, with another agent's identical mock already on the
+  // server: the retry adopts the rule its own session made (#650).
+  "carry-ambiguous-other": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
+                      { "POST /api/v1/proxy/mocks": async (b) => {
+                          const id = `mock_romulus${globalThis.made.length + 1}`;
+                          globalThis.made.push({ rule_id: id, pattern: b.pattern, simulator_udid: b.simulator_udid ?? null,
+                                                 session: "agent-1",
+                                                 response: { status_code: 200, headers: { "content-type": "application/json" }, ...b.response } });
+                          return globalThis.made.length === 2 ? [500, { detail: "timed out" }] : [200, { rule_id: id }];
+                        },
+                        "GET /api/v1/proxy/mocks": async () => [200, { rules: globalThis.made, total: globalThis.made.length }],
+                        "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   // local stays up but refuses to give up its rules at the first switch; on the
   // way back one is removed, one is gone already, one refuses again.
   "carry-stranded": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
@@ -410,6 +422,15 @@ if (scenario === "leave-unreachable" || scenario === "leave-erroring") {
   result.seconds = (Date.now() - t0) / 1000;
 } else if (scenario === "carry-ambiguous") {
   globalThis.made = [];
+  await tools.set_mock({ pattern: "~u /amb", simulator_udid: "SIM-L", status_code: 200, body: "A" });
+  await tools.use_remote({ name: "romulus" });
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
+  result.first = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;
+  result.second = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;
+  result.made = globalThis.made.length;
+} else if (scenario === "carry-ambiguous-other") {
+  globalThis.made = [{ rule_id: "mock_other", pattern: "~u /amb", simulator_udid: "SIM-R1", session: "agent-2",
+                       response: { status_code: 200, headers: { "content-type": "application/json" }, body: "A" } }];
   await tools.set_mock({ pattern: "~u /amb", simulator_udid: "SIM-L", status_code: 200, body: "A" });
   await tools.use_remote({ name: "romulus" });
   globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];

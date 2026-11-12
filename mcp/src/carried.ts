@@ -19,6 +19,7 @@
 
 import { LOCAL, currentRemote, discoverServer } from "./config.js";
 import { ServerTimeout, ServerUnreachable, apiRequest } from "./http.js";
+import { heldSessionId } from "./held-session.js";
 import { isClientKey } from "./remote-paths.js";
 
 type Server = ReturnType<typeof discoverServer>;
@@ -382,7 +383,18 @@ async function removeStranded(entry: Stranded): Promise<"gone" | "failed" | "unr
 
 interface Reserved { udid?: string; device_type?: string }
 
-interface ServerMock { rule_id: string; pattern: string; response: unknown; simulator_udid?: string | null }
+/** Whether a server's session id is this client's, compared in full: a
+ * client key's ids are qualified with its label (`alice:<id>`), so a suffix
+ * match took another key's session of the same name (CodeRabbit on #655). */
+function mySession(session: string | null): boolean {
+  return session === heldSessionId();
+}
+
+interface ServerMock {
+  rule_id: string; pattern: string; response: unknown; simulator_udid?: string | null;
+  /** The session that set it (#650); absent from a server older than that. */
+  session?: string | null;
+}
 
 /** A response as text, keys sorted, so two that say the same compare equal. */
 function canonical(value: unknown): string {
@@ -428,8 +440,11 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
     if (!onServer) return undefined;
     const taken = new Set(mocks.flatMap((m) => [...m.rules.values()]));
     const want = canonical({ ...RESPONSE_DEFAULTS, ...mock.response });
+    // Only a rule this session set (#650): another agent's identical mock
+    // ends with that agent's session, not this one's.
     return onServer.find((r) => !taken.has(r.rule_id) && r.pattern === mock.pattern &&
-      (r.simulator_udid ?? null) === scope && canonical(r.response) === want)?.rule_id;
+      (r.simulator_udid ?? null) === scope && canonical(r.response) === want &&
+      (r.session === undefined || mySession(r.session)))?.rule_id;
   };
   // Scoped mocks first. For a key that may not mock every device, an
   // unscoped mock becomes one scoped rule per device, and the proxy answers

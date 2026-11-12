@@ -248,6 +248,12 @@ test("a retry adopts the rule a failed attempt made anyway, rather than making a
   assert.equal(r.second.still_waiting, undefined);
 });
 
+test("a retry adopts its own session's rule, not another agent's identical one (#650)", async () => {
+  const r = await run("carry-ambiguous-other");
+  assert.deepEqual(r.second.mocks_recreated, [{ pattern: "~u /amb", rule_id: "mock_romulus2", simulator_udid: "SIM-R1" }]);
+  assert.equal(r.made, 2, "the other agent's rule and this one's: nothing made twice");
+});
+
 test("rules a switch could not remove are removed when the agent comes back", async () => {
   const r = await run("carry-stranded");
   assert.deepEqual(r.away.carried.still_on_old, ["mock_local1", "mock_local2", "mock_local3"]);

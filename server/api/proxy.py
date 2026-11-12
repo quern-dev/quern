@@ -260,7 +260,7 @@ async def _get_proxy_status(
             flows_captured=flow_store.size if flow_store else 0,
             flow_store=flow_store.stats() if flow_store else None,
             active_intercept=adapter._intercept_pattern,
-            intercepts=_intercept_infos(adapter),
+            intercepts=_intercept_infos(request.app, adapter),
             held_flows_count=adapter.held_count(),
             tls_rejections=adapter.tls_rejections(),
             simulator_tls=sim_tls_report,
@@ -285,7 +285,7 @@ async def _get_proxy_status(
             flows_captured=flow_store.size if flow_store else 0,
             flow_store=flow_store.stats() if flow_store else None,
             active_intercept=adapter._intercept_pattern,
-            intercepts=_intercept_infos(adapter),
+            intercepts=_intercept_infos(request.app, adapter),
             held_flows_count=adapter.held_count(),
             tls_rejections=adapter.tls_rejections(),
             simulator_tls=sim_tls_report,
@@ -385,13 +385,16 @@ async def proxy_status(
     return status
 
 
-def _intercept_infos(adapter) -> list:
-    """The intercepts set, for proxy_status (#646)."""
+def _intercept_infos(app, adapter) -> list:
+    """The intercepts set, for proxy_status (#646), with who set them (#650)."""
+    from server import rule_owners
     from server.models import InterceptRuleInfo
 
     rules = adapter.intercept_rules() if hasattr(adapter, "intercept_rules") else []
     return [InterceptRuleInfo(rule_id=r["rule_id"], pattern=r["pattern"],
-                              simulator_udid=r.get("simulator_udid")) for r in rules]
+                              simulator_udid=r.get("simulator_udid"),
+                              **rule_owners.label(app, "intercept", r["rule_id"]))
+            for r in rules]
 
 
 async def _blind_status(request: Request, status: ProxyStatusResponse,

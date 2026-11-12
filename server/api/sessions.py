@@ -26,7 +26,7 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from server import principal, visibility
+from server import principal, rule_owners, visibility
 from server.api.actions import logged_action
 from server.device import platform
 from server.device.pool import DevicePool
@@ -538,6 +538,11 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
             actions.append({"action": "knowledge_dropped", "ok": True, "apps": dropped})
     owners = getattr(app.state, "mock_owners", {}) or {}
     adapter = getattr(app.state, "proxy_adapter", None)
+    # A rule removed below because its hold ended was also set by this
+    # opening of a session that has ended: said as such (CodeRabbit on #655).
+    opened = getattr(session, "opened_at", None)
+    ended_mocks = rule_owners.set_by(app, "mock", session.id, opened) if ended else set()
+    ended_icpts = rule_owners.set_by(app, "intercept", session.id, opened) if ended else set()
     manager = getattr(app.state, "recordings", None)
     for udid in session.reservations:
         # First: the proxy record is the session's, not the key's, so it is
@@ -565,9 +570,10 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
                 continue
             try:
                 await adapter.clear_mock(rule_id=rule["rule_id"])
-                owners.pop(rule["rule_id"], None)
+                rule_owners.forget(app, "mock", rule["rule_id"])
                 actions.append({"udid": udid, "action": "mock_removed", "ok": True,
-                                "rule_id": rule["rule_id"]})
+                                "rule_id": rule["rule_id"], "reason": "session_ended"
+                                if rule["rule_id"] in ended_mocks else "hold_ended"})
             except Exception as e:  # noqa: BLE001 -- reported, never raised
                 actions.append({"udid": udid, "action": "mock_removed", "ok": False,
                                 "rule_id": rule.get("rule_id"), "error": str(e)})
@@ -582,9 +588,10 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
                 continue
             try:
                 await adapter.clear_intercept(rule_id=rule["rule_id"])
-                icpt_owners.pop(rule["rule_id"], None)
+                rule_owners.forget(app, "intercept", rule["rule_id"])
                 actions.append({"udid": udid, "action": "intercept_removed", "ok": True,
-                                "rule_id": rule["rule_id"]})
+                                "rule_id": rule["rule_id"], "reason": "session_ended"
+                                if rule["rule_id"] in ended_icpts else "hold_ended"})
             except Exception as e:  # noqa: BLE001 -- reported, never raised
                 actions.append({"udid": udid, "action": "intercept_removed", "ok": False,
                                 "rule_id": rule.get("rule_id"), "error": str(e)})
@@ -628,6 +635,12 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
             except Exception as e:  # noqa: BLE001 -- reported, never raised
                 actions.append({"udid": udid, "action": "session_capture_released",
                                 "ok": False, "error": str(e)})
+    # The mock rules and intercepts this opening of the session set (#650),
+    # whichever key's and whatever they are scoped to: left, one agent's mock
+    # answered the next agent's requests. Only when the session has ended --
+    # an owner agent may release its devices and go on working.
+    if ended and adapter is not None:
+        await _end_session_rules(app, adapter, session, actions)
     # Capture this session asked for on a device its key does not hold: the
     # owner may ask without holding, and a claim lasts for the key's hold, so
     # with none it lasted until someone later held and released that device --
@@ -663,6 +676,39 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
                     actions.append({"udid": claim.udid, "action": "session_capture_released",
                                     "ok": False, "error": str(e)})
     return actions
+
+
+async def _end_session_rules(app: Any, adapter: Any, session: HeldSession,
+                             actions: list[dict]) -> None:
+    """Remove the mock rules and intercepts an ended session set (#650).
+    Reported per rule, never raised. A failure carries the rule's `scope` but
+    no `udid`: the session holds nothing to keep back for a retry, and the
+    rule's owner record is kept."""
+    opened = getattr(session, "opened_at", None)
+    mine = rule_owners.set_by(app, "mock", session.id, opened)
+    for rule in [r for r in list(getattr(adapter, "_mock_rules", []) or [])
+                 if r.get("rule_id") in mine]:
+        try:
+            await adapter.clear_mock(rule_id=rule["rule_id"])
+            rule_owners.forget(app, "mock", rule["rule_id"])
+            actions.append({"action": "mock_removed", "ok": True, "rule_id": rule["rule_id"],
+                            "scope": rule.get("simulator_udid"), "reason": "session_ended"})
+        except Exception as e:  # noqa: BLE001 -- reported, never raised
+            actions.append({"action": "mock_removed", "ok": False, "rule_id": rule["rule_id"],
+                            "scope": rule.get("simulator_udid"), "error": str(e)})
+    mine = rule_owners.set_by(app, "intercept", session.id, opened)
+    rules = adapter.intercept_rules() if hasattr(adapter, "intercept_rules") else []
+    for rule in [r for r in rules if r.get("rule_id") in mine]:
+        try:
+            await adapter.clear_intercept(rule_id=rule["rule_id"])
+            rule_owners.forget(app, "intercept", rule["rule_id"])
+            actions.append({"action": "intercept_removed", "ok": True,
+                            "rule_id": rule["rule_id"], "scope": rule.get("simulator_udid"),
+                            "reason": "session_ended"})
+        except Exception as e:  # noqa: BLE001 -- reported, never raised
+            actions.append({"action": "intercept_removed", "ok": False,
+                            "rule_id": rule["rule_id"], "scope": rule.get("simulator_udid"),
+                            "error": str(e)})
 
 
 #: Attempts at clearing a released device's proxy before giving up: a device
