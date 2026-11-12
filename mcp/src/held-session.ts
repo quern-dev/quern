@@ -42,6 +42,14 @@ let serverId: string | null = null;
 export function heldSessionId(): string {
   return serverId ?? SESSION_ID;
 }
+/** When the server opened this session (ISO 8601), from the same answer: a
+ * session name can be opened again after it ended, and the rules an earlier
+ * opening set end with it (#656). Null before an answer, or from a server
+ * too old to give it. */
+let openedAt: string | null = null;
+export function heldSessionOpening(): string | null {
+  return openedAt;
+}
 let socket: WebSocket | null = null;
 let stopping = false;
 let backoffMs = 1000;
@@ -97,13 +105,14 @@ export async function openHeldSession(): Promise<boolean> {
   try {
     const opened = (await apiRequest("POST", "/api/v1/sessions", undefined, {
       name: SESSION_ID,
-    }, 5000)) as { resume_token?: string; id?: string } | null;
+    }, 5000)) as { resume_token?: string; id?: string; opened_at?: string } | null;
     // Opened on a server this client has since left (use_remote): its token
     // must not be presented to the new one (review).
     if (gen !== generation) return false;
     if (!opened?.resume_token) return false;
     token = opened.resume_token;
     serverId = opened.id ?? null;
+    openedAt = opened.opened_at ?? null;
     return true;
   } catch {
     return false;
@@ -191,11 +200,12 @@ async function open(): Promise<void> {
   try {
     const opened = (await apiRequest("POST", "/api/v1/sessions", undefined, {
       name: SESSION_ID,
-    })) as { resume_token?: string; resumed?: boolean; id?: string } | null;
+    })) as { resume_token?: string; resumed?: boolean; id?: string; opened_at?: string } | null;
     if (gen !== generation) return;   // moved to another server meanwhile
     if (!opened?.resume_token) throw new Error("no resume token in the answer");
     token = opened.resume_token;
     serverId = opened.id ?? null;
+    openedAt = opened.opened_at ?? null;
     // A client that has held a session before and is handed a *new* one has
     // lost what it held -- whichever way it got here: a 4404, or reopening
     // after failed handshakes while the server was down, which never saw a

@@ -254,6 +254,13 @@ test("a retry adopts its own session's rule, not another agent's identical one (
   assert.equal(r.made, 2, "the other agent's rule and this one's: nothing made twice");
 });
 
+test("a mock an earlier opening of the session set is not carried (#656)", async () => {
+  const r = await run("carry-lost-opening");
+  assert.equal(r.away.carried.mocks, 2, "this opening's and the sessionless one");
+  assert.deepEqual(r.away.carried.left_behind.map((m) => m.pattern), ["~u /earlier"]);
+  assert.match(r.away.carried.left_behind[0].why, /earlier opening of your session/);
+});
+
 test("rules a switch could not remove are removed when the agent comes back", async () => {
   const r = await run("carry-stranded");
   assert.deepEqual(r.away.carried.still_on_old, ["mock_local1", "mock_local2", "mock_local3"]);
@@ -290,8 +297,12 @@ test("leaving a server that does not answer asks it once, not three times", asyn
   const asked = r.logs.local.filter((l) => /^(GET|DELETE) \/api\/v1\/(sessions\/agent-1|proxy\/mocks)/.test(l));
   assert.deepEqual(asked.filter((l) => l.startsWith("DELETE")), []);
   assert.ok(r.seconds < 9, `one 5 s timeout, not three: ${r.seconds}s`);
-  // The mocks still move, and are named as left there, for clean-up on return.
-  assert.equal(r.away.carried.mocks, 2);
+  // Unconfirmed, the mocks are not carried (#656): a lost session's end may
+  // have taken them, so they are named as left behind rather than set up
+  // again on a guess -- and named as still there, for clean-up on return.
+  assert.equal(r.away.carried.mocks, 0);
+  assert.equal(r.away.carried.left_behind.length, 2);
+  assert.match(r.away.carried.left_behind[0].why, /could not confirm it on local/);
   assert.deepEqual(r.away.carried.still_on_old, ["mock_local1", "mock_local2"]);
   assert.match(r.away.note, /Could not reach local to release/);
 });

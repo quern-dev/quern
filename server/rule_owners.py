@@ -81,13 +81,17 @@ def forget_all(app: Any, kind: str) -> None:
 def label(app: Any, kind: str, rule_id: str) -> dict:
     """`owner`: the client key's label, or "owner" for the owner key, or None
     when quern does not know (a rule from before it recorded owners);
-    `session`: the held session that set it, or None."""
+    `session`: the held session that set it, or None; `session_opened`: when
+    that session was opened (ISO 8601), which tells one opening of a name
+    from the next -- what the MCP checks before carrying a mock (#656)."""
     owners, sessions = _MAPS[kind]
     key = _map(app, owners).get(rule_id)
     held = _map(app, sessions).get(rule_id)
+    opened = held[1] if held else None
     return {
         "owner": None if key is None else (principal.label_of(key) or "owner"),
         "session": held[0] if held else None,
+        "session_opened": opened.isoformat() if hasattr(opened, "isoformat") else None,
     }
 
 

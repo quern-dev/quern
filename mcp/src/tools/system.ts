@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { LOCAL, currentRemote, discoverServer, selectServer, selectedServer } from "../config.js";
-import { switchHeldSession } from "../held-session.js";
+import { heldSessionId, heldSessionOpening, switchHeldSession } from "../held-session.js";
 import { SESSION_ID, ServerTimeout, ServerUnreachable, apiRequest, serverFetch } from "../http.js";
 import { loadRemote } from "../remote.js";
 import { cleanUpStranded, moveOut } from "../carried.js";
@@ -106,7 +106,7 @@ A server that could not be asked says why (not running, timed out, certificate c
 
 One server at a time: devices you hold on the current server must be released first (release_devices), or pass release=true to release them as part of the switch -- also needed when the current server cannot say what you hold. The switch is made only once your session is live on the new server; if it cannot be, you stay where you were.
 
-What you set up follows you: the mocks you set are removed from the old server and set up again on the devices of your next reservation on the new one (after a lost session, whose mocks the server ended, this MCP does not yet know which survived, so it may set those up again on the new server: they are not listed until then, and once set up again list_mocks shows them and clear_mocks removes them) -- each on the kind of device it was scoped to -- with the session capture you asked for on its simulators, and the Android devices you routed through the proxy (record_device_proxy_config apply=true, held) are unrouted by the old server and the new reservation's Android devices routed through the new proxy (that answer's "carried" lists the new rule ids); this project's knowledge base is loaded there. Mocks the old server could not remove are listed in "carried.still_on_old"; switching back to that server tries again, and "left_here_earlier" then says which went and which are still_there. The answer's "proxy" says whether the new server's proxy runs -- mocks, capture and routed Android devices need it, and only its owner can start it. Machine-wide proxy settings (local capture, system proxy, intercept, bypass), recordings, logging and device settings stay where they were. The quern CLI in your shell is not switched; it still talks to this Mac's server.`,
+What you set up follows you: the mocks you set are removed from the old server and set up again on the devices of your next reservation on the new one (only those the old server still holds for this session: one a lost session's end took, or one quern could not confirm because the old server's mock list could not be read, is left behind and named in carried.left_behind) -- each on the kind of device it was scoped to -- with the session capture you asked for on its simulators, and the Android devices you routed through the proxy (record_device_proxy_config apply=true, held) are unrouted by the old server and the new reservation's Android devices routed through the new proxy (that answer's "carried" lists the new rule ids); this project's knowledge base is loaded there. Mocks the old server could not remove are listed in "carried.still_on_old"; switching back to that server tries again, and "left_here_earlier" then says which went and which are still_there. The answer's "proxy" says whether the new server's proxy runs -- mocks, capture and routed Android devices need it, and only its owner can start it. Machine-wide proxy settings (local capture, system proxy, intercept, bypass), recordings, logging and device settings stay where they were. The quern CLI in your shell is not switched; it still talks to this Mac's server.`,
     inputSchema: strictParams({
       name: z.string().describe(`A server's name from list_remotes, or "local" for this Mac's own`),
       release: z.boolean().optional().describe("Release the devices you hold on the current server as part of the switch (default false: refuse)"),
@@ -215,6 +215,9 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
   }
   const before = selectedServer();
   const old = discoverServer();         // the server being left, for its mocks
+  // Which opening of this session set the mocks there, read before the
+  // switch opens a session on the new server (#656).
+  const leaving = { id: heldSessionId(), opened: heldSessionOpening() };
   selectServer(target);
   if (!(await switchHeldSession())) {
     // Requests would go to a server where nothing can be reserved: go back,
@@ -228,7 +231,7 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
   }
   // What this agent set up follows it: its mocks leave the old server and,
   // with its session capture, are set up again at its next reservation here.
-  const carried = await moveOut(old, from, { unreachable: oldUnreachable });
+  const carried = await moveOut(old, from, { unreachable: oldUnreachable, leaving });
   // Rules an earlier switch left here, when it could not reach this server.
   const strandedHere = await cleanUpStranded(target);
   let knowledge: unknown;
