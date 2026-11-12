@@ -22,7 +22,7 @@ Spawns `mitmdump` as a subprocess to capture HTTP/HTTPS traffic (port 9101 by de
 
 - **Query flows** — filter by host, method, status code, path, or simulator UDID
 - **Inspect details** — full headers and bodies for any captured request
-- **Intercept** — pause matching requests, inspect, modify, release
+- **Intercept** — pause matching requests, inspect, modify, release; several at once, each optionally scoped to one device
 - **Mock** — return synthetic responses without hitting the real server; rules can be updated in place without tearing down and re-adding them
 - **Replay** — re-send a previously captured request
 - **Capture sessions** — bracket a single UI action and get back only the flows it produced, instead of filtering them out of everything else
@@ -54,7 +54,7 @@ The process name is usually the target name in Xcode. Name the process that actu
 
 Entries are mitmproxy's local-mode syntax, not only names: a name matches any part of the process's executable path, a bare number is a PID, and `!` excludes. Put exclusions *after* an include (`MyApp '!12345'`, quoted so the shell leaves the `!` alone). A list that *starts* with an exclusion captures every process on the Mac except those excluded, so it is refused unless you pass `--whole-mac`.
 
-You can also change the list at runtime with the `set_local_capture` MCP tool. That restarts the proxy, not the server: mocks, bypass patterns and the intercept are kept, but open connections reset and held flows are released. To capture one app on one simulator you hold without any restart, use `add_session_capture`.
+You can also change the list at runtime with the `set_local_capture` MCP tool. That restarts the proxy, not the server: mocks, bypass patterns and intercepts are kept, but open connections reset and held flows are released. To capture one app on one simulator you hold without any restart, use `add_session_capture`.
 
 **Proxy setup for physical devices:** Configure the device's Wi-Fi proxy in Settings, then call `record_device_proxy_config` with the SSID and device IP. Quern automatically finds the correct Mac interface IP by subnet-matching, so it works correctly even when multiple interfaces are active. Configs are stored per SSID — switching between home and work networks just works. `proxy_status` shows `wifi_proxy_stale` per device if the stored config no longer matches the current network, and `network_state` (refreshed by a ~15s background poll) reports the current SSID/IP plus a `last_changed_at` timestamp so the response surfaces *when* the network shifted, not just that it's currently mismatched. When the laptop and physical devices travel together between locations, this lets agents notice the change and prompt for proxy reconfiguration without anyone having to remember to ask.
 
