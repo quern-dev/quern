@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 
 from server.config import CONFIG_DIR
+from server.device.ios._xcode import xcode_available
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,9 @@ def build_media_engine_sync(force: bool = False) -> Path:
         if installed.stat().st_mtime >= _newest_source_mtime(package):
             return installed
 
-    swift = shutil.which("swift")
+    # Asked before `which`: /usr/bin/swift is a stub on every Mac, and running
+    # it without the developer tools shows macOS's install dialog (#659).
+    swift = shutil.which("swift") if xcode_available() else None
     if swift is None:
         raise RuntimeError(
             "swift not found. Install Xcode or the Command Line Tools: "

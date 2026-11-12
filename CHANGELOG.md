@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Screen Mirror no longer breaks on a Mac without the developer tools (#659).** `/usr/bin/swift` and `swiftc` exist on every Mac as stubs that ask to install the command line tools, so quern took them for a toolchain. Setup and the first preview ran them: on a non-developer's Mac that showed macOS's install prompt, and the build failed. The failed build still left `Quern Preview.app`'s folder in place, with no executable in it, so the menu bar offered Screen Mirror and macOS then refused to open it. Quern now checks for the developer tools with `xcode-select -p`, which never prompts, before it looks for `swift` or `swiftc`. A developer directory that no longer exists counts as none. The preview compiles to a staging file and installs the bundle only once that file is built. The menu bar offers Screen Mirror only when the bundle's executable is there.
+
 ## [0.26.0-beta.4] - 2026-11-12
 
 ### Added

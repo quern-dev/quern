@@ -199,6 +199,22 @@ class TestFailures:
             with pytest.raises(RuntimeError, match="xcode-select --install"):
                 media_engine.build_media_engine_sync()
 
+    def test_without_the_developer_tools_the_swift_stub_is_never_run(
+        self, package: Path, tmp_path: Path
+    ) -> None:
+        """/usr/bin/swift exists on every Mac; running it without the tools
+        shows macOS's install dialog (#659)."""
+        with (
+            patch.object(media_engine, "_PACKAGE_CANDIDATES", [package]),
+            patch.object(media_engine, "binary_path", return_value=tmp_path / "absent"),
+            patch.object(media_engine, "xcode_available", return_value=False),
+            patch("shutil.which", return_value="/usr/bin/swift"),
+            patch.object(media_engine.subprocess, "run") as run,
+        ):
+            with pytest.raises(RuntimeError, match="xcode-select --install"):
+                media_engine.build_media_engine_sync()
+        run.assert_not_called()
+
     def test_compile_errors_surface_the_compiler_output(
         self, package: Path, tmp_path: Path
     ) -> None:
