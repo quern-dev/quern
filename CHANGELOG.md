@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0-beta.4] - 2026-11-12
+
 ### Added
 - **`record_device_proxy_config(clear=true, restore=false)` resets an Android device to no proxy (#654).** A clear puts back the proxy quern recorded from before its apply (#645). That's right for a phone with its own corporate proxy, but wrong for a shared or remote device whose history quern can't vouch for: the record may hold a dead address, or one from another server's apply. `restore=false` removes the proxy outright, the same way every clear now does (#652), and drops the record, so the hold's release doesn't put it back. The answer's `discarded_proxy` names what wasn't restored. Without `clear` it's a 400.
 - **Mocks and intercepts end with the session that set them, and say whose they are (#650).** A client key's rules already ended with its hold on their device, but the owner key's never ended: agents sharing it left each other's mocks answering requests, and nothing said whose a rule was. Each rule now records the held session that set it, and when that session ends (its MCP exits, or its grace runs out after a dropped connection) its mocks and intercepts are removed, whichever key's and whatever they are scoped to. Each removal is reported as a release action with `reason: "session_ended"`. `release_devices` alone leaves the owner's rules in place, and a rule set with no held session (curl, a script) stays until cleared. `list_mocks`, `proxy_status`'s `intercepts` and `list_held_flows` now give each rule's `owner` (a client key's label, or "owner") and `session`. The MCP's notice after a lost session now says its mocks and intercepts ended too.
@@ -1084,7 +1086,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.3...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.4...main
+[0.26.0-beta.4]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.4
 [0.26.0-beta.3]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.3
 [0.26.0-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.2
 [0.26.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.1
