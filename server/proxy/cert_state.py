@@ -414,13 +414,21 @@ def blank_proxy_before_quern(udid: str) -> None:
     from server.device.ios.devicectl import canonical_device_id
 
     canonical = canonical_device_id(udid)
-    addresses = quern_addresses_applied(udid)
     try:
         raw = json.loads(CERT_STATE_FILE.read_text() or "{}") if CERT_STATE_FILE.exists() else {}
     except (json.JSONDecodeError, OSError):
         raw = {}
     keys = [k for k, entry in raw.items() if canonical_device_id(k) == canonical
             and isinstance(entry, dict) and isinstance(entry.get("proxy_before_quern"), dict)]
+    # Every spelling's addresses, not the merged read's one list: that took a
+    # single spelling's, and blanking wrote it over the others' (CodeRabbit).
+    addresses: list[str] = []
+    for key in keys:
+        for address in raw[key]["proxy_before_quern"].get("quern_addresses") or []:
+            if address not in addresses:
+                addresses.append(address)
+    if not keys:
+        addresses = quern_addresses_applied(udid)
     for key in keys or [canonical]:
         update_cert_state(key, {"proxy_before_quern": {
             "value": None, "quern_addresses": addresses,

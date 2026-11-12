@@ -1827,6 +1827,22 @@ class TestAResetToNoProxy:
             assert cert_state.proxy_before_quern("CANON") == (True, None)
             assert cert_state.quern_addresses_applied("CANON") == ["q:1"]
 
+    async def test_blanking_keeps_every_spellings_quern_addresses(self):
+        """Two spellings holding different addresses kept only one's, so a
+        later apply could take the other for the device's own proxy."""
+        from server.proxy import cert_state
+
+        with patch("server.device.ios.devicectl.canonical_device_id",
+                   side_effect=lambda u: "CANON" if u in ("RAW", "CANON") else u):
+            cert_state.CERT_STATE_FILE.write_text(json.dumps({
+                "CANON": {"proxy_before_quern": {"value": _CORP, "quern_addresses": ["q:1"]}},
+                "RAW": {"proxy_before_quern": {"value": _CORP, "quern_addresses": ["q:2"]}}}))
+            cert_state.blank_proxy_before_quern("CANON")
+            raw = json.loads(cert_state.CERT_STATE_FILE.read_text())
+            for key in ("CANON", "RAW"):
+                assert sorted(raw[key]["proxy_before_quern"]["quern_addresses"]) == ["q:1", "q:2"]
+                assert raw[key]["proxy_before_quern"]["value"] is None
+
     async def test_a_clear_and_a_reset_of_one_device_take_turns(self):
         """A clear that read the old proxy and paused while writing it back
         landed after a reset had removed it (CodeRabbit)."""
