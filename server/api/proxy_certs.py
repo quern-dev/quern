@@ -831,12 +831,21 @@ async def clear_device_proxy(controller, udid: str, previous=_RECORDED, *,
         forget_proxy_before_quern,
         mark_proxy_restored,
         proxy_record,
+        record_proxy_before_quern,
     )
 
     discarded = None
     if discard:
-        discarded = (proxy_record(canonical_device_id(udid)) or {}).get("value")
+        prior = proxy_record(canonical_device_id(udid))
+        discarded = (prior or {}).get("value")
         previous = None
+        if prior is not None:
+            # Before the write, not only after: a write that raises (Android
+            # not seen to empty its copy) left the record, and the hold's
+            # release then put back the proxy this reset threw away (review).
+            # The value goes; quern's addresses stay, since its proxy may
+            # still be on the device if the write never landed.
+            record_proxy_before_quern(canonical_device_id(udid), None)
     elif previous is _RECORDED:
         record = proxy_record(canonical_device_id(udid)) or {}
         previous = record.get("value")

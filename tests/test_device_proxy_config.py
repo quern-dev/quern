@@ -1775,3 +1775,33 @@ class TestAResetToNoProxy:
             SimpleNamespace(state=request.app.state), request.app.state.sessions,
             session, "PHONE1", [])
         assert dev.value is None
+
+
+    async def test_a_reset_whose_write_raises_is_not_undone_by_the_release(self):
+        """clear_http_proxy writes :0 and then raises when Android is not seen
+        to empty its copy: the 502 left the record, and the release restored
+        the proxy the reset threw away (review)."""
+        from server.api import sessions as sessions_api
+
+        ctrl = _android()
+        dev = _FakeDevice(ctrl, _CORP)
+        request = _request(ctrl)
+        session, holding, who = _held_by_a_session(request)
+
+        async def zero_then_raise(udid):
+            dev.value = None
+            raise RuntimeError("Android was not seen to empty its copy of the proxy")
+
+        with who:
+            await self._call(ctrl, request, apply=True)
+            ctrl.adb.clear_http_proxy = AsyncMock(side_effect=zero_then_raise)
+            with pytest.raises(HTTPException) as e:
+                await self._call(ctrl, request, clear=True, restore=False)
+        assert e.value.status_code == 502
+        ctrl.adb.clear_http_proxy = AsyncMock(side_effect=lambda udid: None)
+        holding["now"] = False
+        await sessions_api._end_device_proxy(
+            SimpleNamespace(state=request.app.state), request.app.state.sessions,
+            session, "PHONE1", [])
+        assert dev.value is None
+        ctrl.adb.put_http_proxy.assert_not_awaited()
