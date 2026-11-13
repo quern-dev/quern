@@ -49,7 +49,21 @@ dependencies = [
     # raises TypeError mid-request. Found by checking every release's wheel
     # (the first with all the APIs used is 9.4.4), then verified at 9.4.4 and
     # 11.49.1: the full suite, plus a live snapshot of an iPhone 11 on iOS 26.7.
-    "pymobiledevice3>=9.4.4",
+    #
+    # verified. Raised to 11.20.0 for iOS 27.2 (#665). Older releases send a
+    # fresh random UUID in every RSD handshake, and from 27.2 the device
+    # re-attaches when a peer's UUID changes, so only the first RSD session on
+    # a tunnel works: every later one is refused at the service port, while the
+    # phone still shows as connected (doronz88/pymobiledevice3#1994). In quern
+    # that is the in-process Instruments paths -- get_performance failed with
+    # ConnectionRefusedError -- while WDA, which xcodebuild reaches by its own
+    # route, and screenshots, over lockdown, kept working. Measured on an
+    # iPhone 11 on 27.2.1: 11.15.0 gets one session per tunnel, and 11.20.0
+    # and 11.55.0 open them freely, in sequence and concurrently. `quern update` installs eagerly and
+    # would bring a venv forward anyway; the floor is what reaches a venv that
+    # only ever sees the start path's constraint check, such as a git checkout
+    # updated by `git pull`. Full suite verified at 11.20.0 and 11.55.0.
+    "pymobiledevice3>=11.20.0",
     "pydantic>=2.0",                    # inherited; v1 genuinely breaks, but 2.0 exactly is untested
     "sse-starlette>=2.0",               # inherited
     "mitmproxy>=10.0",                  # inherited
