@@ -691,6 +691,18 @@ def get_auto_install_cert() -> bool:
     return read_user_config().get("auto_install_cert") is True
 
 
+def get_device_ui_reader() -> str:
+    """How quern reads a physical iPhone's screen: ``"wda"`` or ``"coredevice"``.
+
+    ``"coredevice"`` reads the accessibility tree the device pushes over its
+    tunnel (#664) instead of asking WebDriverAgent, on iOS 27 and later; taps
+    and every other action still go through WDA. It is opt-in while the
+    reader is new. Anything but that literal string reads as ``"wda"``, so a
+    typo leaves the default in place rather than enabling something unasked.
+    """
+    return "coredevice" if read_user_config().get("device_ui_reader") == "coredevice" else "wda"
+
+
 def auto_install_cert_choice() -> bool | None:
     """The same setting, but able to say "never answered".
 

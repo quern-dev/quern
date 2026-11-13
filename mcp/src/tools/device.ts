@@ -279,7 +279,7 @@ NOTE: If you want to capture network traffic from this app:
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after the app launches. Waits 0.5s for the screen to settle. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
+        .describe("Include a screen summary in the response after the app launches. Waits 0.5s for the screen to settle. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' or 'coredevice' on a physical iPhone, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
       capture_screenshots: z
         .boolean()
         .default(false)
@@ -922,7 +922,7 @@ bundle_id names the app the link should open in, and quern reports whether it di
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after the URL is handled. Waits 0.5s for the screen to settle. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
+        .describe("Include a screen summary in the response after the URL is handled. Waits 0.5s for the screen to settle. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' or 'coredevice' on a physical iPhone, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
       capture_screenshots: z
         .boolean()
         .default(false)
