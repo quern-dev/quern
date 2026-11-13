@@ -8,12 +8,12 @@ Physical iOS devices are supported for screenshots, UI automation, log capture, 
 
 **After setup**: WDA auto-starts when you first interact with the device (screenshot, UI tree, tap, etc.). No need to manually call `start_driver` — it happens transparently. The driver idles out after 15 minutes of inactivity.
 
-**Screen reads without WDA (`backend: "coredevice"`)**: on iOS 27 and later, a server whose owner has set `"device_ui_reader": "coredevice"` in `~/.quern/config.json` reads a physical iPhone's screen from the accessibility tree the device sends over its tunnel, instead of asking WDA. That covers `get_ui_tree`, `get_screen_summary` and the reads behind `tap_element`, `wait_for_element` and the like, at about 2 s a screen. Taps and every other action still go through WDA. The tree is what VoiceOver can reach, so it differs from WDA's in three ways:
+**Screen reads without WDA (`backend: "coredevice"`)**: on iOS 27 and later, a server whose owner has set `"device_ui_reader": "coredevice"` in `~/.quern/config.json` reads a physical iPhone's screen from the accessibility tree the device sends over its tunnel, instead of asking WDA. That covers whole-screen reads -- `get_ui_tree` and `get_screen_summary` -- at about 2 s a screen. Element lookups (`tap_element`, `wait_for_element`, `get_element_state`, `children_of`) and every action still go through WDA, so they behave exactly as before. The tree is what VoiceOver can reach, so it differs from WDA's in three ways:
 - only elements on screen, and nothing hidden under a toolbar;
 - a row's inner texts merged into one label ("Wi-Fi, Home" where WDA has a button and two texts);
 - the element names a simulator uses (`CheckBox` for a switch, `Heading` for a title).
 
-So match rows by `identifier` rather than an exact `label`, and scroll until an element appears in the tree rather than until its frame is on screen. A read it cannot make falls back to WDA, and `backend` on the answer says which one served it.
+So a label read off this tree may not be one WDA can find: a row's merged label is not its WDA label. Tap rows by `identifier`. A read it cannot make falls back to WDA, and `backend` on the answer says which one served it.
 
 **What works the same**: `take_screenshot`, `get_screen_summary`, `get_ui_tree`, `tap_element`, `swipe`, `type_text`, `wait_for_element`, `install_app`, `launch_app`, `terminate_app`.
 
