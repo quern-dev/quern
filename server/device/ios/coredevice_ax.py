@@ -91,7 +91,16 @@ READ_TIMEOUT_S = 20.0
 #: sends a second pair a second or so later.
 QUIET_S = 0.6
 
-_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+#: Once a complete tree is in hand, the longest a read waits for a newer one.
+#: A loading screen settles within a second or so; one that never settles
+#: (a clock, a spinner) is answered with its newest complete tree.
+SETTLE_MAX_S = 2.0
+
+#: Each cleanup step's bound: unsubscribing and closing must not hold a read
+#: up, or change its outcome.
+CLOSE_S = 2.0
+
+_NUMBER = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
 
 
 class AxTreeError(ValueError):
@@ -142,6 +151,7 @@ def _unarchive(data: bytes) -> Any:
             out.extend(decode(v) for v in obj["NS.objects"])
             return out
         if name in ("NSString", "NSMutableString"):
+            memo[index] = None  # a string that names itself decodes to None
             memo[index] = out = decode(obj.get("NS.string"))
             return out
         if name in ("NSData", "NSMutableData"):
@@ -150,6 +160,7 @@ def _unarchive(data: bytes) -> Any:
         if name == "NSValue":
             for key in ("NS.rectval", "NS.pointval", "NS.sizeval"):
                 if key in obj:
+                    memo[index] = None
                     memo[index] = out = decode(obj[key])
                     return out
         out = {"$c": name}
@@ -163,6 +174,10 @@ def _unarchive(data: bytes) -> Any:
         return decode(root)
     except (IndexError, KeyError, TypeError, AttributeError) as e:
         raise AxTreeError(f"malformed keyed archive: {e!r}") from e
+    except RecursionError as e:
+        # Nesting no real tree reaches: the push is skipped like any other
+        # unreadable one, rather than ending the read.
+        raise AxTreeError("keyed archive nested too deeply") from e
 
 
 def _text(value: Any) -> str | None:
@@ -282,22 +297,34 @@ def _pmd3() -> SimpleNamespace:
 
 
 async def _newest_tree(queue: asyncio.Queue) -> tuple[str, list[dict]]:
-    """Read pushes until an AdditionalData one has had QUIET_S to be replaced.
+    """Read pushes until a complete tree has had QUIET_S to be replaced.
 
+    A complete tree is an AdditionalData push, the one with identifiers.
     Pushes that are not tree dumps -- the device also sends notifications --
-    are skipped. Returns only on a complete tree; the caller's deadline is what
-    ends a wait for one that never comes.
+    are skipped, as is one that cannot be decoded. A newer InitialDump means
+    the screen changed under the read, so its pair is waited for; but once a
+    complete tree is in hand the wait for anything newer ends SETTLE_MAX_S
+    later, and the newest complete tree is the answer. A screen that never
+    stops changing -- a clock, a spinner -- would otherwise never settle, and
+    every read of it would run out the caller's deadline with trees in hand.
+    Before the first complete tree, the caller's deadline is what ends the wait.
     """
-    newest: tuple[str, list[dict]] | None = None
+    loop = asyncio.get_running_loop()
+    latest: tuple[str, list[dict]] | None = None
+    changing = False  # an InitialDump arrived after `latest`
+    settle_by = 0.0
     while True:
-        try:
-            if newest is None:
-                selector, args = await queue.get()
-            else:
-                selector, args = await asyncio.wait_for(queue.get(), QUIET_S)
-        except TimeoutError:
-            assert newest is not None
-            return newest
+        if latest is None:
+            selector, args = await queue.get()
+        else:
+            remaining = settle_by - loop.time()
+            if remaining <= 0:
+                return latest
+            try:
+                selector, args = await asyncio.wait_for(
+                    queue.get(), remaining if changing else min(QUIET_S, remaining))
+            except TimeoutError:
+                return latest
         if selector != PUSH_SELECTOR or not args or not isinstance(args[0], bytes):
             continue
         try:
@@ -305,11 +332,31 @@ async def _newest_tree(queue: asyncio.Queue) -> tuple[str, list[dict]]:
         except AxTreeError:
             continue
         if dump_type == "AdditionalData":
-            newest = (dump_type, elements)
-        elif newest is not None:
-            # A newer InitialDump: the screen changed under the read, so the
-            # pair it starts is the one to wait for.
-            newest = None
+            if latest is None:
+                settle_by = loop.time() + SETTLE_MAX_S
+            latest, changing = (dump_type, elements), False
+        elif latest is not None:
+            changing = True
+
+
+async def _close(provider: Any, rsd: Any) -> None:
+    """Unsubscribe and close, each step bounded and its failure swallowed.
+
+    Outside the read's deadline on purpose: a deadline that fired here would
+    leave the provider open and report a tree already read as never read. NO
+    ends the subscription on the device's side; it is sent even when the read
+    failed, since the device may still be pushing.
+    """
+    steps: list = []
+    if provider is not None:
+        steps.append(lambda: provider.dtx._ctrl_channel.invoke(
+            "clientNeedsAccessibility:", False, expects_reply=False))
+        steps.append(provider.close)
+    if rsd is not None:
+        steps.append(rsd.close)
+    for step in steps:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(step(), CLOSE_S)
 
 
 async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]:
@@ -318,34 +365,26 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
     from server.device.performance import _device_address
 
     lib = _pmd3()
-    address = await _device_address(uuid)
-    rsd = lib.RemoteServiceDiscoveryService(address)
     started = time.monotonic()
+    rsd = provider = None
     deadline = asyncio.timeout(timeout)
     try:
-        async with deadline:
-            try:
+        try:
+            # The address lookup is inside the deadline too: on a cache miss it
+            # asks devicectl, and a read must not outlast the time it was given.
+            async with deadline:
+                address = await _device_address(uuid)
+                rsd = lib.RemoteServiceDiscoveryService(address)
                 await rsd.connect()
                 provider = lib.RemoteAX(rsd)
                 await provider.connect()
-                try:
-                    queue: asyncio.Queue = asyncio.Queue()
-                    provider.dtx.ctx["control_dispatch_queue"] = queue
-                    control = provider.dtx._ctrl_channel
-                    await control.invoke("clientNeedsAccessibility:", True,
-                                         expects_reply=False)
-                    _, elements = await _newest_tree(queue)
-                finally:
-                    # NO ends the subscription on the device's side; a failure
-                    # to send it must not hide the read's own outcome.
-                    with contextlib.suppress(Exception):
-                        await provider.dtx._ctrl_channel.invoke(
-                            "clientNeedsAccessibility:", False, expects_reply=False)
-                    with contextlib.suppress(Exception):
-                        await provider.close()
-            finally:
-                with contextlib.suppress(Exception):
-                    await rsd.close()
+                queue: asyncio.Queue = asyncio.Queue()
+                provider.dtx.ctx["control_dispatch_queue"] = queue
+                await provider.dtx._ctrl_channel.invoke(
+                    "clientNeedsAccessibility:", True, expects_reply=False)
+                _, elements = await _newest_tree(queue)
+        finally:
+            await _close(provider, rsd)
     except TimeoutError as e:
         if deadline.expired():
             raise DeviceError(
@@ -366,8 +405,9 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
 class CoreDeviceAxReader:
     """`describe_all` for a physical iPhone, from the tree push.
 
-    A reader only: taps and every other action stay with WDA in this phase,
-    so this is chosen for reads alone (`DeviceController._device_tree_reader`).
+    A reader of whole screens only: element lookups, taps and every other
+    action stay with WDA in this phase, so it is chosen for unfiltered reads
+    alone (`DeviceController._native_ui_elements`).
     """
 
     TOOL_NAME = "coredevice"

@@ -193,6 +193,35 @@ class TestBadPushes:
             parse_push(plistlib.dumps(archive, fmt=plistlib.FMT_BINARY))
 
 
+class TestDecoderLimits:
+    @staticmethod
+    def _archive(objects, root=1):
+        return plistlib.dumps({"$archiver": "NSKeyedArchiver", "$version": 100000,
+                               "$top": {"root": plistlib.UID(root)}, "$objects": objects},
+                              fmt=plistlib.FMT_BINARY)
+
+    def test_a_string_that_names_itself_is_refused_not_recursed(self):
+        objects = ["$null",
+                   {"$class": plistlib.UID(2), "NS.string": plistlib.UID(1)},
+                   {"$classname": "NSString", "$classes": ["NSString", "NSObject"]}]
+        with pytest.raises(AxTreeError):
+            parse_push(self._archive(objects))
+
+    def test_nesting_too_deep_is_refused_not_raised_raw(self):
+        depth = 3000
+        objects: list = ["$null"]
+        for i in range(depth):
+            nxt = [plistlib.UID(i + 2)] if i + 1 < depth else []
+            objects.append({"$class": plistlib.UID(depth + 1), "NS.objects": nxt})
+        objects.append({"$classname": "NSArray", "$classes": ["NSArray", "NSObject"]})
+        with pytest.raises(AxTreeError, match="too deeply"):
+            parse_push(self._archive(objects))
+
+    def test_a_frame_in_exponent_notation(self):
+        assert coredevice_ax._rect("{{1.5e-05, 2}, {3, 4E2}}") == {
+            "x": 1.5e-05, "y": 2.0, "width": 3.0, "height": 400.0}
+
+
 class TestWaitingForTheTree:
     """Which push a read settles on."""
 
@@ -221,14 +250,52 @@ class TestWaitingForTheTree:
         )
         assert dump_type == "AdditionalData"
 
-    async def test_a_newer_screen_replaces_the_one_before(self):
-        """Settings, then the screen changes to Safari: the read is Safari's."""
+    async def test_a_changing_screen_waits_for_its_newer_tree(self, monkeypatch):
+        """Settings is complete, then Safari's InitialDump arrives and its
+        AdditionalData only after the quiet period: the read waits for it,
+        rather than answering with the screen that has already gone."""
+        monkeypatch.setattr(coredevice_ax, "QUIET_S", 0.1)
+        queue: asyncio.Queue = asyncio.Queue()
+        queue.put_nowait((PUSH_SELECTOR, [SETTINGS]))
+        queue.put_nowait((PUSH_SELECTOR, [_as("InitialDump", SAFARI)]))
+
+        async def later():
+            await asyncio.sleep(0.4)
+            queue.put_nowait((PUSH_SELECTOR, [SAFARI]))
+
+        task = asyncio.create_task(later())
+        _, elements = await asyncio.wait_for(coredevice_ax._newest_tree(queue), 5)
+        await task
+        assert elements[0]["AXLabel"] == "Safari"
+
+    async def test_a_change_that_never_completes_answers_the_last_tree(self, monkeypatch):
+        """An InitialDump with no pair: once the settle window ends, the
+        complete tree in hand is the answer, not a timeout."""
+        monkeypatch.setattr(coredevice_ax, "SETTLE_MAX_S", 0.3)
         _, elements = await self._run(
             (PUSH_SELECTOR, [SETTINGS]),
             (PUSH_SELECTOR, [_as("InitialDump", SAFARI)]),
-            (PUSH_SELECTOR, [SAFARI]),
         )
-        assert elements[0]["AXLabel"] == "Safari"
+        assert elements[0]["AXLabel"] == "Settings"
+
+    async def test_a_screen_that_never_stops_changing_still_answers(self, monkeypatch):
+        """A clock or a spinner: a new pair every 0.45 s, forever. Without a
+        settle cap every read ran out its deadline with trees in hand."""
+        monkeypatch.setattr(coredevice_ax, "SETTLE_MAX_S", 1.0)
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def churn():
+            while True:
+                queue.put_nowait((PUSH_SELECTOR, [_as("InitialDump", SETTINGS)]))
+                queue.put_nowait((PUSH_SELECTOR, [SETTINGS]))
+                await asyncio.sleep(0.45)
+
+        task = asyncio.create_task(churn())
+        try:
+            dump_type, _ = await asyncio.wait_for(coredevice_ax._newest_tree(queue), 4)
+        finally:
+            task.cancel()
+        assert dump_type == "AdditionalData"
 
     async def test_an_initial_dump_alone_never_completes(self):
         """No identifiers yet, so not an answer: the read's deadline ends it."""
@@ -335,6 +402,63 @@ class TestReadingADevice:
 
         assert len(await read_tree(PHONE, timeout=5)) == 14
 
+    async def test_a_hung_unsubscribe_neither_holds_the_read_nor_leaks(
+            self, monkeypatch, phone_address):
+        lib, state = _fake_lib([SETTINGS])
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        monkeypatch.setattr(coredevice_ax, "CLOSE_S", 0.2)
+
+        async def hang(selector, *args, expects_reply=True):
+            if args == (True,):
+                state.control._on_subscribe()
+                return
+            await asyncio.sleep(60)
+
+        original = lib.RemoteAX.__init__
+
+        def init(self, rsd):
+            original(self, rsd)
+            self.dtx._ctrl_channel.invoke = hang
+
+        monkeypatch.setattr(lib.RemoteAX, "__init__", init)
+
+        elements = await asyncio.wait_for(read_tree(PHONE, timeout=1.0), 3)
+
+        assert len(elements) == 14  # a tree already read is not reported lost
+        assert state.provider_closed and state.rsd_closed
+
+    async def test_a_slow_address_lookup_is_inside_the_deadline(self, monkeypatch):
+        async def slow(uuid):
+            await asyncio.sleep(5)
+
+        monkeypatch.setattr("server.device.performance._device_address", slow)
+        lib, _ = _fake_lib([SETTINGS])
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        with pytest.raises(DeviceError, match="within 0.3s"):
+            await asyncio.wait_for(read_tree(PHONE, timeout=0.3), 2)
+
+    async def test_any_failure_finding_the_device_is_a_device_error(self, monkeypatch):
+        monkeypatch.setattr("server.device.performance._device_address",
+                            AsyncMock(side_effect=OSError("devicectl vanished")))
+        lib, _ = _fake_lib([SETTINGS])
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        with pytest.raises(DeviceError) as caught:
+            await read_tree(PHONE, timeout=5)
+        assert caught.value.tool == "coredevice"
+
+    async def test_source_timeout_bounds_the_read(self, monkeypatch):
+        seen = {}
+
+        async def fake_read(uuid, *, timeout):
+            seen["timeout"] = timeout
+            return []
+
+        monkeypatch.setattr(coredevice_ax, "read_tree", fake_read)
+        await CoreDeviceAxReader().describe_all(PHONE, source_timeout=7)
+        assert seen == {"timeout": 7}
+
     async def test_no_tunnel_is_a_device_error_before_anything_opens(self, monkeypatch):
         monkeypatch.setattr(
             "server.device.performance._device_address",
@@ -400,14 +524,44 @@ class TestReadsThroughTheController:
         # Marking asks WDA for the viewport, which would start it for nothing.
         ctrl._mark_on_screen.assert_not_called()
 
-    async def test_a_filtered_read_filters_the_push_not_wda(self, monkeypatch):
+    async def test_an_element_lookup_stays_on_wda(self, monkeypatch):
+        """Whole-screen reads only: a row's merged label ("Wi-Fi, Home") would
+        match differently from WDA's lookup, so lookups are WDA's as before."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
 
-        elements, _ = await ctrl.get_ui_elements(
-            PHONE, filter_identifier="com.apple.settings.general")
+        await ctrl.get_ui_elements(PHONE, filter_identifier="com.apple.settings.general")
 
-        assert [e.label for e in elements] == ["General"]
-        ctrl.wda_client.find_elements_by_query.assert_not_called()
+        ctrl.wda_client.find_elements_by_query.assert_awaited()
+        ctrl.coredevice_ax.describe_all.assert_not_called()
+
+    async def test_a_read_with_a_wda_depth_stays_on_wda(self, monkeypatch):
+        """Every lookup made for a tool passes a depth; so does a caller who
+        asked WDA for one."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+
+        await ctrl.get_ui_elements(PHONE, use_cache=False, snapshot_depth=12)
+
+        ctrl.wda_client.describe_all.assert_awaited()
+        ctrl.coredevice_ax.describe_all.assert_not_called()
+
+    async def test_a_cached_push_tree_never_answers_a_lookup(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        await ctrl.get_ui_elements(PHONE)            # whole screen, cached
+
+        await ctrl.get_ui_elements(PHONE, filter_label="General")
+
+        ctrl.wda_client.find_elements_by_query.assert_awaited()
+
+    async def test_a_cache_hit_names_the_backend_that_made_the_tree(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        await ctrl.get_ui_elements(PHONE)
+        ctrl._last_read_backend[PHONE] = ctrl.wda_client.TOOL_NAME  # a WDA read since
+
+        await ctrl.get_ui_elements(PHONE)                           # served from cache
+
+        assert ctrl.coredevice_ax.describe_all.await_count == 1
+        assert ctrl.backend_that_served(PHONE) == CoreDeviceAxReader.TOOL_NAME
+        ctrl._mark_on_screen.assert_not_called()
 
     async def test_a_failed_push_read_falls_back_to_wda_and_says_so(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)

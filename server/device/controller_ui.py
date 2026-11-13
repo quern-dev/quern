@@ -582,6 +582,7 @@ class DeviceControllerUI:
     - self.coredevice_ax: CoreDeviceAxReader
     - self.simctl: SimctlBackend
     - self._ui_cache: dict[str, tuple[list[UIElement], float]]
+    - self._ui_cache_backend: dict[str, str]
     - self._cache_ttl: float
     - self._cache_hits: int
     - self._cache_misses: int
@@ -2593,11 +2594,20 @@ class DeviceControllerUI:
 
         # Check cache (unless explicitly bypassed)
         # Strategy: Use cached full tree, then filter in memory (fast)
-        if use_cache and resolved in self._ui_cache:
+        cached_by = self._ui_cache_backend.get(resolved)
+        if (use_cache and resolved in self._ui_cache
+                # A pushed tree answers whole-screen reads only (#664): its rows
+                # carry merged labels, so an element lookup over it would match
+                # differently from the WDA lookup it stands in for.
+                and not (has_filters and cached_by == self.coredevice_ax.TOOL_NAME)):
             cached_elements, cached_time = self._ui_cache[resolved]
             age = now - cached_time
             if age < self._cache_ttl:
                 self._cache_hits += 1
+                # A hit reports the backend that made the tree, not whichever
+                # read happened last.
+                if cached_by:
+                    self._last_read_backend[resolved] = cached_by
 
                 # If filters provided, apply them to cached elements (in-memory filtering is fast)
                 if has_filters:
@@ -2608,12 +2618,16 @@ class DeviceControllerUI:
 
                 return cached_elements, resolved
 
-        # The tree push is the whole screen in one read, so a filtered read
-        # through it filters in memory below rather than querying WDA.
-        reader = self._device_tree_reader(resolved)
+        # The tree push serves whole-screen reads only: no filter, and no WDA
+        # depth asked for (every element lookup made for a tool passes one).
+        # Lookups stay on WDA exactly as before, until phase 2 settles how a
+        # merged row label should match (#664).
+        reader = (self._device_tree_reader(resolved)
+                  if not has_filters and snapshot_depth is None and mode != "flat"
+                  else None)
 
         # WDA direct query: physical device + filters + cache miss → query directly
-        if has_filters and reader is None and self._served_by_wda(resolved):
+        if has_filters and self._served_by_wda(resolved):
             # Recorded here too: this path returns before the general one
             # below, so `backend` went on naming whatever served the last full
             # read -- `sim-bridge` on a simulator just put in WDA mode (#336).
@@ -2731,6 +2745,7 @@ class DeviceControllerUI:
             # scroll_to_element returns, which is exactly that window.
             if probe_containers:
                 self._ui_cache[resolved] = (elements, time.time())
+                self._ui_cache_backend[resolved] = self._last_read_backend[resolved]
 
             # Apply filters in memory if needed
             if has_filters:

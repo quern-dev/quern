@@ -188,6 +188,8 @@ class DeviceController(DeviceControllerUI):
         self.__session_written = {s: v["last_used"] for s, v in self.__session_slots.items()}
         # UI tree cache: {udid: (elements, timestamp)}
         self._ui_cache: dict[str, tuple[list[UIElement], float]] = {}
+        #: Which backend made each cached tree, so a hit reports it (#664).
+        self._ui_cache_backend: dict[str, str] = {}
         # When each device's screen was last changed by an action here (tap,
         # swipe, type, launch...), for tap_element's settle-before-tapping.
         self._last_ui_change: dict[str, float] = {}
@@ -903,6 +905,7 @@ class DeviceController(DeviceControllerUI):
         """Invalidate UI tree cache for a device (or all devices if udid=None)."""
         if udid:
             self._ui_cache.pop(udid, None)
+            self._ui_cache_backend.pop(udid, None)
             # The actions that change the screen come through here (tap, swipe,
             # type, launch, terminate, buttons, the hardware keyboard), which
             # makes it the one place to note that it just changed.
@@ -914,6 +917,7 @@ class DeviceController(DeviceControllerUI):
             logger.debug(f"UI cache invalidated for device {udid[:8]}")
         else:
             self._ui_cache.clear()
+            self._ui_cache_backend.clear()
             self._web_overlay.clear()
             logger.debug("UI cache cleared for all devices")
 
