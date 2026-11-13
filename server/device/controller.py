@@ -190,6 +190,10 @@ class DeviceController(DeviceControllerUI):
         self._ui_cache: dict[str, tuple[list[UIElement], float]] = {}
         #: Which backend made each cached tree, so a hit reports it (#664).
         self._ui_cache_backend: dict[str, str] = {}
+        #: Apps a tree-push read crashed, per device, and the app each device
+        #: last showed (#669): together they keep the push off a known crasher.
+        self._push_crashed_apps: dict[str, set[str]] = {}
+        self._last_app: dict[str, str] = {}
         # When each device's screen was last changed by an action here (tap,
         # swipe, type, launch...), for tap_element's settle-before-tapping.
         self._last_ui_change: dict[str, float] = {}

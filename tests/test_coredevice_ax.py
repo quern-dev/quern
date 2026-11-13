@@ -230,7 +230,8 @@ class TestWaitingForTheTree:
         queue: asyncio.Queue = asyncio.Queue()
         for item in items:
             queue.put_nowait(item)
-        return await asyncio.wait_for(coredevice_ax._newest_tree(queue), 5)
+        tree, _, _ = await asyncio.wait_for(coredevice_ax._newest_tree(queue), 5)
+        return tree.dump_type, tree.elements
 
     async def test_it_takes_the_additional_data_not_the_initial_dump(self):
         dump_type, elements = await self._run(
@@ -264,7 +265,8 @@ class TestWaitingForTheTree:
             queue.put_nowait((PUSH_SELECTOR, [SAFARI]))
 
         task = asyncio.create_task(later())
-        _, elements = await asyncio.wait_for(coredevice_ax._newest_tree(queue), 5)
+        tree, _, _ = await asyncio.wait_for(coredevice_ax._newest_tree(queue), 5)
+        elements = tree.elements
         await task
         assert elements[0]["AXLabel"] == "Safari"
 
@@ -292,7 +294,8 @@ class TestWaitingForTheTree:
 
         task = asyncio.create_task(churn())
         try:
-            dump_type, _ = await asyncio.wait_for(coredevice_ax._newest_tree(queue), 4)
+            tree, _, _ = await asyncio.wait_for(coredevice_ax._newest_tree(queue), 4)
+            dump_type = tree.dump_type
         finally:
             task.cancel()
         assert dump_type == "AdditionalData"
@@ -351,7 +354,24 @@ def _fake_lib(pushes, *, connect_error=None, fail_unsubscribe=False):
         async def close(self):
             state.provider_closed = True
 
-    return SimpleNamespace(RemoteServiceDiscoveryService=RSD, RemoteAX=RemoteAX), state
+    class AppService:
+        def __init__(self, rsd):
+            pass
+
+        async def __aenter__(self):
+            if state.processes is None:
+                raise ConnectionRefusedError(61, "refused")
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def list_processes(self):
+            return [{"processIdentifier": pid} for pid in state.processes]
+
+    state.processes = [617, 618]   # Settings and Safari, as captured
+    return (SimpleNamespace(RemoteServiceDiscoveryService=RSD, RemoteAX=RemoteAX,
+                            AppService=AppService), state)
 
 
 @pytest.fixture
@@ -471,6 +491,85 @@ class TestReadingADevice:
         with pytest.raises(DeviceError, match="no tunnel"):
             await read_tree(PHONE, timeout=5)
         assert state.control is None
+
+
+class TestAnAppThatDiesUnderTheRead:
+    """#669: on iOS 27.2.1 a push read crashes some apps. The read must say so,
+    not hand back the dying app's identifier-less tree."""
+
+    def test_each_tree_names_its_app(self):
+        assert coredevice_ax.parse_tree(SETTINGS).app_pid == 617
+        assert coredevice_ax.parse_tree(SAFARI).app_pid == 618
+
+    async def test_an_app_that_died_is_reported_by_name(self, monkeypatch, phone_address):
+        lib, state = _fake_lib([_as("InitialDump", SETTINGS), SETTINGS,
+                                _as("InitialDump", SAFARI), SAFARI])
+        state.processes = [618]                       # Settings is gone
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        with pytest.raises(coredevice_ax.AppExitedDuringRead) as caught:
+            await asyncio.wait_for(read_tree(PHONE, timeout=5), 10)
+
+        assert (caught.value.app, caught.value.pid) == ("Settings", 617)
+        assert "#669" in str(caught.value)
+        assert state.provider_closed and state.rsd_closed
+
+    async def test_a_death_seen_only_as_the_next_apps_first_dump(self, monkeypatch,
+                                                                 phone_address):
+        """As measured: the dying app's last complete tree, then SpringBoard's
+        InitialDump, with SpringBoard's complete tree arriving after the wait
+        has ended. The read returned the dying app's tree, with no warning."""
+        lib, state = _fake_lib([_as("InitialDump", SETTINGS), SETTINGS,
+                                _as("InitialDump", SAFARI)])
+        state.processes = [618]
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        monkeypatch.setattr(coredevice_ax, "SETTLE_MAX_S", 0.3)
+        monkeypatch.setattr(coredevice_ax, "UNSETTLED_QUIET_S", 0.3)
+
+        with pytest.raises(coredevice_ax.AppExitedDuringRead):
+            await asyncio.wait_for(read_tree(PHONE, timeout=5), 10)
+
+    async def test_an_app_switch_is_not_a_crash(self, monkeypatch, phone_address):
+        lib, state = _fake_lib([SETTINGS, _as("InitialDump", SAFARI), SAFARI])
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        elements = await asyncio.wait_for(read_tree(PHONE, timeout=5), 10)
+
+        assert elements[0]["AXLabel"] == "Safari"
+
+    async def test_a_process_list_it_cannot_read_is_not_taken_as_a_death(
+            self, monkeypatch, phone_address):
+        lib, state = _fake_lib([SETTINGS, _as("InitialDump", SAFARI), SAFARI])
+        state.processes = None
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        elements = await asyncio.wait_for(read_tree(PHONE, timeout=5), 10)
+
+        assert elements[0]["AXLabel"] == "Safari"
+
+    async def test_notifications_lengthen_the_quiet_spell(self, monkeypatch):
+        """The crash replaces the app about a second after its last tree: the
+        default quiet spell ended first and handed back the dying app's tree."""
+        monkeypatch.setattr(coredevice_ax, "QUIET_S", 0.1)
+        monkeypatch.setattr(coredevice_ax, "UNSETTLED_QUIET_S", 0.6)
+        note = plistlib.dumps({"$archiver": "NSKeyedArchiver", "$version": 100000,
+                               "$top": {"root": plistlib.UID(1)},
+                               "$objects": ["$null", {"$class": plistlib.UID(2), "notification": 7},
+                                            {"$classname": "AXPTranslatorResponse"}]},
+                              fmt=plistlib.FMT_BINARY)
+        queue: asyncio.Queue = asyncio.Queue()
+        for push in (_as("InitialDump", SETTINGS), note, SETTINGS):
+            queue.put_nowait((PUSH_SELECTOR, [push]))
+
+        async def later():
+            await asyncio.sleep(0.3)
+            queue.put_nowait((PUSH_SELECTOR, [_as("InitialDump", SAFARI)]))
+            queue.put_nowait((PUSH_SELECTOR, [SAFARI]))
+
+        task = asyncio.create_task(later())
+        tree, first, _ = await asyncio.wait_for(coredevice_ax._newest_tree(queue), 5)
+        await task
+        assert (first.app_pid, tree.app_pid) == (617, 618)
 
 
 def _phone_controller(os_version: str | None = "iOS 27.2.1", *, reader: str = "coredevice",
@@ -643,6 +742,54 @@ class TestReadsInsideActionsStayOnWda:
 
         assert summary["backend"] == ctrl.wda_client.TOOL_NAME
         assert summary["source_timed_out"] is True
+
+
+class TestTheControllerAfterACrash:
+    async def test_the_read_falls_back_and_says_why(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = AsyncMock(
+            side_effect=coredevice_ax.AppExitedDuringRead("QuernProbeScene", 711))
+
+        elements, _ = await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+
+        assert [e.label for e in elements] == ["from WDA"]
+        assert ctrl.backend_that_served(PHONE) == ctrl.wda_client.TOOL_NAME
+        assert "QuernProbeScene (pid 711) exited" in ctrl.read_note()
+        assert "QuernProbeScene" in ctrl._push_crashed_apps[PHONE]
+
+    async def test_a_crashed_app_is_not_read_through_the_push_again(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+        ctrl._last_app[PHONE] = "QuernProbeScene"
+
+        await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+
+        ctrl.coredevice_ax.describe_all.assert_not_called()
+
+    async def test_another_app_still_is(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+        ctrl._last_app[PHONE] = "Settings"
+
+        await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+
+        ctrl.coredevice_ax.describe_all.assert_awaited()
+
+    async def test_every_read_records_the_app_on_screen(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+        assert ctrl._last_app[PHONE] == "Settings"
+        await ctrl.get_ui_elements(PHONE, use_cache=False)          # WDA's read
+        assert ctrl._last_app[PHONE] == "from WDA"
+
+    async def test_the_summary_carries_the_warning(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = AsyncMock(
+            side_effect=coredevice_ax.AppExitedDuringRead("QuernProbeScene", 711))
+
+        summary, _, _ = await ctrl.get_screen_summary(udid=PHONE, whole_screen=True)
+
+        assert "exited while its screen was read" in summary["warning"]
 
 
 class TestTheSetting:

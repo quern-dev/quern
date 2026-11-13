@@ -13,7 +13,7 @@ import time
 from server.config import get_device_ui_reader
 from server.device import gestures
 from server.device.element_types import equivalence, related_type_names
-from server.device.ios.coredevice_ax import COREDEVICE_MIN_IOS
+from server.device.ios.coredevice_ax import COREDEVICE_MIN_IOS, AppExitedDuringRead
 from server.device.ios.hinge import DEFAULT_SWEEP_MS, POSES
 from server.device.media.screenshots import annotate_screenshot
 from server.device.probing import frame_key
@@ -573,6 +573,13 @@ def _covering_element(target: UIElement, hit: dict | None) -> dict | None:
     return covering
 
 
+#: Set by a read that had to say something about how it was made: today, that
+#: the tree push crashed the app (#669). Per request, so one caller's note
+#: never reaches another's response; the endpoints put it on the answer.
+_READ_NOTE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "quern_read_note", default=None)
+
+
 class DeviceControllerUI:
     """Mixin providing UI inspection and interaction methods.
 
@@ -691,7 +698,16 @@ class DeviceControllerUI:
         match = re.search(r"\d+", os_version or "")
         if not match or int(match.group()) < COREDEVICE_MIN_IOS:
             return None
+        # Not while the app last seen on screen is one a push read crashed
+        # (#669): the read cannot be made safe once started, so an app known
+        # to die under it is read through WDA instead.
+        if self._last_app.get(udid) in self._push_crashed_apps.get(udid, ()):
+            return None
         return self.coredevice_ax
+
+    def read_note(self) -> str | None:
+        """What this request's read had to report about itself, if anything."""
+        return _READ_NOTE.get()
 
     #: Backend name per device, written by `get_ui_elements` when it selects
     #: one. Read by the error paths that follow a read, so the label names the
@@ -2719,6 +2735,13 @@ class DeviceControllerUI:
                 # which one served it.
                 logger.warning("[coredevice] read of %s failed, using WDA: %s",
                                resolved[:8], e)
+                if isinstance(e, AppExitedDuringRead):
+                    # Said on the answer, not only in the log: the screen the
+                    # caller sees next is the one the crash left (#669).
+                    self._push_crashed_apps.setdefault(resolved, set()).add(e.app)
+                    _READ_NOTE.set(
+                        f"{e}. This read is WDA's, and {e.app or 'that app'}'s screens "
+                        "will be read through WDA until the server restarts.")
                 backend = self._ui_backend(resolved)
                 self._last_read_backend[resolved] = getattr(
                     backend, "TOOL_NAME", "unknown",
@@ -2729,6 +2752,10 @@ class DeviceControllerUI:
                 )
 
         self._remember_screen(resolved, raw)
+        # The app on screen, by name, whichever backend read it: what decides
+        # whether the next whole-screen read may use the push (#669).
+        if raw and isinstance(raw[0], dict) and raw[0].get("type") == "Application":
+            self._last_app[resolved] = raw[0].get("AXLabel") or ""
 
         # Parse strategy:
         # - If filters AND will cache: parse full tree (for cache), then filter in memory
@@ -3162,6 +3189,8 @@ class DeviceControllerUI:
         # investigating unexpected UI behaviour wants to know -- see
         # `backend_that_served`.
         summary["backend"] = self.backend_that_served(resolved)
+        if note := self.read_note():
+            summary["warning"] = note
 
         # A tree read that timed out falls back to a container skeleton,
         # which is often empty -- and an empty result is exactly what a blank

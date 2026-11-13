@@ -38,6 +38,7 @@ import logging
 import plistlib
 import re
 import time
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -91,6 +92,14 @@ READ_TIMEOUT_S = 20.0
 #: sends a second pair a second or so later.
 QUIET_S = 0.6
 
+#: The quiet wait instead when the screen sent notifications during the read:
+#: it is changing, and an app that is going to die under the read -- see
+#: `AppExitedDuringRead` -- is replaced about a second after its last tree.
+UNSETTLED_QUIET_S = 1.5
+
+#: `associatedRequestType` of the response naming the application element.
+APPLICATION_RESPONSE = 4
+
 #: Once a complete tree is in hand, the longest a read waits for a newer one.
 #: A loading screen settles within a second or so; one that never settles
 #: (a clock, a spinner) is answered with its newest complete tree.
@@ -105,6 +114,35 @@ _NUMBER = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
 
 class AxTreeError(ValueError):
     """A push that is not an accessibility tree quern can read."""
+
+
+class AppExitedDuringRead(DeviceError):
+    """The app on screen died while its tree was being read (#669).
+
+    On iOS 27.2.1 a tree read crashes some apps -- measured on screens pushed
+    inside a tab bar's More navigation controller -- in UIKit's own
+    accessibility code. Unsubscribing as soon as the first dump arrives does
+    not save it, so the read cannot be made safe once it has started; this is
+    how the caller learns that the read did it, rather than meeting an empty
+    screen with no explanation.
+    """
+
+    def __init__(self, app: str, pid: int) -> None:
+        super().__init__(
+            f"{app or 'the app'} (pid {pid}) exited while its screen was read through "
+            "the accessibility service; on iOS 27.2 this read crashes some apps (#669)",
+            tool="coredevice")
+        self.app = app
+        self.pid = pid
+
+
+@dataclass
+class Tree:
+    """One tree dump: its kind, its elements, and the pid of its app."""
+
+    dump_type: str
+    elements: list[dict]
+    app_pid: int | None
 
 
 def _unarchive(data: bytes) -> Any:
@@ -232,6 +270,12 @@ def _custom_actions(value: Any) -> list[str]:
 
 
 def parse_push(data: bytes) -> tuple[str, list[dict]]:
+    """`parse_tree` as ``(dump_type, elements)``."""
+    tree = parse_tree(data)
+    return tree.dump_type, tree.elements
+
+
+def parse_tree(data: bytes) -> Tree:
     """One push's tree, as ``(dump_type, elements)``.
 
     `dump_type` is ``"InitialDump"`` or ``"AdditionalData"``; `elements` are
@@ -247,7 +291,13 @@ def parse_push(data: bytes) -> tuple[str, list[dict]]:
     dump_type = dump_type.removeprefix("AXPTreeDumpType")
 
     elements: list[dict] = []
+    app_pid = None
     for response in result["treeDump"]:
+        if (isinstance(response, dict)
+                and response.get("associatedRequestType") == APPLICATION_RESPONSE
+                and isinstance(response.get("resultData"), dict)
+                and isinstance(response["resultData"].get("pid"), int)):
+            app_pid = response["resultData"]["pid"]
         if not isinstance(response, dict):
             continue
         if response.get("associatedRequestType") != ELEMENT_BUNDLE:
@@ -272,7 +322,7 @@ def parse_push(data: bytes) -> tuple[str, list[dict]]:
         })
     if not elements:
         raise AxTreeError(f"{dump_type or 'tree dump'} holds no elements")
-    return dump_type, elements
+    return Tree(dump_type, elements, app_pid)
 
 
 def _pmd3() -> SimpleNamespace:
@@ -280,6 +330,7 @@ def _pmd3() -> SimpleNamespace:
     tested without a phone."""
     try:
         from pymobiledevice3.dtx_service_provider import DtxServiceProvider
+        from pymobiledevice3.remote.core_device.app_service import AppServiceService
         from pymobiledevice3.remote.remote_service_discovery import (
             RemoteServiceDiscoveryService,
         )
@@ -293,25 +344,36 @@ def _pmd3() -> SimpleNamespace:
         RSD_SERVICE_NAME = SERVICE
 
     return SimpleNamespace(RemoteServiceDiscoveryService=RemoteServiceDiscoveryService,
-                           RemoteAX=RemoteAX)
+                           RemoteAX=RemoteAX, AppService=AppServiceService)
 
 
-async def _newest_tree(queue: asyncio.Queue) -> tuple[str, list[dict]]:
-    """Read pushes until a complete tree has had QUIET_S to be replaced.
+async def _newest_tree(queue: asyncio.Queue) -> tuple[Tree, Tree, Tree]:
+    """Read pushes until a complete tree has had a quiet spell to be replaced.
+
+    Returns the newest complete tree, the first tree of the read, and the
+    newest tree of either kind. A caller compares the first with the newest
+    to see whether the app changed under the read: on the crash (#669) the
+    replacing app's InitialDump arrives inside the wait, while its complete
+    tree may come after it, so comparing with the complete tree misses it.
 
     A complete tree is an AdditionalData push, the one with identifiers.
-    Pushes that are not tree dumps -- the device also sends notifications --
-    are skipped, as is one that cannot be decoded. A newer InitialDump means
-    the screen changed under the read, so its pair is waited for; but once a
-    complete tree is in hand the wait for anything newer ends SETTLE_MAX_S
-    later, and the newest complete tree is the answer. A screen that never
-    stops changing -- a clock, a spinner -- would otherwise never settle, and
-    every read of it would run out the caller's deadline with trees in hand.
-    Before the first complete tree, the caller's deadline is what ends the wait.
+    Pushes that are not tree dumps are the device's notifications; a static
+    screen sends none, so any at all mean the screen is changing, and the
+    quiet spell is UNSETTLED_QUIET_S rather than QUIET_S. A push that cannot
+    be decoded is skipped. A newer InitialDump means the screen changed under
+    the read, so its pair is waited for; but once a complete tree is in hand
+    the wait for anything newer ends SETTLE_MAX_S later, and the newest
+    complete tree is the answer. A screen that never stops changing -- a
+    clock, a spinner -- would otherwise never settle, and every read of it
+    would run out the caller's deadline with trees in hand. Before the first
+    complete tree, the caller's deadline is what ends the wait.
     """
     loop = asyncio.get_running_loop()
-    latest: tuple[str, list[dict]] | None = None
+    first: Tree | None = None
+    newest: Tree | None = None  # of either kind
+    latest: Tree | None = None
     changing = False  # an InitialDump arrived after `latest`
+    unsettled = False  # notifications arrived during the read
     settle_by = 0.0
     while True:
         if latest is None:
@@ -319,24 +381,42 @@ async def _newest_tree(queue: asyncio.Queue) -> tuple[str, list[dict]]:
         else:
             remaining = settle_by - loop.time()
             if remaining <= 0:
-                return latest
+                return latest, first or latest, newest or latest
+            quiet = UNSETTLED_QUIET_S if unsettled else QUIET_S
             try:
                 selector, args = await asyncio.wait_for(
-                    queue.get(), remaining if changing else min(QUIET_S, remaining))
+                    queue.get(), remaining if changing else min(quiet, remaining))
             except TimeoutError:
-                return latest
+                return latest, first or latest, newest or latest
         if selector != PUSH_SELECTOR or not args or not isinstance(args[0], bytes):
             continue
         try:
-            dump_type, elements = parse_push(args[0])
+            tree = parse_tree(args[0])
         except AxTreeError:
+            unsettled = True
             continue
-        if dump_type == "AdditionalData":
+        first = first or tree
+        newest = tree
+        if tree.dump_type == "AdditionalData":
             if latest is None:
-                settle_by = loop.time() + SETTLE_MAX_S
-            latest, changing = (dump_type, elements), False
+                # The wait for a newer tree, counted from the first complete
+                # one; long enough to see the app replaced when the screen is
+                # in flux.
+                settle_by = loop.time() + max(SETTLE_MAX_S, UNSETTLED_QUIET_S)
+            latest, changing = tree, False
         elif latest is not None:
             changing = True
+
+
+async def _app_alive(rsd: Any, lib: SimpleNamespace, pid: int) -> bool | None:
+    """Whether a process is still running: True, False, or None when the
+    device could not be asked."""
+    try:
+        async with lib.AppService(rsd) as apps:
+            processes = await asyncio.wait_for(apps.list_processes(), CLOSE_S)
+    except Exception:
+        return None
+    return any(p.get("processIdentifier") == pid for p in processes if isinstance(p, dict))
 
 
 async def _close(provider: Any, rsd: Any) -> None:
@@ -382,7 +462,14 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
                 provider.dtx.ctx["control_dispatch_queue"] = queue
                 await provider.dtx._ctrl_channel.invoke(
                     "clientNeedsAccessibility:", True, expects_reply=False)
-                _, elements = await _newest_tree(queue)
+                tree, first, newest = await _newest_tree(queue)
+                elements = tree.elements
+                # The app changed under the read: switched, or killed by it.
+                # Only the process list can tell those apart. "Could not ask"
+                # is not taken as dead: the read stands, as it would have.
+                if (first.app_pid is not None and newest.app_pid != first.app_pid
+                        and await _app_alive(rsd, lib, first.app_pid) is False):
+                    raise AppExitedDuringRead(first.elements[0]["AXLabel"], first.app_pid)
         finally:
             await _close(provider, rsd)
     except TimeoutError as e:

@@ -493,6 +493,35 @@ class TestGetUIElements:
             whole_screen=True,  # the push may serve it (#664)
         )
 
+    async def test_a_read_that_crashed_the_app_says_so(self, app, auth_headers, mock_controller):
+        """#669: the note is on the answer, where the caller looks."""
+        mock_controller.read_note = lambda: "QuernProbeScene (pid 711) exited ..."
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/v1/device/ui", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["warning"].startswith("QuernProbeScene (pid 711) exited")
+
+    async def test_a_pushed_tree_carries_no_wda_timeout(self, app, auth_headers,
+                                                        mock_controller):
+        mock_controller.backend_that_served = lambda udid: "coredevice"
+        mock_controller.wda_client.source_timed_out = lambda udid: 6.0
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/v1/device/ui", headers=auth_headers)
+        body = resp.json()
+        assert body["backend"] == "coredevice"
+        assert "source_timed_out" not in body and "degraded" not in body
+
+    async def test_a_wda_tree_still_reports_its_timeout(self, app, auth_headers,
+                                                       mock_controller):
+        mock_controller.backend_that_served = lambda udid: "wda"
+        mock_controller.wda_client.source_timed_out = lambda udid: 6.0
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/v1/device/ui", headers=auth_headers)
+        assert resp.json()["source_timed_out"] is True
+
     async def test_get_ui_elements_with_udid(self, app, auth_headers, mock_controller):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
