@@ -766,14 +766,36 @@ class TestTheControllerAfterACrash:
 
         ctrl.coredevice_ax.describe_all.assert_not_called()
 
-    async def test_another_app_still_is(self, monkeypatch):
+    async def test_after_a_crash_the_device_stays_on_wda(self, monkeypatch):
+        """The read after a crash sees SpringBoard; relaunching the app must not
+        put the next read back on the push (CodeRabbit on #668)."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
-        ctrl._last_app[PHONE] = "Settings"
+        ctrl._last_app[PHONE] = " "            # SpringBoard, after the crash
+
+        await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+
+        ctrl.coredevice_ax.describe_all.assert_not_called()
+
+    async def test_another_device_is_unaffected(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl._push_crashed_apps["OTHER-PHONE"] = {"QuernProbeScene"}
 
         await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
 
         ctrl.coredevice_ax.describe_all.assert_awaited()
+
+    async def test_a_flat_read_never_gets_the_pushed_cache(self, monkeypatch):
+        """`mode` asks for WDA's read (CodeRabbit on #668)."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        await ctrl.get_ui_elements(PHONE, whole_screen=True)          # pushed, cached
+        ctrl.wda_client.describe_all_flat = AsyncMock(return_value=[{
+            "type": "Application", "AXLabel": "flat from WDA", "AXUniqueId": None,
+            "frame": {"x": 0, "y": 0, "width": 414, "height": 896}}])
+
+        elements, _ = await ctrl.get_ui_elements(PHONE, whole_screen=True, mode="flat")
+
+        assert [e.label for e in elements] == ["flat from WDA"]
 
     async def test_every_read_records_the_app_on_screen(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)

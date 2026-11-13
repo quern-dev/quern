@@ -698,10 +698,13 @@ class DeviceControllerUI:
         match = re.search(r"\d+", os_version or "")
         if not match or int(match.group()) < COREDEVICE_MIN_IOS:
             return None
-        # Not while the app last seen on screen is one a push read crashed
-        # (#669): the read cannot be made safe once started, so an app known
-        # to die under it is read through WDA instead.
-        if self._last_app.get(udid) in self._push_crashed_apps.get(udid, ()):
+        # Not on a device where a push read has crashed an app (#669). The read
+        # cannot be made safe once started, and keying on the app last seen is
+        # not enough: the read after a crash sees SpringBoard, so relaunching
+        # the app would put the next read straight back on the push and crash
+        # it again (CodeRabbit on #668). Telling the app in front first would
+        # cost a WDA call per read; until the server restarts, WDA reads it.
+        if self._push_crashed_apps.get(udid):
             return None
         return self.coredevice_ax
 
@@ -2625,7 +2628,7 @@ class DeviceControllerUI:
                 # action finding its target -- would match differently from
                 # the WDA read it stands in for.
                 and not (cached_by == self.coredevice_ax.TOOL_NAME
-                         and not (whole_screen and not has_filters))):
+                         and not (whole_screen and not has_filters and mode is None))):
             cached_elements, cached_time = self._ui_cache[resolved]
             age = now - cached_time
             if age < self._cache_ttl:
@@ -2740,8 +2743,8 @@ class DeviceControllerUI:
                     # caller sees next is the one the crash left (#669).
                     self._push_crashed_apps.setdefault(resolved, set()).add(e.app)
                     _READ_NOTE.set(
-                        f"{e}. This read is WDA's, and {e.app or 'that app'}'s screens "
-                        "will be read through WDA until the server restarts.")
+                        f"{e}. This read is WDA's, and this device's screens will be "
+                        "read through WDA until the server restarts.")
                 backend = self._ui_backend(resolved)
                 self._last_read_backend[resolved] = getattr(
                     backend, "TOOL_NAME", "unknown",
