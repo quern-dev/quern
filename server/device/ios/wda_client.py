@@ -509,6 +509,19 @@ class WdaBackend:
             if conn is None or conn.base_url != base_url:
                 self._connections[udid] = _WdaConnection(base_url=base_url)
             return base_url
+        # A start already under way for this phone is joined before anything
+        # is probed: probing first is what brought a second caller to the
+        # runner while it was still starting, and failed it there (#667).
+        from server.device.ios.wda import start_in_flight
+
+        pending = start_in_flight(udid)
+        if pending is not None:
+            started = await asyncio.shield(pending)
+            if not started.get("ready"):
+                raise DeviceError(
+                    f"WDA on {udid[:8]} did not start: {started.get('error')}",
+                    tool="wda",
+                )
         if udid in self._connections:
             conn = self._connections[udid]
 

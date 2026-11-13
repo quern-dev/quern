@@ -16,10 +16,13 @@ from server.config import ServerConfig
 from server.device.controller import DeviceController
 from server.device.ios.wda import (
     ICON_PATH,
+    _await_announcement,
     _find_xctestrun,
     _parse_ios_major_version,
     _post_process_runner_app,
     _rename_xctestrun,
+    _runner_ready,
+    _runner_url,
     build_wda,
     clone_wda,
     customize_wda,
@@ -1028,7 +1031,8 @@ class TestStartDriver:
                 new_callable=AsyncMock,
                 return_value=proc,
             ) as mock_exec,
-            patch("server.device.ios.wda._poll_wda_status", new_callable=AsyncMock, return_value=True),
+            patch("server.device.ios.wda._runner_ready", new_callable=AsyncMock,
+                  return_value=(True, None)),
         ):
             result = await start_driver("DEV-UUID-123", "iOS 17.4")
 
@@ -1046,11 +1050,218 @@ class TestStartDriver:
             patch("server.device.ios.wda.read_wda_state", return_value=state),
             patch("server.device.ios.wda._is_process_alive", return_value=True),
             patch("server.device.ios.wda._find_xctestrun", return_value=Path("/fake")),
+            patch("server.device.ios.wda._runner_url", new_callable=AsyncMock,
+                  return_value="http://[fd00::1]:8100"),
+            patch("server.device.ios.wda._poll_wda_status", new_callable=AsyncMock,
+                  return_value=True) as poll,
         ):
             result = await start_driver("DEV1", "iOS 17.4")
 
         assert result["status"] == "already_running"
         assert result["pid"] == 999
+        assert result["ready"] is True
+        # Ready because WDA answered, not because the pid was alive (#667).
+        poll.assert_awaited_once()
+        assert poll.await_args.args == ("http://[fd00::1]:8100",)
+
+    async def test_a_running_runner_that_announced_is_ready_without_polling(self, tmp_path):
+        """A runner an earlier server started: its announcement is in its log."""
+        log = tmp_path / "runner-DEV1.log"
+        log.write_text("Test Case started\nServerURLHere->http://10.0.0.2:8100<-ServerURLHere\n")
+        state = {"runners": {"DEV1": {"pid": 999, "log_path": str(log)}}}
+        with (
+            patch("server.device.ios.wda.read_wda_state", return_value=state),
+            patch("server.device.ios.wda._is_process_alive", return_value=True),
+            patch("server.device.ios.wda._find_xctestrun", return_value=Path("/fake")),
+            patch("server.device.ios.wda._runner_url", new_callable=AsyncMock,
+                  return_value="http://[fd00::1]:8100"),
+            patch("server.device.ios.wda._status_answers", new_callable=AsyncMock,
+                  return_value=True) as confirm,
+            patch("server.device.ios.wda._poll_wda_status", new_callable=AsyncMock) as poll,
+        ):
+            result = await start_driver("DEV1", "iOS 17.4")
+
+        assert result["status"] == "already_running"
+        assert result["ready"] is True
+        confirm.assert_awaited_once_with("http://[fd00::1]:8100")
+        poll.assert_not_called()
+
+    async def test_a_running_runner_that_never_announces_is_not_ready(
+            self, tmp_path, monkeypatch):
+        """#667: a live pid is not a serving WDA. Told ready on the pid alone, a
+        caller connected while the runner was still starting and failed."""
+        monkeypatch.setattr("server.device.ios.wda.DRIVER_START_TIMEOUT", 0.3)
+        log = tmp_path / "runner-DEV1.log"
+        log.write_text("Test Case started, still building the session...\n" * 3)
+        state = {"runners": {"DEV1": {"pid": 999, "log_path": str(log)}}}
+        with (
+            patch("server.device.ios.wda.read_wda_state", return_value=state),
+            patch("server.device.ios.wda._is_process_alive", return_value=True),
+            patch("server.device.ios.wda._find_xctestrun", return_value=Path("/fake")),
+            patch("server.device.ios.wda._status_answers", new_callable=AsyncMock,
+                  return_value=True) as confirm,
+        ):
+            result = await start_driver("DEV1", "iOS 17.4")
+
+        assert result["ready"] is False
+        assert "did not announce" in result["error"]
+        assert result["log_path"] == str(log)
+        confirm.assert_not_called()
+
+    async def test_concurrent_starts_share_one_runner_and_one_answer(self, tmp_path):
+        """The shape #667 failed in: a second caller arrives while the first
+        start is waiting. It joins that start -- one xcodebuild, one decision --
+        and nobody is told ready before the runner announces."""
+        import asyncio
+
+        state: dict = {"runners": {}}
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.returncode = None
+        logs = tmp_path / "logs"
+
+        def save(new):
+            state.update(new)
+
+        xctestrun = tmp_path / "quern-driver.xctestrun"
+        xctestrun.write_text("x")
+        with (
+            patch("server.device.ios.wda._find_xctestrun", return_value=xctestrun),
+            patch("server.device.ios.wda.WDA_LOG_DIR", logs),
+            patch("server.device.ios.wda.read_wda_state", side_effect=lambda: state),
+            patch("server.device.ios.wda.save_wda_state", side_effect=save),
+            patch("server.device.ios.wda._is_process_alive", return_value=True),
+            patch("server.device.ios.wda.asyncio.create_subprocess_exec",
+                  new_callable=AsyncMock, return_value=proc) as spawn,
+            patch("server.device.ios.tunneld.resolve_tunnel_udid", new_callable=AsyncMock,
+                  return_value=None),
+            patch("server.device.ios.wda._runner_url", new_callable=AsyncMock,
+                  return_value="http://localhost:8100"),
+            patch("server.device.ios.wda._status_answers", new_callable=AsyncMock,
+                  return_value=True),
+        ):
+            first = asyncio.create_task(start_driver("DEV1", "iOS 27.2"))
+            await asyncio.sleep(0.05)
+            second = asyncio.create_task(start_driver("DEV1", "iOS 27.2"))
+            await asyncio.sleep(0.3)
+            assert not first.done() and not second.done(), "ready before the announcement"
+            with open(logs / "runner-DEV1.log", "a") as f:
+                f.write("ServerURLHere->http://10.0.0.2:8100<-ServerURLHere\n")
+            results = await asyncio.wait_for(asyncio.gather(first, second), 5)
+
+        assert spawn.await_count == 1
+        assert all(r["ready"] and r["pid"] == 4242 for r in results)
+        # One start, joined: the second caller gets the first one's answer
+        # rather than inspecting the runner itself.
+        assert [r["status"] for r in results] == ["started", "started"]
+
+    async def test_concurrent_callers_run_one_start(self):
+        import asyncio
+
+        gate = asyncio.Event()
+        calls = []
+
+        async def start(udid, os_version):
+            calls.append(udid)
+            await gate.wait()
+            return {"status": "started", "udid": udid, "pid": 1, "ready": True}
+
+        with patch("server.device.ios.wda._start_driver", side_effect=start):
+            callers = [asyncio.create_task(start_driver("DEV1", "iOS 27.2")) for _ in range(3)]
+            await asyncio.sleep(0.05)
+            gate.set()
+            results = await asyncio.wait_for(asyncio.gather(*callers), 2)
+            # Once it is over, the next call is a new start.
+            gate.clear()
+            again = asyncio.create_task(start_driver("DEV1", "iOS 27.2"))
+            await asyncio.sleep(0.05)
+            gate.set()
+            await asyncio.wait_for(again, 2)
+
+        assert calls == ["DEV1", "DEV1"]
+        assert all(r["ready"] for r in results)
+
+    async def test_a_caller_that_gives_up_does_not_cancel_the_start(self, tmp_path):
+        import asyncio
+
+        gate = asyncio.Event()
+
+        async def slow_start(udid, os_version):
+            await gate.wait()
+            return {"status": "started", "udid": udid, "pid": 1, "ready": True}
+
+        with patch("server.device.ios.wda._start_driver", side_effect=slow_start):
+            impatient = asyncio.create_task(start_driver("DEV1", "iOS 27.2"))
+            patient = asyncio.create_task(start_driver("DEV1", "iOS 27.2"))
+            await asyncio.sleep(0.05)
+            impatient.cancel()
+            gate.set()
+            result = await asyncio.wait_for(patient, 2)
+
+        assert result["ready"] is True
+
+    async def test_a_runner_that_dies_fails_at_once_with_its_reason(self, tmp_path):
+        """No 30-second wait for a runner that has already exited."""
+        import asyncio
+
+        log = tmp_path / "runner.log"
+        log.write_text("xcodebuild: error: Signing for \"WebDriverAgentRunner\" requires a "
+                       "development team.\n" * 3)
+        with patch("server.device.ios.wda._status_answers", new_callable=AsyncMock) as confirm:
+            loop = asyncio.get_running_loop()
+            began = loop.time()
+            ready, error = await _runner_ready("DEV1", "iOS 27.2", log, lambda: False)
+
+        assert ready is False
+        assert loop.time() - began < 1.0
+        assert error
+        confirm.assert_not_called()
+
+    async def test_an_announcement_split_across_reads_is_seen(self, tmp_path):
+        import asyncio
+
+        log = tmp_path / "runner.log"
+        log.write_text("starting\nServerURL")
+
+        async def finish():
+            await asyncio.sleep(0.25)
+            with open(log, "a") as f:
+                f.write("Here->http://10.0.0.2:8100<-ServerURLHere\n")
+
+        task = asyncio.create_task(finish())
+        assert await _await_announcement(log, lambda: True, timeout=3) is None
+        await task
+
+    async def test_an_announcement_without_a_status_answer_is_not_ready(self, tmp_path):
+        log = tmp_path / "runner.log"
+        log.write_text("ServerURLHere->http://10.0.0.2:8100<-ServerURLHere\n")
+        with (
+            patch("server.device.ios.wda._runner_url", new_callable=AsyncMock,
+                  return_value="http://localhost:8100"),
+            patch("server.device.ios.wda._status_answers", new_callable=AsyncMock,
+                  return_value=False),
+        ):
+            ready, error = await _runner_ready("DEV1", "iOS 27.2", log, lambda: True)
+        assert ready is False and "did not answer" in error
+
+    async def test_the_runner_url_is_the_tunnel_on_ios_17_and_later(self):
+        with (
+            patch("server.device.ios.tunneld.get_tunneld_devices", new_callable=AsyncMock,
+                  return_value={"HW1": [{"tunnel-address": "fd00::1"}]}),
+            patch("server.device.ios.tunneld.resolve_tunnel_udid", new_callable=AsyncMock,
+                  return_value="HW1"),
+        ):
+            assert await _runner_url("DEV1", "iOS 17.4") == "http://[fd00::1]:8100"
+            assert await _runner_url("DEV1", "iOS 16.7") == "http://localhost:8100"
+
+    async def test_with_no_tunnel_the_runner_url_is_the_usbmux_forward(self):
+        with (
+            patch("server.device.ios.tunneld.get_tunneld_devices", new_callable=AsyncMock,
+                  return_value={}),
+            patch("server.device.ios.tunneld.resolve_tunnel_udid", new_callable=AsyncMock,
+                  return_value=None),
+        ):
+            assert await _runner_url("DEV1", "iOS 27.2") == "http://localhost:8100"
 
     async def test_start_driver_cleans_stale_pid(self, tmp_path):
         products = tmp_path / "Build" / "Products"

@@ -669,6 +669,52 @@ class TestWdaConnectionManagement:
             url = await backend._get_base_url("test-udid")
             assert url == "http://[fd35::1]:8100"
 
+    async def test_a_start_in_flight_is_joined_before_any_probe(self):
+        """#667: probing first brought a second caller to the runner while it
+        was still starting. Now it waits for that start, then connects."""
+        import asyncio
+
+        from server.device.ios import wda
+
+        backend = WdaBackend()
+        loop = asyncio.get_running_loop()
+        start: asyncio.Future = loop.create_future()
+        wda._starts["test-udid"] = start
+        try:
+            with patch.object(backend, "_try_tunneld_connection", new_callable=AsyncMock,
+                              return_value="http://[fd35::1]:8100") as probe:
+                caller = asyncio.create_task(backend._get_base_url("test-udid"))
+                await asyncio.sleep(0.05)
+                probe.assert_not_called()          # still waiting on the start
+                start.set_result({"status": "started", "ready": True})
+                assert await asyncio.wait_for(caller, 2) == "http://[fd35::1]:8100"
+        finally:
+            wda._starts.pop("test-udid", None)
+
+    async def test_a_joined_start_that_failed_is_the_callers_failure(self):
+        import asyncio
+
+        from server.device.ios import wda
+
+        backend = WdaBackend()
+        start: asyncio.Future = asyncio.get_running_loop().create_future()
+        start.set_result({"status": "started", "ready": False,
+                          "error": "the WDA runner exited before its server started"})
+        # A done future is no longer in flight, so the join reads it only
+        # while it is pending; model the moment before it completes.
+        wda._starts["test-udid"] = start
+        try:
+            with (
+                patch("server.device.ios.wda.start_in_flight", return_value=start),
+                patch.object(backend, "_try_tunneld_connection",
+                             new_callable=AsyncMock) as probe,
+            ):
+                with pytest.raises(DeviceError, match="exited before its server started"):
+                    await backend._get_base_url("test-udid")
+                probe.assert_not_called()
+        finally:
+            wda._starts.pop("test-udid", None)
+
     async def test_close_terminates_forward_procs(self):
         backend = WdaBackend()
         mock_proc = AsyncMock()
