@@ -350,7 +350,7 @@ async def get_ui_elements(
                 else:
                     elements, resolved_udid = await controller.get_ui_elements(
                         udid=udid, snapshot_depth=snapshot_depth,
-                        source_timeout=source_timeout, mode=mode,
+                        source_timeout=source_timeout, mode=mode, whole_screen=True,
                     )
             elif children_of:
                 elements, resolved_udid = await controller.get_ui_elements_children_of(
@@ -359,7 +359,7 @@ async def get_ui_elements(
             else:
                 elements, resolved_udid = await controller.get_ui_elements(
                     udid=udid, snapshot_depth=snapshot_depth,
-                    source_timeout=source_timeout, mode=mode,
+                    source_timeout=source_timeout, mode=mode, whole_screen=True,
                 )
 
             act.udid = resolved_udid
@@ -383,9 +383,11 @@ async def get_ui_elements(
             # timed out. `get_screen_summary` got this guard; this route is
             # its sibling and did not, which is the same omission the review
             # of this PR found in `describe_all_nested`.
-            backend = None if asked_for_skeleton else getattr(
-                controller, "wda_client", None
-            )
+            # And only when WDA made this read: its record of an earlier
+            # `/source` timeout says nothing about a tree push (#664).
+            wda = getattr(controller, "wda_client", None)
+            served_by_wda = body["backend"] == getattr(wda, "TOOL_NAME", None)
+            backend = None if asked_for_skeleton or not served_by_wda else wda
             timed_out = getattr(backend, "source_timed_out", None)
             seconds = timed_out(resolved_udid) if callable(timed_out) else None
             if seconds is not None:
@@ -395,6 +397,9 @@ async def get_ui_elements(
                     "so this is a partial fallback rather than the tree. Retry "
                     "with a larger source_timeout."
                 )
+            note = controller.read_note()
+            if note:
+                body["warning"] = note
             return body
         except DeviceError as e:
             raise _handle_device_error(e)
@@ -620,6 +625,7 @@ async def get_screen_summary(
             strategy=strategy,
             source_timeout=source_timeout,
             mode=mode,
+            whole_screen=True,
         )
         summary["udid"] = resolved_udid
 

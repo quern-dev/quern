@@ -27,6 +27,7 @@ import pytest
 
 from server.device.android.u2_client import U2Backend
 from server.device.controller import DeviceController
+from server.device.ios.coredevice_ax import CoreDeviceAxReader
 from server.device.ios.idb import IdbBackend
 from server.device.ios.sim_bridge import SimBridgeBackend
 from server.device.ios.wda_client import WdaBackend
@@ -37,7 +38,7 @@ class TestTheNameComesFromTheBackend:
     """Read off whichever backend was selected, never re-decided."""
 
     def test_every_backend_declares_one(self):
-        for cls in (SimBridgeBackend, IdbBackend, U2Backend, WdaBackend):
+        for cls in (SimBridgeBackend, IdbBackend, U2Backend, WdaBackend, CoreDeviceAxReader):
             assert getattr(cls, "TOOL_NAME", None), f"{cls.__name__} has no TOOL_NAME"
 
     def test_the_names_are_distinct(self):
@@ -45,7 +46,8 @@ class TestTheNameComesFromTheBackend:
         the case it exists for."""
         names = [
             c.TOOL_NAME
-            for c in (SimBridgeBackend, IdbBackend, U2Backend, WdaBackend)
+            for c in (SimBridgeBackend, IdbBackend, U2Backend, WdaBackend,
+                      CoreDeviceAxReader)
         ]
         assert len(set(names)) == len(names), names
 
@@ -102,7 +104,7 @@ class TestTheDispatcherDoesNotHardcodeAToolName:
     #: Names of actual UI backends. `web-content` and the like are different
     #: subsystems, not backends the dispatcher chooses between, so a literal
     #: there is correct.
-    BACKEND_NAMES = {"idb", "sim-bridge", "wda", "u2"}
+    BACKEND_NAMES = {"idb", "sim-bridge", "wda", "u2", "coredevice"}
 
     @staticmethod
     def _hardcoded_backend_names(source, names):

@@ -2,11 +2,18 @@
 
 *`quern://guide/devices/physical` -- part of `quern://guide/devices` in the Quern agent guide. Start from `quern://guide`.*
 
-Physical iOS devices are supported for screenshots, UI automation, log capture, and crash reports. UI automation on a device always uses WebDriverAgent (WDA). A simulator uses the accessibility tree (sim-bridge / idb) by default, and can be switched to WDA with `start_driver` — that is the way to see the element types XCUITest will see (`xcui_type`), and `stop_driver` switches it back.
+Physical iOS devices are supported for screenshots, UI automation, log capture, and crash reports. UI automation on a device uses WebDriverAgent (WDA); on iOS 27 a server can read the screen without it (below). A simulator uses the accessibility tree (sim-bridge / idb) by default, and can be switched to WDA with `start_driver` — that is the way to see the element types XCUITest will see (`xcui_type`), and `stop_driver` switches it back.
 
 **First-time setup**: Call `setup_wda` with the device UDID. This builds and installs WDA on the device, which requires a valid Apple Developer signing identity. If multiple identities exist, the tool returns a list — call again with the chosen `team_id`. The app appears on the device as **Quern Driver**.
 
 **After setup**: WDA auto-starts when you first interact with the device (screenshot, UI tree, tap, etc.). No need to manually call `start_driver` — it happens transparently. The driver idles out after 15 minutes of inactivity.
+
+**Screen reads without WDA (`backend: "coredevice"`)**: on iOS 27 and later, a server whose owner has set `"device_ui_reader": "coredevice"` in `~/.quern/config.json` reads a physical iPhone's screen from the accessibility tree the device sends over its tunnel, instead of asking WDA. That covers `get_ui_tree` and `get_screen_summary` called without `snapshot_depth`, `strategy`, `children_of` or `mode`, at about 2 s a screen. Any of those asks for WDA's own read, and gets it. Element lookups (`tap_element`, `wait_for_element`, `get_element_state`), the screen context inside other tools' answers, and every action still go through WDA, so they behave exactly as before. The tree is what VoiceOver can reach, so it differs from WDA's in three ways:
+- only elements on screen, and nothing hidden under a toolbar;
+- a row's inner texts merged into one label ("Wi-Fi, Home" where WDA has a button and two texts);
+- the element names a simulator uses (`CheckBox` for a switch, `Heading` for a title).
+
+So a label read off this tree may not be one WDA can find: a row's merged label is not its WDA label. Tap rows by `identifier`. A read it cannot make falls back to WDA, and `backend` on the answer says which one served it. On iOS 27.2 the push read can crash some apps (screens inside a tab bar's More list, #669). When it does, the answer carries a `warning` naming the app and comes from WDA, and that device's screens are read through WDA until the server restarts.
 
 **What works the same**: `take_screenshot`, `get_screen_summary`, `get_ui_tree`, `tap_element`, `swipe`, `type_text`, `wait_for_element`, `install_app`, `launch_app`, `terminate_app`.
 

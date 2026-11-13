@@ -7,10 +7,13 @@ import contextlib
 import contextvars
 import logging
 import math
+import re
 import time
 
+from server.config import get_device_ui_reader
 from server.device import gestures
 from server.device.element_types import equivalence, related_type_names
+from server.device.ios.coredevice_ax import COREDEVICE_MIN_IOS, AppExitedDuringRead
 from server.device.ios.hinge import DEFAULT_SWEEP_MS, POSES
 from server.device.media.screenshots import annotate_screenshot
 from server.device.probing import frame_key
@@ -570,14 +573,23 @@ def _covering_element(target: UIElement, hit: dict | None) -> dict | None:
     return covering
 
 
+#: Set by a read that had to say something about how it was made: today, that
+#: the tree push crashed the app (#669). Per request, so one caller's note
+#: never reaches another's response; the endpoints put it on the answer.
+_READ_NOTE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "quern_read_note", default=None)
+
+
 class DeviceControllerUI:
     """Mixin providing UI inspection and interaction methods.
 
     Expects the consuming class to provide:
     - self.idb: IdbBackend
     - self.wda_client: WdaBackend
+    - self.coredevice_ax: CoreDeviceAxReader
     - self.simctl: SimctlBackend
     - self._ui_cache: dict[str, tuple[list[UIElement], float]]
+    - self._ui_cache_backend: dict[str, str]
     - self._cache_ttl: float
     - self._cache_hits: int
     - self._cache_misses: int
@@ -667,6 +679,38 @@ class DeviceControllerUI:
         WDA mode. Ask this, not `_is_physical`, before a WDA-only call: since
         #336 the two are not the same question."""
         return self._ui_backend(udid) is self.wda_client
+
+    def _device_tree_reader(self, udid: str):
+        """The CoreDevice tree reader when it should serve this device's
+        reads, else None (#664).
+
+        Reads only: taps and every other action keep going through
+        `_ui_backend`, which is WDA for a phone. Opt-in through
+        `device_ui_reader` in config.json, and only on iOS 27 and later, the
+        only versions it has been measured on. A device whose version quern has
+        not seen stays with WDA rather than being guessed at.
+        """
+        if self._is_android(udid) or not self._is_physical(udid):
+            return None
+        if get_device_ui_reader() != "coredevice":
+            return None
+        os_version = self.wda_client._device_os_versions.get(udid)
+        match = re.search(r"\d+", os_version or "")
+        if not match or int(match.group()) < COREDEVICE_MIN_IOS:
+            return None
+        # Not on a device where a push read has crashed an app (#669). The read
+        # cannot be made safe once started, and keying on the app last seen is
+        # not enough: the read after a crash sees SpringBoard, so relaunching
+        # the app would put the next read straight back on the push and crash
+        # it again (CodeRabbit on #668). Telling the app in front first would
+        # cost a WDA call per read; until the server restarts, WDA reads it.
+        if self._push_crashed_apps.get(udid):
+            return None
+        return self.coredevice_ax
+
+    def read_note(self) -> str | None:
+        """What this request's read had to report about itself, if anything."""
+        return _READ_NOTE.get()
 
     #: Backend name per device, written by `get_ui_elements` when it selects
     #: one. Read by the error paths that follow a read, so the label names the
@@ -2498,8 +2542,14 @@ class DeviceControllerUI:
         mode: str | None = None,
         probe_containers: bool = True,
         deepen_on_miss: bool = False,
+        whole_screen: bool = False,
     ) -> tuple[list[UIElement], str]:
         """Native UI elements, plus any web content read by get_web_content.
+
+        `whole_screen` marks a read made to show a caller the screen --
+        `get_ui_tree`, `get_screen_summary` -- which a physical iPhone may
+        serve from its tree push (#664). Every read made inside an action
+        leaves it False and stays with WDA.
 
         The merge happens here rather than in the cache so every consumer --
         tap_element, screen summaries, landmark matching, annotated screenshots
@@ -2509,8 +2559,12 @@ class DeviceControllerUI:
             udid, use_cache, filter_label, filter_identifier, filter_type,
             snapshot_depth, source_timeout, mode,
             probe_containers=probe_containers, deepen_on_miss=deepen_on_miss,
+            whole_screen=whole_screen,
         )
-        if self._served_by_wda(resolved):
+        # Not on a CoreDevice read: the push holds only what is on screen, and
+        # marking asks WDA for the viewport, which would start it for nothing.
+        if (self._served_by_wda(resolved)
+                and self._last_read_backend.get(resolved) != self.coredevice_ax.TOOL_NAME):
             await self._mark_on_screen(resolved, elements)
         return self._merge_web_overlay(
             resolved, elements,
@@ -2530,6 +2584,7 @@ class DeviceControllerUI:
         mode: str | None = None,
         probe_containers: bool = True,
         deepen_on_miss: bool = False,
+        whole_screen: bool = False,
     ) -> tuple[list[UIElement], str]:
         """Get UI accessibility elements with TTL-based caching and optional filtering.
 
@@ -2566,11 +2621,22 @@ class DeviceControllerUI:
 
         # Check cache (unless explicitly bypassed)
         # Strategy: Use cached full tree, then filter in memory (fast)
-        if use_cache and resolved in self._ui_cache:
+        cached_by = self._ui_cache_backend.get(resolved)
+        if (use_cache and resolved in self._ui_cache
+                # A pushed tree answers whole-screen reads only (#664): its rows
+                # carry merged labels, so a lookup over it -- a filter, or an
+                # action finding its target -- would match differently from
+                # the WDA read it stands in for.
+                and not (cached_by == self.coredevice_ax.TOOL_NAME
+                         and not (whole_screen and not has_filters and mode is None))):
             cached_elements, cached_time = self._ui_cache[resolved]
             age = now - cached_time
             if age < self._cache_ttl:
                 self._cache_hits += 1
+                # A hit reports the backend that made the tree, not whichever
+                # read happened last.
+                if cached_by:
+                    self._last_read_backend[resolved] = cached_by
 
                 # If filters provided, apply them to cached elements (in-memory filtering is fast)
                 if has_filters:
@@ -2580,6 +2646,17 @@ class DeviceControllerUI:
                     return filtered, resolved
 
                 return cached_elements, resolved
+
+        # The tree push serves only reads made to show the screen, asked for
+        # by name: inferring them from "no filter" let the text actions'
+        # target lookups through (CodeRabbit on #668). Lookups and every read
+        # an action makes stay on WDA exactly as before, until phase 2 settles
+        # how a merged row label should match (#664). A WDA depth or flat mode
+        # is a request for WDA's own read.
+        reader = (self._device_tree_reader(resolved)
+                  if whole_screen and not has_filters and snapshot_depth is None
+                  and mode != "flat"
+                  else None)
 
         # WDA direct query: physical device + filters + cache miss → query directly
         if has_filters and self._served_by_wda(resolved):
@@ -2633,7 +2710,7 @@ class DeviceControllerUI:
         if self._is_android(resolved):
             await self._ensure_android_screen_on(resolved)
 
-        backend = self._ui_backend(resolved)
+        backend = reader or self._ui_backend(resolved)
         # Recorded at the one moment it is authoritative: the read's own
         # selection. Capturing it before the call is stale if the periodic
         # refresh flips `_sim_bridge_ok` in between, and recomputing it when
@@ -2648,12 +2725,40 @@ class DeviceControllerUI:
             )
             use_cache = False  # flat mode returns different elements
         else:
-            raw = await backend.describe_all(
-                resolved, snapshot_depth=snapshot_depth,
-                source_timeout=source_timeout, probe=probe_containers,
-            )
+            try:
+                raw = await backend.describe_all(
+                    resolved, snapshot_depth=snapshot_depth,
+                    source_timeout=source_timeout, probe=probe_containers,
+                )
+            except DeviceError as e:
+                if backend is not reader:
+                    raise
+                # The reader is new and opt-in; a read it cannot make is made
+                # the way it was before, and `backend` on the answer says
+                # which one served it.
+                logger.warning("[coredevice] read of %s failed, using WDA: %s",
+                               resolved[:8], e)
+                if isinstance(e, AppExitedDuringRead):
+                    # Said on the answer, not only in the log: the screen the
+                    # caller sees next is the one the crash left (#669).
+                    self._push_crashed_apps.setdefault(resolved, set()).add(e.app)
+                    _READ_NOTE.set(
+                        f"{e}. This read is WDA's, and this device's screens will be "
+                        "read through WDA until the server restarts.")
+                backend = self._ui_backend(resolved)
+                self._last_read_backend[resolved] = getattr(
+                    backend, "TOOL_NAME", "unknown",
+                )
+                raw = await backend.describe_all(
+                    resolved, snapshot_depth=snapshot_depth,
+                    source_timeout=source_timeout, probe=probe_containers,
+                )
 
         self._remember_screen(resolved, raw)
+        # The app on screen, by name, whichever backend read it: what decides
+        # whether the next whole-screen read may use the push (#669).
+        if raw and isinstance(raw[0], dict) and raw[0].get("type") == "Application":
+            self._last_app[resolved] = raw[0].get("AXLabel") or ""
 
         # Parse strategy:
         # - If filters AND will cache: parse full tree (for cache), then filter in memory
@@ -2683,6 +2788,9 @@ class DeviceControllerUI:
             # scroll_to_element returns, which is exactly that window.
             if probe_containers:
                 self._ui_cache[resolved] = (elements, time.time())
+                # This read's own backend: `_last_read_backend` is shared, and a
+                # concurrent WDA lookup can rewrite it while this read awaits.
+                self._ui_cache_backend[resolved] = getattr(backend, "TOOL_NAME", "unknown")
 
             # Apply filters in memory if needed
             if has_filters:
@@ -3053,6 +3161,7 @@ class DeviceControllerUI:
         strategy: str | None = None,
         source_timeout: float | None = None,
         mode: str | None = None,
+        whole_screen: bool = False,
     ) -> tuple[dict, list, str]:
         """Generate an LLM-optimized screen summary.
 
@@ -3076,13 +3185,15 @@ class DeviceControllerUI:
             elements, resolved = await self.get_ui_elements(
                 udid, snapshot_depth=snapshot_depth,
                 source_timeout=source_timeout,
-                mode=mode,
+                mode=mode, whole_screen=whole_screen,
             )
         summary = generate_screen_summary(elements, max_elements=max_elements)
         # Which backend produced this. Cheap, and the first thing anyone
         # investigating unexpected UI behaviour wants to know -- see
         # `backend_that_served`.
         summary["backend"] = self.backend_that_served(resolved)
+        if note := self.read_note():
+            summary["warning"] = note
 
         # A tree read that timed out falls back to a container skeleton,
         # which is often empty -- and an empty result is exactly what a blank
@@ -3098,7 +3209,11 @@ class DeviceControllerUI:
         # their deliberate choice had timed out. The agent guide recommends
         # `strategy: "skeleton"` for exactly the dense screens that produce
         # these timeouts, so it is the likely sequence rather than a corner.
-        backend = None if asked_for_skeleton else self._ui_backend(resolved)
+        # And not after a tree push: WDA's record of an earlier `/source`
+        # timeout says nothing about a read WDA did not make (CodeRabbit on
+        # #668), while `_ui_backend` still names WDA for the actions.
+        pushed = summary["backend"] == self.coredevice_ax.TOOL_NAME
+        backend = None if asked_for_skeleton or pushed else self._ui_backend(resolved)
         timed_out = getattr(backend, "source_timed_out", None)
         seconds = timed_out(resolved) if callable(timed_out) else None
         if seconds is not None:
