@@ -967,6 +967,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     if device_controller:
         await device_controller.wda_client.close()
+        # The held CoreDevice input sessions, each an open RSD connection (#664).
+        try:
+            await device_controller.coredevice_input.close()
+        except Exception:
+            logger.debug("closing CoreDevice input sessions failed", exc_info=True)
         # The gesture servers' adb forwards outlive this process otherwise:
         # adb keeps them until it restarts, one per run (#252).
         try:
