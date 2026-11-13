@@ -855,14 +855,14 @@ def test_tool_descriptions_name_backends_the_code_can_emit():
     # Located through the modules, not built from parts: the backends moved
     # into ios/ and android/ (#396), and a built path does not follow.
     from server.device.android import u2_client
-    from server.device.ios import idb, sim_bridge, wda_client
+    from server.device.ios import coredevice_ax, idb, sim_bridge, wda_client
 
-    for mod in (u2_client, wda_client, sim_bridge, idb):
+    for mod in (u2_client, wda_client, sim_bridge, idb, coredevice_ax):
         text = Path(mod.__file__).read_text()
         # Either a literal, or the module constant sim_bridge assigns from.
         real.update(re.findall(r'TOOL_NAME\s*=\s*"([^"]+)"', text))
         real.update(re.findall(r'^_TOOL\s*=\s*"([^"]+)"', text, re.M))
-    assert len(real) >= 4, (
+    assert len(real) >= 5, (
         f"expected a TOOL_NAME per backend, found {sorted(real)} -- this "
         "guard passes vacuously if the scan misses one"
     )
