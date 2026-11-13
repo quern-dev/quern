@@ -15,6 +15,7 @@ from server.device.android.adb import AdbBackend
 from server.device.android.u2_client import U2Backend
 from server.device.controller_ui import DeviceControllerUI
 from server.device.ios import sim_settings
+from server.device.ios.coredevice_ax import CoreDeviceAxReader
 from server.device.ios.devicectl import DevicectlBackend, canonical_device_id, spellings_of
 from server.device.ios.hinge import HingeControl
 from server.device.ios.idb import IdbBackend
@@ -123,6 +124,7 @@ class DeviceController(DeviceControllerUI):
         self.pmd3 = Pmd3Backend()
         self.usbmux = UsbmuxBackend()
         self.wda_client = WdaBackend()
+        self.coredevice_ax = CoreDeviceAxReader()
         self.adb = AdbBackend()
         self.u2 = U2Backend()
         self.sim_bridge_manager = SimBridgeManager()

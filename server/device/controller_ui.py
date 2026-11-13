@@ -7,10 +7,13 @@ import contextlib
 import contextvars
 import logging
 import math
+import re
 import time
 
+from server.config import get_device_ui_reader
 from server.device import gestures
 from server.device.element_types import equivalence, related_type_names
+from server.device.ios.coredevice_ax import COREDEVICE_MIN_IOS
 from server.device.ios.hinge import DEFAULT_SWEEP_MS, POSES
 from server.device.media.screenshots import annotate_screenshot
 from server.device.probing import frame_key
@@ -576,6 +579,7 @@ class DeviceControllerUI:
     Expects the consuming class to provide:
     - self.idb: IdbBackend
     - self.wda_client: WdaBackend
+    - self.coredevice_ax: CoreDeviceAxReader
     - self.simctl: SimctlBackend
     - self._ui_cache: dict[str, tuple[list[UIElement], float]]
     - self._cache_ttl: float
@@ -667,6 +671,26 @@ class DeviceControllerUI:
         WDA mode. Ask this, not `_is_physical`, before a WDA-only call: since
         #336 the two are not the same question."""
         return self._ui_backend(udid) is self.wda_client
+
+    def _device_tree_reader(self, udid: str):
+        """The CoreDevice tree reader when it should serve this device's
+        reads, else None (#664).
+
+        Reads only: taps and every other action keep going through
+        `_ui_backend`, which is WDA for a phone. Opt-in through
+        `device_ui_reader` in config.json, and only on iOS 27 and later, the
+        only versions it has been measured on. A device whose version quern has
+        not seen stays with WDA rather than being guessed at.
+        """
+        if self._is_android(udid) or not self._is_physical(udid):
+            return None
+        if get_device_ui_reader() != "coredevice":
+            return None
+        os_version = self.wda_client._device_os_versions.get(udid)
+        match = re.search(r"\d+", os_version or "")
+        if not match or int(match.group()) < COREDEVICE_MIN_IOS:
+            return None
+        return self.coredevice_ax
 
     #: Backend name per device, written by `get_ui_elements` when it selects
     #: one. Read by the error paths that follow a read, so the label names the
@@ -2510,7 +2534,10 @@ class DeviceControllerUI:
             snapshot_depth, source_timeout, mode,
             probe_containers=probe_containers, deepen_on_miss=deepen_on_miss,
         )
-        if self._served_by_wda(resolved):
+        # Not on a CoreDevice read: the push holds only what is on screen, and
+        # marking asks WDA for the viewport, which would start it for nothing.
+        if (self._served_by_wda(resolved)
+                and self._last_read_backend.get(resolved) != self.coredevice_ax.TOOL_NAME):
             await self._mark_on_screen(resolved, elements)
         return self._merge_web_overlay(
             resolved, elements,
@@ -2581,8 +2608,12 @@ class DeviceControllerUI:
 
                 return cached_elements, resolved
 
+        # The tree push is the whole screen in one read, so a filtered read
+        # through it filters in memory below rather than querying WDA.
+        reader = self._device_tree_reader(resolved)
+
         # WDA direct query: physical device + filters + cache miss → query directly
-        if has_filters and self._served_by_wda(resolved):
+        if has_filters and reader is None and self._served_by_wda(resolved):
             # Recorded here too: this path returns before the general one
             # below, so `backend` went on naming whatever served the last full
             # read -- `sim-bridge` on a simulator just put in WDA mode (#336).
@@ -2633,7 +2664,7 @@ class DeviceControllerUI:
         if self._is_android(resolved):
             await self._ensure_android_screen_on(resolved)
 
-        backend = self._ui_backend(resolved)
+        backend = reader or self._ui_backend(resolved)
         # Recorded at the one moment it is authoritative: the read's own
         # selection. Capturing it before the call is stale if the periodic
         # refresh flips `_sim_bridge_ok` in between, and recomputing it when
@@ -2648,10 +2679,27 @@ class DeviceControllerUI:
             )
             use_cache = False  # flat mode returns different elements
         else:
-            raw = await backend.describe_all(
-                resolved, snapshot_depth=snapshot_depth,
-                source_timeout=source_timeout, probe=probe_containers,
-            )
+            try:
+                raw = await backend.describe_all(
+                    resolved, snapshot_depth=snapshot_depth,
+                    source_timeout=source_timeout, probe=probe_containers,
+                )
+            except DeviceError as e:
+                if backend is not reader:
+                    raise
+                # The reader is new and opt-in; a read it cannot make is made
+                # the way it was before, and `backend` on the answer says
+                # which one served it.
+                logger.warning("[coredevice] read of %s failed, using WDA: %s",
+                               resolved[:8], e)
+                backend = self._ui_backend(resolved)
+                self._last_read_backend[resolved] = getattr(
+                    backend, "TOOL_NAME", "unknown",
+                )
+                raw = await backend.describe_all(
+                    resolved, snapshot_depth=snapshot_depth,
+                    source_timeout=source_timeout, probe=probe_containers,
+                )
 
         self._remember_screen(resolved, raw)
 
