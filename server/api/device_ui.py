@@ -350,7 +350,7 @@ async def get_ui_elements(
                 else:
                     elements, resolved_udid = await controller.get_ui_elements(
                         udid=udid, snapshot_depth=snapshot_depth,
-                        source_timeout=source_timeout, mode=mode,
+                        source_timeout=source_timeout, mode=mode, whole_screen=True,
                     )
             elif children_of:
                 elements, resolved_udid = await controller.get_ui_elements_children_of(
@@ -359,7 +359,7 @@ async def get_ui_elements(
             else:
                 elements, resolved_udid = await controller.get_ui_elements(
                     udid=udid, snapshot_depth=snapshot_depth,
-                    source_timeout=source_timeout, mode=mode,
+                    source_timeout=source_timeout, mode=mode, whole_screen=True,
                 )
 
             act.udid = resolved_udid
@@ -620,6 +620,7 @@ async def get_screen_summary(
             strategy=strategy,
             source_timeout=source_timeout,
             mode=mode,
+            whole_screen=True,
         )
         summary["udid"] = resolved_udid
 

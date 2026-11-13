@@ -489,7 +489,8 @@ class TestGetUIElements:
         assert len(data["elements"]) == 3
         assert data["udid"] == "AAAA-1111"
         mock_controller.get_ui_elements.assert_called_once_with(
-            udid=None, snapshot_depth=None, source_timeout=None, mode=None
+            udid=None, snapshot_depth=None, source_timeout=None, mode=None,
+            whole_screen=True,  # the push may serve it (#664)
         )
 
     async def test_get_ui_elements_with_udid(self, app, auth_headers, mock_controller):
@@ -501,7 +502,8 @@ class TestGetUIElements:
             )
         assert resp.status_code == 200
         mock_controller.get_ui_elements.assert_called_once_with(
-            udid="BBBB-2222", snapshot_depth=None, source_timeout=None, mode=None
+            udid="BBBB-2222", snapshot_depth=None, source_timeout=None, mode=None,
+            whole_screen=True,
         )
 
     async def test_get_ui_elements_strips_extra_attrs_by_default(
@@ -634,6 +636,7 @@ class TestScreenSummary:
             strategy=None,
             source_timeout=None,
             mode=None,
+            whole_screen=True,
         )
 
     async def test_screen_summary_with_strategy(self, app, auth_headers, mock_controller):
@@ -651,6 +654,7 @@ class TestScreenSummary:
             strategy="skeleton",
             source_timeout=None,
             mode=None,
+            whole_screen=True,
         )
 
 

@@ -380,7 +380,9 @@ class TestReadingADevice:
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
 
         with pytest.raises(DeviceError, match="no complete accessibility tree") as caught:
-            await read_tree(PHONE, timeout=0.5)
+            # Bounded on its own: if read_tree stopped enforcing its deadline,
+            # this must fail rather than wait forever.
+            await asyncio.wait_for(read_tree(PHONE, timeout=0.5), 5)
 
         assert caught.value.tool == "coredevice"
         assert state.provider_closed and state.rsd_closed
@@ -516,7 +518,7 @@ class TestReadsThroughTheController:
     async def test_a_read_uses_the_push_and_names_it(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
 
-        elements, _ = await ctrl.get_ui_elements(PHONE, use_cache=False)
+        elements, _ = await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
 
         assert len(elements) == 14
         ctrl.wda_client.describe_all.assert_not_called()
@@ -539,14 +541,15 @@ class TestReadsThroughTheController:
         asked WDA for one."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
 
-        await ctrl.get_ui_elements(PHONE, use_cache=False, snapshot_depth=12)
+        await ctrl.get_ui_elements(PHONE, use_cache=False, snapshot_depth=12,
+                                   whole_screen=True)
 
         ctrl.wda_client.describe_all.assert_awaited()
         ctrl.coredevice_ax.describe_all.assert_not_called()
 
     async def test_a_cached_push_tree_never_answers_a_lookup(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
-        await ctrl.get_ui_elements(PHONE)            # whole screen, cached
+        await ctrl.get_ui_elements(PHONE, whole_screen=True)   # pushed, cached
 
         await ctrl.get_ui_elements(PHONE, filter_label="General")
 
@@ -554,10 +557,10 @@ class TestReadsThroughTheController:
 
     async def test_a_cache_hit_names_the_backend_that_made_the_tree(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
-        await ctrl.get_ui_elements(PHONE)
+        await ctrl.get_ui_elements(PHONE, whole_screen=True)
         ctrl._last_read_backend[PHONE] = ctrl.wda_client.TOOL_NAME  # a WDA read since
 
-        await ctrl.get_ui_elements(PHONE)                           # served from cache
+        await ctrl.get_ui_elements(PHONE, whole_screen=True)        # served from cache
 
         assert ctrl.coredevice_ax.describe_all.await_count == 1
         assert ctrl.backend_that_served(PHONE) == CoreDeviceAxReader.TOOL_NAME
@@ -568,7 +571,7 @@ class TestReadsThroughTheController:
         ctrl.coredevice_ax.describe_all = AsyncMock(
             side_effect=DeviceError("refused", tool="coredevice"))
 
-        elements, _ = await ctrl.get_ui_elements(PHONE, use_cache=False)
+        elements, _ = await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
 
         assert [e.label for e in elements] == ["from WDA"]
         assert ctrl.backend_that_served(PHONE) == ctrl.wda_client.TOOL_NAME
@@ -577,10 +580,69 @@ class TestReadsThroughTheController:
     async def test_not_opted_in_is_unchanged(self, monkeypatch):
         ctrl = _phone_controller(reader="wda", monkeypatch=monkeypatch)
 
+        elements, _ = await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+
+        assert [e.label for e in elements] == ["from WDA"]
+        ctrl.coredevice_ax.describe_all.assert_not_called()
+
+
+class TestReadsInsideActionsStayOnWda:
+    """Only reads made to show the screen use the push. `type_text` and
+    `clear_text` find their field with an unfiltered read and no depth, which
+    the first version took for a whole-screen read (CodeRabbit on #668)."""
+
+    async def test_an_unfiltered_read_inside_an_action_is_wdas(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+
         elements, _ = await ctrl.get_ui_elements(PHONE, use_cache=False)
 
         assert [e.label for e in elements] == ["from WDA"]
         ctrl.coredevice_ax.describe_all.assert_not_called()
+
+    async def test_a_cached_push_tree_is_not_served_to_an_action(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        await ctrl.get_ui_elements(PHONE, whole_screen=True)   # pushed, cached
+
+        elements, _ = await ctrl.get_ui_elements(PHONE)
+
+        assert [e.label for e in elements] == ["from WDA"]
+
+    async def test_the_cache_names_the_read_that_made_it(self, monkeypatch):
+        """A WDA lookup that lands while the push read awaits rewrites the
+        shared last-read name; the cache must still say coredevice, or a
+        lookup inside the TTL would be answered from merged labels."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        pushed = parse_push(SETTINGS)[1]
+
+        async def read_while_wda_answers(*a, **kw):
+            ctrl._last_read_backend[PHONE] = ctrl.wda_client.TOOL_NAME
+            return pushed
+
+        ctrl.coredevice_ax.describe_all = AsyncMock(side_effect=read_while_wda_answers)
+
+        await ctrl.get_ui_elements(PHONE, whole_screen=True)
+        assert ctrl._ui_cache_backend[PHONE] == CoreDeviceAxReader.TOOL_NAME
+
+        await ctrl.get_ui_elements(PHONE, filter_label="General")
+        ctrl.wda_client.find_elements_by_query.assert_awaited()
+
+    async def test_a_pushed_summary_carries_no_wda_timeout(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.wda_client.source_timed_out = lambda udid: 6.0   # an earlier WDA read
+
+        summary, _, _ = await ctrl.get_screen_summary(udid=PHONE, whole_screen=True)
+
+        assert summary["backend"] == CoreDeviceAxReader.TOOL_NAME
+        assert "source_timed_out" not in summary and "degraded" not in summary
+
+    async def test_a_wda_summary_still_reports_its_timeout(self, monkeypatch):
+        ctrl = _phone_controller(reader="wda", monkeypatch=monkeypatch)
+        ctrl.wda_client.source_timed_out = lambda udid: 6.0
+
+        summary, _, _ = await ctrl.get_screen_summary(udid=PHONE, whole_screen=True)
+
+        assert summary["backend"] == ctrl.wda_client.TOOL_NAME
+        assert summary["source_timed_out"] is True
 
 
 class TestTheSetting:

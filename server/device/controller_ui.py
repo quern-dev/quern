@@ -2523,8 +2523,14 @@ class DeviceControllerUI:
         mode: str | None = None,
         probe_containers: bool = True,
         deepen_on_miss: bool = False,
+        whole_screen: bool = False,
     ) -> tuple[list[UIElement], str]:
         """Native UI elements, plus any web content read by get_web_content.
+
+        `whole_screen` marks a read made to show a caller the screen --
+        `get_ui_tree`, `get_screen_summary` -- which a physical iPhone may
+        serve from its tree push (#664). Every read made inside an action
+        leaves it False and stays with WDA.
 
         The merge happens here rather than in the cache so every consumer --
         tap_element, screen summaries, landmark matching, annotated screenshots
@@ -2534,6 +2540,7 @@ class DeviceControllerUI:
             udid, use_cache, filter_label, filter_identifier, filter_type,
             snapshot_depth, source_timeout, mode,
             probe_containers=probe_containers, deepen_on_miss=deepen_on_miss,
+            whole_screen=whole_screen,
         )
         # Not on a CoreDevice read: the push holds only what is on screen, and
         # marking asks WDA for the viewport, which would start it for nothing.
@@ -2558,6 +2565,7 @@ class DeviceControllerUI:
         mode: str | None = None,
         probe_containers: bool = True,
         deepen_on_miss: bool = False,
+        whole_screen: bool = False,
     ) -> tuple[list[UIElement], str]:
         """Get UI accessibility elements with TTL-based caching and optional filtering.
 
@@ -2597,9 +2605,11 @@ class DeviceControllerUI:
         cached_by = self._ui_cache_backend.get(resolved)
         if (use_cache and resolved in self._ui_cache
                 # A pushed tree answers whole-screen reads only (#664): its rows
-                # carry merged labels, so an element lookup over it would match
-                # differently from the WDA lookup it stands in for.
-                and not (has_filters and cached_by == self.coredevice_ax.TOOL_NAME)):
+                # carry merged labels, so a lookup over it -- a filter, or an
+                # action finding its target -- would match differently from
+                # the WDA read it stands in for.
+                and not (cached_by == self.coredevice_ax.TOOL_NAME
+                         and not (whole_screen and not has_filters))):
             cached_elements, cached_time = self._ui_cache[resolved]
             age = now - cached_time
             if age < self._cache_ttl:
@@ -2618,12 +2628,15 @@ class DeviceControllerUI:
 
                 return cached_elements, resolved
 
-        # The tree push serves whole-screen reads only: no filter, and no WDA
-        # depth asked for (every element lookup made for a tool passes one).
-        # Lookups stay on WDA exactly as before, until phase 2 settles how a
-        # merged row label should match (#664).
+        # The tree push serves only reads made to show the screen, asked for
+        # by name: inferring them from "no filter" let the text actions'
+        # target lookups through (CodeRabbit on #668). Lookups and every read
+        # an action makes stay on WDA exactly as before, until phase 2 settles
+        # how a merged row label should match (#664). A WDA depth or flat mode
+        # is a request for WDA's own read.
         reader = (self._device_tree_reader(resolved)
-                  if not has_filters and snapshot_depth is None and mode != "flat"
+                  if whole_screen and not has_filters and snapshot_depth is None
+                  and mode != "flat"
                   else None)
 
         # WDA direct query: physical device + filters + cache miss → query directly
@@ -2745,7 +2758,9 @@ class DeviceControllerUI:
             # scroll_to_element returns, which is exactly that window.
             if probe_containers:
                 self._ui_cache[resolved] = (elements, time.time())
-                self._ui_cache_backend[resolved] = self._last_read_backend[resolved]
+                # This read's own backend: `_last_read_backend` is shared, and a
+                # concurrent WDA lookup can rewrite it while this read awaits.
+                self._ui_cache_backend[resolved] = getattr(backend, "TOOL_NAME", "unknown")
 
             # Apply filters in memory if needed
             if has_filters:
@@ -3116,6 +3131,7 @@ class DeviceControllerUI:
         strategy: str | None = None,
         source_timeout: float | None = None,
         mode: str | None = None,
+        whole_screen: bool = False,
     ) -> tuple[dict, list, str]:
         """Generate an LLM-optimized screen summary.
 
@@ -3139,7 +3155,7 @@ class DeviceControllerUI:
             elements, resolved = await self.get_ui_elements(
                 udid, snapshot_depth=snapshot_depth,
                 source_timeout=source_timeout,
-                mode=mode,
+                mode=mode, whole_screen=whole_screen,
             )
         summary = generate_screen_summary(elements, max_elements=max_elements)
         # Which backend produced this. Cheap, and the first thing anyone
@@ -3161,7 +3177,11 @@ class DeviceControllerUI:
         # their deliberate choice had timed out. The agent guide recommends
         # `strategy: "skeleton"` for exactly the dense screens that produce
         # these timeouts, so it is the likely sequence rather than a corner.
-        backend = None if asked_for_skeleton else self._ui_backend(resolved)
+        # And not after a tree push: WDA's record of an earlier `/source`
+        # timeout says nothing about a read WDA did not make (CodeRabbit on
+        # #668), while `_ui_backend` still names WDA for the actions.
+        pushed = summary["backend"] == self.coredevice_ax.TOOL_NAME
+        backend = None if asked_for_skeleton or pushed else self._ui_backend(resolved)
         timed_out = getattr(backend, "source_timed_out", None)
         seconds = timed_out(resolved) if callable(timed_out) else None
         if seconds is not None:
