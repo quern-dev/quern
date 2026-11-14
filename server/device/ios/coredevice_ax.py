@@ -119,18 +119,21 @@ class AxTreeError(ValueError):
 class AppExitedDuringRead(DeviceError):
     """The app on screen died while its tree was being read (#669).
 
-    On iOS 27.2.1 a tree read crashes some apps -- measured on screens pushed
-    inside a tab bar's More navigation controller -- in UIKit's own
-    accessibility code. Unsubscribing as soon as the first dump arrives does
-    not save it, so the read cannot be made safe once it has started; this is
-    how the caller learns that the read did it, rather than meeting an empty
+    An iOS bug, not the app's or quern's: on iOS 27 a tree read crashes some
+    UIKit apps inside UIKit's own accessibility code
+    (`_accessibilityWindowSections` inserting nil) -- measured on 27.0.1 and
+    27.2.1, on a tab that is a UINavigationController reached through a tab
+    bar's More list. Unsubscribing as soon as the first dump arrives does not
+    save it, so the read cannot be made safe once it has started; this is how
+    the caller learns that the read did it, rather than meeting an empty
     screen with no explanation.
     """
 
     def __init__(self, app: str, pid: int) -> None:
         super().__init__(
             f"{app or 'the app'} (pid {pid}) exited while its screen was read through "
-            "the accessibility service; on iOS 27.2 this read crashes some apps (#669)",
+            "the accessibility service: an iOS 27 bug in UIKit's accessibility code "
+            "crashes some apps under this read (#669)",
             tool="coredevice")
         self.app = app
         self.pid = pid

@@ -494,7 +494,7 @@ class TestReadingADevice:
 
 
 class TestAnAppThatDiesUnderTheRead:
-    """#669: on iOS 27.2.1 a push read crashes some apps. The read must say so,
+    """#669: on iOS 27 a push read crashes some apps. The read must say so,
     not hand back the dying app's identifier-less tree."""
 
     def test_each_tree_names_its_app(self):
