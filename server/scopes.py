@@ -191,6 +191,7 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("POST", "/api/v1/device/erase"): _RESOLVED,
     ("POST", "/api/v1/device/font-scale"): _RESOLVED,
     ("POST", "/api/v1/device/hinge"): _RESOLVED,
+    ("POST", "/api/v1/device/orientation"): _RESOLVED,
     ("POST", "/api/v1/device/keyboard"): _RESOLVED,
     ("POST", "/api/v1/device/locale"): _RESOLVED,
     ("POST", "/api/v1/device/location"): _RESOLVED,

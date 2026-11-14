@@ -440,6 +440,42 @@ A 400 on any other device. After a fold, quern waits for the screen to settle be
     }
   });
 
+  server.registerTool("set_orientation", {
+    description: `Turn an iOS simulator to portrait, pud (portrait upside down), landscape-left, landscape-right, face-up or face-down, for landscape layouts. The names are devicectl's: landscape-left is its landscapeLeft. Turned with devicectl (Xcode 27.2+), else with the event Simulator.app's Rotate sends; turned_with says which. face-up and face-down need devicectl, and leave the interface as it was.
+
+The device turns; the app in front decides whether its interface follows. So the response reads the interface back: interface_orientation is what the screen shows now, and a note says when the app did not follow (the iPhone home screen, and many apps, are portrait only). On Xcode 27 and later, tap, tap_element, swipe, get_ui_tree and take_screenshot then all work in the turned interface's points.
+
+On an iPhone Duo this is set_hinge with that orientation, and answers as set_hinge does. A 400 on a physical iPhone or an Android device.`,
+    inputSchema: strictParams({
+      orientation: z
+        .enum(["portrait", "pud", "landscape-left", "landscape-right", "face-up", "face-down"])
+        .describe("How the device is held, as devicectl names it."),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ orientation, udid }) => {
+    try {
+      const body: Record<string, unknown> = { orientation };
+      if (udid) body.udid = udid;
+      const data = await apiRequest("POST", "/api/v1/device/orientation", undefined, body);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: errorText(e),
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("get_hinge", {
     description: `Read a foldable simulator's hinge angle and which panel is lit (iPhone Duo, Xcode 27.1+). lit_panel gives the screen_id, orientation and size in points of the panel taps and reads go to. angle is null when the guest gives no reading, which happens after SpringBoard restarts until the hinge next moves. A 400 on any other device.`,
     inputSchema: strictParams({
@@ -707,7 +743,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       edge: z
         .enum(["left", "right", "top", "bottom"])
         .optional()
-        .describe("Make it a swipe from this screen edge, which the system takes: back from the left, home from the bottom, Control Centre or the notification shade from the top. Start the swipe at that edge (within 3% of the screen) -- e.g. start_x 1 for the left; otherwise it is refused. On a simulator it needs sim-bridge, the default backend, which flags the touch as an edge swipe: idb, or WDA after start_driver, answers 400. Physical iPhones and Android need no flag."),
+        .describe("Make it a swipe from this screen edge, which the system takes: back from the left, home from the bottom, Control Centre or the notification shade from the top. Start the swipe at that edge (within 3% of the screen) -- e.g. start_x 1 for the left; otherwise it is refused. On a simulator it needs sim-bridge, the default backend, which flags the touch as an edge swipe: idb, or WDA after start_driver, answers 400. An iPhone Duo answers 400 too: no edge gesture reached one. On a simulator turned with set_orientation, the edge is the turned screen's. Physical iPhones and Android need no flag."),
     }),
   }, async ({ start_x, start_y, end_x, end_y, duration, udid, edge }) => {
     try {

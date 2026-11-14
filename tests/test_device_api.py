@@ -1101,6 +1101,37 @@ class TestPressButton:
         assert resp.status_code == 401
 
 
+class TestSetOrientation:
+    async def test_set_orientation(self, app, auth_headers, mock_controller):
+        mock_controller.set_orientation = AsyncMock(return_value={"status": "ok"})
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/v1/device/orientation",
+                                     json={"orientation": "landscape-left"}, headers=auth_headers)
+        assert resp.status_code == 200
+        mock_controller.set_orientation.assert_awaited_once_with("landscape-left", udid=None)
+
+    async def test_a_refusal_is_a_400_not_a_500(self, app, auth_headers, mock_controller):
+        mock_controller.set_orientation = AsyncMock(side_effect=InvalidDeviceRequestError(
+            "Turning the device is for iOS simulators", tool="set_orientation"))
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/v1/device/orientation",
+                                     json={"orientation": "pud"}, headers=auth_headers)
+        assert resp.status_code == 400
+        assert "iOS simulators" in resp.text
+
+    async def test_an_unknown_orientation_is_refused_by_the_model(self, app, auth_headers,
+                                                                  mock_controller):
+        mock_controller.set_orientation = AsyncMock()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/v1/device/orientation",
+                                     json={"orientation": "sideways"}, headers=auth_headers)
+        assert resp.status_code == 422
+        mock_controller.set_orientation.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # POST /device/location (Phase 3c)
 # ---------------------------------------------------------------------------

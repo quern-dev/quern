@@ -816,6 +816,21 @@ class SimBridgeBackend:
     async def press_button(self, udid: str, button: str) -> None:
         await self._send({"cmd": "button", "udid": udid, "name": button})
 
+    async def orientation(self, udid: str, set_to: int | None = None) -> tuple[int | None, int]:
+        """The interface orientation the screen reports now (UIDeviceOrientation,
+        1-4, or None when it cannot be read) and how many built-in panels the
+        device has, after turning a one-panel device to `set_to` when given
+        (#243). The guest plays the turn out after this answers, so a caller
+        that set it polls until the read-back changes."""
+        cmd: dict = {"cmd": "orientation", "udid": udid}
+        if set_to is not None:
+            cmd["set"] = set_to
+        result = await self._send(cmd)
+        read = result.get("orientation")
+        panels = result.get("panels")
+        return (read if isinstance(read, int) else None,
+                panels if isinstance(panels, int) else 0)
+
     async def set_hardware_keyboard(self, udid: str, enabled: bool) -> None:
         await self._send(
             {
