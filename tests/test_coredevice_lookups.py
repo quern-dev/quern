@@ -342,7 +342,6 @@ class TestTapElement:
         assert result["matched_via"] == "merged_label"
         ctrl.coredevice_input.tap.assert_awaited_once()
         ctrl.wda_client.is_hittable.assert_not_called()      # the push is the reachable set
-        ctrl.wda_client.tap.assert_not_called()
         # One read: the push reader answers a settled screen, so there is no
         # second read to see whether the row moved.
         ctrl.coredevice_ax.describe_all.assert_awaited_once()
@@ -383,7 +382,6 @@ class TestTapElement:
 
         assert result["status"] == "not_found"
         ctrl.coredevice_ax.describe_all.assert_not_called()
-        ctrl.wda_client.tap.assert_not_called()
 
     async def test_a_pushed_miss_sweeps_through_the_push(self, monkeypatch):
         """The sweep reads and swipes over CoreDevice too (#678), so the pushed
@@ -399,9 +397,10 @@ class TestTapElement:
         assert kwargs["pushed"] is True
         assert kwargs["target_known_absent"] is True
 
-    async def test_after_the_wda_sweep_the_stability_check_runs(self, monkeypatch):
-        """The sweep finds the target through WDA after a swipe, while the list
-        may still be moving: the push's 'settled' reason no longer holds."""
+    async def test_after_a_pushed_sweep_nothing_asks_wda(self, monkeypatch):
+        """The sweep read through the push too (#678): what it found is the
+        push's settled read, so no WDA re-check or reachability query follows
+        -- on a phone with no WDA either would fail or start one."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         _wda_depth_spies(ctrl)
         ctrl._identify_for_miss = AsyncMock(return_value={})
@@ -414,10 +413,8 @@ class TestTapElement:
         result = await ctrl.tap_element(label="Far", udid=PHONE, scroll_to_find=True)
 
         assert result["status"] == "ok", result
-        # The re-check: a WDA read of the target by its label. (The other
-        # direct query here is the reachability check's, for the viewport.)
-        assert any(c.kwargs.get("label") == "Far"
-                   for c in ctrl._wda_direct_query.await_args_list)
+        ctrl._wda_direct_query.assert_not_called()
+        ctrl.coredevice_input.tap.assert_awaited_once()
 
 
 class TestOtherReadsStayOnWda:

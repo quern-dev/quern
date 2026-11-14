@@ -3914,10 +3914,10 @@ class DeviceControllerUI:
                     deepen=_deepen_allowed(snapshot_depth, deepen), pushed=pushed,
                 )
                 if scrolled is not None:
-                    # Found by the sweep, through WDA after a swipe: no longer
-                    # the push's settled read, so the stability check and the
-                    # rest treat it as WDA's (#664 phase 2b review).
-                    pushed = False
+                    # Found by the sweep, which read through the push when the
+                    # lookup did (#678): still the push's settled read, so
+                    # nothing after this asks WDA. A sweep through WDA was
+                    # never pushed (#664 phase 2b review).
                     # Found deep by the sweep: the checks below look it up
                     # again at the session depth, which the sweep left there;
                     # the wrapper puts the shallow depth back (#475 review).
@@ -3934,10 +3934,11 @@ class DeviceControllerUI:
                         label_prefix=label_prefix, identifier=identifier,
                         element_type=element_type,
                     )
-                    if matches and self._served_by_wda(resolved):
+                    if matches and not pushed and self._served_by_wda(resolved):
                         # On screen after the sweep is not the same as
                         # reachable: the keyboard or a sheet can still be
-                        # over it.
+                        # over it. A pushed row is reachable already: the push
+                        # holds only what VoiceOver can reach (#672).
                         matches, unreachable = await self._wda_reachable_only(
                             resolved, matches,
                         )
