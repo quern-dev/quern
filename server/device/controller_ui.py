@@ -13,7 +13,7 @@ import time
 from server.config import get_device_ui_reader
 from server.device import gestures
 from server.device.element_types import equivalence, related_type_names
-from server.device.ios.coredevice_ax import COREDEVICE_MIN_IOS, AppExitedDuringRead
+from server.device.ios.coredevice_ax import COREDEVICE_MIN_IOS, AppExitedDuringRead, BareAppTree
 from server.device.ios.hinge import DEFAULT_SWEEP_MS, POSES
 from server.device.media.screenshots import annotate_screenshot
 from server.device.probing import frame_key
@@ -603,6 +603,14 @@ PUSHED_MISS_DETAIL = (
     ". Looked for in the tree the device pushes (backend coredevice), which "
     "holds what VoiceOver can reach, with a row's texts merged into one label; "
     "pass snapshot_depth to look through WDA instead")
+
+
+def _bare_and_wda_failed(bare: DeviceError, wda: DeviceError) -> DeviceError:
+    """The error for a push that answered bare and a WDA read that could not
+    stand in for it (#664): the bare tree is the cause to report, since WDA's
+    own error -- often that it is not set up -- says nothing about it."""
+    return DeviceError(f"{bare}. WDA could not read the screen instead: {wda}",
+                       tool=bare.tool)
 
 
 def _note_merged_label(result: dict, label: str | None, element: UIElement,
@@ -2738,6 +2746,7 @@ class DeviceControllerUI:
         # query and its deeper look on a miss -- not a /source after it that
         # never looks deeper (CodeRabbit on #672).
         pushed_raw = None
+        bare: BareAppTree | None = None
         if reader is not None:
             self._last_read_backend[resolved] = reader.TOOL_NAME
             try:
@@ -2767,6 +2776,11 @@ class DeviceControllerUI:
                     _READ_NOTE.set(
                         f"{e}. This read is WDA's, and this device's screens will be "
                         "read through WDA until the server restarts.")
+                if isinstance(e, BareAppTree):
+                    # Not a screen with nothing on it: WDA reads it instead,
+                    # and the answer says why (#664).
+                    bare = e
+                    _READ_NOTE.set(f"{e}. This read is WDA's.")
                 reader = None
                 if lookup and snapshot_depth is None:
                     # A lookup asked for no depth because the push needs none;
@@ -2786,10 +2800,15 @@ class DeviceControllerUI:
                 # WDA's depth is a session setting: queries honour it too, and
                 # a deep one makes a query on a long list as slow as /source.
                 await self.wda_client._set_snapshot_depth(resolved, snapshot_depth)
-            elements, query_elapsed = await self._wda_direct_query(
-                resolved, label=filter_label,
-                identifier=filter_identifier, element_type=filter_type,
-            )
+            try:
+                elements, query_elapsed = await self._wda_direct_query(
+                    resolved, label=filter_label,
+                    identifier=filter_identifier, element_type=filter_type,
+                )
+            except DeviceError as e:
+                if bare is None:
+                    raise
+                raise _bare_and_wda_failed(bare, e) from e
             if elements:
                 return elements, resolved
             if deepen_on_miss:
@@ -2845,10 +2864,15 @@ class DeviceControllerUI:
             )
             use_cache = False  # flat mode returns different elements
         else:
-            raw = await backend.describe_all(
-                resolved, snapshot_depth=snapshot_depth,
-                source_timeout=source_timeout, probe=probe_containers,
-            )
+            try:
+                raw = await backend.describe_all(
+                    resolved, snapshot_depth=snapshot_depth,
+                    source_timeout=source_timeout, probe=probe_containers,
+                )
+            except DeviceError as e:
+                if bare is None:
+                    raise
+                raise _bare_and_wda_failed(bare, e) from e
 
         # Who made it, after any fallback: a lookup's matches are read by it.
         pushed = reader is not None and backend is reader
