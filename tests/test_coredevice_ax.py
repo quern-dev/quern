@@ -47,6 +47,13 @@ def _as(dump_type: str, data: bytes) -> bytes:
     return plistlib.dumps(archive, fmt=plistlib.FMT_BINARY)
 
 
+def _relabelled(data: bytes, old: str, new: str) -> bytes:
+    """The same push with one string replaced: a distinguishable stage."""
+    archive = plistlib.loads(data)
+    archive["$objects"] = [new if o == old else o for o in archive["$objects"]]
+    return plistlib.dumps(archive, fmt=plistlib.FMT_BINARY)
+
+
 def _by_id(elements: list[dict], ident: str) -> dict:
     return next(e for e in elements if e["AXUniqueId"] == ident)
 
@@ -385,6 +392,72 @@ class TestWaitingForTheTree:
         assert tree.elements[0]["AXLabel"] == "Settings"
         assert 0.9 <= loop.time() - started <= 1.6
 
+    def test_the_budget_is_sized_by_the_dump_that_started_the_pair(self):
+        """Not the tree in hand: the newer screen's size is what it costs."""
+        small, big = coredevice_ax.parse_tree(SAFARI), coredevice_ax.parse_tree(SETTINGS)
+        small = coredevice_ax.Tree("InitialDump", small.elements[:2], small.app_pid)
+        assert coredevice_ax._pair_budget(small) == pytest.approx(
+            coredevice_ax.PAIR_BASE_S + 2 * coredevice_ax.PAIR_PER_ELEMENT_S)
+        assert coredevice_ax._pair_budget(big) > coredevice_ax._pair_budget(small)
+
+    async def test_a_page_loading_in_stages_is_waited_for_stage_by_stage(
+            self, short_windows, monkeypatch):
+        """Three stages, the second completing after the settle window: the
+        read answers with the third, not the stage between (#677 review).
+        Each newer InitialDump lands well inside the quiet spell before it."""
+        monkeypatch.setattr(coredevice_ax, "PAIR_BASE_S", 0.5)
+        monkeypatch.setattr(coredevice_ax, "PAIR_PER_ELEMENT_S", 0.0)
+        stage3 = _relabelled(SETTINGS, "Settings", "Stage three")
+        queue: asyncio.Queue = asyncio.Queue()
+        queue.put_nowait((PUSH_SELECTOR, [SETTINGS]))                      # stage 1, at 0
+
+        async def stages():
+            await asyncio.sleep(0.03)
+            queue.put_nowait((PUSH_SELECTOR, [_as("InitialDump", SAFARI)]))
+            await asyncio.sleep(0.27)
+            queue.put_nowait((PUSH_SELECTOR, [SAFARI]))                    # stage 2, at 0.3
+            await asyncio.sleep(0.03)
+            queue.put_nowait((PUSH_SELECTOR, [_as("InitialDump", stage3)]))
+            await asyncio.sleep(0.27)
+            queue.put_nowait((PUSH_SELECTOR, [stage3]))                    # stage 3, at 0.6
+
+        task = asyncio.create_task(stages())
+        try:
+            tree, _, _ = await asyncio.wait_for(coredevice_ax._newest_tree(queue), 5)
+        finally:
+            task.cancel()
+        assert tree.elements[0]["AXLabel"] == "Stage three"
+
+    async def test_the_hard_cap_counts_from_the_first_complete_tree(self, short_windows,
+                                                                    monkeypatch):
+        """A later complete tree does not restart it: SETTLE_HARD_S after the
+        first, whatever follows (#677 review)."""
+        monkeypatch.setattr(coredevice_ax, "PAIR_BASE_S", 0.5)
+        monkeypatch.setattr(coredevice_ax, "PAIR_PER_ELEMENT_S", 0.0)
+        monkeypatch.setattr(coredevice_ax, "SETTLE_HARD_S", 1.0)
+        queue: asyncio.Queue = asyncio.Queue()
+        queue.put_nowait((PUSH_SELECTOR, [SETTINGS]))
+
+        async def churn():
+            await asyncio.sleep(0.03)
+            queue.put_nowait((PUSH_SELECTOR, [_as("InitialDump", SAFARI)]))
+            await asyncio.sleep(0.37)
+            # A second complete tree, at 0.4 s.
+            queue.put_nowait((PUSH_SELECTOR, [SAFARI]))
+            while True:
+                await asyncio.sleep(0.03)
+                queue.put_nowait((PUSH_SELECTOR, [_as("InitialDump", SETTINGS)]))
+
+        task = asyncio.create_task(churn())
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        try:
+            await asyncio.wait_for(coredevice_ax._newest_tree(queue), 4)
+        finally:
+            task.cancel()
+        elapsed = loop.time() - started
+        assert 0.9 <= elapsed < 1.3, elapsed     # renewed at 0.4 s it would run to 1.4
+
     async def test_an_initial_dump_alone_never_completes(self):
         """No identifiers yet, so not an answer: the read's deadline ends it."""
         with pytest.raises(TimeoutError):
@@ -478,6 +551,18 @@ class TestReadingADevice:
         assert state.control.calls == [("clientNeedsAccessibility:", (True,)),
                                        ("clientNeedsAccessibility:", (False,))]
         assert state.provider_closed and state.rsd_closed
+
+    async def test_a_deadline_with_a_tree_in_hand_answers_with_it(
+            self, monkeypatch, phone_address):
+        """A short source_timeout ending the wait for a newer pair is not "no
+        complete tree": one was in hand (#677 review)."""
+        monkeypatch.setattr(coredevice_ax, "PAIR_BASE_S", 30.0)    # the pair outlasts the deadline
+        lib, _ = _fake_lib([SETTINGS, _as("InitialDump", SAFARI)])
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        elements = await asyncio.wait_for(read_tree(PHONE, timeout=0.5), 5)
+
+        assert elements[0]["AXLabel"] == "Settings"
 
     async def test_a_screen_that_never_completes_is_a_device_error(
             self, monkeypatch, phone_address):

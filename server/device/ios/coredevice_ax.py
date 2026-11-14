@@ -360,7 +360,15 @@ def _pmd3() -> SimpleNamespace:
                            RemoteAX=RemoteAX, AppService=AppServiceService)
 
 
-async def _newest_tree(queue: asyncio.Queue) -> tuple[Tree, Tree, Tree]:
+def _pair_budget(initial: Tree) -> float:
+    """How long a pair started by this InitialDump gets to complete: the time a
+    device takes to build a tree its size (PAIR_BASE_S, PAIR_PER_ELEMENT_S).
+    The newest InitialDump's, which supersedes an earlier one under way."""
+    return PAIR_BASE_S + PAIR_PER_ELEMENT_S * len(initial.elements)
+
+
+async def _newest_tree(queue: asyncio.Queue,
+                       held: dict | None = None) -> tuple[Tree, Tree, Tree]:
     """Read pushes until a complete tree has had a quiet spell to be replaced.
 
     Returns the newest complete tree, the first tree of the read, and the
@@ -378,8 +386,12 @@ async def _newest_tree(queue: asyncio.Queue) -> tuple[Tree, Tree, Tree]:
     the wait for anything newer ends SETTLE_MAX_S later, and the newest
     complete tree is the answer -- unless a newer pair is under way then: it
     gets PAIR_BASE_S plus PAIR_PER_ELEMENT_S for each element its InitialDump
-    carries, to finish (#676). SETTLE_HARD_S after the first complete tree
-    the read answers regardless. A screen that never stops changing -- a
+    carries, to finish (#676), and a complete tree that arrives after the
+    settle window gets a quiet spell of its own, so a page loading in stages
+    is waited for stage by stage. SETTLE_HARD_S after the first complete tree
+    the read answers regardless. `held`, when given, is kept up to date with
+    the trees in hand ("latest", "first", "newest"), so a caller whose own
+    deadline ends the wait can still answer with them. A screen that never stops changing -- a
     clock, a spinner -- would otherwise never settle, and every read of it
     would run out the caller's deadline with trees in hand. Before the first
     complete tree, the caller's deadline is what ends the wait.
@@ -416,6 +428,8 @@ async def _newest_tree(queue: asyncio.Queue) -> tuple[Tree, Tree, Tree]:
             continue
         first = first or tree
         newest = tree
+        if held is not None:
+            held.update(first=first, newest=newest)
         if tree.dump_type == "AdditionalData":
             if latest is None:
                 # The wait for a newer tree, counted from the first complete
@@ -423,13 +437,20 @@ async def _newest_tree(queue: asyncio.Queue) -> tuple[Tree, Tree, Tree]:
                 # in flux.
                 settle_by = loop.time() + max(SETTLE_MAX_S, UNSETTLED_QUIET_S)
                 hard_by = loop.time() + SETTLE_HARD_S
+            elif loop.time() >= settle_by:
+                # A later stage, completed after the settle window: it gets the
+                # quiet spell any complete tree gets, or the next stage -- or a
+                # dying app's replacement (#669) -- is never seen (#677 review).
+                quiet = UNSETTLED_QUIET_S if unsettled else QUIET_S
+                settle_by = min(hard_by, loop.time() + quiet)
             latest, changing = tree, False
+            if held is not None:
+                held["latest"] = latest
         elif latest is not None:
             changing = True
             # Its pair gets the time a tree this size takes to build, and
             # never less than the settle window already allowed.
-            pair_by = max(settle_by, loop.time() + PAIR_BASE_S
-                          + PAIR_PER_ELEMENT_S * len(tree.elements))
+            pair_by = max(settle_by, loop.time() + _pair_budget(tree))
 
 
 async def _app_alive(rsd: Any, lib: SimpleNamespace, pid: int) -> bool | None:
@@ -471,6 +492,7 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
     lib = _pmd3()
     started = time.monotonic()
     rsd = provider = None
+    held: dict = {}
     deadline = asyncio.timeout(timeout)
     try:
         try:
@@ -486,7 +508,7 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
                 provider.dtx.ctx["control_dispatch_queue"] = queue
                 await provider.dtx._ctrl_channel.invoke(
                     "clientNeedsAccessibility:", True, expects_reply=False)
-                tree, first, newest = await _newest_tree(queue)
+                tree, first, newest = await _newest_tree(queue, held)
                 elements = tree.elements
                 # The app changed under the read: switched, or killed by it.
                 # Only the process list can tell those apart. "Could not ask"
@@ -497,6 +519,15 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
         finally:
             await _close(provider, rsd)
     except TimeoutError as e:
+        if deadline.expired() and held.get("latest") is not None:
+            # The caller's deadline (a short `source_timeout`) ended a wait for
+            # a newer tree, with a complete one in hand: that is the answer,
+            # not "sent no complete tree", which would be false (#677 review).
+            # The crash check is skipped -- its process query has no time left
+            # -- and "could not ask" is not taken as dead, as above.
+            logger.info("[coredevice] tree of %s answered at the %gs deadline",
+                        uuid[:8], timeout)
+            return held["latest"].elements
         if deadline.expired():
             raise DeviceError(
                 f"{uuid[:8]} sent no complete accessibility tree within {timeout:g}s",
