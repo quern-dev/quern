@@ -270,6 +270,17 @@ struct Panel {
         }
     }
 
+    /// The panel's own edge (left, right, top, bottom) that an interface edge
+    /// lies on: where `toPanel` takes that edge's points.
+    func digitizerEdge(_ interfaceEdge: String) -> String {
+        let turns: [UInt32: [String: String]] = [
+            2: ["left": "right", "right": "left", "top": "bottom", "bottom": "top"],
+            3: ["left": "bottom", "right": "top", "top": "left", "bottom": "right"],
+            4: ["left": "top", "right": "bottom", "top": "right", "bottom": "left"],
+        ]
+        return turns[orientation]?[interfaceEdge] ?? interfaceEdge
+    }
+
     /// Panel rect -> interface rect: the inverse of `toPanel`, for frames.
     func toScreen(_ r: CGRect) -> CGRect {
         let w = nativeSize.width, h = nativeSize.height
@@ -488,8 +499,9 @@ func readPanels(udid: String, device: NSObject) -> (lit: (Panel, NSObject)?, all
 /// (UIDeviceOrientation, 1-4), or nil when it cannot be read: not yet known
 /// to have one panel, an Xcode without the screen interfaces, or a descriptor
 /// that no longer answers, which is forgotten so the next read enumerates.
+/// Never enumerates itself, so a Duo or a booting phone pays nothing extra:
+/// a caller reads the panels first, which records a one-panel device (review).
 func singlePanelOrientation(udid: String, device: NSObject) -> (Panel, UInt32)? {
-    if !singlePanelDevices.contains(udid) { _ = readPanels(udid: udid, device: device) }
     guard let (panel, desc) = singlePanelDescriptors[udid] else { return nil }
     guard let props = screenProperties(of: desc) else {
         singlePanelDescriptors.removeValue(forKey: udid)
@@ -950,8 +962,9 @@ func axChildren(of element: NSObject) -> [NSObject] {
 /// device: the interface's, turned. An app reports its root at the interface's
 /// size, so in landscape the portrait size scaled every frame by 402/874 on an
 /// iPhone 18 Pro (iOS 27.2) and a tap at its centre landed elsewhere (#243).
-func axPointSize(udid: String, device: NSObject) -> CGSize {
-    turnedSinglePanel(udid: udid, device: device)?.screenSize ?? devicePointSize(for: device)
+func axPointSize(udid: String, device: NSObject, panel: Panel?) -> CGSize {
+    if panel != nil { return devicePointSize(for: device) }  // a Duo: its own path
+    return turnedSinglePanel(udid: udid, device: device)?.screenSize ?? devicePointSize(for: device)
 }
 
 struct AXFrameTransform {
@@ -1204,9 +1217,9 @@ func describeUI(udid: String, nested: Bool, hitX: Double? = nil, hitY: Double? =
     stampElementTranslation(token: token, on: rootElement)
     stampSubtree(rootElement, token: token)
 
-    let pointSize = axPointSize(udid: udid, device: device)
-    let rootFrame = axFrame(of: rootElement)
     let panel = litPanel(udid: udid, device: device)
+    let pointSize = axPointSize(udid: udid, device: device, panel: panel)
+    let rootFrame = axFrame(of: rootElement)
     let transform = AXFrameTransform(
         rootFrame: rootFrame, pointSize: pointSize, panel: panel,
         panelSpace: panel.map { AXFrameTransform.panelSpace(root: rootFrame, panel: $0) } ?? false)
@@ -1269,9 +1282,9 @@ func probePoint(udid: String, x: Double, y: Double, nested: Bool) -> Any? {
     // refused the tap as covered (#536). A single-panel transform skips a
     // zero root, which is why this went unnoticed.
     stampElementTranslation(token: token, on: frontmostRoot)
-    let pointSize = axPointSize(udid: udid, device: device)
-    let rootFrame = axFrame(of: frontmostRoot)
     let panel = litPanel(udid: udid, device: device)
+    let pointSize = axPointSize(udid: udid, device: device, panel: panel)
+    let rootFrame = axFrame(of: frontmostRoot)
     let transform = AXFrameTransform(
         rootFrame: rootFrame, pointSize: pointSize, panel: panel,
         panelSpace: panel.map { AXFrameTransform.panelSpace(root: rootFrame, panel: $0) } ?? false)
@@ -1740,20 +1753,25 @@ func sendOrientation(udid: String, orientation: UInt32) -> String? {
     put(wire, at: 0x4C)             // the orientation
     let kr = bytes.withUnsafeMutableBytes { raw -> kern_return_t in
         guard let base = raw.baseAddress else { return KERN_FAILURE }
-        return mach_msg_send(base.assumingMemoryBound(to: mach_msg_header_t.self))
+        // Bounded: a guest not draining its port would otherwise hold the
+        // bridge, and every caller behind it, until quern's own timeout.
+        return mach_msg(base.assumingMemoryBound(to: mach_msg_header_t.self),
+                        MACH_SEND_MSG | MACH_SEND_TIMEOUT, 108, 0, mach_port_t(MACH_PORT_NULL),
+                        1000, mach_port_t(MACH_PORT_NULL))
     }
-    return kr == KERN_SUCCESS ? nil : "mach_msg_send to PurpleWorkspacePort failed: \(kr)"
+    return kr == KERN_SUCCESS ? nil : "sending to PurpleWorkspacePort failed: \(kr)"
 }
 
 /// The interface orientation the screen reports now (UIDeviceOrientation),
 /// with how many built-in panels the device has; nil when it cannot be read.
 /// A Duo answers for its lit panel.
 func readOrientation(udid: String, device: NSObject) -> (orientation: UInt32?, panels: Int) {
+    let read = readPanels(udid: udid, device: device)
+    if let lit = read.lit { return (lit.0.orientation, read.all.count) }
     if let (_, orientation) = singlePanelOrientation(udid: udid, device: device) {
         return (orientation, 1)
     }
-    let read = readPanels(udid: udid, device: device)
-    return (read.lit?.0.orientation, read.all.count)
+    return (nil, singlePanelDevices.contains(udid) ? 1 : read.all.count)
 }
 
 /// Nil when pressed, else why not. The press is checked as delivered, as one
@@ -1764,15 +1782,17 @@ func pressIndigoButton(code: UInt32, holdUs: UInt32, client: AnyObject) -> Strin
     guard let down = bfn(code, 1, 0x33) else {
         return "IndigoHIDMessageForButton gave no message for button \(code)"
     }
-    guard sendHIDMessageChecked(down, to: client) else {
-        return "the simulator did not take the button press"
-    }
+    let confirmed = sendHIDMessageChecked(down, to: client)
     usleep(holdUs)
+    // Released whether or not the press was confirmed: a press delivered late
+    // and never released holds the button down -- Siri, or the power-off
+    // slider (review).
     guard let up = bfn(code, 2, 0x33) else {
         return "IndigoHIDMessageForButton gave no release for button \(code)"
     }
     sendHIDMessage(up, to: client)
-    return nil
+    return confirmed ? nil
+        : "the simulator did not confirm the button press, so it may or may not have happened"
 }
 
 func pressArbitraryHID(page: UInt32, usage: UInt32, holdUs: UInt32, client: AnyObject) -> Bool {
@@ -2440,8 +2460,10 @@ func handleCommand(_ dict: [String: Any]) {
                 // Refused, not sent: no edge gesture reached an iPhone Duo in
                 // any state, folded or not, by the old path or this one
                 // (#536). Answering ok for a gesture that never happens is
-                // the failure this bridge keeps being fixed for.
-                if space.panel != nil {
+                // the failure this bridge keeps being fixed for. Asked of the
+                // device, not of `space.panel`: a turned phone has a panel
+                // too (#243), and took edge swipes (review).
+                if litPanel(udid: udid, device: device) != nil {
                     respond(failure("edge swipes do not reach a device with several panels (iPhone Duo): none did, folded or unfolded. Navigate with taps, or press home",
                                     badRequest: true))
                     return
@@ -2454,6 +2476,11 @@ func handleCommand(_ dict: [String: Any]) {
                 case "right": atEdge = x1 >= w * (1 - m)
                 case "top": atEdge = y1 <= h * m
                 default: atEdge = y1 >= h * (1 - m)
+                }
+                // The bit names the digitizer's edge, which is portrait; the
+                // caller named the interface's. Turned, they differ (#243).
+                if let turned = space.panel, let bit = edgeBits[turned.digitizerEdge(name)] {
+                    edge = bit
                 }
                 if !atEdge {
                     let span = (name == "left" || name == "right") ? w : h
@@ -2550,8 +2577,15 @@ func handleCommand(_ dict: [String: Any]) {
             respond(["ok": false, "error": "missing 'udid' or device not found"])
             return
         }
-        if let set = dict["set"] as? Int {
-            if let why = sendOrientation(udid: udid, orientation: UInt32(clamping: set)) {
+        if let raw = dict["set"] {
+            // `3.7 as? Int` is nil; a JSON `true` would read as 1, so it is
+            // refused by type first.
+            guard !(raw is Bool), let set = raw as? Int, (1...4).contains(set) else {
+                respond(["ok": false, "code": "bad_request",
+                         "error": "set must be an orientation from 1 to 4, not \(raw)"])
+                return
+            }
+            if let why = sendOrientation(udid: udid, orientation: UInt32(set)) {
                 respond(["ok": false, "error": "could not turn the simulator: \(why)"])
                 return
             }

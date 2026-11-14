@@ -10,11 +10,13 @@ one missed.
 
 from __future__ import annotations
 
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from server.device.controller import DeviceController
+from server.device.ios.sim_bridge import SimBridgeBackend, SimBridgeManager
 from server.models import (
     DeviceError,
     DeviceOperationUnsupportedError,
@@ -109,6 +111,36 @@ async def test_a_failed_read_back_does_not_undo_the_turn():
     assert "could not be read back" in result["note"]
 
 
+async def test_a_failure_after_a_stale_read_is_no_reading():
+    """A read from before the turn, then the bridge failing: that earlier
+    reading is not the answer -- reported, it would call an app that did
+    turn one that does not (review)."""
+    ctrl = _controller(reads=(1, 1, 1, DeviceError("bridge died")))
+
+    result = await ctrl.set_orientation("landscape-left")
+
+    assert result["interface_orientation"] is None
+    assert "could not be read back" in result["note"]
+
+
+async def test_the_change_is_marked_after_the_turn_has_played_out():
+    """Marked again once the wait is over, so a tap straight after the call
+    still finds the rotation recent and waits for it to settle."""
+    ctrl = _controller(reads=(1, 1, 1, 3))
+    read_at: list[float] = []
+    inner = ctrl.sim_bridge.orientation.side_effect
+
+    async def timed(udid, set_to=None):
+        read_at.append(time.monotonic())
+        return await inner(udid, set_to)
+
+    ctrl.sim_bridge.orientation = AsyncMock(side_effect=timed)
+
+    await ctrl.set_orientation("landscape-left")
+
+    assert ctrl._last_ui_change[SIM] >= read_at[-1]
+
+
 async def test_a_turn_the_bridge_could_not_send_raises():
     """Nothing turned, so this one is an error: the caller should know."""
     ctrl = _controller(reads=(1, DeviceError("no PurpleWorkspacePort")))
@@ -117,16 +149,20 @@ async def test_a_turn_the_bridge_could_not_send_raises():
         await ctrl.set_orientation("landscape-left")
 
 
-async def test_a_foldable_turns_through_its_orientation_picker():
+async def test_a_foldable_is_set_hinge_with_that_orientation():
     """iPhone Duo ignored the rotation event (measured), and turns through
-    Device Hub's picker, the path set_hinge's orientation takes."""
+    Device Hub's picker. set_hinge already reports that as it should, and
+    without comparing to the request: unfolded, `portrait` is the inner
+    panel's landscape, so a comparison would call every unfolded turn a
+    refusal (review)."""
     ctrl = _controller(reads=(1, 3), panels=2)
+    ctrl.set_hinge = AsyncMock(return_value={"udid": SIM, "status": "ok", "lit_panel": {}})
 
-    result = await ctrl.set_orientation("landscape-left")
+    result = await ctrl.set_orientation("portrait")
 
-    ctrl.hinge.orient.assert_awaited_once_with(SIM, "landscape-left")
+    ctrl.set_hinge.assert_awaited_once_with(SIM, orientation="portrait")
     assert ctrl.sets == []
-    assert result["interface_orientation"] == "landscape-left"
+    assert result == {"udid": SIM, "status": "ok", "lit_panel": {}}
 
 
 async def test_a_turn_counts_as_a_screen_change():
@@ -163,3 +199,40 @@ async def test_without_sim_bridge_it_says_so():
 
     with pytest.raises(DeviceOperationUnsupportedError, match="sim-bridge"):
         await ctrl.set_orientation("landscape-left")
+
+
+# -- the bridge's side of the wire ------------------------------------------------
+
+
+def _bridge(answer: dict) -> tuple[SimBridgeBackend, AsyncMock]:
+    mgr = SimBridgeManager()
+    mgr.send = AsyncMock(return_value=answer)  # type: ignore[method-assign]
+    return SimBridgeBackend(mgr), mgr.send
+
+
+async def test_the_bridge_sends_the_turn_and_parses_the_answer():
+    bridge, send = _bridge({"ok": True, "orientation": 3, "panels": 1})
+
+    assert await bridge.orientation(SIM, set_to=3) == (3, 1)
+    assert send.await_args.args[0] == {"cmd": "orientation", "udid": SIM, "set": 3}
+
+
+async def test_a_read_sends_no_turn():
+    bridge, send = _bridge({"ok": True, "orientation": 1, "panels": 2})
+
+    assert await bridge.orientation(SIM) == (1, 2)
+    assert "set" not in send.await_args.args[0]
+
+
+async def test_an_unreadable_orientation_is_none_not_portrait():
+    bridge, _ = _bridge({"ok": True, "orientation": None, "panels": 1})
+
+    assert await bridge.orientation(SIM) == (None, 1)
+
+
+async def test_a_refused_turn_raises_with_the_bridges_reason():
+    bridge, _ = _bridge({"ok": False,
+                         "error": "could not turn the simulator: no PurpleWorkspacePort"})
+
+    with pytest.raises(DeviceError, match="PurpleWorkspacePort"):
+        await bridge.orientation(SIM, set_to=3)

@@ -969,9 +969,12 @@ class DeviceControllerUI:
 
         before, panels = await self.sim_bridge.orientation(resolved)
         if panels > 1:
-            await self.hinge.orient(resolved, orientation)
-        else:
-            await self.sim_bridge.orientation(resolved, set_to=value)
+            # A foldable turns through its picker, and set_hinge already reports
+            # that as it should: the lit panel, settled. Not compared with the
+            # request -- unfolded, `portrait` is the inner panel's landscape --
+            # so a comparison here would call every unfolded turn a refusal.
+            return await self.set_hinge(resolved, orientation=orientation)
+        await self.sim_bridge.orientation(resolved, set_to=value)
         # The device has turned: nothing below may turn that into an error,
         # or a caller retries. A read that fails is reported.
         self._invalidate_ui_cache(resolved)
@@ -996,8 +999,10 @@ class DeviceControllerUI:
     async def _await_orientation(self, udid: str, want: int) -> int | None:
         """The screen's orientation once a turn has played out: `want` as soon
         as it reads that, else the last reading after _ORIENTATION_SETTLE_S --
-        which is the answer when the app in front does not turn. None when no
-        read worked."""
+        which is the answer when the app in front does not turn. None when the
+        last read failed: a reading from before the failure may be from before
+        the turn, and would report an app that did turn as one that did not
+        (review)."""
         read: int | None = None
         deadline = time.monotonic() + self._ORIENTATION_SETTLE_S
         while True:
@@ -1005,6 +1010,7 @@ class DeviceControllerUI:
                 read, _ = await self.sim_bridge.orientation(udid)
             except DeviceError:
                 logger.debug("Could not read the orientation of %s", udid[:8], exc_info=True)
+                read = None
             if read == want or time.monotonic() >= deadline:
                 return read
             await asyncio.sleep(0.25)

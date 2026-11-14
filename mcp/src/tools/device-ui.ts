@@ -441,11 +441,11 @@ A 400 on any other device. After a fold, quern waits for the screen to settle be
   });
 
   server.registerTool("set_orientation", {
-    description: `Turn an iOS simulator to portrait, pud (portrait upside down), landscape-left or landscape-right, as Simulator.app's Rotate does. For landscape layouts, and with press_button LOCK for StandBy.
+    description: `Turn an iOS simulator to portrait, pud (portrait upside down), landscape-left or landscape-right, as Simulator.app's Rotate does, for landscape layouts.
 
-The device turns; the app in front decides whether its interface follows. So the response reads the interface back: interface_orientation is what the screen shows now, and a note says when the app did not follow (the iPhone home screen, and many apps, are portrait only). Afterwards tap, tap_element, get_ui_tree and take_screenshot all work in the turned interface's points.
+The device turns; the app in front decides whether its interface follows. So the response reads the interface back: interface_orientation is what the screen shows now, and a note says when the app did not follow (the iPhone home screen, and many apps, are portrait only). On Xcode 27 and later, tap, tap_element, swipe, get_ui_tree and take_screenshot then all work in the turned interface's points.
 
-On an iPhone Duo this goes through Device Hub's orientation picker, as set_hinge's orientation does. A 400 on a physical iPhone or an Android device.`,
+On an iPhone Duo this is set_hinge with that orientation, and answers as set_hinge does. A 400 on a physical iPhone or an Android device.`,
     inputSchema: strictParams({
       orientation: z
         .enum(["portrait", "pud", "landscape-left", "landscape-right"])
