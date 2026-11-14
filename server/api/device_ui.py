@@ -1241,6 +1241,12 @@ async def type_text(request: Request, body: TypeTextRequest):
             result: dict = {"status": "ok", "udid": udid, "verified": typed["verified"]}
             if "value" in typed:
                 result["value"] = typed["value"]
+            # Over CoreDevice (#664): which carried the keys, and whether the
+            # text was set rather than typed -- the app's editing callbacks did
+            # not run for a set, which the caller must be told.
+            for key in ("input", "set_through_accessibility", "note"):
+                if key in typed:
+                    result[key] = typed[key]
             if body.capture_screenshots:
                 await asyncio.sleep(body.settle_delay)
                 after = await _capture_action_screenshot(controller, udid, "type_after")
