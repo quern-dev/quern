@@ -441,15 +441,15 @@ A 400 on any other device. After a fold, quern waits for the screen to settle be
   });
 
   server.registerTool("set_orientation", {
-    description: `Turn an iOS simulator to portrait, pud (portrait upside down), landscape-left or landscape-right, as Simulator.app's Rotate does, for landscape layouts.
+    description: `Turn an iOS simulator to portrait, pud (portrait upside down), landscape-left, landscape-right, face-up or face-down, for landscape layouts. The names are devicectl's: landscape-left is its landscapeLeft. Turned with devicectl (Xcode 27.2+), else with the event Simulator.app's Rotate sends; turned_with says which. face-up and face-down need devicectl, and leave the interface as it was.
 
 The device turns; the app in front decides whether its interface follows. So the response reads the interface back: interface_orientation is what the screen shows now, and a note says when the app did not follow (the iPhone home screen, and many apps, are portrait only). On Xcode 27 and later, tap, tap_element, swipe, get_ui_tree and take_screenshot then all work in the turned interface's points.
 
 On an iPhone Duo this is set_hinge with that orientation, and answers as set_hinge does. A 400 on a physical iPhone or an Android device.`,
     inputSchema: strictParams({
       orientation: z
-        .enum(["portrait", "pud", "landscape-left", "landscape-right"])
-        .describe("How the device is held, as UIDeviceOrientation names it."),
+        .enum(["portrait", "pud", "landscape-left", "landscape-right", "face-up", "face-down"])
+        .describe("How the device is held, as devicectl names it."),
       udid: z
         .string()
         .optional()

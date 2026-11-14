@@ -27,9 +27,10 @@ from server.models import (
 SIM = "B7C00E83-B66A-49DB-AD90-D58A2359748B"
 
 
-def _controller(*, reads=(1, 3), panels=1) -> DeviceController:
+def _controller(*, reads=(1, 4), panels=1, devicectl=False) -> DeviceController:
     """A controller whose sim-bridge reads `reads` in turn (the last repeats)
-    and reports `panels` built-in panels."""
+    and reports `panels` built-in panels; `devicectl` says whether devicectl
+    can turn it, else sim-bridge's event does."""
     ctrl = DeviceController()
     ctrl._device_type_cache[SIM] = DeviceType.SIMULATOR
     ctrl._sim_bridge_ok = True
@@ -50,16 +51,19 @@ def _controller(*, reads=(1, 3), panels=1) -> DeviceController:
     ctrl.sim_bridge.orientation = AsyncMock(side_effect=orientation)
     ctrl.hinge = MagicMock()
     ctrl.hinge.orient = AsyncMock()
+    ctrl.devicectl = MagicMock()
+    ctrl.devicectl.can_set_orientation = AsyncMock(return_value=devicectl)
+    ctrl.devicectl.set_orientation = AsyncMock()
     return ctrl
 
 
 @pytest.mark.parametrize("name,value", [
-    ("portrait", 1), ("pud", 2), ("landscape-left", 3), ("landscape-right", 4),
+    ("portrait", 1), ("pud", 2), ("landscape-left", 4), ("landscape-right", 3),
 ])
 async def test_each_orientation_is_sent_as_the_value_it_reads_back(name, value):
-    """The bridge sets and reads UIDeviceOrientation, so one number means one
-    thing both ways; the event's own landscape numbering, which is the other
-    way round, stays inside sim-bridge."""
+    """Without devicectl, sim-bridge's event turns it. The bridge sets and
+    reads one number, so it means one thing both ways; the names are
+    devicectl's, measured: its landscapeLeft reads back 4."""
     ctrl = _controller(reads=(1, value))
 
     result = await ctrl.set_orientation(name)
@@ -79,7 +83,7 @@ async def test_the_interface_is_read_back_not_assumed():
 
     result = await ctrl.set_orientation("landscape-left")
 
-    assert ctrl.sets == [3]
+    assert ctrl.sets == [4]
     assert result["status"] == "ok"
     assert result["interface_orientation"] == "portrait"
     assert result["interface_orientation_before"] == "portrait"
@@ -90,7 +94,7 @@ async def test_it_waits_for_the_turn_to_play_out():
     """The guest rotates after the bridge answers: a read taken straight away
     is the old orientation, and reporting it would call a turn that worked a
     failure."""
-    ctrl = _controller(reads=(1, 1, 1, 4))
+    ctrl = _controller(reads=(1, 1, 1, 3))
 
     result = await ctrl.set_orientation("landscape-right")
 
@@ -105,7 +109,7 @@ async def test_a_failed_read_back_does_not_undo_the_turn():
 
     result = await ctrl.set_orientation("landscape-left")
 
-    assert ctrl.sets == [3]
+    assert ctrl.sets == [4]
     assert result["status"] == "ok"
     assert result["interface_orientation"] is None
     assert "could not be read back" in result["note"]
@@ -126,7 +130,7 @@ async def test_a_failure_after_a_stale_read_is_no_reading():
 async def test_the_change_is_marked_after_the_turn_has_played_out():
     """Marked again once the wait is over, so a tap straight after the call
     still finds the rotation recent and waits for it to settle."""
-    ctrl = _controller(reads=(1, 1, 1, 3))
+    ctrl = _controller(reads=(1, 1, 1, 4))
     read_at: list[float] = []
     inner = ctrl.sim_bridge.orientation.side_effect
 
@@ -155,7 +159,7 @@ async def test_a_foldable_is_set_hinge_with_that_orientation():
     without comparing to the request: unfolded, `portrait` is the inner
     panel's landscape, so a comparison would call every unfolded turn a
     refusal (review)."""
-    ctrl = _controller(reads=(1, 3), panels=2)
+    ctrl = _controller(reads=(1, 4), panels=2)
     ctrl.set_hinge = AsyncMock(return_value={"udid": SIM, "status": "ok", "lit_panel": {}})
 
     result = await ctrl.set_orientation("portrait")
@@ -163,6 +167,69 @@ async def test_a_foldable_is_set_hinge_with_that_orientation():
     ctrl.set_hinge.assert_awaited_once_with(SIM, orientation="portrait")
     assert ctrl.sets == []
     assert result == {"udid": SIM, "status": "ok", "lit_panel": {}}
+
+
+async def test_devicectl_turns_it_where_it_can():
+    """Apple's own command, where this Xcode's devicectl has it; sim-bridge's
+    event is then not sent, and the answer says which turned it."""
+    ctrl = _controller(reads=(1, 4), devicectl=True)
+
+    result = await ctrl.set_orientation("landscape-left")
+
+    ctrl.devicectl.set_orientation.assert_awaited_once_with(SIM, "landscape-left")
+    assert ctrl.sets == []
+    assert result["turned_with"] == "devicectl"
+    assert result["interface_orientation"] == "landscape-left"
+
+
+async def test_without_devicectl_the_event_turns_it_and_says_so():
+    ctrl = _controller(reads=(1, 4), devicectl=False)
+
+    result = await ctrl.set_orientation("landscape-left")
+
+    ctrl.devicectl.set_orientation.assert_not_awaited()
+    assert result["turned_with"] == "sim-bridge"
+
+
+async def test_a_turn_devicectl_refused_raises():
+    """Nothing turned, so the caller should know."""
+    ctrl = _controller(devicectl=True)
+    ctrl.devicectl.set_orientation = AsyncMock(side_effect=DeviceError("devicectl device failed"))
+
+    with pytest.raises(DeviceError, match="devicectl"):
+        await ctrl.set_orientation("landscape-left")
+
+
+async def test_lying_flat_keeps_the_interface_and_is_not_called_a_refusal():
+    """Face up or down, the interface stays as it was: that is no app
+    declining to turn, so no such note."""
+    ctrl = _controller(reads=(4, 4), devicectl=True)
+
+    result = await ctrl.set_orientation("face-up")
+
+    ctrl.devicectl.set_orientation.assert_awaited_once_with(SIM, "face-up")
+    assert result["interface_orientation"] == "landscape-left"
+    assert "does not support" not in result["note"]
+    assert "keeps the interface" in result["note"]
+
+
+async def test_lying_flat_needs_devicectl():
+    ctrl = _controller(devicectl=False)
+
+    with pytest.raises(DeviceOperationUnsupportedError, match="devicectl"):
+        await ctrl.set_orientation("face-down")
+    assert ctrl.sets == []
+
+
+async def test_a_foldable_cannot_lie_flat():
+    """Its picker has the four orientations only."""
+    ctrl = _controller(panels=2, devicectl=True)
+    ctrl.set_hinge = AsyncMock()
+
+    with pytest.raises(InvalidDeviceRequestError, match="foldable"):
+        await ctrl.set_orientation("face-up")
+    ctrl.set_hinge.assert_not_awaited()
+    ctrl.devicectl.set_orientation.assert_not_awaited()
 
 
 async def test_a_turn_counts_as_a_screen_change():
@@ -236,3 +303,55 @@ async def test_a_refused_turn_raises_with_the_bridges_reason():
 
     with pytest.raises(DeviceError, match="PurpleWorkspacePort"):
         await bridge.orientation(SIM, set_to=3)
+
+
+# -- devicectl ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name,apple", [
+    ("portrait", "portrait"), ("pud", "portraitUpsideDown"),
+    ("landscape-left", "landscapeLeft"), ("landscape-right", "landscapeRight"),
+    ("face-up", "faceUp"), ("face-down", "faceDown"),
+])
+async def test_devicectl_is_given_apples_name(name, apple):
+    from server.device.ios.devicectl import DevicectlBackend
+
+    backend = DevicectlBackend()
+    backend._run_devicectl = AsyncMock(return_value=("", ""))
+
+    await backend.set_orientation(SIM, name)
+
+    backend._run_devicectl.assert_awaited_once_with(
+        "device", "orientation", "set", "--device", SIM, apple)
+
+
+async def test_a_devicectl_that_hangs_is_an_error_not_a_turn(monkeypatch):
+    import asyncio
+
+    from server.device.ios.devicectl import DevicectlBackend
+
+    backend = DevicectlBackend()
+    backend._ORIENTATION_TIMEOUT_S = 0.05
+
+    async def hang(*_a, **_k):
+        await asyncio.sleep(5)
+
+    backend._run_devicectl = hang
+
+    with pytest.raises(DeviceError, match="did not turn"):
+        await backend.set_orientation(SIM, "portrait")
+
+
+async def test_whether_devicectl_can_turn_is_asked_once(monkeypatch):
+    from server.device.ios import devicectl as mod
+
+    probe = AsyncMock(return_value=True)
+    monkeypatch.setattr(mod, "probe_command", probe)
+    monkeypatch.setattr(mod, "xcode_available", lambda: True)
+    backend = mod.DevicectlBackend()
+
+    assert await backend.can_set_orientation()
+    assert await backend.can_set_orientation()
+    assert probe.await_count == 1
+    assert probe.await_args.args[:6] == ("xcrun", "devicectl", "device", "orientation", "set",
+                                         "--help")
