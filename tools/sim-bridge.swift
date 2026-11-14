@@ -2578,9 +2578,11 @@ func handleCommand(_ dict: [String: Any]) {
             return
         }
         if let raw = dict["set"] {
-            // `3.7 as? Int` is nil; a JSON `true` would read as 1, so it is
-            // refused by type first.
-            guard !(raw is Bool), let set = raw as? Int, (1...4).contains(set) else {
+            // `3.7 as? Int` is nil, and a JSON `true` would read as 1. It is
+            // told apart by its CoreFoundation type: `raw is Bool` is true of
+            // any JSON 0 or 1, so it refused portrait (measured).
+            let isJSONBool = CFGetTypeID(raw as CFTypeRef) == CFBooleanGetTypeID()
+            guard !isJSONBool, let set = raw as? Int, (1...4).contains(set) else {
                 respond(["ok": false, "code": "bad_request",
                          "error": "set must be an orientation from 1 to 4, not \(raw)"])
                 return
