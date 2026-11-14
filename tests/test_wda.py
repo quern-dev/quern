@@ -5,6 +5,7 @@ All subprocess calls are mocked — no real git/xcodebuild/devicectl/ideviceinst
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1320,6 +1321,37 @@ class TestStopDriver:
 
         assert result["status"] == "stopped"
         mock_kill.assert_called_once_with(42, __import__("signal").SIGTERM)
+
+    async def test_a_stop_during_a_start_waits_and_stops_what_it_started(self):
+        """Read before the start recorded its runner, the stop said
+        "not_running" and the runner came up after it (CodeRabbit on #670)."""
+        from server.device.ios import wda
+
+        state: dict = {}
+        started = asyncio.Event()
+
+        async def start():
+            await started.wait()
+            state["runners"] = {"DEV1": {"pid": 42}}
+
+        task = asyncio.ensure_future(start())
+        wda._starts["DEV1"] = task
+        try:
+            with (
+                patch("server.device.ios.wda.read_wda_state", side_effect=lambda: state),
+                patch("server.device.ios.wda.save_wda_state"),
+                patch("server.device.ios.wda._is_process_alive", side_effect=[True, False]),
+                patch("server.device.ios.wda.os.kill") as mock_kill,
+            ):
+                stop = asyncio.ensure_future(stop_driver("DEV1"))
+                await asyncio.sleep(0.05)
+                assert not stop.done()            # waiting on the start
+                started.set()
+                result = await stop
+            assert result["status"] == "stopped"
+            mock_kill.assert_called_once_with(42, __import__("signal").SIGTERM)
+        finally:
+            wda._starts.pop("DEV1", None)
 
     async def test_stop_driver_dead_pid(self):
         state = {"runners": {"DEV1": {"pid": 42}}}

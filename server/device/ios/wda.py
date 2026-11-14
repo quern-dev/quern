@@ -1373,6 +1373,14 @@ async def stop_driver(udid: str) -> dict:
     Sends SIGTERM, waits up to 5s, then SIGKILL if needed.
     Removes runner entry from wda-state.json.
     """
+    # A start still under way has not recorded its runner yet, so a stop read
+    # now would say "not running" and the runner would come up after it
+    # (CodeRabbit on #670). Wait for it -- shielded, so this does not cancel it
+    # for its other callers -- and stop what it started. A start that fails
+    # still lets the stop go on to read the state.
+    pending = start_in_flight(udid)
+    if pending is not None:
+        await asyncio.wait([pending])
     state = read_wda_state()
     runners = state.get("runners", {})
     existing = runners.get(udid)
