@@ -488,13 +488,18 @@ If coordinate taps are not landing on the expected element, use take_annotated_s
         .max(10)
         .optional()
         .describe("Hold the touch this many seconds: a long press, for context menus, drag handles and press-and-hold controls. Omit for an ordinary tap. 1.0 clears the long-press threshold on iOS (0.5s) and Android (~0.4s)."),
+      verify_changed: z
+        .boolean()
+        .optional()
+        .describe("Default false. Answer on this tap whether it changed the screen: a frame before the tap and one 1 s after, compared near-exactly. The answer carries screen_changed -- true, false, or null when a frame could not be taken (never read null as false) -- and screen_change with the measured fraction, and a note when false: the tap probably did not register, or hit something that does nothing. Costs ~1.1 s per tap. Use it where a tap must navigate or open something, especially on a physical iPhone, where nothing else checks where a tap landed. A tap meant to change nothing also reads false."),
     }),
-  }, async ({ x, y, udid, duration, skip_settle }) => {
+  }, async ({ x, y, udid, duration, skip_settle, verify_changed }) => {
     try {
       const body: Record<string, unknown> = { x, y };
       if (udid) body.udid = udid;
       if (duration !== undefined) body.duration = duration;
       if (skip_settle !== undefined) body.skip_settle = skip_settle;
+      if (verify_changed !== undefined) body.verify_changed = verify_changed;
 
       const data = await apiRequest(
         "POST",
@@ -604,6 +609,10 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .boolean()
         .optional()
         .describe("Default true. A frame of the screen is captured before the tap, so that if your next tap_element misses or wait_for_element times out -- at least a second later, with no screen change through quern in between -- on a screen that looks exactly the same, the miss carries `screen_unchanged_since_tap` (no knowledge base needed): the tap probably did not register. Animated screens read as changed and get no note. Costs one capture per tap -- ~90ms on a simulator, ~60ms on Android, ~200ms on an iPhone. Pass false in a speed-sensitive loop."),
+      verify_changed: z
+        .boolean()
+        .optional()
+        .describe("Default false. Answer on this tap whether it changed the screen: a frame before the tap and one 1 s after, compared near-exactly. The answer carries screen_changed -- true, false, or null when a frame could not be taken (never read null as false) -- and screen_change with the measured fraction, and a note when false: the tap probably did not register, or hit something that does nothing. Costs ~1.1 s per tap. Use it where a tap must navigate or open something, especially on a physical iPhone, where nothing else checks where a tap landed. A tap meant to change nothing also reads false."),
       navigation_timeout: z
         .coerce.number()
         .positive()
@@ -624,7 +633,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .optional()
         .describe("Hold the touch this many seconds: a long press, for context menus, drag handles and press-and-hold controls. Omit for an ordinary tap. 1.0 clears the long-press threshold on iOS (0.5s) and Android (~0.4s)."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth, deepen, verify_navigation, navigation_timeout, note_unchanged, duration, skip_stability_check }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth, deepen, verify_navigation, navigation_timeout, note_unchanged, verify_changed, duration, skip_stability_check }) => {
     try {
       const body: Record<string, unknown> = {};
       if (duration !== undefined) body.duration = duration;
@@ -653,6 +662,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       if (verify_navigation !== undefined) body.verify_navigation = verify_navigation;
       if (navigation_timeout !== undefined) body.navigation_timeout = navigation_timeout;
       if (note_unchanged !== undefined) body.note_unchanged = note_unchanged;
+      if (verify_changed !== undefined) body.verify_changed = verify_changed;
 
       const data = await apiRequest(
         "POST",
