@@ -257,9 +257,23 @@ def find_element(
     Returns:
         List of matching elements (empty if no matches)
     """
+    if label and merged_labels:
+        # Exact and title candidates are narrowed apart, and a title is tried
+        # only when no exact candidate survives: choosing between them first
+        # let a stray exact StaticText "Wi-Fi" hide the "Wi-Fi, Home" row a
+        # Button filter asked for (#664 phase 2b review).
+        exact = _narrowed(find_by_label(elements, label), label, identifier,
+                          element_type, prefilter)
+        if exact:
+            return exact
+        lower = label.lower()
+        titled = [e for e in elements
+                  if e.label.lower() != lower and title_of(e.label).lower() == lower]
+        return _narrowed(titled, label, identifier, element_type, prefilter)
+
     # Start with label or identifier search, then narrow by type
     if label:
-        matches = find_by_label(elements, label, merged=merged_labels)
+        matches = find_by_label(elements, label)
     elif label_contains:
         matches = find_by_label_contains(elements, label_contains)
     elif label_prefix:
@@ -275,19 +289,23 @@ def find_element(
         # No search criteria provided
         return []
 
-    # Narrowing filters. Applied after the primary selector rather than instead
-    # of it, so naming both a label and an identifier means both must hold.
+    return _narrowed(matches, label or label_contains or label_prefix, identifier,
+                     element_type, prefilter)
+
+
+def _narrowed(matches: list[UIElement], label: str | None, identifier: str | None,
+              element_type: str | None, prefilter: bool) -> list[UIElement]:
+    """The narrowing filters. Applied after the primary selector rather than
+    instead of it, so naming both a label and an identifier means both must
+    hold."""
     if identifier and matches:
         matches = [e for e in matches if e.identifier == identifier]
     if element_type and matches:
         if prefilter:
             matches = find_by_related_type(matches, element_type)
         else:
-            rule = rule_for(
-                identifier=identifier, label=label or label_contains or label_prefix,
-            )
+            rule = rule_for(identifier=identifier, label=label)
             matches = find_by_type(matches, element_type, rule, identifier)
-
     return matches
 
 

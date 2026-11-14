@@ -16,13 +16,34 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from server.device.controller_ui import PUSHED_MISS_DETAIL
-from server.device.ios.coredevice_ax import CoreDeviceAxReader
+from server.device.controller_ui import PUSHED_ABSENT_NOTE, PUSHED_MISS_DETAIL
+from server.device.ios.coredevice_ax import AppExitedDuringRead, CoreDeviceAxReader
+from server.device.ios.wda_client import ACTION_SNAPSHOT_DEPTH
 from server.device.ui_elements import find_element, parse_elements
-from server.models import DeviceError, WaitCondition
+from server.models import DeviceError, UIElement, WaitCondition
 from tests.test_coredevice_ax import PHONE, SETTINGS, _phone_controller, parse_push
 
 ROWS = parse_elements(parse_push(SETTINGS)[1])
+SPRINGBOARD = [
+    {"type": "Application", "AXLabel": "SpringBoard", "AXUniqueId": None,
+     "frame": {"x": 0, "y": 0, "width": 414, "height": 896}},
+    {"type": "Button", "AXLabel": "Settings", "AXUniqueId": "Settings",
+     "frame": {"x": 20, "y": 100, "width": 60, "height": 60}},
+]
+#: A WDA tree with a label that looks merged: WDA's labels are matched exactly.
+WDA_ROW = [
+    {"type": "Application", "AXLabel": "Settings", "AXUniqueId": None,
+     "frame": {"x": 0, "y": 0, "width": 414, "height": 896}},
+    {"type": "Button", "AXLabel": "Wi-Fi, Home", "AXUniqueId": "wifi",
+     "frame": {"x": 20, "y": 370, "width": 374, "height": 52}},
+]
+
+
+def _wda_depth_spies(ctrl):
+    """WDA's depth calls, faked and recorded: a None depth is the bug."""
+    ctrl.wda_client._set_snapshot_depth = AsyncMock()
+    ctrl._wda_direct_query = AsyncMock(return_value=([], 0.1))
+    ctrl._deeper_query = AsyncMock(return_value=([], 0.1))
 
 
 @pytest.fixture(autouse=True)
@@ -60,6 +81,14 @@ class TestTheTitleRule:
         exact = ROWS[0].model_copy(update={"label": "Wi-Fi", "identifier": "exact"})
         found = find_element([*ROWS, exact], label="Wi-Fi", merged_labels=True)
         assert [e.identifier for e in found] == ["exact"]
+
+    def test_a_type_filter_reaches_the_row_past_a_stray_exact_text(self):
+        """A section header "Wi-Fi" must not hide the row a Button asks for."""
+        header = ROWS[0].model_copy(update={"label": "Wi-Fi", "type": "StaticText",
+                                             "identifier": "header"})
+        found = find_element([*ROWS, header], label="Wi-Fi", element_type="Button",
+                             merged_labels=True)
+        assert [e.identifier for e in found] == ["com.apple.settings.wifi"]
 
     def test_the_whole_label_still_matches(self):
         found = find_element(ROWS, label="Wi-Fi, ExampleNetwork", merged_labels=True)
@@ -105,16 +134,21 @@ class TestGetElementState:
 
     async def test_a_push_that_cannot_be_read_falls_back_with_exact_labels(self, monkeypatch):
         """WDA's read is matched exactly, as it always was: no title rule, and
-        the miss is not called the push's."""
+        the miss is not called the push's. At the action depth, never the
+        full walk, and every WDA depth step gets a number."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
+        _wda_depth_spies(ctrl)
         ctrl.coredevice_ax.describe_all = AsyncMock(
             side_effect=DeviceError("no tunnel", tool="coredevice"))
-        ctrl.wda_client.describe_all = AsyncMock(return_value=parse_push(SETTINGS)[1])
+        ctrl.wda_client.describe_all = AsyncMock(return_value=WDA_ROW)
 
         with pytest.raises(DeviceError) as caught:
             await ctrl.get_element(label="Wi-Fi", udid=PHONE)
 
-        ctrl.wda_client.describe_all.assert_awaited()
+        assert ctrl.wda_client.describe_all.await_args.kwargs["snapshot_depth"] == \
+            ACTION_SNAPSHOT_DEPTH
+        assert all(c.args[1] is not None
+                   for c in ctrl.wda_client._set_snapshot_depth.await_args_list)
         assert "tree the device pushes" not in str(caught.value)
 
     async def test_a_pushed_screen_read_answers_the_next_lookup(self, monkeypatch):
@@ -127,6 +161,42 @@ class TestGetElementState:
 
         assert result["matched_via"] == "merged_label"
         ctrl.coredevice_ax.describe_all.assert_awaited_once()
+
+
+class TestACrashDuringALookup:
+    """#669: the push read kills the app. A lookup must not then answer from
+    the screen the crash left -- SpringBoard."""
+
+    @pytest.fixture
+    def crashing(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = AsyncMock(
+            side_effect=AppExitedDuringRead("Settings", 711))
+        ctrl.wda_client.describe_all = AsyncMock(return_value=SPRINGBOARD)
+        ctrl.coredevice_input.tap = AsyncMock(return_value="coredevice")
+        return ctrl
+
+    def _says_so(self, ctrl, error):
+        assert "Nothing was looked up" in str(error)
+        assert ctrl._push_crashed_apps[PHONE] == {"Settings"}
+        ctrl.wda_client.describe_all.assert_not_called()
+
+    async def test_tap_element_taps_nothing(self, crashing):
+        with pytest.raises(DeviceError) as caught:
+            await crashing.tap_element(label="Settings", udid=PHONE, scroll_to_find=False)
+        self._says_so(crashing, caught.value)
+        crashing.coredevice_input.tap.assert_not_called()
+
+    async def test_not_exists_does_not_pass(self, crashing):
+        with pytest.raises(DeviceError) as caught:
+            await crashing.wait_for_element(
+                condition=WaitCondition.NOT_EXISTS, label="Wi-Fi", timeout=1, udid=PHONE)
+        self._says_so(crashing, caught.value)
+
+    async def test_get_element_state_says_why(self, crashing):
+        with pytest.raises(DeviceError) as caught:
+            await crashing.get_element(label="Wi-Fi", udid=PHONE)
+        self._says_so(crashing, caught.value)
 
 
 class TestWaitForElement:
@@ -150,6 +220,54 @@ class TestWaitForElement:
             interval=0.1, udid=PHONE)
 
         assert result["matched"] is False
+
+    async def test_a_pushed_absence_says_whose(self, monkeypatch):
+        """The network name is on screen, merged into the Wi-Fi row: absent as
+        VoiceOver sees it, which the success has to say."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+
+        result, _ = await ctrl.wait_for_element(
+            condition=WaitCondition.NOT_EXISTS, label="ExampleNetwork", timeout=1, udid=PHONE)
+
+        assert result["matched"] is True and result["note"] == PUSHED_ABSENT_NOTE
+
+    async def test_a_found_element_that_times_out_names_the_push(self, monkeypatch):
+        """Bluetooth's state is in its merged label, not its value."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl._identify_for_miss = AsyncMock(return_value={})
+
+        result, _ = await ctrl.wait_for_element(
+            condition=WaitCondition.VALUE_EQUALS, label="Bluetooth", value="On",
+            timeout=0.3, interval=0.1, udid=PHONE)
+
+        assert result["matched"] is False
+        assert "tree the device pushes" in result["depth_note"]
+
+    async def test_each_poll_is_matched_by_its_own_reader(self, monkeypatch):
+        """A poll WDA made after the push failed matches exactly: WDA's
+        "Wi-Fi, Home" is not the "Wi-Fi" the push's title rule found."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        _wda_depth_spies(ctrl)
+        ctrl.coredevice_ax.describe_all = AsyncMock(side_effect=[
+            parse_push(SETTINGS)[1], DeviceError("no tunnel", tool="coredevice")])
+        ctrl.wda_client.describe_all = AsyncMock(return_value=WDA_ROW)
+
+        result, _ = await ctrl.wait_for_element(
+            condition=WaitCondition.NOT_EXISTS, label="Wi-Fi", timeout=3,
+            interval=0.35, udid=PHONE)
+
+        assert result["matched"] is True and result["polls"] == 2
+        assert "note" not in result                  # WDA's absence, not the push's
+
+    async def test_through_wda_a_merged_looking_label_is_matched_exactly(self, monkeypatch):
+        ctrl = _phone_controller(reader="wda", monkeypatch=monkeypatch)
+        _wda_depth_spies(ctrl)
+        ctrl.wda_client.describe_all = AsyncMock(return_value=WDA_ROW)
+
+        result, _ = await ctrl.wait_for_element(
+            condition=WaitCondition.NOT_EXISTS, label="Wi-Fi", timeout=1, udid=PHONE)
+
+        assert result["matched"] is True and "note" not in result
 
     async def test_a_never_found_element_names_the_push(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
@@ -208,14 +326,39 @@ class TestTapElement:
         assert ctrl.backend_that_served(PHONE) == CoreDeviceAxReader.TOOL_NAME
 
     async def test_through_wda_the_label_is_exact(self, monkeypatch):
-        """Not opted in: the same lookup is WDA's, matched exactly."""
+        """Not opted in: the same lookup is WDA's, matched exactly -- its
+        "Wi-Fi, Home" row is not found by "Wi-Fi"."""
         ctrl = _phone_controller(reader="wda", monkeypatch=monkeypatch)
-        ctrl.wda_client._set_snapshot_depth = AsyncMock()
+        _wda_depth_spies(ctrl)
+        ctrl._identify_for_miss = AsyncMock(return_value={})
+        ctrl.wda_client.describe_all = AsyncMock(return_value=WDA_ROW)
+        ctrl.wda_client.tap = AsyncMock()
 
-        await ctrl.tap_element(label="Wi-Fi", udid=PHONE, scroll_to_find=False)
+        result = await ctrl.tap_element(label="Wi-Fi", udid=PHONE, scroll_to_find=False)
 
+        assert result["status"] == "not_found"
         ctrl.coredevice_ax.describe_all.assert_not_called()
-        ctrl.wda_client.find_elements_by_query.assert_awaited()
+        ctrl.wda_client.tap.assert_not_called()
+
+    async def test_after_the_wda_sweep_the_stability_check_runs(self, monkeypatch):
+        """The sweep finds the target through WDA after a swipe, while the list
+        may still be moving: the push's 'settled' reason no longer holds."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        _wda_depth_spies(ctrl)
+        ctrl._identify_for_miss = AsyncMock(return_value={})
+        ctrl.coredevice_input.tap = AsyncMock(return_value="coredevice")
+        found = UIElement(type="Button", label="Far", identifier="far",
+                          frame={"x": 20, "y": 400, "width": 374, "height": 52})
+        ctrl._ios_scroll_to_element = AsyncMock(return_value=found)
+        ctrl._wda_direct_query = AsyncMock(return_value=([found], 0.1))
+
+        result = await ctrl.tap_element(label="Far", udid=PHONE, scroll_to_find=True)
+
+        assert result["status"] == "ok", result
+        # The re-check: a WDA read of the target by its label. (The other
+        # direct query here is the reachability check's, for the viewport.)
+        assert any(c.kwargs.get("label") == "Far"
+                   for c in ctrl._wda_direct_query.await_args_list)
 
 
 class TestOtherReadsStayOnWda:
@@ -237,6 +380,42 @@ class TestOtherReadsStayOnWda:
         elements, _ = await ctrl.get_ui_elements(
             PHONE, filter_label="Wi-Fi", use_cache=False, lookup=True)
         assert [e.identifier for e in elements] == ["com.apple.settings.wifi"]
+
+    async def test_a_wda_filtered_read_after_a_pushed_one_stays_exact(self, monkeypatch):
+        """In the same request -- a sweep after a pushed lookup -- WDA's read is
+        WDA's, matched exactly. Through the cached path, whose in-memory filter
+        is the one a pushed read changes."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        _wda_depth_spies(ctrl)
+        await ctrl.get_element(label="Wi-Fi", udid=PHONE)              # pushed
+        ctrl._invalidate_ui_cache(PHONE)
+        ctrl.wda_client.describe_all = AsyncMock(return_value=WDA_ROW)
+
+        elements, _ = await ctrl.get_ui_elements(PHONE, filter_label="Wi-Fi")
+
+        assert elements == []
+        ctrl.wda_client.describe_all.assert_awaited()
+
+    async def test_a_wda_query_after_a_pushed_read_is_marked_as_wdas(self, monkeypatch):
+        """Its own record of the reader, not the request's last one nor the
+        shared per-device one a concurrent push read rewrites meanwhile."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        await ctrl.get_element(label="Wi-Fi", udid=PHONE)              # pushed
+        general = UIElement(type="Button", label="General", identifier="general",
+                            frame={"x": 20, "y": 660, "width": 374, "height": 52})
+
+        async def query_while_a_push_lands(*a, **kw):
+            ctrl._last_read_backend[PHONE] = CoreDeviceAxReader.TOOL_NAME
+            return [general], 0.1
+
+        ctrl._wda_direct_query = AsyncMock(side_effect=query_while_a_push_lands)
+        ctrl.wda_client._set_snapshot_depth = AsyncMock()
+
+        elements, _ = await ctrl.get_ui_elements(PHONE, filter_label="General",
+                                                 snapshot_depth=12)
+
+        assert elements == [general]
+        ctrl._mark_on_screen.assert_awaited()
 
     async def test_the_reader_is_recorded_per_request(self, monkeypatch):
         """A WDA read that rewrites the shared per-device record mid-lookup must

@@ -589,6 +589,13 @@ _READ_BY: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "quern_read_by", default=None)
 
 
+#: Said on a not_exists wait the tree push satisfied (#664): absent as
+#: VoiceOver sees the screen, which is not the same as absent from it.
+PUSHED_ABSENT_NOTE = (
+    "Not in the tree the device pushes (backend coredevice), where a row's texts "
+    "are merged into one label: text inside a row, such as its detail, is not an "
+    "element of its own there. Pass snapshot_depth to check through WDA.")
+
 #: Said on a miss read from the tree push (#664), so "not there" is read as
 #: what it is -- not there as VoiceOver sees the screen -- and the way to ask
 #: WDA instead is named.
@@ -2811,6 +2818,15 @@ class DeviceControllerUI:
                     # Said on the answer, not only in the log: the screen the
                     # caller sees next is the one the crash left (#669).
                     self._push_crashed_apps.setdefault(resolved, set()).add(e.app)
+                    if lookup:
+                        # Not looked up on what the crash left: on SpringBoard
+                        # a tap by label tapped an icon, and not_exists passed,
+                        # each answering ok (#664 phase 2b review).
+                        raise DeviceError(
+                            f"{e}. Nothing was looked up: the screen this lookup was "
+                            "for is gone. This device's screens will be read through "
+                            "WDA until the server restarts; read the screen again "
+                            "before acting.", tool=self.coredevice_ax.TOOL_NAME) from e
                     _READ_NOTE.set(
                         f"{e}. This read is WDA's, and this device's screens will be "
                         "read through WDA until the server restarts.")
@@ -2818,8 +2834,13 @@ class DeviceControllerUI:
                 self._last_read_backend[resolved] = getattr(
                     backend, "TOOL_NAME", "unknown",
                 )
+                # A lookup asked for no depth because the push needs none; its
+                # WDA read takes the action depth, never the full walk that
+                # took 34.5 s on an iPhone 11 (F35, #664 phase 2b review).
                 raw = await backend.describe_all(
-                    resolved, snapshot_depth=snapshot_depth,
+                    resolved,
+                    snapshot_depth=(self._read_depth(resolved, None)
+                                    if lookup and snapshot_depth is None else snapshot_depth),
                     source_timeout=source_timeout, probe=probe_containers,
                 )
 
@@ -2948,6 +2969,10 @@ class DeviceControllerUI:
             lookup=True,
         )
         pushed = _READ_BY.get() == self.coredevice_ax.TOOL_NAME
+        if not pushed and shallow is None:
+            # The push could not be read and WDA was, at the action depth: its
+            # depth steps below need that number, never None.
+            shallow = self._read_depth(resolved, snapshot_depth)
         matches = find_element(
             elements, label=label, label_contains=label_contains,
             label_prefix=label_prefix, identifier=identifier,
@@ -3128,8 +3153,6 @@ class DeviceControllerUI:
         # quick shallow one, and is bounded (#470 review).
         poll_depth = self._read_depth(resolved, snapshot_depth, lookup=True)
         shallow_depth = poll_depth
-        # Whether any poll read the tree push (#664), for the timed-out answer.
-        ever_pushed = False
         deepened = None
         # Across polls, for the timed-out answer: whether any looked deeper.
         deepen_tried = deep_timed_out = False
@@ -3153,7 +3176,6 @@ class DeviceControllerUI:
             )
             # Per poll: a push read that cannot be made falls back to WDA.
             pushed = _READ_BY.get() == self.coredevice_ax.TOOL_NAME
-            ever_pushed = ever_pushed or pushed
             deepened = _DEEPENED.get()
             deepen_tried = deepen_tried or _DEEPEN_TRIED.get()
             deep_timed_out = deep_timed_out or _DEEP_TIMED_OUT.get()
@@ -3185,6 +3207,10 @@ class DeviceControllerUI:
                 if current_element is not None:
                     _note_equivalence(result, element_type, current_element)
                     _note_merged_label(result, label, current_element, pushed)
+                elif pushed:
+                    # An absence that counts as success: say whose. Text inside
+                    # a row's merged label is no element of its own there.
+                    result["note"] = PUSHED_ABSENT_NOTE
                 _note_deepened(result, deepened, shallow_depth)
                 return result, resolved
 
@@ -3223,7 +3249,10 @@ class DeviceControllerUI:
                 }
                 if hint:
                     result["web_content_hint"] = hint
-                if not ever_found and ever_pushed:
+                if pushed:
+                    # By the last poll's reader, which made the state that
+                    # timed out -- found and never matching a value, or never
+                    # found (#664 phase 2b review).
                     result["depth_note"] = PUSHED_MISS_DETAIL.lstrip(". ")
                 if (not ever_found and poll_depth is not None
                         and self._served_by_wda(resolved)):
@@ -3742,6 +3771,10 @@ class DeviceControllerUI:
                     deepen=_deepen_allowed(snapshot_depth, deepen),
                 )
                 if scrolled is not None:
+                    # Found by the sweep, through WDA after a swipe: no longer
+                    # the push's settled read, so the stability check and the
+                    # rest treat it as WDA's (#664 phase 2b review).
+                    pushed = False
                     # Found deep by the sweep: the checks below look it up
                     # again at the session depth, which the sweep left there;
                     # the wrapper puts the shallow depth back (#475 review).
