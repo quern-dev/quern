@@ -105,6 +105,19 @@ APPLICATION_RESPONSE = 4
 #: (a clock, a spinner) is answered with its newest complete tree.
 SETTLE_MAX_S = 2.0
 
+#: A pair already under way -- a newer InitialDump in, its AdditionalData not
+#: yet -- gets the time the device takes to build one, which grows with the
+#: tree: about 0.9 s plus 15 ms an element, as AXe measured. Measured here
+#: (#676): after a tap into Settings > Battery the 28-element pair completed
+#: 0.87-1.02 s after its InitialDump, and in one run of three that ran past
+#: SETTLE_MAX_S, so the read answered with the 12-element page still loading.
+PAIR_BASE_S = 0.9
+PAIR_PER_ELEMENT_S = 0.015
+
+#: However many pairs are under way, a read answers this long after its first
+#: complete tree, with the newest complete tree it has.
+SETTLE_HARD_S = 4.0
+
 #: Each cleanup step's bound: unsubscribing and closing must not hold a read
 #: up, or change its outcome.
 CLOSE_S = 2.0
@@ -363,7 +376,10 @@ async def _newest_tree(queue: asyncio.Queue) -> tuple[Tree, Tree, Tree]:
     be decoded is skipped. A newer InitialDump means the screen changed under
     the read, so its pair is waited for; but once a complete tree is in hand
     the wait for anything newer ends SETTLE_MAX_S later, and the newest
-    complete tree is the answer. A screen that never stops changing -- a
+    complete tree is the answer -- unless a newer pair is under way then: it
+    gets PAIR_BASE_S plus PAIR_PER_ELEMENT_S for each element its InitialDump
+    carries, to finish (#676). SETTLE_HARD_S after the first complete tree
+    the read answers regardless. A screen that never stops changing -- a
     clock, a spinner -- would otherwise never settle, and every read of it
     would run out the caller's deadline with trees in hand. Before the first
     complete tree, the caller's deadline is what ends the wait.
@@ -375,11 +391,14 @@ async def _newest_tree(queue: asyncio.Queue) -> tuple[Tree, Tree, Tree]:
     changing = False  # an InitialDump arrived after `latest`
     unsettled = False  # notifications arrived during the read
     settle_by = 0.0
+    pair_by = 0.0  # when a pair under way is given up on
+    hard_by = 0.0
     while True:
         if latest is None:
             selector, args = await queue.get()
         else:
-            remaining = settle_by - loop.time()
+            deadline = min(pair_by, hard_by) if changing else settle_by
+            remaining = deadline - loop.time()
             if remaining <= 0:
                 return latest, first or latest, newest or latest
             quiet = UNSETTLED_QUIET_S if unsettled else QUIET_S
@@ -403,9 +422,14 @@ async def _newest_tree(queue: asyncio.Queue) -> tuple[Tree, Tree, Tree]:
                 # one; long enough to see the app replaced when the screen is
                 # in flux.
                 settle_by = loop.time() + max(SETTLE_MAX_S, UNSETTLED_QUIET_S)
+                hard_by = loop.time() + SETTLE_HARD_S
             latest, changing = tree, False
         elif latest is not None:
             changing = True
+            # Its pair gets the time a tree this size takes to build, and
+            # never less than the settle window already allowed.
+            pair_by = max(settle_by, loop.time() + PAIR_BASE_S
+                          + PAIR_PER_ELEMENT_S * len(tree.elements))
 
 
 async def _app_alive(rsd: Any, lib: SimpleNamespace, pid: int) -> bool | None:

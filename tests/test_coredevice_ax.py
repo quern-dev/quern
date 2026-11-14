@@ -300,6 +300,91 @@ class TestWaitingForTheTree:
             task.cancel()
         assert dump_type == "AdditionalData"
 
+    @staticmethod
+    async def _pair_completing_at(delay: float):
+        """Settings complete; Safari's InitialDump at once and its
+        AdditionalData `delay` seconds later. Returns the label of the answer."""
+        queue: asyncio.Queue = asyncio.Queue()
+        queue.put_nowait((PUSH_SELECTOR, [SETTINGS]))
+        queue.put_nowait((PUSH_SELECTOR, [_as("InitialDump", SAFARI)]))
+
+        async def later():
+            await asyncio.sleep(delay)
+            queue.put_nowait((PUSH_SELECTOR, [SAFARI]))
+
+        task = asyncio.create_task(later())
+        try:
+            tree, _, _ = await asyncio.wait_for(coredevice_ax._newest_tree(queue), 5)
+        finally:
+            task.cancel()
+        return tree.elements[0]["AXLabel"]
+
+    @pytest.fixture
+    def short_windows(self, monkeypatch):
+        """Settle windows far shorter than the pair below takes, so only the
+        pair's own budget can see it through."""
+        monkeypatch.setattr(coredevice_ax, "SETTLE_MAX_S", 0.2)
+        monkeypatch.setattr(coredevice_ax, "UNSETTLED_QUIET_S", 0.2)
+        monkeypatch.setattr(coredevice_ax, "QUIET_S", 0.1)
+
+    async def test_a_pair_under_way_finishes_past_the_settle_window(self, short_windows,
+                                                                    monkeypatch):
+        """Measured after a tap into Settings > Battery (#676): the newer pair
+        completed after the settle window, and the read answered with the
+        page still loading."""
+        monkeypatch.setattr(coredevice_ax, "PAIR_BASE_S", 0.6)
+        monkeypatch.setattr(coredevice_ax, "PAIR_PER_ELEMENT_S", 0.0)
+        assert await self._pair_completing_at(0.45) == "Safari"
+
+    async def test_the_pairs_budget_grows_with_its_tree(self, short_windows, monkeypatch):
+        """Safari's InitialDump carries 13 elements: at 30 ms each its pair
+        has 0.49 s, past the 0.45 s it takes; with none, 0.1 s, short of it."""
+        monkeypatch.setattr(coredevice_ax, "PAIR_BASE_S", 0.1)
+        monkeypatch.setattr(coredevice_ax, "PAIR_PER_ELEMENT_S", 0.03)
+        assert await self._pair_completing_at(0.45) == "Safari"
+        monkeypatch.setattr(coredevice_ax, "PAIR_PER_ELEMENT_S", 0.0)
+        assert await self._pair_completing_at(0.45) == "Settings"
+
+    async def test_a_small_pair_keeps_the_settle_windows_time(self, monkeypatch):
+        """A pair budget shorter than the settle window left does not cut the
+        wait the window already gave."""
+        monkeypatch.setattr(coredevice_ax, "SETTLE_MAX_S", 1.0)
+        monkeypatch.setattr(coredevice_ax, "UNSETTLED_QUIET_S", 1.0)
+        monkeypatch.setattr(coredevice_ax, "PAIR_BASE_S", 0.1)
+        monkeypatch.setattr(coredevice_ax, "PAIR_PER_ELEMENT_S", 0.0)
+        assert await self._pair_completing_at(0.5) == "Safari"
+
+    async def test_a_pair_slower_than_its_budget_is_given_up(self, short_windows,
+                                                             monkeypatch):
+        monkeypatch.setattr(coredevice_ax, "PAIR_BASE_S", 0.3)
+        monkeypatch.setattr(coredevice_ax, "PAIR_PER_ELEMENT_S", 0.0)
+        assert await self._pair_completing_at(0.8) == "Settings"
+
+    async def test_pairs_that_never_finish_still_answer_by_the_hard_cap(self, short_windows,
+                                                                       monkeypatch):
+        """A new InitialDump every 0.25 s, never its pair: each one renews the
+        pair budget, so only SETTLE_HARD_S ends the read."""
+        monkeypatch.setattr(coredevice_ax, "PAIR_BASE_S", 0.5)
+        monkeypatch.setattr(coredevice_ax, "PAIR_PER_ELEMENT_S", 0.0)
+        monkeypatch.setattr(coredevice_ax, "SETTLE_HARD_S", 1.0)
+        queue: asyncio.Queue = asyncio.Queue()
+        queue.put_nowait((PUSH_SELECTOR, [SETTINGS]))
+
+        async def churn():
+            while True:
+                queue.put_nowait((PUSH_SELECTOR, [_as("InitialDump", SAFARI)]))
+                await asyncio.sleep(0.25)
+
+        task = asyncio.create_task(churn())
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        try:
+            tree, _, _ = await asyncio.wait_for(coredevice_ax._newest_tree(queue), 4)
+        finally:
+            task.cancel()
+        assert tree.elements[0]["AXLabel"] == "Settings"
+        assert 0.9 <= loop.time() - started <= 1.6
+
     async def test_an_initial_dump_alone_never_completes(self):
         """No identifiers yet, so not an answer: the read's deadline ends it."""
         with pytest.raises(TimeoutError):
