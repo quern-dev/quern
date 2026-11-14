@@ -59,10 +59,16 @@ CONNECT_S = 5.0
 #: later action on that phone queues behind it with no error and no fallback.
 SEND_S = 5.0
 
-#: Typing is not here: a HID keyboard is a hardware keyboard to iOS, typed
-#: through the phone's hardware-keyboard layout for its input language. On an
-#: iPhone 11 with a Japanese keyboard, "Hello abc" arrived as "Hっぉあ BC".
-#: type_text stays with WDA, which inserts the text itself.
+#: Typing is over a virtual HID keyboard, which iOS treats as a hardware
+#: keyboard (#664): keys arrive through the phone's layout and input method for
+#: the keyboard in use, which nothing reports. On an iPhone 11 with a Japanese
+#: keyboard "Hello abc #@" arrived as "Helloあbc＃＠". So this types US key
+#: positions, and the controller reads the field back and corrects it when
+#: what arrived is not what was meant.
+#:
+#: How long a key is held, and the pause after its release: the 0.02 s
+#: pymobiledevice3's own `type` uses.
+KEY_HOLD_S = 0.02
 
 #: Hardware buttons quern names, as (HID usage page, usage). Consumer page:
 #: AXe's capture and #624's probe agree on these.
@@ -157,9 +163,21 @@ def _pmd3() -> SimpleNamespace:
             RELEASE=hid_service.TOUCHSCREEN_STATE_RELEASE,
             BUTTON_DOWN=hid_service.HID_BUTTON_STATE_DOWN,
             BUTTON_UP=hid_service.HID_BUTTON_STATE_UP,
+            KEYS=hid_service.ASCII_TO_HID,
+            SHIFT=hid_service.KEY_LEFT_SHIFT,
         )
     except (ImportError, AttributeError) as e:
         raise NotSent(f"pymobiledevice3's HID services are not available ({e})") from e
+
+
+def types_on_us_keys(text: str) -> bool:
+    """Whether every character of `text` has a US key. False when the HID
+    services are not there to ask."""
+    try:
+        keys = _pmd3().KEYS
+    except NotSent:
+        return False
+    return all(ch in keys for ch in text)
 
 
 async def _report(send: Any) -> None:
@@ -281,6 +299,49 @@ class CoreDeviceInput:
         # landscape presses Home over HID as well as one in portrait.
         return await self._or_fallback(udid, f"{button} button", send,
                                        lambda: self._fallback.press_button(udid, button),
+                                       needs_screen=False)
+
+    async def type_text(self, udid: str, text: str) -> str:
+        """Type `text` as US key positions on a virtual keyboard (#664).
+
+        The keyboard is registered on a HID service of its own and closed with
+        it when the text is typed: while one is attached iOS hides the
+        on-screen keyboard, so a keyboard left on the held session would hide
+        it for the minute that session stays open. Measured on an iPhone 11:
+        closing the service brings the on-screen keyboard straight back.
+
+        Text with a character no US key types goes through WDA, as anything
+        HID cannot send does; the controller sets such text through the
+        accessibility service instead when it has a field to set it in.
+        """
+        async def send(lib: SimpleNamespace, session: _Session, screen: Screen | None,
+                       progress: _Progress) -> None:
+            keys = [lib.KEYS.get(ch) for ch in text]
+            if None in keys:
+                raise NotSent("the text has a character no US key types")
+            keyboard = lib.UniversalHID(session.rsd)
+            try:
+                await asyncio.wait_for(keyboard.connect(), CONNECT_S)
+                service = await asyncio.wait_for(keyboard.create_keyboard_service(),
+                                                 CONNECT_S)
+                progress.reached = True
+                for usage, shift in keys:
+                    if shift:
+                        # Pressed on its own first: iOS can ignore a Shift that
+                        # arrives with the key, as pymobiledevice3's own
+                        # `type` found.
+                        await _report(keyboard.send_keyboard(service, (lib.SHIFT,)))
+                        await _sleep(KEY_HOLD_S)
+                    held = (lib.SHIFT, usage) if shift else (usage,)
+                    await _report(keyboard.send_keyboard(service, held))
+                    await _sleep(KEY_HOLD_S)
+                    await _report(keyboard.send_keyboard(service, ()))
+                    await _sleep(KEY_HOLD_S)
+            finally:
+                await asyncio.shield(_bounded_close(keyboard.close))
+
+        return await self._or_fallback(udid, "typing", send,
+                                       lambda: self._fallback.type_text(udid, text),
                                        needs_screen=False)
 
     # -- delivery ----------------------------------------------------------

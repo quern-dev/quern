@@ -38,7 +38,8 @@ import logging
 import plistlib
 import re
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
@@ -191,11 +192,16 @@ def _refuse_bare(elements: list[dict], uuid: str) -> list[dict]:
 
 @dataclass
 class Tree:
-    """One tree dump: its kind, its elements, and the pid of its app."""
+    """One tree dump: its kind, its elements, and the pid of its app.
+
+    `refs` holds each element's `(pid, objectID)`, by index, or None where the
+    push carried none: what a request about that element names (`set_value`).
+    """
 
     dump_type: str
     elements: list[dict]
     app_pid: int | None
+    refs: list[tuple[int, int] | None] = field(default_factory=list)
 
 
 def _unarchive(data: bytes) -> Any:
@@ -344,6 +350,7 @@ def parse_tree(data: bytes) -> Tree:
     dump_type = dump_type.removeprefix("AXPTreeDumpType")
 
     elements: list[dict] = []
+    refs: list[tuple[int, int] | None] = []
     app_pid = None
     for response in result["treeDump"]:
         if (isinstance(response, dict)
@@ -373,9 +380,58 @@ def parse_tree(data: bytes) -> Tree:
             "help": None,
             "custom_actions": _custom_actions(bundle.get(ATTR_CUSTOM_ACTIONS)),
         })
+        refs.append(_ref(response.get("associatedTranslationObject")))
     if not elements:
         raise AxTreeError(f"{dump_type or 'tree dump'} holds no elements")
-    return Tree(dump_type, elements, app_pid)
+    return Tree(dump_type, elements, app_pid, refs)
+
+
+def _ref(translation: Any) -> tuple[int, int] | None:
+    """An element's `(pid, objectID)` from its translation object, or None."""
+    if not isinstance(translation, dict):
+        return None
+    pid, object_id = translation.get("pid"), translation.get("objectID")
+    if isinstance(pid, int) and isinstance(object_id, int) and not isinstance(pid, bool):
+        return pid, object_id
+    return None
+
+
+#: AXPTranslatorRequest's type for setting an attribute, and the client it
+#: speaks as -- what Apple's own translator sends (#664, measured).
+REQUEST_SET_ATTRIBUTE = 8
+CLIENT_TYPE = 2
+
+
+def set_value_request(pid: int, object_id: int, value: str) -> bytes:
+    """A keyed archive asking the device to set an element's value (#664).
+
+    The shape Apple's AccessibilityPlatformTranslation archives, built here so
+    quern needs no private framework. `objectID` is an object of its own, not
+    an inline integer: measured on an iPhone 15 Pro, a request carrying it
+    inline is accepted and silently does nothing.
+    """
+    uid = plistlib.UID
+    objects: list = [
+        "$null",
+        {"$class": uid(8), "actionType": 0, "attributeType": ATTR_VALUE,
+         "clientType": CLIENT_TYPE, "parameters": uid(2),
+         "requestType": REQUEST_SET_ATTRIBUTE, "translation": uid(5)},
+        {"$class": uid(7), "NS.keys": [uid(3)], "NS.objects": [uid(4)]},
+        "value",
+        value,
+        {"$class": uid(6), "bridgeDelegateToken": uid(0), "didPopuldateAppInfo": True,
+         "isApplicationElement": False, "objectID": uid(9), "pid": pid,
+         "rawElementData": uid(0)},
+        {"$classes": ["AXPTranslationObject", "NSObject"],
+         "$classname": "AXPTranslationObject"},
+        {"$classes": ["NSDictionary", "NSObject"], "$classname": "NSDictionary"},
+        {"$classes": ["AXPTranslatorRequest", "NSObject"],
+         "$classname": "AXPTranslatorRequest"},
+        object_id,
+    ]
+    return plistlib.dumps({"$archiver": "NSKeyedArchiver", "$objects": objects,
+                           "$top": {"root": uid(1)}, "$version": 100000},
+                          fmt=plistlib.FMT_BINARY)
 
 
 def _pmd3() -> SimpleNamespace:
@@ -522,6 +578,71 @@ async def _close(provider: Any, rsd: Any) -> None:
     for step in steps:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(step(), CLOSE_S)
+
+
+async def set_value(uuid: str, match: Callable[[dict], bool], value: str, *,
+                    timeout: float = READ_TIMEOUT_S) -> None:
+    """Set the value of the first on-screen element `match` accepts, through
+    the accessibility service (#664).
+
+    The text is set, not typed: the app's editing callbacks do not run for it
+    (`UITextFieldDelegate` did not fire, measured on an iPhone 11). Nothing
+    here says whether it took; the caller reads the field back. Raises
+    DeviceError when the element is not on screen or the request cannot be
+    sent.
+    """
+    from server.device.performance import _device_address
+
+    lib = _pmd3()
+    rsd = provider = None
+    try:
+        async with asyncio.timeout(timeout):
+            try:
+                address = await _device_address(uuid)
+                rsd = lib.RemoteServiceDiscoveryService(address)
+                await rsd.connect()
+                provider = lib.RemoteAX(rsd)
+                await provider.connect()
+                queue: asyncio.Queue = asyncio.Queue()
+                provider.dtx.ctx["control_dispatch_queue"] = queue
+                await provider.dtx._ctrl_channel.invoke(
+                    "clientNeedsAccessibility:", True, expects_reply=False)
+                tree, first, newest = await _newest_tree(queue, {})
+                if first.app_pid is not None and newest.app_pid != first.app_pid:
+                    # Switched, or killed by the read (#669): whatever is on
+                    # screen now is not the field's app (#682 review).
+                    raise DeviceError(
+                        f"the app on {uuid[:8]}'s screen changed while the field was "
+                        "looked up; nothing was set", tool="coredevice")
+                _refuse_bare(tree.elements, uuid)
+                found = [i for i, e in enumerate(tree.elements) if match(e)]
+                if len(found) != 1:
+                    # More than one is refused, never the first taken: the text
+                    # would go to whichever came first (#682 review).
+                    raise DeviceError(
+                        f"the field to set is not in {uuid[:8]}'s accessibility tree"
+                        if not found else
+                        f"{len(found)} elements on {uuid[:8]}'s screen match the field; "
+                        "nothing was set", tool="coredevice")
+                ref = tree.refs[found[0]] if found[0] < len(tree.refs) else None
+                if ref is None:
+                    raise DeviceError(
+                        f"{uuid[:8]}'s accessibility tree does not say how to address "
+                        "the field", tool="coredevice")
+                await provider.dtx._ctrl_channel.invoke(
+                    "processDataFromHost:", set_value_request(*ref, value),
+                    expects_reply=True)
+            finally:
+                await _close(provider, rsd)
+    except DeviceError:
+        raise
+    except TimeoutError as e:
+        # The request may have gone before the deadline: not "nothing set".
+        raise DeviceError(f"setting a value on {uuid[:8]} timed out after {timeout:g}s; "
+                          "it may or may not have been set", tool="coredevice") from e
+    except Exception as e:  # pymobiledevice3 raises its own hierarchy
+        raise DeviceError(f"accessibility service on {uuid[:8]} failed: {e!r}",
+                          tool="coredevice") from e
 
 
 async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]:
