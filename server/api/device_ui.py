@@ -725,6 +725,19 @@ async def restore_input(request: Request, body: RestoreInputRequest):
         raise _handle_device_error(e)
 
 
+async def _verify_changed(controller, udid: str, before: tuple) -> dict:
+    """`screen_changed` for a tap the caller asked to verify: the frame taken
+    before it against one `frames.VERIFY_WAIT_S` after, on the same path."""
+    after = None
+    if before[0] is not None:
+        await asyncio.sleep(frames.VERIFY_WAIT_S)
+        try:
+            after = await frames.capture_for_check(controller, udid, source=before[2])
+        except Exception:  # noqa: BLE001 -- no frame is "could not tell", never a failure
+            logger.debug("frame after the tap failed", exc_info=True)
+    return frames.changed_verdict(before, after)
+
+
 @router.post("/ui/tap")
 async def tap(request: Request, body: TapRequest):
     """Tap at specific coordinates."""
@@ -733,7 +746,13 @@ async def tap(request: Request, body: TapRequest):
         act.detail = f"({body.x}, {body.y})" + (
             f" held {body.duration:g}s" if body.duration else "")
         try:
-            report = await controller.tap_and_report(x=body.x, y=body.y, udid=body.udid,
+            target = body.udid
+            before = None
+            if body.verify_changed:
+                # Resolved first, so both frames are of the device tapped.
+                target = await controller.resolve_udid(body.udid)
+                before = await frames.capture_for_check(controller, target)
+            report = await controller.tap_and_report(x=body.x, y=body.y, udid=target,
                                                      duration=body.duration,
                                                      skip_settle=body.skip_settle)
             udid = report["udid"]
@@ -741,6 +760,8 @@ async def tap(request: Request, body: TapRequest):
             payload = {"status": "ok", "x": body.x, "y": body.y, **report}
             if body.duration is not None:
                 payload["duration"] = body.duration
+            if before is not None:
+                payload.update(await _verify_changed(controller, udid, before))
             return _with_input_warning(controller, udid, payload)
         except DeviceError as e:
             raise _handle_device_error(e)
@@ -786,6 +807,12 @@ async def tap_element(request: Request, body: TapElementRequest):
                     before_frame = await frames.capture(controller, resolved)
                 except Exception:  # noqa: BLE001 -- no frame is no note, never a failed tap
                     logger.debug("frame before the tap failed", exc_info=True)
+            # verify_changed's own, on a path that reaches a phone with no WDA
+            # frame to give: the note's frame is reused when it has one.
+            verify_before = None
+            if body.verify_changed:
+                verify_before = (before_frame if before_frame[0] is not None
+                                 else await frames.capture_for_check(controller, resolved))
 
             # Guarded like scroll_to_element, and for the same reason: with
             # `scroll_to_find` on -- explicitly, or via a screen the knowledge
@@ -886,6 +913,10 @@ async def tap_element(request: Request, body: TapElementRequest):
                         # carries -- a target still moving (#529).
                         result["warning"] = " ".join(
                             w for w in (result.get("warning"), warning, advisory) if w)
+
+            if (verify_before is not None and isinstance(result, dict)
+                    and result.get("status") == "ok"):
+                result.update(await _verify_changed(controller, resolved, verify_before))
 
             # Remembered for the next miss only when the tap was not already
             # checked: a verified arrival must not be blamed later, and a

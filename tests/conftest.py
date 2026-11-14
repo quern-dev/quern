@@ -854,4 +854,9 @@ def _no_real_frame_capture(monkeypatch):
     async def no_frame(controller, udid):
         return None, 0.0, "none"
 
+    async def no_screenshot(controller, udid):
+        return None
+
     monkeypatch.setattr(frames, "capture", no_frame)
+    # verify_changed's route for a phone with no WDA frame to give.
+    monkeypatch.setattr(frames, "device_screenshot", no_screenshot)
