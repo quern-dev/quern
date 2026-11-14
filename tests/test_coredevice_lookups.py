@@ -385,10 +385,9 @@ class TestTapElement:
         ctrl.coredevice_ax.describe_all.assert_not_called()
         ctrl.wda_client.tap.assert_not_called()
 
-    async def test_a_pushed_miss_leaves_the_sweeps_opening_lookup(self, monkeypatch):
-        """The push holds what VoiceOver reaches; its miss proves nothing about
-        WDA's tree, so the sweep still makes its first lookup -- the one read
-        that looks deeper (CodeRabbit on #672)."""
+    async def test_a_pushed_miss_sweeps_through_the_push(self, monkeypatch):
+        """The sweep reads and swipes over CoreDevice too (#678), so the pushed
+        miss is its own kind of read and is not taken again."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         _wda_depth_spies(ctrl)
         ctrl._identify_for_miss = AsyncMock(return_value={})
@@ -396,7 +395,9 @@ class TestTapElement:
 
         await ctrl.tap_element(label="Nowhere", udid=PHONE, scroll_to_find=True)
 
-        assert ctrl._ios_scroll_to_element.await_args.kwargs["target_known_absent"] is False
+        kwargs = ctrl._ios_scroll_to_element.await_args.kwargs
+        assert kwargs["pushed"] is True
+        assert kwargs["target_known_absent"] is True
 
     async def test_after_the_wda_sweep_the_stability_check_runs(self, monkeypatch):
         """The sweep finds the target through WDA after a swipe, while the list

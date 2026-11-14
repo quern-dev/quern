@@ -219,6 +219,13 @@ class CoreDeviceInput:
     """
 
     TOOL_NAME = "coredevice"
+    #: How fast a sweep drags, and how long it holds at the end (#678). A
+    #: faster HID drag carries a list on past the finger, hold or no hold:
+    #: measured on an iPhone 11, 672 pt in 0.3 s moved it about 1,500 pt
+    #: and 200 pt about 2.3x, while at 250 pt/s 672 pt moved it 647-660
+    #: pt, six of six -- the 0.97 WDA's drag travels.
+    sweep_drag_pt_s = 250.0
+    sweep_hold_s = 0.5
     #: A physical device decides an edge swipe from where it starts, as for
     #: WDA; no flag is involved (#251).
     edge_swipes = True
@@ -265,8 +272,12 @@ class CoreDeviceInput:
                 if i < steps:
                     await _sleep(interval)
             if hold:
-                # Held at the end, so a list stops where the finger does.
-                await _sleep(hold)
+                # Held at the end, so a list stops where the finger does: the
+                # still contact is reported throughout, not just left down.
+                end = screen.point(end_x, end_y)
+                for _ in range(max(1, round(hold * SWIPE_RATE_HZ))):
+                    await _sleep(1 / SWIPE_RATE_HZ)
+                    await _report(session.hid.send_touchscreen(lib.CONTACT, *end))
             await _report(session.hid.send_touchscreen(lib.RELEASE, *screen.point(end_x, end_y)))
 
         extra = {"edge": edge} if edge is not None else {}

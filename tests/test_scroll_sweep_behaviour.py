@@ -1014,3 +1014,73 @@ async def test_a_settle_never_outlives_the_deadline():
     assert timeouts[-1] < 2.5, (
         f"the last settle was given its full timeout past the deadline: {timeouts}"
     )
+
+
+# -- over CoreDevice: HID swipes, pushed reads (#678) -------------------------
+
+
+class PushedListScreen(ListScreen):
+    """The same list, swept as a phone with no WDA is: the HID backend names
+    its own drag speed and hold, and every read is asked of the push."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.durations: list[float] = []
+        self.reads: list[dict] = []
+
+    @property
+    def coredevice_input(self):
+        backend = self._ui_backend("SIM")
+        backend.sweep_drag_pt_s = 250.0
+        backend.sweep_hold_s = 0.5
+        swipe = backend.swipe.side_effect
+
+        async def timed(*a, **k):
+            self.durations.append(a[5])
+            return await swipe(*a, **k)
+
+        backend.swipe = AsyncMock(side_effect=timed)
+        return backend
+
+    async def get_ui_elements(self, *a, **k):
+        self.reads.append(k)
+        return await super().get_ui_elements(*a, **k)
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_sweep_drags_at_the_hid_backend_s_speed():
+    screen = PushedListScreen()
+    found = await _sweep(screen, "row_150", pushed=True)
+
+    assert found is not None and found.identifier == "row_150"
+    assert screen.durations and all(
+        # `drags` are fractions of the screen's height.
+        d == pytest.approx(drag * SCREEN["height"] / 250.0)
+        for d, drag in zip(screen.durations, screen.drags)
+    ), (screen.durations, screen.drags)
+    assert screen.holds and all(h == 0.5 for h in screen.holds)
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_sweep_reads_the_push_once_per_swipe():
+    """A push read answers a settled screen, so no second read confirms it."""
+    screen = PushedListScreen()
+    await _sweep(screen, "row_150", pushed=True)
+
+    full = [r for r in screen.reads if not (r.get("filter_label") or r.get("filter_identifier")
+                                            or r.get("filter_type"))]
+    assert full and all(r.get("whole_screen") is True for r in full), full
+    for group in screen.after_each_swipe():
+        # One full read; the push has no container probing to skip.
+        assert len(group) == 1 and group[0].endswith(":full"), group
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_sweep_asks_the_push_for_the_viewport_and_the_target():
+    screen = PushedListScreen()
+    await _sweep(screen, "row_150", pushed=True)
+
+    viewport = next(r for r in screen.reads if r.get("filter_type") == "Application")
+    assert viewport.get("lookup") is True
+    lookups = [r for r in screen.reads if r.get("filter_identifier")]
+    assert lookups and all(r.get("lookup") is True for r in lookups)

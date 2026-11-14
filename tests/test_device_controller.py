@@ -2099,6 +2099,8 @@ class TestTapElementIosScroll:
             # The caller chose no depth, so through WDA the sweep may look
             # below the action depth (#475).
             deepen=True,
+            # A simulator's lookup is not the push, so neither is its sweep (#678).
+            pushed=False,
         )
         backend.tap.assert_awaited_once()
 

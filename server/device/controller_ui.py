@@ -657,6 +657,17 @@ PUSHED_MISS_DETAIL = (
     "pass snapshot_depth to look through WDA instead")
 
 
+def _sweep_drag(backend) -> tuple[float, float] | None:
+    """A backend's own sweep drag speed (pt/s) and end hold, when it names
+    them (#678); None for the rest, which drag in 0.3 s. Only numbers count:
+    a test double answers every attribute."""
+    rate = getattr(backend, "sweep_drag_pt_s", None)
+    hold = getattr(backend, "sweep_hold_s", None)
+    if isinstance(rate, (int, float)) and isinstance(hold, (int, float)) and rate > 0:
+        return float(rate), float(hold)
+    return None
+
+
 def _bare_and_wda_failed(bare: DeviceError, wda: DeviceError) -> DeviceError:
     """WDA's error, for a push that answered bare and a WDA read that could
     not stand in for it (#664), with the bare tree named first: WDA's message
@@ -1222,6 +1233,7 @@ class DeviceControllerUI:
         element_type: str | None,
         screen_height: float,
         screen_width: float = 393,
+        pushed: bool = False,
     ) -> UIElement | None:
         """Scroll an obscured element into the tappable area.
 
@@ -1229,7 +1241,11 @@ class DeviceControllerUI:
         whether it moved. If it moved into the safe zone, returns the updated
         element. If it didn't move (fixed-position element), returns None
         to signal the caller that scrolling won't help.
+
+        Over CoreDevice when the caller looked the element up in the push
+        (#678): swiped over HID, and found again by the push's rule.
         """
+        backend = self.coredevice_input if pushed else self._ui_backend(resolved)
         safe_bottom = screen_height - self._HOME_INDICATOR_INSET
         scroll_amount = 100  # points to scroll per attempt
         mid_x = screen_width / 2
@@ -1241,13 +1257,14 @@ class DeviceControllerUI:
             elements_before, _ = await self.get_ui_elements(
                 resolved, use_cache=False,
                 filter_label=filter_lbl, filter_identifier=identifier,
-                filter_type=element_type,
+                filter_type=element_type, lookup=pushed,
             )
 
             matches_before = find_element(
                 elements_before, label=label,
                 label_contains=label_contains, label_prefix=label_prefix,
                 identifier=identifier, element_type=element_type,
+                merged_labels=pushed,
             )
             if not matches_before:
                 return None
@@ -1262,8 +1279,11 @@ class DeviceControllerUI:
             # Swipe up (start lower, end higher)
             swipe_start_y = screen_height * 0.7
             swipe_end_y = swipe_start_y - scroll_amount
-            await self._ui_backend(resolved).swipe(
-                resolved, mid_x, swipe_start_y, mid_x, swipe_end_y, 0.3,
+            own = _sweep_drag(backend)
+            await backend.swipe(
+                resolved, mid_x, swipe_start_y, mid_x, swipe_end_y,
+                scroll_amount / own[0] if own else 0.3,
+                **({"hold": own[1]} if own else {}),
             )
             self._invalidate_ui_cache(resolved)
 
@@ -1271,13 +1291,14 @@ class DeviceControllerUI:
             elements_after, _ = await self.get_ui_elements(
                 resolved, use_cache=False,
                 filter_label=filter_lbl, filter_identifier=identifier,
-                filter_type=element_type,
+                filter_type=element_type, lookup=pushed,
             )
 
             matches_after = find_element(
                 elements_after, label=label,
                 label_contains=label_contains, label_prefix=label_prefix,
                 identifier=identifier, element_type=element_type,
+                merged_labels=pushed,
             )
             if not matches_after:
                 return None
@@ -1597,6 +1618,7 @@ class DeviceControllerUI:
         report: dict | None = None,
         snapshot_depth: int | None = None,
         deepen: bool = False,
+        pushed: bool = False,
     ) -> UIElement | None:
         """Scroll an iOS scroll container until the target element is on-screen.
 
@@ -1679,7 +1701,7 @@ class DeviceControllerUI:
             # probing is 92% of a simulator tree read (#196). The old table
             # lookup cost nothing, so this query has to stay cheap to replace
             # it.
-            probe_containers=False,
+            probe_containers=False, lookup=pushed,
         )
         app_frame = next((e.frame for e in app_els if e.frame), None)
         screen_height = app_frame["height"] if app_frame else None
@@ -1700,7 +1722,10 @@ class DeviceControllerUI:
         # than the visible content area, so every row is on screen after some
         # swipe. The endpoints stay clear of the chrome a drag must not start
         # on -- 0.13 is below a collapsed navigation bar, 0.88 above a tab bar.
-        backend = self._ui_backend(resolved)
+        # Over CoreDevice (#678): swipes over HID, reads from the push. The
+        # caller says so, having read through the push itself; a device the
+        # push has crashed an app on sweeps through WDA as it reads.
+        backend = self.coredevice_input if pushed else self._ui_backend(resolved)
         # idb cannot hold a swipe, so its swipes still fling and a read after
         # one can catch the list in flight. It keeps a settle per step; the
         # controlled backends do not need one.
@@ -1731,6 +1756,10 @@ class DeviceControllerUI:
         # matters because a WDA read is a full /source, 3-7s on a physical
         # device, and taking each one twice would double the sweep.
         at_rest = getattr(backend, "swipe_returns_at_rest", False) is True
+        # A push read answers only a settled screen -- it waits for the pushes
+        # to go quiet (#676) -- so its first read after a swipe is at rest too,
+        # and taking two per step would double a ~2.5 s read.
+        at_rest = at_rest or pushed
 
         # By the backend serving the sweep, which is the question: are its
         # reads WDA's? (Also what keeps a fake screen without a WDA client off
@@ -1833,6 +1862,13 @@ class DeviceControllerUI:
             ~3.5s), and what the sweep hunts is a row in a scroll container,
             always present in the static tree.
             """
+            if pushed:
+                els, _ = await self.get_ui_elements(
+                    resolved, use_cache=False,
+                    filter_label=label, filter_identifier=identifier, lookup=True,
+                )
+                return _pick(find_element(els, label=label, identifier=identifier,
+                                          merged_labels=True))
             if deepen:
                 _begin_lookup()
             try:
@@ -1918,6 +1954,14 @@ class DeviceControllerUI:
             if via_wda:
                 # A query and a frame instead: see the docstring (#475).
                 return await _wda_read()
+            if pushed:
+                # The whole pushed screen, matched by the push's own rule: a
+                # row's merged label also answers to its title (#672).
+                els, _ = await self.get_ui_elements(resolved, use_cache=False,
+                                                    whole_screen=True)
+                matches = find_element(els, label=label, identifier=identifier,
+                                       merged_labels=True)
+                return _pick(matches), _fingerprint(els)
             els, _ = await self.get_ui_elements(
                 resolved, use_cache=False, probe_containers=probe,
                 snapshot_depth=snapshot_depth,
@@ -1984,9 +2028,11 @@ class DeviceControllerUI:
             # swipe and be out of the tree after the next, and the sweep hunted
             # past it for 105s. Measured with the hold: the drag distance, and
             # at rest on release.
-            await backend.swipe(
-                resolved, mid_x, y1, mid_x, y2, 0.3, hold=self._SWIPE_HOLD_S,
-            )
+            # A backend whose fast drag overshoots names its own speed (#678).
+            own = _sweep_drag(backend)
+            duration = abs(y1 - y2) / own[0] if own else 0.3
+            hold = own[1] if own else self._SWIPE_HOLD_S
+            await backend.swipe(resolved, mid_x, y1, mid_x, y2, duration, hold=hold)
             self._invalidate_ui_cache(resolved)
 
         #: Through WDA, the list's scroll container, looked up the first time a
@@ -3859,13 +3905,13 @@ class DeviceControllerUI:
                 sweep["attempted"] = True
                 scrolled = await self._ios_scroll_to_element(
                     resolved, label=label, identifier=identifier, max_swipes=10,
-                    # A pushed miss proves nothing about WDA's tree: the push
-                    # holds what VoiceOver reaches, so the sweep's opening WDA
-                    # lookup -- its one read that looks deeper -- still runs
+                    # A pushed miss is the sweep's own kind of read now that it
+                    # sweeps through the push (#678), so it is not taken again;
+                    # read through WDA it proved nothing about WDA's tree
                     # (CodeRabbit on #672).
-                    target_known_absent=not served_from_cache and not pushed,
+                    target_known_absent=not served_from_cache,
                     report=sweep, snapshot_depth=read_depth,
-                    deepen=_deepen_allowed(snapshot_depth, deepen),
+                    deepen=_deepen_allowed(snapshot_depth, deepen), pushed=pushed,
                 )
                 if scrolled is not None:
                     # Found by the sweep, through WDA after a swipe: no longer
@@ -4077,7 +4123,7 @@ class DeviceControllerUI:
                 scrolled_el = await self._scroll_element_into_view(
                     resolved, label, label_contains, label_prefix,
                     identifier, element_type,
-                    screen_height, screen_width,
+                    screen_height, screen_width, pushed=pushed,
                 )
                 if scrolled_el is not None:
                     el = scrolled_el
@@ -4898,6 +4944,9 @@ class DeviceControllerUI:
             max_swipes=10 if max_swipes is None else max_swipes,
             snapshot_depth=read_depth,
             deepen=_deepen_allowed(snapshot_depth, deepen),
+            # As tap_element's lookups decide (#672): the push unless a WDA
+            # depth was asked for (#678).
+            pushed=snapshot_depth is None and self._device_tree_reader(resolved) is not None,
         )
         # Only its frame is reported, so a deep hit is done with now.
         await self._done_with_deep_element(resolved, read_depth)
