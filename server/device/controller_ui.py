@@ -3343,11 +3343,13 @@ class DeviceControllerUI:
                                        "identifier": hit.get("AXUniqueId"),
                                        "frame": hit.get("frame")}
         backend = self._input_backend(resolved)
-        await backend.tap(resolved, x, y, **hold)
+        carried_by = await backend.tap(resolved, x, y, **hold)
         self._invalidate_ui_cache(resolved)  # UI changed
         if backend is self.coredevice_input:
             # Which of the two carried it: HID, or WDA for what HID cannot send.
-            report["input"] = self.coredevice_input.delivered_by.get(resolved)
+            # This call's answer, not the device's last one: another tap on the
+            # same phone may have gone the other way meanwhile.
+            report["input"] = carried_by
         return report
 
     async def tap(self, x: float, y: float, udid: str | None = None,

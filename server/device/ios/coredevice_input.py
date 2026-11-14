@@ -34,7 +34,8 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
-from server.models import DeviceError
+from server.device.gestures import check_edge_start
+from server.models import DeviceError, InvalidDeviceRequestError
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,11 @@ IDLE_CLOSE_S = 60.0
 
 #: Each step's bound when opening a session or closing one.
 CONNECT_S = 5.0
+
+#: Each report's bound, and the display read's. A half-open tunnel otherwise
+#: hangs a write for good while it holds the device's session lock, and every
+#: later action on that phone queues behind it with no error and no fallback.
+SEND_S = 5.0
 
 #: Typing is not here: a HID keyboard is a hardware keyboard to iOS, typed
 #: through the phone's hardware-keyboard layout for its input language. On an
@@ -75,6 +81,11 @@ _sleep = asyncio.sleep
 
 class NotSent(Exception):
     """Nothing reached the phone; the caller may do it another way."""
+
+
+class _ReadFailed(NotSent):
+    """The display could not be read: nothing was sent, and the session is
+    not trusted again."""
 
 
 class _Progress:
@@ -102,15 +113,24 @@ def screen_from_display_info(info: dict) -> Screen:
     """The primary display from `getdisplayinfo`, or NotSent when it cannot
     be mapped."""
     displays = info.get("displays") if isinstance(info, dict) else None
-    primary = next((d for d in displays or [] if isinstance(d, dict) and d.get("primary")), None)
-    if primary is None:
-        raise NotSent("the device reported no primary display")
+    # Exactly one built-in primary display, as AXe requires: two, or one
+    # marked external (a phone mirroring to a screen), is a guess at which
+    # panel the touchscreen belongs to, and goes through WDA instead.
+    primaries = [d for d in displays or []
+                 if isinstance(d, dict) and d.get("primary") is True and not d.get("external")]
+    if len(primaries) != 1:
+        raise NotSent(f"the device reported {len(primaries)} built-in primary displays, not one")
+    primary = primaries[0]
     mode = primary.get("currentMode") or {}
     size, scale = mode.get("size"), mode.get("preferredUIScale")
-    if not (isinstance(size, list) and len(size) == 2 and all(size)
+    if not (isinstance(size, list) and len(size) == 2
+            and all(isinstance(v, (int, float)) and v > 0 for v in size)
             and isinstance(scale, (int, float)) and scale > 0):
         raise NotSent(f"the primary display's size could not be read: {mode!r}")
     native, current = primary.get("nativeOrientation"), primary.get("currentOrientation")
+    if native is None or current is None:
+        # Not read as portrait: a reply without them may be a turned screen.
+        raise NotSent(f"the display's orientation could not be read ({current}, native {native})")
     if native != current:
         raise NotSent(f"the screen is turned ({current}, native {native}); "
                       "touch is mapped in the native orientation only")
@@ -120,24 +140,31 @@ def screen_from_display_info(info: dict) -> Screen:
 def _pmd3() -> SimpleNamespace:
     """The pymobiledevice3 pieces input uses, in one place so it can be
     tested without a phone."""
+    # AttributeError too: a pymobiledevice3 with the module but without one
+    # of these names is as unable to send as one without the module.
     try:
         from pymobiledevice3.remote.core_device import hid_service
         from pymobiledevice3.remote.core_device.device_info import DeviceInfoService
         from pymobiledevice3.remote.remote_service_discovery import (
             RemoteServiceDiscoveryService,
         )
-    except ImportError as e:
+        return SimpleNamespace(
+            RemoteServiceDiscoveryService=RemoteServiceDiscoveryService,
+            DeviceInfoService=DeviceInfoService,
+            UniversalHID=hid_service.UniversalHIDServiceService,
+            IndigoHID=hid_service.IndigoHIDService,
+            CONTACT=hid_service.TOUCHSCREEN_STATE_CONTACT,
+            RELEASE=hid_service.TOUCHSCREEN_STATE_RELEASE,
+            BUTTON_DOWN=hid_service.HID_BUTTON_STATE_DOWN,
+            BUTTON_UP=hid_service.HID_BUTTON_STATE_UP,
+        )
+    except (ImportError, AttributeError) as e:
         raise NotSent(f"pymobiledevice3's HID services are not available ({e})") from e
-    return SimpleNamespace(
-        RemoteServiceDiscoveryService=RemoteServiceDiscoveryService,
-        DeviceInfoService=DeviceInfoService,
-        UniversalHID=hid_service.UniversalHIDServiceService,
-        IndigoHID=hid_service.IndigoHIDService,
-        CONTACT=hid_service.TOUCHSCREEN_STATE_CONTACT,
-        RELEASE=hid_service.TOUCHSCREEN_STATE_RELEASE,
-        BUTTON_DOWN=hid_service.HID_BUTTON_STATE_DOWN,
-        BUTTON_UP=hid_service.HID_BUTTON_STATE_UP,
-    )
+
+
+async def _report(send: Any) -> None:
+    """One report to the phone, bounded by SEND_S."""
+    await asyncio.wait_for(send, SEND_S)
 
 
 async def _bounded_close(*closers: Any) -> None:
@@ -169,8 +196,8 @@ class CoreDeviceInput:
 
     Matches the action methods of WdaBackend, so the controller hands it the
     same calls (`DeviceController._input_backend`); everything else stays
-    with WDA. `delivered_by` records, per device, which of the two carried the
-    last action.
+    with WDA. Each action returns the TOOL_NAME of whichever of the two
+    carried it: per call, since two calls on one device can go different ways.
     """
 
     TOOL_NAME = "coredevice"
@@ -183,49 +210,54 @@ class CoreDeviceInput:
         self._fallback = fallback
         self._sessions: dict[str, _Session] = {}
         self._opening: dict[str, asyncio.Lock] = {}
-        self.delivered_by: dict[str, str] = {}
         self._reaper: asyncio.Task | None = None
+        self._dropping: set[asyncio.Task] = set()
 
     # -- the actions -------------------------------------------------------
 
-    async def tap(self, udid: str, x: float, y: float, hold: float | None = None) -> None:
+    async def tap(self, udid: str, x: float, y: float, hold: float | None = None) -> str:
         async def send(lib: SimpleNamespace, session: _Session, screen: Screen,
                        progress: _Progress) -> None:
             hx, hy = screen.point(x, y)
             progress.reached = True
-            await session.hid.send_touchscreen(lib.CONTACT, hx, hy)
+            await _report(session.hid.send_touchscreen(lib.CONTACT, hx, hy))
             await _sleep(TAP_HOLD_S if hold is None else float(hold))
-            await session.hid.send_touchscreen(lib.RELEASE, hx, hy)
+            await _report(session.hid.send_touchscreen(lib.RELEASE, hx, hy))
 
-        await self._or_fallback(udid, "tap", send,
-                                lambda: self._fallback.tap(udid, x, y, hold=hold))
+        return await self._or_fallback(udid, "tap", send,
+                                       lambda: self._fallback.tap(udid, x, y, hold=hold))
 
     async def swipe(self, udid: str, start_x: float, start_y: float, end_x: float,
                     end_y: float, duration: float = 0.5, hold: float = 0.0,
-                    edge: str | None = None) -> None:
+                    edge: str | None = None) -> str:
         async def send(lib: SimpleNamespace, session: _Session, screen: Screen,
                        progress: _Progress) -> None:
+            if edge is not None:
+                # As WDA does: the device takes a swipe from the edge from
+                # where it starts, so one from the middle is refused, not sent.
+                check_edge_start(edge, start_x, start_y, screen.width, screen.height,
+                                 tool=self.TOOL_NAME)
             steps = max(2, round(duration * SWIPE_RATE_HZ))
             interval = duration / steps
             progress.reached = True
             for i in range(steps + 1):
                 f = i / steps
-                await session.hid.send_touchscreen(lib.CONTACT, *screen.point(
-                    start_x + (end_x - start_x) * f, start_y + (end_y - start_y) * f))
+                await _report(session.hid.send_touchscreen(lib.CONTACT, *screen.point(
+                    start_x + (end_x - start_x) * f, start_y + (end_y - start_y) * f)))
                 if i < steps:
                     await _sleep(interval)
             if hold:
                 # Held at the end, so a list stops where the finger does.
                 await _sleep(hold)
-            await session.hid.send_touchscreen(lib.RELEASE, *screen.point(end_x, end_y))
+            await _report(session.hid.send_touchscreen(lib.RELEASE, *screen.point(end_x, end_y)))
 
         extra = {"edge": edge} if edge is not None else {}
-        await self._or_fallback(
+        return await self._or_fallback(
             udid, "swipe", send,
             lambda: self._fallback.swipe(udid, start_x, start_y, end_x, end_y,
                                          duration, hold=hold, **extra))
 
-    async def press_button(self, udid: str, button: str) -> None:
+    async def press_button(self, udid: str, button: str) -> str:
         code = BUTTONS.get(button.lower())
 
         async def send(lib: SimpleNamespace, session: _Session, screen: Screen,
@@ -234,28 +266,32 @@ class CoreDeviceInput:
                 raise NotSent(f"no HID code for the {button!r} button")
             if session.indigo is None:
                 indigo = lib.IndigoHID(session.rsd)
-                await asyncio.wait_for(indigo.connect(), CONNECT_S)
+                try:
+                    await asyncio.wait_for(indigo.connect(), CONNECT_S)
+                except BaseException:
+                    await _bounded_close(indigo.close)
+                    raise
                 session.indigo = indigo
             progress.reached = True
-            await session.indigo.send_button(*code, lib.BUTTON_DOWN)
+            await _report(session.indigo.send_button(*code, lib.BUTTON_DOWN))
             await _sleep(TAP_HOLD_S)
-            await session.indigo.send_button(*code, lib.BUTTON_UP)
+            await _report(session.indigo.send_button(*code, lib.BUTTON_UP))
 
-        await self._or_fallback(udid, f"{button} button", send,
+        return await self._or_fallback(udid, f"{button} button", send,
                                 lambda: self._fallback.press_button(udid, button))
 
     # -- delivery ----------------------------------------------------------
 
-    async def _or_fallback(self, udid: str, what: str, send: Any, fallback: Any) -> None:
-        """Send over HID; if nothing could be sent, do it through WDA."""
+    async def _or_fallback(self, udid: str, what: str, send: Any, fallback: Any) -> str:
+        """Send over HID; if nothing could be sent, do it through WDA. Returns
+        which of the two carried it."""
         try:
             await self._send(udid, what, send)
         except NotSent as e:
             logger.info("[coredevice] %s on %s through WDA: %s", what, udid[:8], e)
-            self.delivered_by[udid] = getattr(self._fallback, "TOOL_NAME", "wda")
             await fallback()
-            return
-        self.delivered_by[udid] = self.TOOL_NAME
+            return getattr(self._fallback, "TOOL_NAME", "wda")
+        return self.TOOL_NAME
 
     async def _send(self, udid: str, what: str, send: Any) -> None:
         lib = _pmd3()
@@ -266,7 +302,19 @@ class CoreDeviceInput:
             try:
                 screen = await self._screen(session, lib)
                 await send(lib, session, screen, progress)
-            except NotSent:
+            except _ReadFailed:
+                await self._drop(udid, session)
+                raise
+            except (NotSent, InvalidDeviceRequestError):
+                # Nothing sent, and nothing wrong with the session: a screen
+                # this cannot map, a button with no code, an edge swipe that
+                # does not start at its edge.
+                raise
+            except asyncio.CancelledError:
+                # Cancelled mid-gesture, perhaps with a contact still down. The
+                # session goes with it, so the next action does not start on
+                # a finger that never lifted.
+                await asyncio.shield(self._drop(udid, session))
                 raise
             except Exception as e:
                 # A session that failed is not trusted again; the next action
@@ -283,11 +331,16 @@ class CoreDeviceInput:
     async def _screen(self, session: _Session, lib: SimpleNamespace) -> Screen:
         """The display, read per action: a rotation between actions is seen.
         A fresh connection each time, as AXe found a reused one stalls."""
-        try:
+        async def read() -> Any:
             async with lib.DeviceInfoService(session.rsd) as info:
-                raw = await asyncio.wait_for(info.get_display_info(), CONNECT_S)
+                return await info.get_display_info()
+
+        try:
+            # Bounded as a whole: opening and closing the service can stall
+            # as well as the read.
+            raw = await asyncio.wait_for(read(), SEND_S)
         except Exception as e:
-            raise NotSent(f"the display could not be read: {e!r}") from e
+            raise _ReadFailed(f"the display could not be read: {e!r}") from e
         return screen_from_display_info(raw)
 
     async def _session(self, udid: str, lib: SimpleNamespace) -> _Session:
@@ -303,8 +356,10 @@ class CoreDeviceInput:
 
             try:
                 address = await _device_address(udid)
-            except DeviceError as e:
-                raise NotSent(str(e)) from e
+            except Exception as e:
+                # Not only DeviceError: tunneld or a resolver can fail any
+                # way, and nothing has been sent.
+                raise NotSent(f"the device's tunnel address could not be found: {e!r}") from e
             rsd = lib.RemoteServiceDiscoveryService(address)
             hid = None
             try:
@@ -335,11 +390,19 @@ class CoreDeviceInput:
             now = time.monotonic()
             for udid, session in list(self._sessions.items()):
                 if not session.lock.locked() and now - session.last_used >= IDLE_CLOSE_S:
-                    await self._drop(udid, session)
+                    # Its own task, so cancelling the reaper at shutdown does
+                    # not cut a close short; close() waits for it instead.
+                    drop = asyncio.ensure_future(self._drop(udid, session))
+                    self._dropping.add(drop)
+                    drop.add_done_callback(self._dropping.discard)
+                    await asyncio.shield(drop)
 
     async def close(self) -> None:
         """Close every held session (server shutdown)."""
         if self._reaper is not None:
             self._reaper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reaper
+        await asyncio.gather(*self._dropping, return_exceptions=True)
         for udid, session in list(self._sessions.items()):
             await self._drop(udid, session)
