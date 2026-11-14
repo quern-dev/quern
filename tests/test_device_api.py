@@ -987,6 +987,25 @@ class TestTypeText:
             snapshot_depth=None,
         )
 
+    async def test_a_set_over_coredevice_says_so(self, app, auth_headers, mock_controller):
+        """The app's editing callbacks did not run for text set through the
+        accessibility service, so the answer must carry it (#664)."""
+        mock_controller.type_text.return_value = {
+            "udid": "AAAA-1111", "verified": True, "value": "日本", "input": "coredevice",
+            "set_through_accessibility": True, "note": "callbacks did not run",
+        }
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/type",
+                json={"text": "日本", "identifier": "name"},
+                headers=auth_headers,
+            )
+        body = resp.json()
+        assert body["input"] == "coredevice"
+        assert body["set_through_accessibility"] is True
+        assert body["note"] == "callbacks did not run"
+
     async def test_a_verified_type_returns_the_field_s_value(
         self, app, auth_headers, mock_controller,
     ):
