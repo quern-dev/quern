@@ -260,7 +260,7 @@ class CoreDeviceInput:
     async def press_button(self, udid: str, button: str) -> str:
         code = BUTTONS.get(button.lower())
 
-        async def send(lib: SimpleNamespace, session: _Session, screen: Screen,
+        async def send(lib: SimpleNamespace, session: _Session, screen: Screen | None,
                        progress: _Progress) -> None:
             if code is None:
                 raise NotSent(f"no HID code for the {button!r} button")
@@ -277,56 +277,71 @@ class CoreDeviceInput:
             await _sleep(TAP_HOLD_S)
             await _report(session.indigo.send_button(*code, lib.BUTTON_UP))
 
+        # No screen read: a button report has no coordinates, so a phone in
+        # landscape presses Home over HID as well as one in portrait.
         return await self._or_fallback(udid, f"{button} button", send,
-                                lambda: self._fallback.press_button(udid, button))
+                                       lambda: self._fallback.press_button(udid, button),
+                                       needs_screen=False)
 
     # -- delivery ----------------------------------------------------------
 
-    async def _or_fallback(self, udid: str, what: str, send: Any, fallback: Any) -> str:
+    async def _or_fallback(self, udid: str, what: str, send: Any, fallback: Any,
+                           needs_screen: bool = True) -> str:
         """Send over HID; if nothing could be sent, do it through WDA. Returns
         which of the two carried it."""
         try:
-            await self._send(udid, what, send)
+            await self._send(udid, what, send, needs_screen)
         except NotSent as e:
             logger.info("[coredevice] %s on %s through WDA: %s", what, udid[:8], e)
             await fallback()
             return getattr(self._fallback, "TOOL_NAME", "wda")
         return self.TOOL_NAME
 
-    async def _send(self, udid: str, what: str, send: Any) -> None:
+    async def _send(self, udid: str, what: str, send: Any, needs_screen: bool = True) -> None:
         lib = _pmd3()
-        session = await self._session(udid, lib)
-        async with session.lock:
+        while True:
+            session = await self._session(udid, lib)
+            async with session.lock:
+                # Retired while this waited for the lock -- by the reaper, or
+                # by an action that failed on it -- so not used: take a fresh
+                # one (CodeRabbit on #671).
+                if self._sessions.get(udid) is session:
+                    await self._send_on(udid, what, send, needs_screen, lib, session)
+                    return
+
+    async def _send_on(self, udid: str, what: str, send: Any, needs_screen: bool,
+                       lib: SimpleNamespace, session: _Session) -> None:
+        """One action on a session whose lock the caller holds."""
+        session.last_used = time.monotonic()
+        progress = _Progress()
+        try:
+            screen = await self._screen(session, lib) if needs_screen else None
+            await send(lib, session, screen, progress)
+        except _ReadFailed:
+            await self._drop(udid, session)
+            raise
+        except (NotSent, InvalidDeviceRequestError):
+            # Nothing sent, and nothing wrong with the session: a screen this
+            # cannot map, a button with no code, an edge swipe that does not
+            # start at its edge.
+            raise
+        except asyncio.CancelledError:
+            # Cancelled mid-gesture, perhaps with a contact still down. The
+            # session goes with it, so the next action does not start on a
+            # finger that never lifted.
+            await asyncio.shield(self._drop(udid, session))
+            raise
+        except Exception as e:
+            # A session that failed is not trusted again; the next action opens
+            # a fresh one.
+            await self._drop(udid, session)
+            if not progress.reached:
+                raise NotSent(f"the HID service failed before sending: {e!r}") from e
+            raise DeviceError(
+                f"{what} on {udid[:8]} may have been partly delivered, so it is "
+                f"not retried: {e!r}", tool=self.TOOL_NAME) from e
+        finally:
             session.last_used = time.monotonic()
-            progress = _Progress()
-            try:
-                screen = await self._screen(session, lib)
-                await send(lib, session, screen, progress)
-            except _ReadFailed:
-                await self._drop(udid, session)
-                raise
-            except (NotSent, InvalidDeviceRequestError):
-                # Nothing sent, and nothing wrong with the session: a screen
-                # this cannot map, a button with no code, an edge swipe that
-                # does not start at its edge.
-                raise
-            except asyncio.CancelledError:
-                # Cancelled mid-gesture, perhaps with a contact still down. The
-                # session goes with it, so the next action does not start on
-                # a finger that never lifted.
-                await asyncio.shield(self._drop(udid, session))
-                raise
-            except Exception as e:
-                # A session that failed is not trusted again; the next action
-                # opens a fresh one.
-                await self._drop(udid, session)
-                if not progress.reached:
-                    raise NotSent(f"the HID service failed before sending: {e!r}") from e
-                raise DeviceError(
-                    f"{what} on {udid[:8]} may have been partly delivered, so it is "
-                    f"not retried: {e!r}", tool=self.TOOL_NAME) from e
-            finally:
-                session.last_used = time.monotonic()
 
     async def _screen(self, session: _Session, lib: SimpleNamespace) -> Screen:
         """The display, read per action: a rotation between actions is seen.
@@ -366,6 +381,13 @@ class CoreDeviceInput:
                 await asyncio.wait_for(rsd.connect(), CONNECT_S)
                 hid = lib.UniversalHID(rsd)
                 await asyncio.wait_for(hid.connect(), CONNECT_S)
+            except asyncio.CancelledError:
+                # Cancelled half open: neither is registered yet, so nothing
+                # else would ever close them. Still a cancellation, not NotSent
+                # (CodeRabbit on #671).
+                await asyncio.shield(_bounded_close(
+                    *(c for c in (getattr(hid, "close", None), rsd.close) if c)))
+                raise
             except Exception as e:
                 await _bounded_close(*(c for c in (getattr(hid, "close", None), rsd.close) if c))
                 raise NotSent(f"the HID service could not be opened: {e!r}") from e
@@ -392,10 +414,18 @@ class CoreDeviceInput:
                 if not session.lock.locked() and now - session.last_used >= IDLE_CLOSE_S:
                     # Its own task, so cancelling the reaper at shutdown does
                     # not cut a close short; close() waits for it instead.
-                    drop = asyncio.ensure_future(self._drop(udid, session))
+                    drop = asyncio.ensure_future(self._retire(udid, session))
                     self._dropping.add(drop)
                     drop.add_done_callback(self._dropping.discard)
                     await asyncio.shield(drop)
+
+    async def _retire(self, udid: str, session: _Session) -> None:
+        """Close an idle session, holding its lock so no action is on it, and
+        only if it is still idle once the lock is had: an action may have
+        taken it between the reaper's look and now (CodeRabbit on #671)."""
+        async with session.lock:
+            if time.monotonic() - session.last_used >= IDLE_CLOSE_S:
+                await self._drop(udid, session)
 
     async def close(self) -> None:
         """Close every held session (server shutdown)."""

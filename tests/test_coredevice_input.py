@@ -8,6 +8,7 @@ as measured on iOS 27.2.1 (828x1792 pixels at scale 2, rot0).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -88,7 +89,7 @@ class FakeLib:
                 self.name = "hid"
 
             async def connect(self):
-                pass
+                await maybe_hang("hid-connect")
 
             async def close(self):
                 lib.closed.append(self.name)
@@ -354,12 +355,43 @@ class TestNeverReSent:
         session with a finger that never lifted."""
         hid = CoreDeviceInput(wda)
         task = asyncio.create_task(hid.tap(PHONE, 1, 1, hold=30))
-        while lib.contacts == 0:
-            await asyncio.sleep(0.01)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert PHONE not in hid._sessions and "rsd" in lib.closed
+        try:
+            async with asyncio.timeout(2):
+                while lib.contacts == 0:
+                    assert not task.done(), task      # fell through to WDA, or failed
+                    await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+            assert PHONE not in hid._sessions and "rsd" in lib.closed
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    async def test_a_session_cancelled_half_open_is_closed(self, lib, wda):
+        """Not yet registered, so nothing else would ever close it; and still a
+        cancellation, not a fall-through to WDA."""
+        lib.hang.add("hid-connect")
+        hid = CoreDeviceInput(wda)
+        task = asyncio.create_task(hid.tap(PHONE, 1, 1))
+        try:
+            async with asyncio.timeout(2):
+                while lib.connects == 0:
+                    await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)              # into hid.connect()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        assert "rsd" in lib.closed and "hid" in lib.closed
+        assert hid._sessions == {}
+        wda.tap.assert_not_called()
 
     async def test_a_failure_after_contact_is_an_error_not_a_second_tap(self, lib, wda):
         lib.fail["release"] = ConnectionResetError("gone")
@@ -390,6 +422,13 @@ class TestButtons:
         lib.fail["indigo"] = OSError("refused")
         await CoreDeviceInput(wda).press_button(PHONE, "volumeUp")
         wda.press_button.assert_awaited_once()
+
+    async def test_a_button_is_pressed_over_hid_in_landscape(self, lib, wda):
+        """A button report has no coordinates, so the screen's orientation is
+        no reason to send it through WDA."""
+        lib.display = _display(orientation="rot90")
+        assert await CoreDeviceInput(wda).press_button(PHONE, "home") == "coredevice"
+        wda.press_button.assert_not_called()
 
     async def test_a_press_that_fails_on_down_is_an_error(self, lib, wda):
         lib.fail["button-down"] = ConnectionResetError("gone")
@@ -423,6 +462,46 @@ class TestSessions:
         # reaper off it.
         assert await hid.tap(PHONE, 1, 1, hold=0.6) == "coredevice"
         assert "rsd" not in lib.closed and PHONE in hid._sessions
+
+    async def test_an_action_queued_on_a_retired_session_takes_a_fresh_one(self, lib, wda):
+        """Retired while it waited for the lock: it must not run on a session
+        that has been closed under it."""
+        hid = CoreDeviceInput(wda)
+        first = asyncio.create_task(hid.tap(PHONE, 1, 1, hold=0.3))
+        tasks = [first]
+        try:
+            async with asyncio.timeout(2):
+                while lib.contacts == 0:
+                    await asyncio.sleep(0.01)
+            old = hid._sessions[PHONE]
+            second = asyncio.create_task(hid.tap(PHONE, 2, 2))
+            tasks.append(second)
+            await asyncio.sleep(0.05)                  # queued on old's lock
+            await hid._drop(PHONE, old)
+            assert await asyncio.wait_for(first, 2) == "coredevice"
+            assert await asyncio.wait_for(second, 2) == "coredevice"
+        finally:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await t
+        assert lib.connects == 2 and hid._sessions[PHONE] is not old
+
+    async def test_retiring_waits_for_an_action_and_spares_a_used_session(self, lib, wda,
+                                                                          monkeypatch):
+        """The reaper's look and the close are not one step: an action that
+        took the session in between keeps it."""
+        monkeypatch.setattr(coredevice_input, "IDLE_CLOSE_S", 0.1)
+        hid = CoreDeviceInput(wda)
+        await hid.tap(PHONE, 1, 1)
+        session = hid._sessions[PHONE]
+        session.last_used -= 10                        # idle, as the reaper saw it
+        action = asyncio.create_task(hid.tap(PHONE, 2, 2, hold=0.2))
+        await asyncio.sleep(0.05)                      # the action holds the lock
+        await asyncio.wait_for(hid._retire(PHONE, session), 2)
+        assert await asyncio.wait_for(action, 2) == "coredevice"
+        assert hid._sessions.get(PHONE) is session and "rsd" not in lib.closed
 
     async def test_close_closes_every_session(self, lib, wda):
         hid = CoreDeviceInput(wda)
