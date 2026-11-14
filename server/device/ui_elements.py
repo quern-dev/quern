@@ -139,13 +139,34 @@ def parse_elements(raw: list[dict], filter_label: str | None = None,
     return elements
 
 
-def find_by_label(elements: list[UIElement], label: str) -> list[UIElement]:
+def find_by_label(elements: list[UIElement], label: str, *,
+                  merged: bool = False) -> list[UIElement]:
     """Find elements by exact case-insensitive label match.
 
     No substring matching — avoids 'Mail' matching 'Voicemail'.
+
+    `merged`: the labels are VoiceOver's, read from a physical iPhone's tree
+    push (#664), where a row and its inner texts are one element labelled
+    "Wi-Fi, ExampleNetwork" -- WDA has a "Wi-Fi" button there. Then, failing
+    an exact match, the row's title matches: the text before its first ", ".
+    Only the title, not every part: "Apple Account, Sign in to access your
+    iCloud data, the App Store, ..." is not the App Store's row.
     """
     lower = label.lower()
-    return [e for e in elements if e.label.lower() == lower]
+    exact = [e for e in elements if e.label.lower() == lower]
+    if exact or not merged:
+        return exact
+    return [e for e in elements if title_of(e.label).lower() == lower]
+
+
+def title_of(label: str) -> str:
+    """A merged VoiceOver label's title: the text before its first ", "."""
+    return label.split(", ", 1)[0]
+
+
+def matched_by_title(element: UIElement, label: str | None) -> bool:
+    """Whether `label` found this element by its title, not its whole label."""
+    return bool(label) and element.label.lower() != label.lower()
 
 
 def find_by_label_contains(elements: list[UIElement], substring: str) -> list[UIElement]:
@@ -204,6 +225,7 @@ def find_element(
     element_type: str | None = None,
     *,
     prefilter: bool = False,
+    merged_labels: bool = False,
 ) -> list[UIElement]:
     """Find elements matching label/identifier/type filters.
 
@@ -228,10 +250,32 @@ def find_element(
             For reads narrowed before the caller's own `find_element` runs --
             they see only `filter_label`, never `label_contains`, so applying
             the rule there would drop an equivalent the caller's rule accepts.
+        merged_labels: The elements came from a tree push, whose rows carry
+            merged VoiceOver labels; `label` then also matches a row's title.
+            See `find_by_label`.
 
     Returns:
         List of matching elements (empty if no matches)
     """
+    if label and merged_labels:
+        # Exact and title candidates are narrowed apart, and a title is tried
+        # only when no exact candidate survives: choosing between them first
+        # let a stray exact StaticText "Wi-Fi" hide the "Wi-Fi, Home" row a
+        # Button filter asked for (#664 phase 2b review).
+        exact = _narrowed(find_by_label(elements, label), label, identifier,
+                          element_type, prefilter)
+        lower = label.lower()
+        titled = _narrowed(
+            [e for e in elements
+             if e.label.lower() != lower and title_of(e.label).lower() == lower],
+            label, identifier, element_type, prefilter)
+        if prefilter:
+            # Both, for the caller's own match to choose from: an exact Cell
+            # that the related-type prefilter keeps, and the final rule then
+            # drops, must not have hidden the Button row (CodeRabbit on #672).
+            return exact + titled
+        return exact or titled
+
     # Start with label or identifier search, then narrow by type
     if label:
         matches = find_by_label(elements, label)
@@ -250,19 +294,23 @@ def find_element(
         # No search criteria provided
         return []
 
-    # Narrowing filters. Applied after the primary selector rather than instead
-    # of it, so naming both a label and an identifier means both must hold.
+    return _narrowed(matches, label or label_contains or label_prefix, identifier,
+                     element_type, prefilter)
+
+
+def _narrowed(matches: list[UIElement], label: str | None, identifier: str | None,
+              element_type: str | None, prefilter: bool) -> list[UIElement]:
+    """The narrowing filters. Applied after the primary selector rather than
+    instead of it, so naming both a label and an identifier means both must
+    hold."""
     if identifier and matches:
         matches = [e for e in matches if e.identifier == identifier]
     if element_type and matches:
         if prefilter:
             matches = find_by_related_type(matches, element_type)
         else:
-            rule = rule_for(
-                identifier=identifier, label=label or label_contains or label_prefix,
-            )
+            rule = rule_for(identifier=identifier, label=label)
             matches = find_by_type(matches, element_type, rule, identifier)
-
     return matches
 
 
