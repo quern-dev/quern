@@ -1077,12 +1077,12 @@ Returns where the fingers went. An app's recogniser reports a little less than w
   });
 
   server.registerTool("press_button", {
-    description: `Press a hardware button on the device. iOS: HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY. Android: home, back, recents, volumeUp, volumeDown, power, enter, delete, menu.`,
+    description: `Press a hardware button on the device. iOS: HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY; a physical iPhone also takes volumeUp and volumeDown. With "device_ui_reader": "coredevice" on iOS 27+, home and the volume buttons on a physical iPhone go over CoreDevice HID rather than WDA. Android: home, back, recents, volumeUp, volumeDown, power, enter, delete, menu.`,
     inputSchema: strictParams({
       button: z
         .string()
         .describe(
-          "Button name. iOS: HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY. Android: home, back, recents, volumeUp, volumeDown, power, enter, delete, menu"
+          "Button name. iOS: HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY; a physical iPhone also takes volumeUp, volumeDown. Android: home, back, recents, volumeUp, volumeDown, power, enter, delete, menu"
         ),
       udid: z
         .string()
