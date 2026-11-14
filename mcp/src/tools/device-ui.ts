@@ -467,7 +467,7 @@ A 400 on any other device. After a fold, quern waits for the screen to settle be
   server.registerTool("tap", {
     description: `Tap at specific screen coordinates on the simulator.
 
-PREFER tap_element over this tool. Use get_screen_summary to find element labels/identifiers, then tap_element to tap by name. Only use coordinate tap as a last resort when tap_element cannot find the element. On an iOS simulator the response carries landed_on: what a hit-test found at the point just before the tap (a bar, a menu, the element you meant), and a tap moments after another action waits for the screen to stop moving (waited_for_settle_ms).
+PREFER tap_element over this tool. Use get_screen_summary to find element labels/identifiers, then tap_element to tap by name. Only use coordinate tap as a last resort when tap_element cannot find the element. On an iOS simulator the response carries landed_on: what a hit-test found at the point just before the tap (a bar, a menu, the element you meant), and a tap moments after another action waits for the screen to stop moving (waited_for_settle_ms). On a physical iPhone whose server drives it over CoreDevice, the response's input says what delivered the tap: 'coredevice', or 'wda' for one it could not send that way (a turned screen, no tunnel).
 
 If coordinate taps are not landing on the expected element, use take_annotated_screenshot to see exact element bounding boxes overlaid on the screen. Read the element's position as a fraction of the screen (e.g. iPhone 12: 390×844 pt, iPhone 15 Pro: 393×852 pt) to calculate correct tap coordinates, then retry.`,
     inputSchema: strictParams({
@@ -1077,12 +1077,12 @@ Returns where the fingers went. An app's recogniser reports a little less than w
   });
 
   server.registerTool("press_button", {
-    description: `Press a hardware button on the device. iOS: HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY. Android: home, back, recents, volumeUp, volumeDown, power, enter, delete, menu.`,
+    description: `Press a hardware button on the device. iOS: HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY; a physical iPhone also takes volumeUp and volumeDown. With "device_ui_reader": "coredevice" on iOS 27+, home and the volume buttons on a physical iPhone go over CoreDevice HID rather than WDA. Android: home, back, recents, volumeUp, volumeDown, power, enter, delete, menu.`,
     inputSchema: strictParams({
       button: z
         .string()
         .describe(
-          "Button name. iOS: HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY. Android: home, back, recents, volumeUp, volumeDown, power, enter, delete, menu"
+          "Button name. iOS: HOME, LOCK, SIDE_BUTTON, SIRI, APPLE_PAY; a physical iPhone also takes volumeUp, volumeDown. Android: home, back, recents, volumeUp, volumeDown, power, enter, delete, menu"
         ),
       udid: z
         .string()

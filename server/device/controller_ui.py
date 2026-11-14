@@ -587,6 +587,7 @@ class DeviceControllerUI:
     - self.idb: IdbBackend
     - self.wda_client: WdaBackend
     - self.coredevice_ax: CoreDeviceAxReader
+    - self.coredevice_input: CoreDeviceInput
     - self.simctl: SimctlBackend
     - self._ui_cache: dict[str, tuple[list[UIElement], float]]
     - self._ui_cache_backend: dict[str, str]
@@ -680,23 +681,31 @@ class DeviceControllerUI:
         #336 the two are not the same question."""
         return self._ui_backend(udid) is self.wda_client
 
-    def _device_tree_reader(self, udid: str):
-        """The CoreDevice tree reader when it should serve this device's
-        reads, else None (#664).
+    def _coredevice_serves(self, udid: str) -> bool:
+        """Whether this device is read and driven over CoreDevice (#664).
 
-        Reads only: taps and every other action keep going through
-        `_ui_backend`, which is WDA for a phone. Opt-in through
-        `device_ui_reader` in config.json, and only on iOS 27 and later, the
-        only versions it has been measured on. A device whose version quern has
-        not seen stays with WDA rather than being guessed at.
+        Opt-in through `device_ui_reader` in config.json, and only for a
+        physical iPhone on iOS 27 and later, the only versions it has been
+        measured on. A device whose version quern has not seen stays with WDA
+        rather than being guessed at.
         """
         if self._is_android(udid) or not self._is_physical(udid):
-            return None
+            return False
         if get_device_ui_reader() != "coredevice":
-            return None
+            return False
         os_version = self.wda_client._device_os_versions.get(udid)
         match = re.search(r"\d+", os_version or "")
-        if not match or int(match.group()) < COREDEVICE_MIN_IOS:
+        return bool(match) and int(match.group()) >= COREDEVICE_MIN_IOS
+
+    def _device_tree_reader(self, udid: str):
+        """The CoreDevice tree reader when it should serve this device's
+        whole-screen reads, else None (#664).
+
+        None too on a device where a push read has crashed an app (#669):
+        that device is read through WDA until the server restarts. Input is
+        unaffected -- the dump is what crashes, not a tap.
+        """
+        if not self._coredevice_serves(udid):
             return None
         # Not on a device where a push read has crashed an app (#669). The read
         # cannot be made safe once started, and keying on the app last seen is
@@ -707,6 +716,22 @@ class DeviceControllerUI:
         if self._push_crashed_apps.get(udid):
             return None
         return self.coredevice_ax
+
+    def _input_backend(self, udid: str):
+        """Who delivers a tap, swipe or button press to this device.
+
+        CoreDevice HID when it serves the device (#664, phase 2a), which falls
+        back to WDA for anything it cannot send; otherwise `_ui_backend`, as
+        for every other action. Finding the target -- tap_element's lookup --
+        stays with WDA either way, until phase 2b.
+
+        Not typing. A HID keyboard is a hardware keyboard to iOS, so the
+        phone applies its hardware-keyboard layout for the active input
+        language: measured on an iPhone 11 with a Japanese keyboard, "Hello
+        abc" arrived as "Hっぉあ BC". WDA inserts the text itself, so
+        type_text stays with it.
+        """
+        return self.coredevice_input if self._coredevice_serves(udid) else self._ui_backend(udid)
 
     def read_note(self) -> str | None:
         """What this request's read had to report about itself, if anything."""
@@ -3317,8 +3342,14 @@ class DeviceControllerUI:
                 report["landed_on"] = {"type": hit.get("type"), "label": hit.get("AXLabel") or "",
                                        "identifier": hit.get("AXUniqueId"),
                                        "frame": hit.get("frame")}
-        await self._ui_backend(resolved).tap(resolved, x, y, **hold)
+        backend = self._input_backend(resolved)
+        carried_by = await backend.tap(resolved, x, y, **hold)
         self._invalidate_ui_cache(resolved)  # UI changed
+        if backend is self.coredevice_input:
+            # Which of the two carried it: HID, or WDA for what HID cannot send.
+            # This call's answer, not the device's last one: another tap on the
+            # same phone may have gone the other way meanwhile.
+            report["input"] = carried_by
         return report
 
     async def tap(self, x: float, y: float, udid: str | None = None,
@@ -3327,7 +3358,7 @@ class DeviceControllerUI:
         hold = _hold(duration)
         resolved = await self.resolve_udid(udid)
         await self._warn_if_input_is_suppressed(resolved)
-        await self._ui_backend(resolved).tap(resolved, x, y, **hold)
+        await self._input_backend(resolved).tap(resolved, x, y, **hold)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
 
@@ -3767,7 +3798,7 @@ class DeviceControllerUI:
                 web_settled_ms = None
                 if self._checks_landing(resolved) and not skip_stability_check:
                     web_settled_ms = await self._settle_if_just_changed(resolved)
-                await self._ui_backend(resolved).tap(resolved, cx, cy, **hold)
+                await self._input_backend(resolved).tap(resolved, cx, cy, **hold)
                 self._invalidate_ui_cache(resolved)
                 result = {
                     "status": "ok",
@@ -4010,7 +4041,7 @@ class DeviceControllerUI:
                         result["scroll"] = _scroll_report(sweep, scroll_to_find)
                     return result
 
-            await self._ui_backend(resolved).tap(resolved, cx, cy, **hold)
+            await self._input_backend(resolved).tap(resolved, cx, cy, **hold)
             self._invalidate_ui_cache(resolved)  # UI changed
 
             # Future enhancement: Post-tap verification
@@ -4442,7 +4473,7 @@ class DeviceControllerUI:
         if edge is not None:
             gestures.check_edge(edge)
         resolved = await self.resolve_udid(udid)
-        backend = self._ui_backend(resolved)
+        backend = self._input_backend(resolved)
         name = getattr(backend, "TOOL_NAME", type(backend).__name__)
         if edge is not None and getattr(backend, "edge_swipes", False) is not True:
             raise DeviceOperationUnsupportedError(
@@ -5064,7 +5095,7 @@ class DeviceControllerUI:
         """Press a hardware button. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
         await self._warn_if_input_is_suppressed(resolved)
-        await self._ui_backend(resolved).press_button(resolved, button)
+        await self._input_backend(resolved).press_button(resolved, button)
         # Home, lock, volume: the screen changed (and a tap straight after a
         # Home press lands mid-transition), so the cached tree is stale.
         self._invalidate_ui_cache(resolved)
