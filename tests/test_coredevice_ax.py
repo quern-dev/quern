@@ -28,7 +28,7 @@ from server.device.ios.coredevice_ax import (
     parse_push,
     read_tree,
 )
-from server.models import DeviceError, DeviceType
+from server.models import DeviceError, DeviceType, WdaNotSetUpError
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "coredevice_ax"
 SETTINGS = (FIXTURES / "settings_root.bin").read_bytes()
@@ -1047,28 +1047,58 @@ class TestABareApplication:
         assert not ctrl._push_crashed_apps.get(PHONE)
 
     async def test_wda_failing_too_reports_the_wedge(self, monkeypatch):
-        """Not WDA's error alone, which says nothing about why the push failed."""
+        """Not WDA's error alone, which says nothing about why the push failed;
+        and still WDA's exception, so not set up stays a 400 (#681 review)."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl.coredevice_ax.describe_all = AsyncMock(side_effect=coredevice_ax.BareAppTree(PHONE))
-        ctrl.wda_client.describe_all = AsyncMock(
-            side_effect=DeviceError("WDA is not set up", tool="wda"))
+        ctrl.wda_client.describe_all = AsyncMock(side_effect=WdaNotSetUpError("WDA is not set up"))
 
-        with pytest.raises(DeviceError) as caught:
+        with pytest.raises(WdaNotSetUpError) as caught:
             await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
 
         assert "empty tree" in str(caught.value)
         assert "WDA could not read the screen instead: WDA is not set up" in str(caught.value)
 
-    async def test_a_lookup_with_wda_failing_reports_the_wedge(self, monkeypatch):
-        """A tap_element on a wedged phone is an error naming it, not a 404."""
+    async def test_a_lookup_with_no_wda_reports_the_wedge(self, monkeypatch):
+        """A tap_element on a wedged phone with no WDA is an error naming the
+        wedge, not WDA's error alone. It fails where a missing WDA does in
+        production: making the session, which setting the lookup's depth
+        does first (#681 review)."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = AsyncMock(side_effect=coredevice_ax.BareAppTree(PHONE))
+        del ctrl.wda_client.find_elements_by_query          # the real one
+        ctrl.wda_client._ensure_session = AsyncMock(
+            side_effect=WdaNotSetUpError("WDA is not set up"))
+
+        with pytest.raises(WdaNotSetUpError, match="empty tree"):
+            await ctrl.get_ui_elements(PHONE, filter_label="Wi-Fi", use_cache=False, lookup=True)
+
+    async def test_a_miss_through_wda_carries_the_reason(self, monkeypatch):
+        """WDA read the screen and the element is not there: the miss still says
+        the push answered bare, or it is a plain 404 again (#681 review)."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl.coredevice_ax.describe_all = AsyncMock(side_effect=coredevice_ax.BareAppTree(PHONE))
         ctrl.wda_client._set_snapshot_depth = AsyncMock()
-        ctrl.wda_client.find_elements_by_query = AsyncMock(
-            side_effect=DeviceError("WDA is not set up", tool="wda"))
 
-        with pytest.raises(DeviceError, match="empty tree"):
-            await ctrl.get_ui_elements(PHONE, filter_label="Wi-Fi", use_cache=False, lookup=True)
+        with pytest.raises(DeviceError, match="No element found.*empty tree"):
+            await ctrl.get_element(label="Wi-Fi", udid=PHONE)
+
+    async def test_one_bare_read_is_read_again(self, monkeypatch):
+        monkeypatch.setattr(coredevice_ax, "BARE_CONFIRM_S", 0)
+        reads = AsyncMock(side_effect=[coredevice_ax.BareAppTree(PHONE), [{"AXLabel": "Settings"}]])
+        monkeypatch.setattr(coredevice_ax, "read_tree", reads)
+
+        elements = await CoreDeviceAxReader().describe_all(PHONE)
+
+        assert elements == [{"AXLabel": "Settings"}] and reads.await_count == 2
+
+    async def test_two_bare_reads_are_the_wedge(self, monkeypatch):
+        monkeypatch.setattr(coredevice_ax, "BARE_CONFIRM_S", 0)
+        reads = AsyncMock(side_effect=[coredevice_ax.BareAppTree(PHONE)] * 2)
+        monkeypatch.setattr(coredevice_ax, "read_tree", reads)
+
+        with pytest.raises(coredevice_ax.BareAppTree):
+            await CoreDeviceAxReader().describe_all(PHONE)
 
     async def test_an_unrelated_wda_failure_is_unchanged(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)

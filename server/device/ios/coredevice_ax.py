@@ -118,6 +118,12 @@ PAIR_PER_ELEMENT_S = 0.015
 #: complete tree, with the newest complete tree it has.
 SETTLE_HARD_S = 4.0
 
+#: How long a bare tree waits before it is read again (#664): one read is not
+#: taken as the wedge, so a screen caught in a moment of change is not
+#: reported as a phone that needs a restart. Measured on an iPhone 15 Pro, a
+#: read straight after a launch already carried the app's name, 10 of 10.
+BARE_CONFIRM_S = 1.0
+
 #: Each cleanup step's bound: unsubscribing and closing must not hold a read
 #: up, or change its outcome.
 CLOSE_S = 2.0
@@ -593,4 +599,9 @@ class CoreDeviceAxReader:
                            probe: bool = True) -> list[dict]:
         # snapshot_depth and probe are WDA's and sim-bridge's knobs; the push
         # is the whole on-screen tree, so there is nothing for them to change.
-        return await read_tree(udid, timeout=source_timeout or READ_TIMEOUT_S)
+        timeout = source_timeout or READ_TIMEOUT_S
+        try:
+            return await read_tree(udid, timeout=timeout)
+        except BareAppTree:
+            await asyncio.sleep(BARE_CONFIRM_S)
+            return await read_tree(udid, timeout=timeout)

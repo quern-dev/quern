@@ -606,11 +606,17 @@ PUSHED_MISS_DETAIL = (
 
 
 def _bare_and_wda_failed(bare: DeviceError, wda: DeviceError) -> DeviceError:
-    """The error for a push that answered bare and a WDA read that could not
-    stand in for it (#664): the bare tree is the cause to report, since WDA's
-    own error -- often that it is not set up -- says nothing about it."""
-    return DeviceError(f"{bare}. WDA could not read the screen instead: {wda}",
-                       tool=bare.tool)
+    """WDA's error, for a push that answered bare and a WDA read that could
+    not stand in for it (#664), with the bare tree named first: WDA's message
+    alone -- often that it is not set up -- says nothing about the cause.
+
+    The same exception, so its status stays its own: not set up is a 400 and
+    a lost session a 503, which a new plain DeviceError would make a 500
+    (#681 review).
+    """
+    wda.args = (f"{bare}. WDA could not read the screen instead: {wda}",
+                *wda.args[1:])
+    return wda
 
 
 def _note_merged_label(result: dict, label: str | None, element: UIElement,
@@ -2796,11 +2802,13 @@ class DeviceControllerUI:
             # read -- `sim-bridge` on a simulator just put in WDA mode (#336).
             self._last_read_backend[resolved] = self.wda_client.TOOL_NAME
             _READ_BY.set(self.wda_client.TOOL_NAME)
-            if snapshot_depth is not None:
-                # WDA's depth is a session setting: queries honour it too, and
-                # a deep one makes a query on a long list as slow as /source.
-                await self.wda_client._set_snapshot_depth(resolved, snapshot_depth)
             try:
+                if snapshot_depth is not None:
+                    # WDA's depth is a session setting: queries honour it too,
+                    # and a deep one makes a query on a long list as slow as
+                    # /source. Setting it is where a WDA that is not there
+                    # fails, so it is inside what names the bare tree.
+                    await self.wda_client._set_snapshot_depth(resolved, snapshot_depth)
                 elements, query_elapsed = await self._wda_direct_query(
                     resolved, label=filter_label,
                     identifier=filter_identifier, element_type=filter_type,
@@ -3055,9 +3063,12 @@ class DeviceControllerUI:
                     shallow, tried=_DEEPEN_TRIED.get(), timed_out=_DEEP_TIMED_OUT.get(),
                     opted_out=not deepen,
                 )
+            # Why the push did not answer, when it did not (#664): a bare tree
+            # read through WDA is a phone to restart, not a missing element.
+            note = self.read_note()
             raise DeviceError(
                 f"No element found matching {search_desc}{depth}"
-                + (f". {hint}" if hint else ""),
+                + (f". {hint}" if hint else "") + (f". {note}" if note else ""),
                 tool=self._last_read_backend.get(resolved, backend),
             )
 
@@ -3279,6 +3290,8 @@ class DeviceControllerUI:
                 }
                 if hint:
                     result["web_content_hint"] = hint
+                if note := self.read_note():
+                    result["warning"] = note
                 if pushed:
                     # By the last poll's reader, which made the state that
                     # timed out -- found and never matching a value, or never
@@ -3885,6 +3898,8 @@ class DeviceControllerUI:
             if hint:
                 result["web_content_hint"] = hint
                 result["detail"] += f". {hint}"
+            if note := self.read_note():
+                result["warning"] = note
             if pushed and not sweep.get("attempted"):
                 result["detail"] += PUSHED_MISS_DETAIL
             elif read_depth is not None and self._served_by_wda(resolved):
