@@ -177,6 +177,23 @@ class TestTypingIntoAField:
         ctrl.coredevice_input.type_text.assert_not_called()
 
 
+class TestTheReadsTheyMake:
+    """Both reads must reach the push: through WDA they would need a WDA the
+    phone does not have."""
+
+    @pytest.mark.parametrize("helper", ["_find_text_field", "_read_field_value"])
+    async def test_whole_screen_reaches_the_read(self, helper):
+        ctrl = DeviceController()
+        ctrl.get_ui_elements = AsyncMock(return_value=([_field("x")], PHONE))
+        if helper == "_find_text_field":
+            await ctrl._find_text_field(PHONE, label=None, identifier="field_default",
+                                        whole_screen=True)
+        else:
+            await ctrl._read_field_value(PHONE, _field("x"), None, "field_default",
+                                         whole_screen=True)
+        assert ctrl.get_ui_elements.await_args.kwargs["whole_screen"] is True
+
+
 class TestTheIntendedValue:
     @pytest.mark.parametrize(("before", "after", "text", "expected"), [
         ("field_default", "Helloあbc＃＠", "Hello abc #@", "Hello abc #@"),  # placeholder
