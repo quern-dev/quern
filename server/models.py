@@ -2635,6 +2635,13 @@ class TapRequest(BaseModel):
     skip_settle: bool = Field(default=False, description=(
         "Do not wait for the screen to settle when an action changed it moments "
         "ago (iOS simulators). For a screen that never stops moving."))
+    verify_changed: bool = Field(default=False, description=(
+        "Answer whether the tap changed the screen: a frame before the tap and "
+        "one 1 s after, compared as a later miss compares them (#502). The answer "
+        "carries `screen_changed` -- true, false, or null when a frame could not be "
+        "taken -- and `screen_change` with the measured fraction, and a note when "
+        "false. Costs ~1.1 s per tap; for taps that must navigate or open "
+        "something. A tap meant to change nothing reads false too."))
 
 
 class HingeRequest(BaseModel):
@@ -2727,6 +2734,13 @@ class TapElementRequest(BaseModel):
             "Android, ~200ms on an iPhone. false skips it for speed-sensitive loops."
         ),
     )
+    verify_changed: bool = Field(default=False, description=(
+        "Answer whether the tap changed the screen: a frame before the tap and "
+        "one 1 s after, compared as a later miss compares them (#502). The answer "
+        "carries `screen_changed` -- true, false, or null when a frame could not be "
+        "taken -- and `screen_change` with the measured fraction, and a note when "
+        "false. Costs ~1.1 s per tap; for taps that must navigate or open "
+        "something. A tap meant to change nothing reads false too."))
     include_screen_context: bool = False
     capture_screenshots: bool = False
     settle_delay: float = Field(default=1.0, ge=0, le=10)

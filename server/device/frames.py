@@ -45,6 +45,13 @@ FRAME_WIDTH = 100
 #: the safe direction.
 STATUS_BAR_FRACTION = {"ios": 0.07, "android": 0.05}
 
+#: An iPad's status bar is 24 pt of 1024 or more: 7% of its height would also
+#: cover its navigation bar, so a change made only there -- a relabelled bar
+#: button, a new title -- read as "unchanged" (verify_changed review). A
+#: portrait frame wider than this is taken for an iPad.
+IPAD_ASPECT = 0.6
+IPAD_STATUS_BAR_FRACTION = 0.025
+
 #: The whole capture, fallback included, is abandoned past this: the tap must
 #: not wait on it.
 CAPTURE_TIMEOUT = 3.0
@@ -151,9 +158,12 @@ def prepare(png: bytes | None, platform: str):
         logger.debug("frame could not be decoded", exc_info=True)
         return None
     portrait = image.height >= image.width
+    fraction = STATUS_BAR_FRACTION[platform]
+    if platform == "ios" and image.width / image.height > IPAD_ASPECT:
+        fraction = IPAD_STATUS_BAR_FRACTION
     height = max(1, round(image.height * FRAME_WIDTH / image.width))
     image = image.resize((FRAME_WIDTH, height))
-    top = int(image.height * STATUS_BAR_FRACTION[platform]) if portrait else 0
+    top = int(image.height * fraction) if portrait else 0
     return image.crop((0, top, image.width, image.height))
 
 
@@ -202,3 +212,102 @@ def unchanged_note(
             "send."
         ),
     }
+
+
+# -- verify_changed: the same question asked on the tap itself -------------
+#
+# #502 says "unchanged" only on a later miss, because nothing changing is often
+# meant. A caller can still ask on the tap -- a tap that must navigate, where
+# landing on nothing has to be known at once (`verify_changed`). It costs the
+# grace below, which is why it is asked for and not done on every tap.
+
+#: How long after the tap the second frame is taken: the grace a miss gives a
+#: tap's screen to arrive (MIN_AGE). Sooner reads a screen still on its way as
+#: unchanged, the false answer this module exists to avoid.
+VERIFY_WAIT_S = MIN_AGE
+
+#: The capture a physical iPhone's own screenshot service makes, named for the
+#: verdict and the source to match.
+DEVICE_SOURCE = "device"
+
+
+async def _device_screenshot(controller, udid: str) -> bytes | None:
+    """A physical iPhone's own screenshot, over its tunnel: no WDA involved.
+
+    For a check the caller asked for, when WDA has no connection to give a
+    frame from -- a phone driven over CoreDevice (#664) may have none.
+    Slower than WDA's frame, which is why the tap path does not use it.
+    None for anything else, and whenever it cannot be had.
+    """
+    if controller._is_android(udid) or not controller._is_physical(udid):
+        return None
+    try:
+        # pmd3's own capture, without its tunneld recovery: that drops every
+        # device's tunnels, which one tap's check must not do. A capture past
+        # the timeout is killed, not left running (pmd3.screenshot).
+        png = await asyncio.wait_for(
+            controller.pmd3.screenshot(udid, recover_tunneld=False), CAPTURE_TIMEOUT)
+    except Exception:  # noqa: BLE001 -- no frame is an answer, never a failure
+        logger.debug("device screenshot failed", exc_info=True)
+        return None
+    return png or None
+
+
+#: Named so the test suite can stand it in, as it does `capture`.
+device_screenshot = _device_screenshot
+
+
+async def capture_for_check(controller, udid: str,
+                            source: str | None = None) -> tuple[bytes | None, float, str]:
+    """A frame for `verify_changed`: the tap path's capture, or failing that a
+    physical iPhone's own screenshot.
+
+    `source` keeps the after-frame off the device-screenshot route when the
+    before-frame was not on it, and on it when it was. Within `capture` the
+    backend still picks its own path -- u2 or adb, sim-bridge or simctl -- as
+    it does for #502's note; every frame is decoded to one width, which reads
+    a mismatch as changed rather than unchanged.
+    """
+    start = time.monotonic()
+    if source != DEVICE_SOURCE:
+        png, ms, got = await capture(controller, udid)
+        if png is not None or source is not None:
+            return png, ms, got
+    png = await device_screenshot(controller, udid)
+    return png, (time.monotonic() - start) * 1000, DEVICE_SOURCE
+
+
+def changed_verdict(before: tuple[bytes | None, float, str],
+                    after: tuple[bytes | None, float, str] | None) -> dict:
+    """`screen_changed` and its detail, from two `capture_for_check` frames.
+
+    `screen_changed` is None -- not False -- whenever a frame is missing or
+    will not decode: "could not tell" must never read as "the tap did
+    nothing". The threshold is the miss's own (`UNCHANGED_BELOW`).
+    """
+    from server.device.settle import changed_fraction
+
+    detail: dict = {"waited_s": VERIFY_WAIT_S}
+    png0, _, source0 = before
+    if png0 is None:
+        detail["reason"] = "no frame of the screen could be taken before the tap"
+        return {"screen_changed": None, "screen_change": detail}
+    if after is None or after[0] is None:
+        detail["reason"] = "no frame of the screen could be taken after the tap"
+        return {"screen_changed": None, "screen_change": detail}
+    platform = platform_of(source0)
+    a, b = prepare(png0, platform), prepare(after[0], platform)
+    if a is None or b is None:
+        detail["reason"] = "a frame of the screen could not be decoded"
+        return {"screen_changed": None, "screen_change": detail}
+    change = changed_fraction(a, b)
+    detail["fraction"] = round(change, 5)
+    changed = change >= UNCHANGED_BELOW
+    if not changed:
+        detail["note"] = (
+            f"The screen looks exactly as it did just before the tap, "
+            f"{VERIFY_WAIT_S:g}s after it. If the tap was meant to navigate, open "
+            "or toggle something, it probably did not register -- or hit "
+            "something that does nothing. Check the screen before repeating it, "
+            "and not blindly for a submit, a purchase or a send.")
+    return {"screen_changed": changed, "screen_change": detail}
