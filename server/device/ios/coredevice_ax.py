@@ -118,6 +118,12 @@ PAIR_PER_ELEMENT_S = 0.015
 #: complete tree, with the newest complete tree it has.
 SETTLE_HARD_S = 4.0
 
+#: How long a bare tree waits before it is read again (#664): one read is not
+#: taken as the wedge, so a screen caught in a moment of change is not
+#: reported as a phone that needs a restart. Measured on an iPhone 15 Pro, a
+#: read straight after a launch already carried the app's name, 10 of 10.
+BARE_CONFIRM_S = 1.0
+
 #: Each cleanup step's bound: unsubscribing and closing must not hold a read
 #: up, or change its outcome.
 CLOSE_S = 2.0
@@ -150,6 +156,37 @@ class AppExitedDuringRead(DeviceError):
             tool="coredevice")
         self.app = app
         self.pid = pid
+
+
+class BareAppTree(DeviceError):
+    """The phone answered for the app on screen with a bare, unlabelled
+    `Application` and nothing else (#664).
+
+    Measured on an iPhone 15 Pro on iOS 27.0.1: every app launched after
+    some point read this way, while SpringBoard and apps already running kept
+    reading normally, the shape of the simulator wedge in `ax_recovery.py`
+    (#66). A restart cleared it; what started it is not known. A healthy
+    app's `Application` carries the app's name, so an app with no
+    accessibility of its own does not read as this. Raised rather than
+    returned because the tree reads as a screen holding nothing, which
+    every lookup on it then reports as not found.
+    """
+
+    def __init__(self, uuid: str) -> None:
+        super().__init__(
+            f"{uuid[:8]}'s accessibility service answered with an empty tree for the "
+            "app on screen, a bare unlabelled Application. On a phone this has been "
+            "a wedge in iOS: apps launched after it read empty while the home screen "
+            "reads normally, and restarting the phone clears it (#664)",
+            tool="coredevice")
+
+
+def _refuse_bare(elements: list[dict], uuid: str) -> list[dict]:
+    """The tree, unless it is the wedge's bare `Application` (#664)."""
+    if (len(elements) == 1 and elements[0].get("type") == "Application"
+            and not elements[0].get("AXLabel")):
+        raise BareAppTree(uuid)
+    return elements
 
 
 @dataclass
@@ -530,7 +567,7 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
             # -- and "could not ask" is not taken as dead, as above.
             logger.info("[coredevice] tree of %s answered at the %gs deadline",
                         uuid[:8], timeout)
-            return held["latest"].elements
+            return _refuse_bare(held["latest"].elements, uuid)
         if deadline.expired():
             raise DeviceError(
                 f"{uuid[:8]} sent no complete accessibility tree within {timeout:g}s",
@@ -544,7 +581,7 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
                           tool="coredevice") from e
     logger.info("[coredevice] tree of %s: %d elements in %.2fs",
                 uuid[:8], len(elements), time.monotonic() - started)
-    return elements
+    return _refuse_bare(elements, uuid)
 
 
 class CoreDeviceAxReader:
@@ -562,4 +599,9 @@ class CoreDeviceAxReader:
                            probe: bool = True) -> list[dict]:
         # snapshot_depth and probe are WDA's and sim-bridge's knobs; the push
         # is the whole on-screen tree, so there is nothing for them to change.
-        return await read_tree(udid, timeout=source_timeout or READ_TIMEOUT_S)
+        timeout = source_timeout or READ_TIMEOUT_S
+        try:
+            return await read_tree(udid, timeout=timeout)
+        except BareAppTree:
+            await asyncio.sleep(BARE_CONFIRM_S)
+            return await read_tree(udid, timeout=timeout)

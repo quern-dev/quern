@@ -13,7 +13,7 @@ import time
 from server.config import get_device_ui_reader
 from server.device import gestures
 from server.device.element_types import equivalence, related_type_names
-from server.device.ios.coredevice_ax import COREDEVICE_MIN_IOS, AppExitedDuringRead
+from server.device.ios.coredevice_ax import COREDEVICE_MIN_IOS, AppExitedDuringRead, BareAppTree
 from server.device.ios.hinge import DEFAULT_SWEEP_MS, POSES
 from server.device.media.screenshots import annotate_screenshot
 from server.device.probing import frame_key
@@ -603,6 +603,20 @@ PUSHED_MISS_DETAIL = (
     ". Looked for in the tree the device pushes (backend coredevice), which "
     "holds what VoiceOver can reach, with a row's texts merged into one label; "
     "pass snapshot_depth to look through WDA instead")
+
+
+def _bare_and_wda_failed(bare: DeviceError, wda: DeviceError) -> DeviceError:
+    """WDA's error, for a push that answered bare and a WDA read that could
+    not stand in for it (#664), with the bare tree named first: WDA's message
+    alone -- often that it is not set up -- says nothing about the cause.
+
+    The same exception, so its status stays its own: not set up is a 400 and
+    a lost session a 503, which a new plain DeviceError would make a 500
+    (#681 review).
+    """
+    wda.args = (f"{bare}. WDA could not read the screen instead: {wda}",
+                *wda.args[1:])
+    return wda
 
 
 def _note_merged_label(result: dict, label: str | None, element: UIElement,
@@ -2738,6 +2752,7 @@ class DeviceControllerUI:
         # query and its deeper look on a miss -- not a /source after it that
         # never looks deeper (CodeRabbit on #672).
         pushed_raw = None
+        bare: BareAppTree | None = None
         if reader is not None:
             self._last_read_backend[resolved] = reader.TOOL_NAME
             try:
@@ -2767,6 +2782,11 @@ class DeviceControllerUI:
                     _READ_NOTE.set(
                         f"{e}. This read is WDA's, and this device's screens will be "
                         "read through WDA until the server restarts.")
+                if isinstance(e, BareAppTree):
+                    # Not a screen with nothing on it: WDA reads it instead,
+                    # and the answer says why (#664).
+                    bare = e
+                    _READ_NOTE.set(f"{e}. This read is WDA's.")
                 reader = None
                 if lookup and snapshot_depth is None:
                     # A lookup asked for no depth because the push needs none;
@@ -2782,14 +2802,21 @@ class DeviceControllerUI:
             # read -- `sim-bridge` on a simulator just put in WDA mode (#336).
             self._last_read_backend[resolved] = self.wda_client.TOOL_NAME
             _READ_BY.set(self.wda_client.TOOL_NAME)
-            if snapshot_depth is not None:
-                # WDA's depth is a session setting: queries honour it too, and
-                # a deep one makes a query on a long list as slow as /source.
-                await self.wda_client._set_snapshot_depth(resolved, snapshot_depth)
-            elements, query_elapsed = await self._wda_direct_query(
-                resolved, label=filter_label,
-                identifier=filter_identifier, element_type=filter_type,
-            )
+            try:
+                if snapshot_depth is not None:
+                    # WDA's depth is a session setting: queries honour it too,
+                    # and a deep one makes a query on a long list as slow as
+                    # /source. Setting it is where a WDA that is not there
+                    # fails, so it is inside what names the bare tree.
+                    await self.wda_client._set_snapshot_depth(resolved, snapshot_depth)
+                elements, query_elapsed = await self._wda_direct_query(
+                    resolved, label=filter_label,
+                    identifier=filter_identifier, element_type=filter_type,
+                )
+            except DeviceError as e:
+                if bare is None:
+                    raise
+                raise _bare_and_wda_failed(bare, e) from e
             if elements:
                 return elements, resolved
             if deepen_on_miss:
@@ -2845,10 +2872,15 @@ class DeviceControllerUI:
             )
             use_cache = False  # flat mode returns different elements
         else:
-            raw = await backend.describe_all(
-                resolved, snapshot_depth=snapshot_depth,
-                source_timeout=source_timeout, probe=probe_containers,
-            )
+            try:
+                raw = await backend.describe_all(
+                    resolved, snapshot_depth=snapshot_depth,
+                    source_timeout=source_timeout, probe=probe_containers,
+                )
+            except DeviceError as e:
+                if bare is None:
+                    raise
+                raise _bare_and_wda_failed(bare, e) from e
 
         # Who made it, after any fallback: a lookup's matches are read by it.
         pushed = reader is not None and backend is reader
@@ -3031,9 +3063,12 @@ class DeviceControllerUI:
                     shallow, tried=_DEEPEN_TRIED.get(), timed_out=_DEEP_TIMED_OUT.get(),
                     opted_out=not deepen,
                 )
+            # Why the push did not answer, when it did not (#664): a bare tree
+            # read through WDA is a phone to restart, not a missing element.
+            note = self.read_note()
             raise DeviceError(
                 f"No element found matching {search_desc}{depth}"
-                + (f". {hint}" if hint else ""),
+                + (f". {hint}" if hint else "") + (f". {note}" if note else ""),
                 tool=self._last_read_backend.get(resolved, backend),
             )
 
@@ -3255,6 +3290,8 @@ class DeviceControllerUI:
                 }
                 if hint:
                     result["web_content_hint"] = hint
+                if note := self.read_note():
+                    result["warning"] = note
                 if pushed:
                     # By the last poll's reader, which made the state that
                     # timed out -- found and never matching a value, or never
@@ -3861,6 +3898,8 @@ class DeviceControllerUI:
             if hint:
                 result["web_content_hint"] = hint
                 result["detail"] += f". {hint}"
+            if note := self.read_note():
+                result["warning"] = note
             if pushed and not sweep.get("attempted"):
                 result["detail"] += PUSHED_MISS_DETAIL
             elif read_depth is not None and self._served_by_wda(resolved):
