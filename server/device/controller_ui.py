@@ -1281,8 +1281,14 @@ class DeviceControllerUI:
         identifier: str | None,
         element_type: str | None,
         snapshot_depth: int | None = None,
+        pushed: bool = False,
     ) -> tuple[list[UIElement], bool]:
         """The whole screen, for identification and for not-found context.
+
+        `pushed`: the lookup was read from the tree push (#664), which reads
+        and caches the whole screen, so the context is that same tree -- not a
+        second read through WDA, which cost a WDA call per miss and rewrote
+        which reader the answer names.
 
         `elements` may have been read under filters, and a filtered read is not
         cached -- so it holds only what matched and cannot answer "which screen
@@ -1300,7 +1306,8 @@ class DeviceControllerUI:
         if not (filter_label or identifier or element_type):
             return elements, True
         try:
-            full, _ = await self.get_ui_elements(resolved, snapshot_depth=snapshot_depth)
+            full, _ = await self.get_ui_elements(
+                resolved, snapshot_depth=None if pushed else snapshot_depth, lookup=pushed)
         except Exception:
             logger.debug("full-tree read for screen context failed", exc_info=True)
             return elements, False
@@ -3187,8 +3194,10 @@ class DeviceControllerUI:
                 # loop uses filtered fetches that may return empty)
                 hint = None
                 try:
+                    # The last poll's own tree when it was pushed (#664),
+                    # cached by that poll, rather than a WDA read.
                     ctx_elements, _ = await self.get_ui_elements(
-                        resolved, mode=mode,
+                        resolved, mode=mode, lookup=pushed,
                     )
                     screen_context = _build_screen_context(ctx_elements)
                     screen_context.update(
@@ -3700,7 +3709,7 @@ class DeviceControllerUI:
                 all_elements, complete = (elements, False) if deep_timed_out else (
                     await self._all_elements_for_context(
                         resolved, elements, filter_label, identifier, element_type,
-                        snapshot_depth=read_depth,
+                        snapshot_depth=read_depth, pushed=pushed,
                     ))
                 all_elements_complete = complete
                 if not complete:
@@ -3772,7 +3781,7 @@ class DeviceControllerUI:
                 all_elements, all_elements_complete = (elements, False) if deep_timed_out else (
                     await self._all_elements_for_context(
                         resolved, elements, filter_label, identifier,
-                        element_type, snapshot_depth=read_depth,
+                        element_type, snapshot_depth=read_depth, pushed=pushed,
                     )
                 )
             screen_context = _build_screen_context(all_elements)

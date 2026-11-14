@@ -162,6 +162,7 @@ class TestWaitForElement:
         assert result["matched"] is False
         assert "tree the device pushes" in result["depth_note"]
         assert "snapshot_depth" not in result
+        ctrl.wda_client.describe_all.assert_not_called()      # nor for its context
 
 
 class TestTapElement:
@@ -192,6 +193,19 @@ class TestTapElement:
         assert result["status"] == "not_found"
         assert result["detail"].endswith(PUSHED_MISS_DETAIL)
         assert "snapshot_depth" not in result
+
+    async def test_a_miss_takes_its_screen_context_from_the_push(self, monkeypatch):
+        """Measured live: a WDA read for the context cost seconds per miss and
+        made the answer's backend say wda for a lookup the push made."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl._identify_for_miss = AsyncMock(return_value={})
+
+        result = await ctrl.tap_element(label="Nowhere", udid=PHONE)   # sweep unset
+
+        assert result["status"] == "not_found"
+        ctrl.wda_client.describe_all.assert_not_called()
+        ctrl.wda_client.find_elements_by_query.assert_not_called()
+        assert ctrl.backend_that_served(PHONE) == CoreDeviceAxReader.TOOL_NAME
 
     async def test_through_wda_the_label_is_exact(self, monkeypatch):
         """Not opted in: the same lookup is WDA's, matched exactly."""
