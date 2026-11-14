@@ -194,7 +194,7 @@ class TestTheMapDoesNotDriftFromTheCode:
         """
         branches_on_android_first = {
             "Boot", "Shutdown", "Set location", "Open URL",
-            "Grant permission", "Clear app data", "Erase",
+            "Grant permission", "Clear app data", "Erase", "Set orientation",
         }
         unaccounted = (
             self._guarded_operations()

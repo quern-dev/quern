@@ -29,6 +29,7 @@ from server.models import (
     DeviceError,
     GestureRequest,
     HingeRequest,
+    OrientationRequest,
     PressButtonRequest,
     RestoreInputRequest,
     ScrollToElementRequest,
@@ -676,6 +677,21 @@ async def set_hinge(request: Request, body: HingeRequest):
         return await controller.set_hinge(
             udid=body.udid, pose=body.pose, angle=body.angle, duration=body.duration,
             orientation=body.orientation)
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/orientation")
+@logged_action("set_orientation", category="device.action")
+async def set_orientation(request: Request, body: OrientationRequest) -> dict:
+    """Turn an iOS simulator, as Simulator.app's Rotate does (#243).
+
+    The device turns; the app in front decides whether its interface
+    follows, so the answer reads the interface back rather than assuming it.
+    """
+    controller = _get_controller(request)
+    try:
+        return await controller.set_orientation(body.orientation, udid=body.udid)
     except DeviceError as e:
         raise _handle_device_error(e)
 

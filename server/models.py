@@ -2663,6 +2663,18 @@ class HingeRequest(BaseModel):
             "move. Unfolded, `portrait` is the inner panel's landscape interface."))
 
 
+class OrientationRequest(BaseModel):
+    """Request body for POST /device/orientation: turn a simulator (#243)."""
+
+    udid: str | None = None
+    orientation: Literal["portrait", "pud", "landscape-left", "landscape-right",
+                         "face-up", "face-down"] = Field(
+        description=(
+            "How the device is held: portrait, pud (portrait upside down), landscape-left, "
+            "landscape-right, face-up or face-down, as devicectl names them. The app in "
+            "front decides whether its interface follows."))
+
+
 class RestoreInputRequest(BaseModel):
     """Request body for POST /device/ui/restore-input."""
 

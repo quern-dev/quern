@@ -84,9 +84,22 @@ def _remember_identity(canonical: str, *spellings: str) -> None:
 class DevicectlBackend:
     """Manages physical iOS devices via xcrun devicectl subprocess calls."""
 
+    #: devicectl's names for the orientations `set_orientation` takes (#243).
+    #: They are Apple's, and the names quern uses mean what they mean there:
+    #: measured on an iPhone 18 Pro (iOS 27.2), `landscapeLeft` reads back as
+    #: UIDeviceOrientation 4 and `landscapeRight` as 3.
+    ORIENTATIONS = {
+        "portrait": "portrait", "pud": "portraitUpsideDown",
+        "landscape-left": "landscapeLeft", "landscape-right": "landscapeRight",
+        "face-up": "faceUp", "face-down": "faceDown",
+    }
+    #: A turn took ~0.14s (measured); this bounds one that hangs.
+    _ORIENTATION_TIMEOUT_S = 15.0
+
     def __init__(self) -> None:
         # Track launched PIDs: (uuid, bundle_id) -> PID
         self._launched_pids: dict[tuple[str, str], int] = {}
+        self._orientation_supported: bool | None = None
 
     async def _run_devicectl(
         self, *args: str, json_output: bool = False,
@@ -144,6 +157,28 @@ class DevicectlBackend:
         return await probe_command(
             "xcrun", "devicectl", "list", "devices", "--help", tool="devicectl",
         )
+
+    async def can_set_orientation(self) -> bool:
+        """Whether this devicectl has `device orientation set`, which turns a
+        simulator (Xcode 27.2's does). Asked once: it is the Xcode's."""
+        if self._orientation_supported is None:
+            self._orientation_supported = xcode_available() and await probe_command(
+                "xcrun", "devicectl", "device", "orientation", "set", "--help",
+                tool="devicectl")
+        return self._orientation_supported
+
+    async def set_orientation(self, udid: str, orientation: str) -> None:
+        """Turn a simulator with devicectl (#243). Raises DeviceError when it
+        refused or did not answer in time; nothing is assumed turned then."""
+        name = self.ORIENTATIONS[orientation]
+        try:
+            await asyncio.wait_for(
+                self._run_devicectl("device", "orientation", "set", "--device", udid, name),
+                timeout=self._ORIENTATION_TIMEOUT_S)
+        except TimeoutError as e:
+            raise DeviceError(
+                f"devicectl did not turn {udid[:8]} within {self._ORIENTATION_TIMEOUT_S:.0f}s",
+                tool="devicectl") from e
 
     async def list_devices(self) -> list[DeviceInfo]:
         """List connected physical devices by parsing devicectl list devices output.
