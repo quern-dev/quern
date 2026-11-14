@@ -955,17 +955,17 @@ class DeviceControllerUI:
         if value is None:
             raise InvalidDeviceRequestError(
                 f"orientation must be one of {', '.join(self._DEVICE_ORIENTATIONS)}, "
-                f"not {orientation!r}", tool="sim-bridge")
+                f"not {orientation!r}", tool="set_orientation")
         resolved = await self.resolve_udid(udid)
         if self._is_android(resolved) or self._is_physical(resolved):
             raise InvalidDeviceRequestError(
                 "Turning the device is for iOS simulators: a physical iPhone has no way "
-                "to be turned remotely, and Android is not supported yet.", tool="sim-bridge")
+                "to be turned remotely, and Android is not supported yet.", tool="set_orientation")
         self._require_simulator(resolved, "Set orientation")
         if not self._sim_bridge_ok:
             raise DeviceOperationUnsupportedError(
                 "Turning a simulator needs sim-bridge, and it is not available.",
-                tool="sim-bridge")
+                tool="set_orientation")
 
         before, panels = await self.sim_bridge.orientation(resolved)
         if panels > 1:
