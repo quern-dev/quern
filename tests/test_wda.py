@@ -6,6 +6,7 @@ All subprocess calls are mocked — no real git/xcodebuild/devicectl/ideviceinst
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1331,11 +1332,12 @@ class TestStopDriver:
         started = asyncio.Event()
 
         async def start():
-            await started.wait()
+            await asyncio.wait_for(started.wait(), 5)
             state["runners"] = {"DEV1": {"pid": 42}}
 
         task = asyncio.ensure_future(start())
         wda._starts["DEV1"] = task
+        stop = None
         try:
             with (
                 patch("server.device.ios.wda.read_wda_state", side_effect=lambda: state),
@@ -1347,11 +1349,16 @@ class TestStopDriver:
                 await asyncio.sleep(0.05)
                 assert not stop.done()            # waiting on the start
                 started.set()
-                result = await stop
+                result = await asyncio.wait_for(stop, 5)
             assert result["status"] == "stopped"
             mock_kill.assert_called_once_with(42, __import__("signal").SIGTERM)
         finally:
             wda._starts.pop("DEV1", None)
+            for pending in (stop, task):
+                if pending is not None and not pending.done():
+                    pending.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await pending
 
     async def test_stop_driver_dead_pid(self):
         state = {"runners": {"DEV1": {"pid": 42}}}
