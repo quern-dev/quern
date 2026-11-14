@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from server.device.controller import DeviceController
-from server.device.controller_ui import _intended_value
+from server.device.controller_ui import _keyboard_correction
 from server.device.ios import coredevice_ax
 from server.device.ios.coredevice_ax import parse_tree, set_value, set_value_request
 from server.models import DeviceError, DeviceType, UIElement
@@ -88,22 +88,30 @@ class TestTypingIntoAField:
 
         assert setter.await_args.args[2] == "abcXa"
 
-    async def test_the_set_finds_the_field_it_was_typed_into(self, monkeypatch):
+    async def test_the_set_finds_the_field_by_every_name_it_has(self, monkeypatch):
+        """An identifier a reusable cell's fields share is not enough on its own:
+        the text would go to whichever came first (#682 review)."""
         ctrl, setter = _phone(monkeypatch, before="", reads=["あ", "a"])
-        await ctrl.type_text("a", udid=PHONE, identifier="field_default")
+        ctrl._find_text_field.return_value = UIElement(
+            type="TextField", label="Last name", identifier="textField", value="", frame=FRAME)
+        await ctrl.type_text("a", udid=PHONE, label="Last name")
 
         same_field = setter.await_args.args[1]
-        assert same_field({"AXUniqueId": "field_default"})
-        assert not same_field({"AXUniqueId": "field_url"})
+        assert same_field({"type": "TextField", "AXUniqueId": "textField", "AXLabel": "Last name"})
+        assert not same_field({"type": "TextField", "AXUniqueId": "textField",
+                               "AXLabel": "First name"})
+        assert not same_field({"type": "Group", "AXUniqueId": "textField",
+                               "AXLabel": "Last name"})
 
-    async def test_a_field_without_an_identifier_is_found_by_its_frame(self, monkeypatch):
+    async def test_a_field_is_not_found_by_a_frame_the_keyboard_may_move(self, monkeypatch):
         ctrl, setter = _phone(monkeypatch, before="", reads=["あ", "a"])
-        ctrl._find_text_field.return_value = _field("", identifier=None)
+        ctrl._find_text_field.return_value = UIElement(
+            type="TextField", label="Name", identifier=None, value="", frame=FRAME)
         await ctrl.type_text("a", udid=PHONE, label="Name")
 
         same_field = setter.await_args.args[1]
-        assert same_field({"type": "TextField", "frame": dict(FRAME)})
-        assert not same_field({"type": "TextField", "frame": {**FRAME, "y": 180.0}})
+        assert same_field({"type": "TextField", "AXLabel": "Name",
+                           "frame": {**FRAME, "y": 40.0}})
 
     async def test_text_no_us_key_types_is_set(self, monkeypatch):
         """A space is typed so the read-back shows where the field's text
@@ -166,7 +174,7 @@ class TestTypingIntoAField:
 
         result = await ctrl.type_text("abc", udid=PHONE)
 
-        assert result == {"udid": PHONE, "verified": False, "input": "coredevice"}
+        assert result["verified"] is False and result["input"] == "coredevice"
         ctrl.coredevice_input.type_text.assert_awaited_once_with(PHONE, "abc")
         setter.assert_not_called()
 
@@ -175,6 +183,55 @@ class TestTypingIntoAField:
         await ctrl.type_text("abc", udid=PHONE, snapshot_depth=12)
         ctrl.wda_client.type_text.assert_awaited_once_with(PHONE, "abc")
         ctrl.coredevice_input.type_text.assert_not_called()
+
+
+class TestWhatIsNotSet:
+    """Only what the phone's keyboard did is set: anything else is the app's or
+    iOS's own change, which a set would overwrite and report as success (#682
+    review)."""
+
+    @pytest.mark.parametrize(("before", "after", "text"), [
+        ("teh", "the cat", " cat"),           # autocorrect rewrote an earlier word
+        ("(555) 12", "(555) 123-4", "34"),    # an input mask
+        ("", "12", "12a"),                    # a validator dropped a character
+    ])
+    async def test_an_app_s_own_change_is_an_error(self, monkeypatch, before, after, text):
+        ctrl, setter = _phone(monkeypatch, before=before, reads=[after])
+
+        with pytest.raises(DeviceError):
+            await ctrl.type_text(text, udid=PHONE, identifier="field_default")
+
+        setter.assert_not_called()
+
+    async def test_not_after_the_push_crashed_an_app(self, monkeypatch):
+        """The set reads the push, which would run the crashing dump again (#669)."""
+        ctrl, setter = _phone(monkeypatch, before="", reads=["あ"])
+        ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+
+        with pytest.raises(DeviceError):
+            await ctrl.type_text("a", udid=PHONE, identifier="field_default")
+
+        setter.assert_not_called()
+
+    async def test_a_failed_set_says_what_the_field_holds(self, monkeypatch):
+        ctrl, setter = _phone(monkeypatch, before="", reads=["Helloあ"])
+        setter.side_effect = DeviceError("the field to set is not in it", tool="coredevice")
+
+        with pytest.raises(DeviceError, match="holds 'Helloあ'.*failed"):
+            await ctrl.type_text("Hello a", udid=PHONE, identifier="field_default")
+
+    async def test_a_set_that_leaves_only_the_text_is_not_landed(self, monkeypatch):
+        """`after == text` passes a typed field; after a set that asked for the
+        old content too, it means the content was lost."""
+        ctrl, _ = _phone(monkeypatch, before="abc", reads=["abcあ", "a"])
+
+        with pytest.raises(DeviceError):
+            await ctrl.type_text("a", udid=PHONE, identifier="field_default")
+
+    async def test_untargeted_keystrokes_say_nothing_checked_them(self, monkeypatch):
+        ctrl, _ = _phone(monkeypatch, before="", reads=[])
+        result = await ctrl.type_text("abc", udid=PHONE)
+        assert "name the field" in result["note"]
 
 
 class TestTheReadsTheyMake:
@@ -194,17 +251,27 @@ class TestTheReadsTheyMake:
         assert ctrl.get_ui_elements.await_args.kwargs["whole_screen"] is True
 
 
-class TestTheIntendedValue:
-    @pytest.mark.parametrize(("before", "after", "text", "expected"), [
-        ("field_default", "Helloあbc＃＠", "Hello abc #@", "Hello abc #@"),  # placeholder
-        ("Search", "Sうし", "Sushi", "Sushi"),        # a placeholder sharing a letter
-        ("abc", "abcXあ", "Xa", "abcXa"),              # typed at the end
-        ("abc", "aあbc", "x", "axbc"),                 # typed in the middle
-        ("", "あ", "a", "a"),
-        ("abc", "abc ", "日本", "abc日本"),             # the space typed for text with no key
+class TestTheCorrection:
+    @pytest.mark.parametrize(("before", "after", "keys", "text", "expected"), [
+        # The keyboard's doing: set.
+        ("field_default", "Helloあbc＃＠", "Hello abc #@", "Hello abc #@", "Hello abc #@"),
+        ("Search", "Sうし", "Sushi", "Sushi", "Sushi"),      # a placeholder sharing a letter
+        ("abc", "abcXあ", "Xa", "Xa", "abcXa"),
+        ("", "あ", "a", "a", "a"),
+        # Typed only in part, on purpose: set.
+        ("abc", "abc ", " ", "日本", "abc日本"),
+        ("field_default", " ", " ", "日本", "日本"),
+        ("", "caf", "caf", "café", "café"),
+        # Not the keyboard: not set.
+        ("teh", "the cat", " cat", " cat", None),           # autocorrect
+        ("(555) 12", "(555) 123-4", "34", "34", None),      # a mask
+        ("", "12", "12a", "12a", None),                     # a validator
+        ("abc", "abcX", "Y", "Y", None),                    # plain ASCII mismatch
+        # Where the keys went is ambiguous: not set.
+        ("ab", "aあab", "ac", "ac", None),
     ])
-    def test_it(self, before, after, text, expected):
-        assert _intended_value(before, after, text) == expected
+    def test_it(self, before, after, keys, text, expected):
+        assert _keyboard_correction(before, after, keys, text) == expected
 
 
 class TestTheRequest:
@@ -260,6 +327,46 @@ class TestSettingAValue:
 
         assert not [c for c in state.control.calls if c[0] == "processDataFromHost:"]
         assert state.provider_closed and state.rsd_closed
+
+    async def test_several_matching_elements_are_refused(self, monkeypatch):
+        """Never the first taken: the text would go to whichever came first."""
+        lib, state = _fake_lib([SETTINGS])
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        with pytest.raises(DeviceError, match="elements .* match the field"):
+            await set_value(PHONE, lambda e: True, "x", timeout=5)
+
+        assert not [c for c in state.control.calls if c[0] == "processDataFromHost:"]
+
+    async def test_a_bare_tree_is_refused(self, monkeypatch):
+        lib, state = _fake_lib([])
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        bare = coredevice_ax.Tree("AdditionalData", [{"type": "Application", "AXLabel": ""}],
+                                  711, [(711, 1)])
+
+        async def newest(queue, held=None):
+            return bare, bare, bare
+        monkeypatch.setattr(coredevice_ax, "_newest_tree", newest)
+
+        with pytest.raises(coredevice_ax.BareAppTree):
+            await set_value(PHONE, lambda e: True, "x", timeout=5)
+        assert not [c for c in state.control.calls if c[0] == "processDataFromHost:"]
+
+    async def test_an_app_that_changed_under_the_read_is_refused(self, monkeypatch):
+        lib, state = _fake_lib([])
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        tree = parse_tree(SETTINGS)
+        first = coredevice_ax.Tree("InitialDump", tree.elements, 711, tree.refs)
+        newest_tree = coredevice_ax.Tree("AdditionalData", tree.elements, 99, tree.refs)
+
+        async def newest(queue, held=None):
+            return newest_tree, first, newest_tree
+        monkeypatch.setattr(coredevice_ax, "_newest_tree", newest)
+
+        with pytest.raises(DeviceError, match="changed"):
+            await set_value(PHONE, lambda e: e["AXUniqueId"] == "com.apple.settings.general",
+                            "x", timeout=5)
+        assert not [c for c in state.control.calls if c[0] == "processDataFromHost:"]
 
     async def test_a_refused_connection_is_a_device_error(self, monkeypatch):
         lib, _ = _fake_lib([], connect_error=ConnectionRefusedError(61, "refused"))

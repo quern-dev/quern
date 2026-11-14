@@ -607,13 +607,26 @@ async def set_value(uuid: str, match: Callable[[dict], bool], value: str, *,
                 provider.dtx.ctx["control_dispatch_queue"] = queue
                 await provider.dtx._ctrl_channel.invoke(
                     "clientNeedsAccessibility:", True, expects_reply=False)
-                tree, _, _ = await _newest_tree(queue, {})
-                index = next((i for i, e in enumerate(tree.elements) if match(e)), None)
-                ref = tree.refs[index] if index is not None and index < len(tree.refs) else None
-                if ref is None:
+                tree, first, newest = await _newest_tree(queue, {})
+                if first.app_pid is not None and newest.app_pid != first.app_pid:
+                    # Switched, or killed by the read (#669): whatever is on
+                    # screen now is not the field's app (#682 review).
+                    raise DeviceError(
+                        f"the app on {uuid[:8]}'s screen changed while the field was "
+                        "looked up; nothing was set", tool="coredevice")
+                _refuse_bare(tree.elements, uuid)
+                found = [i for i, e in enumerate(tree.elements) if match(e)]
+                if len(found) != 1:
+                    # More than one is refused, never the first taken: the text
+                    # would go to whichever came first (#682 review).
                     raise DeviceError(
                         f"the field to set is not in {uuid[:8]}'s accessibility tree"
-                        if index is None else
+                        if not found else
+                        f"{len(found)} elements on {uuid[:8]}'s screen match the field; "
+                        "nothing was set", tool="coredevice")
+                ref = tree.refs[found[0]] if found[0] < len(tree.refs) else None
+                if ref is None:
+                    raise DeviceError(
                         f"{uuid[:8]}'s accessibility tree does not say how to address "
                         "the field", tool="coredevice")
                 await provider.dtx._ctrl_channel.invoke(
@@ -624,8 +637,9 @@ async def set_value(uuid: str, match: Callable[[dict], bool], value: str, *,
     except DeviceError:
         raise
     except TimeoutError as e:
-        raise DeviceError(f"setting a value on {uuid[:8]} timed out after {timeout:g}s",
-                          tool="coredevice") from e
+        # The request may have gone before the deadline: not "nothing set".
+        raise DeviceError(f"setting a value on {uuid[:8]} timed out after {timeout:g}s; "
+                          "it may or may not have been set", tool="coredevice") from e
     except Exception as e:  # pymobiledevice3 raises its own hierarchy
         raise DeviceError(f"accessibility service on {uuid[:8]} failed: {e!r}",
                           tool="coredevice") from e

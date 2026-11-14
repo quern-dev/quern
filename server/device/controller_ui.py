@@ -436,28 +436,54 @@ def _note_equivalence(result: dict, element_type: str | None, element: UIElement
 _BACKEND_FAILURE_TOOLS = frozenset({"sim-bridge", "idb", "wda", "u2"})
 
 
-def _intended_value(before: str, after: str, text: str) -> str:
-    """What the field should hold: `before` with `text` where the keystrokes
-    went (#664).
-
-    Typing inserts, so a field that held `before` holds it still around what
-    arrived: their common prefix and suffix cover all of it, and the text goes
-    after the prefix. When they do not, `before` was never the field's -- an
-    empty field's placeholder reads as its value and vanishes at the first
-    key -- so the field was empty and should hold `text` alone. A rule on the
-    prefix and suffix alone put "Search" and a garbled "Sushi" together as
-    "SSushi".
+def _changed_by_keyboard(segment: str, keys: str) -> bool:
+    """Whether `segment` is what the phone's keyboard or input method made of
+    the ASCII `keys` (#664): characters outside ASCII where only ASCII was
+    typed -- kana, full-width symbols -- and nothing that is neither. An app's
+    own change (a phone-number mask's "-", a validator dropping a character,
+    autocorrect's "the") is ASCII from ASCII and is not this.
     """
+    return (keys.isascii() and not segment.isascii()
+            and all(c in keys or not c.isascii() for c in segment))
+
+
+def _keyboard_correction(before: str, after: str, keys: str, text: str) -> str | None:
+    """What the field should be set to when typing `keys` (for `text`) turned
+    `before` into `after`, or None when it should not be set at all (#664).
+
+    Set only for what the phone did: its keyboard changed the keys, or quern
+    typed only the part of `text` US keys type (`keys` then differs from it).
+    Anything else -- an input mask, a validator, autocorrect rewriting an
+    earlier word -- is the app's or iOS's doing, which a set would overwrite
+    and report as success, so it stays an error as it is through WDA (#682
+    review).
+
+    Typing inserts, so a field that held `before` holds it around what arrived.
+    When it does not, `before` was an empty field's placeholder, which the
+    first key replaces: the field is set to `text` only if everything in it is
+    the keyboard's making. And when where the keys went is ambiguous -- "ab"
+    becoming "açab" could be either side of the "a" -- nothing is set rather
+    than a guess.
+    """
+    def explained(segment: str) -> bool:
+        return _changed_by_keyboard(segment, keys) or (keys != text and segment == keys)
+
+    shortest = min(len(before), len(after))
     prefix = 0
-    while prefix < min(len(before), len(after)) and before[prefix] == after[prefix]:
+    while prefix < shortest and before[prefix] == after[prefix]:
         prefix += 1
     suffix = 0
-    while (suffix < min(len(before), len(after)) - prefix
-           and before[-1 - suffix] == after[-1 - suffix]):
+    while suffix < shortest and before[-1 - suffix] == after[-1 - suffix]:
         suffix += 1
     if prefix + suffix < len(before):
-        return text
-    return before[:prefix] + text + before[prefix:]
+        return text if explained(after) else None
+    results = set()
+    for k in range(len(before) - suffix, min(prefix, len(before)) + 1):
+        inserted = after[k:len(after) - (len(before) - k)]
+        if not explained(inserted):
+            return None
+        results.add(before[:k] + text + before[k:])
+    return results.pop() if len(results) == 1 else None
 
 
 def _inserted_into(before: str, after: str, text: str) -> bool:
@@ -4985,7 +5011,15 @@ class DeviceControllerUI:
             # US key types goes through WDA, as anything HID cannot send does.
             via = await hid.type_text(udid, text)
             self._invalidate_ui_cache(udid)
-            return {"udid": udid, "verified": False, "input": via}
+            result = {"udid": udid, "verified": False, "input": via}
+            if via == hid.TOOL_NAME:
+                # Said, not only documented: WDA inserted text exactly, and
+                # keystrokes may not arrive as typed (#682 review).
+                result["note"] = (
+                    "Typed as keystrokes, which the phone's keyboard or input method "
+                    "may change, with nothing to check it: name the field to have it "
+                    "read back and corrected.")
+            return result
 
         target = await self._find_text_field(udid, label=label, identifier=identifier,
                                              whole_screen=True)
@@ -5009,31 +5043,48 @@ class DeviceControllerUI:
                                              whole_screen=True)
         outcome = self._typing_outcome(before, after, text, secure)
         result: dict = {"udid": udid, "verified": True, "input": via}
-        if (outcome != "landed" and not secure and after is not None
-                and after != before):
+        correction = (None if secure or after is None or outcome == "landed"
+                      else _keyboard_correction(before, after, keys, text))
+        if correction is not None and self._push_crashed_apps.get(udid):
+            # The set reads the push, which has crashed an app on this device
+            # (#669): not run again for a correction (#682 review).
+            correction = None
+        if correction is not None:
             # Set to what was meant, then read back again: the set reports
-            # nothing of its own.
-            frame = target.frame
-
+            # nothing of its own. The field is the one typed into by every
+            # name it has -- an identifier shared by a reusable cell's fields
+            # would otherwise send the text to another (#682 review) -- and
+            # set_value refuses unless exactly one element answers to it.
             def same_field(e: dict) -> bool:
-                if target.identifier:
-                    return e.get("AXUniqueId") == target.identifier
-                return e.get("type") == target.type and e.get("frame") == frame
+                if e.get("type") != target.type:
+                    return False
+                if target.identifier and e.get("AXUniqueId") != target.identifier:
+                    return False
+                return (e.get("AXLabel") or "") == (target.label or "")
 
-            await coredevice_ax.set_value(udid, same_field,
-                                          _intended_value(before, after, text))
+            try:
+                await coredevice_ax.set_value(udid, same_field, correction)
+            except DeviceError as e:
+                raise DeviceError(
+                    f"typed {len(keys)} characters into '{label or identifier}', which "
+                    f"the phone's keyboard changed: the field holds {after!r}. Setting "
+                    f"it to the text instead failed, so it still may: {e}",
+                    tool=e.tool) from e
             self._invalidate_ui_cache(udid)
             await asyncio.sleep(0.3)
             after = await self._read_field_value(udid, target, label, identifier,
                                                  whole_screen=True)
             outcome = self._typing_outcome(before, after, text, secure)
+            if outcome == "landed" and after != correction:
+                # Landed by `after == text` alone -- the field holds nothing
+                # else -- where the set asked for more: not what was meant.
+                outcome = "mismatch"
             result["set_through_accessibility"] = True
             result["note"] = (
-                "The keystrokes did not produce this text -- the phone's keyboard "
-                "or input method changed it, or a character has no US key -- so it "
-                "was set through the accessibility service. The app's editing "
-                "callbacks (shouldChangeCharactersIn, formatters, input masks) did "
-                "not run for it.")
+                "The phone's keyboard or input method changed the keystrokes, or a "
+                "character has no US key, so the text was set through the "
+                "accessibility service. The app's editing callbacks "
+                "(shouldChangeCharactersIn, formatters, input masks) did not run for it.")
         if outcome != "landed":
             raise DeviceError(
                 self._typing_failure(outcome, before, after, text, label or identifier,
