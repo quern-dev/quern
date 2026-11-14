@@ -23,6 +23,7 @@ from server.device.ui_elements import (
     generate_screen_summary,
     get_center,
     get_tap_point,
+    matched_by_title,
     parse_elements,
 )
 from server.device.web.web_probing import WebSweepResult
@@ -579,6 +580,33 @@ def _covering_element(target: UIElement, hit: dict | None) -> dict | None:
 _READ_NOTE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "quern_read_note", default=None)
 
+#: Which reader made this request's latest element read. Per request, for the
+#: reason `_last_read_backend` is not enough: that is shared per device, and a
+#: concurrent read rewrites it while a lookup is still deciding what its
+#: matches mean -- whether their labels are merged, whether WDA's own checks
+#: apply to them (#664 phase 2b).
+_READ_BY: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "quern_read_by", default=None)
+
+
+#: Said on a miss read from the tree push (#664), so "not there" is read as
+#: what it is -- not there as VoiceOver sees the screen -- and the way to ask
+#: WDA instead is named.
+PUSHED_MISS_DETAIL = (
+    ". Looked for in the tree the device pushes (backend coredevice), which "
+    "holds what VoiceOver can reach, with a row's texts merged into one label; "
+    "pass snapshot_depth to look through WDA instead")
+
+
+def _note_merged_label(result: dict, label: str | None, element: UIElement,
+                       pushed: bool) -> None:
+    """Add `matched_via: "merged_label"` when `label` found a pushed row by its
+    title alone (#664): "Wi-Fi" matching "Wi-Fi, ExampleNetwork". Beside a
+    type equivalence, both are said."""
+    if pushed and matched_by_title(element, label):
+        via = result.get("matched_via")
+        result["matched_via"] = f"merged_label; {via}" if via else "merged_label"
+
 
 class DeviceControllerUI:
     """Mixin providing UI inspection and interaction methods.
@@ -722,8 +750,8 @@ class DeviceControllerUI:
 
         CoreDevice HID when it serves the device (#664, phase 2a), which falls
         back to WDA for anything it cannot send; otherwise `_ui_backend`, as
-        for every other action. Finding the target -- tap_element's lookup --
-        stays with WDA either way, until phase 2b.
+        for every other action. Finding the target is a separate question:
+        `get_ui_elements(lookup=True)` (#664, phase 2b).
 
         Not typing. A HID keyboard is a hardware keyboard to iOS, so the
         phone applies its hardware-keyboard layout for the active input
@@ -1399,15 +1427,20 @@ class DeviceControllerUI:
                     and viewport["y"] <= cy < viewport["y"] + viewport["height"]
                 )
 
-    def _read_depth(self, resolved: str, requested: int | None) -> int | None:
+    def _read_depth(self, resolved: str, requested: int | None,
+                    lookup: bool = False) -> int | None:
         """The WDA snapshot depth for a read made on a caller's behalf.
 
         The caller's own number wins. Otherwise, through WDA, the shallow
         action depth: the global default walks every cell of a long list and
-        took 34.5s on an iPhone 11 (F35). Off WDA there is no depth to set.
+        took 34.5s on an iPhone 11 (F35). Off WDA there is no depth to set --
+        nor for a `lookup` the tree push serves (#664), since a depth is a
+        request for WDA's read.
         """
         if requested is not None:
             return requested
+        if lookup and self._device_tree_reader(resolved) is not None:
+            return None
         if self._served_by_wda(resolved):
             from server.device.ios.wda_client import ACTION_SNAPSHOT_DEPTH
 
@@ -2568,13 +2601,16 @@ class DeviceControllerUI:
         probe_containers: bool = True,
         deepen_on_miss: bool = False,
         whole_screen: bool = False,
+        lookup: bool = False,
     ) -> tuple[list[UIElement], str]:
         """Native UI elements, plus any web content read by get_web_content.
 
         `whole_screen` marks a read made to show a caller the screen --
-        `get_ui_tree`, `get_screen_summary` -- which a physical iPhone may
-        serve from its tree push (#664). Every read made inside an action
-        leaves it False and stays with WDA.
+        `get_ui_tree`, `get_screen_summary` -- and `lookup` one made to find an
+        element for `tap_element`, `wait_for_element` or `get_element_state`.
+        A physical iPhone may serve either from its tree push (#664), unless
+        the caller named a WDA depth. Every other read an action makes leaves
+        both False and stays with WDA.
 
         The merge happens here rather than in the cache so every consumer --
         tap_element, screen summaries, landmark matching, annotated screenshots
@@ -2584,12 +2620,12 @@ class DeviceControllerUI:
             udid, use_cache, filter_label, filter_identifier, filter_type,
             snapshot_depth, source_timeout, mode,
             probe_containers=probe_containers, deepen_on_miss=deepen_on_miss,
-            whole_screen=whole_screen,
+            whole_screen=whole_screen, lookup=lookup,
         )
         # Not on a CoreDevice read: the push holds only what is on screen, and
         # marking asks WDA for the viewport, which would start it for nothing.
         if (self._served_by_wda(resolved)
-                and self._last_read_backend.get(resolved) != self.coredevice_ax.TOOL_NAME):
+                and _READ_BY.get() != self.coredevice_ax.TOOL_NAME):
             await self._mark_on_screen(resolved, elements)
         return self._merge_web_overlay(
             resolved, elements,
@@ -2610,6 +2646,7 @@ class DeviceControllerUI:
         probe_containers: bool = True,
         deepen_on_miss: bool = False,
         whole_screen: bool = False,
+        lookup: bool = False,
     ) -> tuple[list[UIElement], str]:
         """Get UI accessibility elements with TTL-based caching and optional filtering.
 
@@ -2646,14 +2683,15 @@ class DeviceControllerUI:
 
         # Check cache (unless explicitly bypassed)
         # Strategy: Use cached full tree, then filter in memory (fast)
+        # What a pushed tree may answer (#664): a whole-screen read, or a
+        # lookup -- which filters it by its own rule, since its rows carry
+        # merged labels. Any other read an action makes, or a flat one, would
+        # match differently from the WDA read it stands in for, and stays
+        # with WDA (CodeRabbit on #668).
+        pushable = mode is None and ((whole_screen and not has_filters) or lookup)
         cached_by = self._ui_cache_backend.get(resolved)
         if (use_cache and resolved in self._ui_cache
-                # A pushed tree answers whole-screen reads only (#664): its rows
-                # carry merged labels, so a lookup over it -- a filter, or an
-                # action finding its target -- would match differently from
-                # the WDA read it stands in for.
-                and not (cached_by == self.coredevice_ax.TOOL_NAME
-                         and not (whole_screen and not has_filters and mode is None))):
+                and not (cached_by == self.coredevice_ax.TOOL_NAME and not pushable)):
             cached_elements, cached_time = self._ui_cache[resolved]
             age = now - cached_time
             if age < self._cache_ttl:
@@ -2662,33 +2700,32 @@ class DeviceControllerUI:
                 # read happened last.
                 if cached_by:
                     self._last_read_backend[resolved] = cached_by
+                _READ_BY.set(cached_by)
 
                 # If filters provided, apply them to cached elements (in-memory filtering is fast)
                 if has_filters:
                     filtered = find_element(cached_elements, label=filter_label,
                                           identifier=filter_identifier, element_type=filter_type,
-                                          prefilter=True)
+                                          prefilter=True,
+                                          merged_labels=cached_by == self.coredevice_ax.TOOL_NAME)
                     return filtered, resolved
 
                 return cached_elements, resolved
 
-        # The tree push serves only reads made to show the screen, asked for
-        # by name: inferring them from "no filter" let the text actions'
-        # target lookups through (CodeRabbit on #668). Lookups and every read
-        # an action makes stay on WDA exactly as before, until phase 2 settles
-        # how a merged row label should match (#664). A WDA depth or flat mode
+        # The tree push serves only the reads asked for by name, `whole_screen`
+        # and `lookup`: inferring them from "no filter" let the text actions'
+        # target lookups through (CodeRabbit on #668). A WDA depth or flat mode
         # is a request for WDA's own read.
         reader = (self._device_tree_reader(resolved)
-                  if whole_screen and not has_filters and snapshot_depth is None
-                  and mode != "flat"
-                  else None)
+                  if pushable and snapshot_depth is None else None)
 
         # WDA direct query: physical device + filters + cache miss → query directly
-        if has_filters and self._served_by_wda(resolved):
+        if has_filters and reader is None and self._served_by_wda(resolved):
             # Recorded here too: this path returns before the general one
             # below, so `backend` went on naming whatever served the last full
             # read -- `sim-bridge` on a simulator just put in WDA mode (#336).
             self._last_read_backend[resolved] = self.wda_client.TOOL_NAME
+            _READ_BY.set(self.wda_client.TOOL_NAME)
             if snapshot_depth is not None:
                 # WDA's depth is a session setting: queries honour it too, and
                 # a deep one makes a query on a long list as slow as /source.
@@ -2779,6 +2816,9 @@ class DeviceControllerUI:
                     source_timeout=source_timeout, probe=probe_containers,
                 )
 
+        # Who made it, after any fallback: a lookup's matches are read by it.
+        pushed = reader is not None and backend is reader
+        _READ_BY.set(getattr(backend, "TOOL_NAME", "unknown"))
         self._remember_screen(resolved, raw)
         # The app on screen, by name, whichever backend read it: what decides
         # whether the next whole-screen read may use the push (#669).
@@ -2790,8 +2830,9 @@ class DeviceControllerUI:
         # - If filters but won't cache (bypass): parse with filters to save time
         # - If no filters: parse full tree
 
-        if has_filters and not use_cache:
-            # Bypassing cache - use filtered parsing for speed
+        if has_filters and not use_cache and not pushed:
+            # Bypassing cache - use filtered parsing for speed. Not for a pushed
+            # tree, whose labels are matched by their own rule below.
             elements = parse_elements(raw, filter_label, filter_identifier, filter_type)
         else:
             # Parse full tree for caching
@@ -2821,7 +2862,7 @@ class DeviceControllerUI:
             if has_filters:
                 elements = find_element(elements, label=filter_label,
                                       identifier=filter_identifier, element_type=filter_type,
-                                      prefilter=True)
+                                      prefilter=True, merged_labels=pushed)
 
         return elements, resolved
 
@@ -2891,21 +2932,23 @@ class DeviceControllerUI:
         # thing this change exists to get right.
         backend = self._backend_name(udid)
         resolved = await self.resolve_udid(udid)
-        shallow = self._read_depth(resolved, snapshot_depth)
+        shallow = self._read_depth(resolved, snapshot_depth, lookup=True)
         # Here, not only in the deeper look's branch: the 404 below reports
         # whether that look ran, and must not read an earlier lookup's answer.
         _begin_lookup()
         elements, resolved = await self.get_ui_elements(
             resolved, source_timeout=source_timeout, snapshot_depth=shallow,
+            lookup=True,
         )
+        pushed = _READ_BY.get() == self.coredevice_ax.TOOL_NAME
         matches = find_element(
             elements, label=label, label_contains=label_contains,
             label_prefix=label_prefix, identifier=identifier,
-            element_type=element_type,
+            element_type=element_type, merged_labels=pushed,
         )
         deepened = None
         if (not matches and _deepen_allowed(snapshot_depth, deepen)
-                and self._served_by_wda(resolved)):
+                and not pushed and self._served_by_wda(resolved)):
             # This read is unfiltered, so it never reaches the query path that
             # deepens. One bounded query at the full depth does -- gated on how
             # quick this read was, never a second /source (#470 review).
@@ -2944,8 +2987,8 @@ class DeviceControllerUI:
             if element_type:
                 search_desc += f", type='{element_type}'"
             hint = self._web_hint_for(resolved, elements)
-            depth = ""
-            if shallow is not None and self._served_by_wda(resolved):
+            depth = PUSHED_MISS_DETAIL if pushed else ""
+            if shallow is not None and not pushed and self._served_by_wda(resolved):
                 depth = _depth_detail(
                     shallow, tried=_DEEPEN_TRIED.get(), timed_out=_DEEP_TIMED_OUT.get(),
                     opted_out=not deepen,
@@ -2962,6 +3005,7 @@ class DeviceControllerUI:
         if len(matches) > 1:
             result["match_count"] = len(matches)
         _note_equivalence(result, element_type, el)
+        _note_merged_label(result, label, el, pushed)
         _note_deepened(result, deepened, shallow)
 
         return result, resolved
@@ -3075,8 +3119,10 @@ class DeviceControllerUI:
         # row on the screen a tap just opened, which appears after the first
         # poll. Safe on a long list because the deeper look runs only after a
         # quick shallow one, and is bounded (#470 review).
-        poll_depth = self._read_depth(resolved, snapshot_depth)
+        poll_depth = self._read_depth(resolved, snapshot_depth, lookup=True)
         shallow_depth = poll_depth
+        # Whether any poll read the tree push (#664), for the timed-out answer.
+        ever_pushed = False
         deepened = None
         # Across polls, for the timed-out answer: whether any looked deeper.
         deepen_tried = deep_timed_out = False
@@ -3096,7 +3142,11 @@ class DeviceControllerUI:
                 mode=mode,
                 snapshot_depth=poll_depth,
                 deepen_on_miss=_deepen_allowed(snapshot_depth, deepen),
+                lookup=True,
             )
+            # Per poll: a push read that cannot be made falls back to WDA.
+            pushed = _READ_BY.get() == self.coredevice_ax.TOOL_NAME
+            ever_pushed = ever_pushed or pushed
             deepened = _DEEPENED.get()
             deepen_tried = deepen_tried or _DEEPEN_TRIED.get()
             deep_timed_out = deep_timed_out or _DEEP_TIMED_OUT.get()
@@ -3109,6 +3159,7 @@ class DeviceControllerUI:
                 label_prefix=label_prefix,
                 identifier=identifier,
                 element_type=element_type,
+                merged_labels=pushed,
             )
 
             # Get first match (or None if no matches)
@@ -3126,6 +3177,7 @@ class DeviceControllerUI:
                 }
                 if current_element is not None:
                     _note_equivalence(result, element_type, current_element)
+                    _note_merged_label(result, label, current_element, pushed)
                 _note_deepened(result, deepened, shallow_depth)
                 return result, resolved
 
@@ -3162,6 +3214,8 @@ class DeviceControllerUI:
                 }
                 if hint:
                     result["web_content_hint"] = hint
+                if not ever_found and ever_pushed:
+                    result["depth_note"] = PUSHED_MISS_DETAIL.lstrip(". ")
                 if (not ever_found and poll_depth is not None
                         and self._served_by_wda(resolved)):
                     # Never seen: say how deep the polls looked, or a shallow
@@ -3555,15 +3609,19 @@ class DeviceControllerUI:
         depth_for = await self.resolve_udid(udid)
         read_depth = self._read_depth(depth_for, snapshot_depth)
         _begin_lookup()
+        # The lookup itself may come from the tree push (#664, phase 2b); the
+        # sweep and the miss's screen context below keep WDA's action depth.
         elements, resolved = await self.get_ui_elements(
             depth_for,
             filter_label=filter_label,
             filter_identifier=identifier,
             filter_type=element_type,
             source_timeout=source_timeout,
-            snapshot_depth=read_depth,
+            snapshot_depth=self._read_depth(depth_for, snapshot_depth, lookup=True),
             deepen_on_miss=_deepen_allowed(snapshot_depth, deepen),
+            lookup=True,
         )
+        pushed = _READ_BY.get() == self.coredevice_ax.TOOL_NAME
         served_from_cache = self._cache_hits > cache_hits_before
         # A deep hit changes what is reported, never the depth of the reads
         # after it: escalating them sent the context read, the sweep and the
@@ -3578,7 +3636,7 @@ class DeviceControllerUI:
         matches = find_element(
             elements, label=label, label_contains=label_contains,
             label_prefix=label_prefix, identifier=identifier,
-            element_type=element_type,
+            element_type=element_type, merged_labels=pushed,
         )
         # Through WDA, a match is not yet a tap target: WDA reports every cell
         # of a table, on screen or not, and elements under the keyboard. Only
@@ -3586,8 +3644,11 @@ class DeviceControllerUI:
         # tapped; the rest are treated as not found, so the sweep below (or the
         # not-found answer) handles them as it does on the accessibility tree,
         # where they are simply absent (F32).
+        # Not for a pushed read: the push holds only what VoiceOver can reach --
+        # nothing off screen, nothing under a toolbar -- so it is already the
+        # reachable set, and asking WDA would start it for nothing (#664).
         unreachable: list[dict] = []
-        if matches and self._served_by_wda(resolved):
+        if matches and not pushed and self._served_by_wda(resolved):
             matches, unreachable = await self._wda_reachable_only(resolved, matches)
         if not matches:
             # Nothing to tap: what follows is the sweep or the not-found report,
@@ -3748,7 +3809,9 @@ class DeviceControllerUI:
             if hint:
                 result["web_content_hint"] = hint
                 result["detail"] += f". {hint}"
-            if read_depth is not None and self._served_by_wda(resolved):
+            if pushed and not sweep.get("attempted"):
+                result["detail"] += PUSHED_MISS_DETAIL
+            elif read_depth is not None and self._served_by_wda(resolved):
                 # A shallow read is a reason something can be missing, so the
                 # answer says how deep it looked and how to look deeper --
                 # otherwise "not found" reads as "not there".
@@ -3888,7 +3951,11 @@ class DeviceControllerUI:
             # Stability check: ensure element has stopped moving/animating
             # Skip for static elements (tab bars, nav bars) to avoid expensive tree fetches
             unsettled_ms: int | None = None
-            if not skip_stability_check:
+            # Not after a pushed read: the push reader answers only once the
+            # device has stopped sending changes (or with the newest complete
+            # tree after its settle bound), so the read is already the settled
+            # screen, and a second ~2 s read would only repeat it (#664).
+            if not skip_stability_check and not pushed:
                 # Get initial position
                 initial_frame = el.frame
                 await asyncio.sleep(0.1)
@@ -4081,6 +4148,7 @@ class DeviceControllerUI:
                     f"now -- check the screen before relying on this tap.")
             _note_collapsed(result, folded)
             _note_equivalence(result, element_type, el)
+            _note_merged_label(result, label, el, pushed)
             _note_deepened(result, deepened, shallow_depth)
             if sweep.get("attempted"):
                 result["scroll"] = _scroll_report(sweep, scroll_to_find)
