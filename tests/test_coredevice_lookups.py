@@ -90,6 +90,18 @@ class TestTheTitleRule:
                              merged_labels=True)
         assert [e.identifier for e in found] == ["com.apple.settings.wifi"]
 
+    def test_prefiltering_keeps_both_kinds_of_candidate(self):
+        """A read narrowed before the caller's own match keeps exact and title
+        candidates alike: the related-type prefilter keeps an exact Cell that
+        the final rule then drops, and the row must still be there for it."""
+        cell = ROWS[0].model_copy(update={"label": "Wi-Fi", "type": "Cell",
+                                           "identifier": "cell"})
+        kept = find_element([*ROWS, cell], label="Wi-Fi", element_type="Button",
+                            merged_labels=True, prefilter=True)
+        assert {e.identifier for e in kept} >= {"cell", "com.apple.settings.wifi"}
+        final = find_element(kept, label="Wi-Fi", element_type="Button", merged_labels=True)
+        assert [e.identifier for e in final] == ["com.apple.settings.wifi"]
+
     def test_the_whole_label_still_matches(self):
         found = find_element(ROWS, label="Wi-Fi, ExampleNetwork", merged_labels=True)
         assert [e.identifier for e in found] == ["com.apple.settings.wifi"]
@@ -161,6 +173,39 @@ class TestGetElementState:
 
         assert result["matched_via"] == "merged_label"
         ctrl.coredevice_ax.describe_all.assert_awaited_once()
+
+
+class TestAPushThatCannotBeRead:
+    """A lookup whose push read fails takes the WDA path any lookup takes,
+    including its deeper look on a miss (CodeRabbit on #672)."""
+
+    async def test_wait_for_element_looks_deeper_through_wda(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        _wda_depth_spies(ctrl)
+        ctrl.coredevice_ax.describe_all = AsyncMock(
+            side_effect=DeviceError("no tunnel", tool="coredevice"))
+        deep = UIElement(type="Button", label="Deep", identifier="deep",
+                         frame={"x": 20, "y": 400, "width": 374, "height": 52})
+        ctrl._deeper_query = AsyncMock(return_value=([deep], 0.2))
+
+        result, _ = await ctrl.wait_for_element(
+            condition=WaitCondition.EXISTS, label="Deep", timeout=1, udid=PHONE)
+
+        assert result["matched"] is True and result["element"]["identifier"] == "deep"
+        assert ctrl._wda_direct_query.await_args_list            # WDA's filtered query
+        ctrl._deeper_query.assert_awaited()
+
+    async def test_tap_element_looks_deeper_through_wda(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        _wda_depth_spies(ctrl)
+        ctrl.coredevice_ax.describe_all = AsyncMock(
+            side_effect=DeviceError("no tunnel", tool="coredevice"))
+        ctrl._deeper_query = AsyncMock(return_value=([], 0.2))
+        ctrl._identify_for_miss = AsyncMock(return_value={})
+
+        await ctrl.tap_element(label="Deep", udid=PHONE, scroll_to_find=False)
+
+        ctrl._deeper_query.assert_awaited()
 
 
 class TestACrashDuringALookup:
@@ -340,6 +385,19 @@ class TestTapElement:
         ctrl.coredevice_ax.describe_all.assert_not_called()
         ctrl.wda_client.tap.assert_not_called()
 
+    async def test_a_pushed_miss_leaves_the_sweeps_opening_lookup(self, monkeypatch):
+        """The push holds what VoiceOver reaches; its miss proves nothing about
+        WDA's tree, so the sweep still makes its first lookup -- the one read
+        that looks deeper (CodeRabbit on #672)."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        _wda_depth_spies(ctrl)
+        ctrl._identify_for_miss = AsyncMock(return_value={})
+        ctrl._ios_scroll_to_element = AsyncMock(return_value=None)
+
+        await ctrl.tap_element(label="Nowhere", udid=PHONE, scroll_to_find=True)
+
+        assert ctrl._ios_scroll_to_element.await_args.kwargs["target_known_absent"] is False
+
     async def test_after_the_wda_sweep_the_stability_check_runs(self, monkeypatch):
         """The sweep finds the target through WDA after a swipe, while the list
         may still be moving: the push's 'settled' reason no longer holds."""
@@ -421,13 +479,15 @@ class TestOtherReadsStayOnWda:
         """A WDA read that rewrites the shared per-device record mid-lookup must
         not make the lookup's pushed matches read as WDA's."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
-        pushed = parse_push(SETTINGS)[1]
+        remember = ctrl._remember_screen
 
-        async def read_while_wda_answers(*a, **kw):
+        def wda_answers_meanwhile(udid, raw):
+            # After the read has named its reader, before the lookup reads its
+            # answer: where a concurrent WDA read's record lands.
+            remember(udid, raw)
             ctrl._last_read_backend[PHONE] = ctrl.wda_client.TOOL_NAME
-            return pushed
 
-        ctrl.coredevice_ax.describe_all = AsyncMock(side_effect=read_while_wda_answers)
+        ctrl._remember_screen = wda_answers_meanwhile
 
         result, _ = await ctrl.get_element(label="Wi-Fi", udid=PHONE)
 

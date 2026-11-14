@@ -2733,6 +2733,48 @@ class DeviceControllerUI:
         reader = (self._device_tree_reader(resolved)
                   if pushable and snapshot_depth is None else None)
 
+        # The push is read first, ahead of WDA's filtered query, so a read it
+        # cannot make takes the path any WDA lookup takes -- the filtered
+        # query and its deeper look on a miss -- not a /source after it that
+        # never looks deeper (CodeRabbit on #672).
+        pushed_raw = None
+        if reader is not None:
+            self._last_read_backend[resolved] = reader.TOOL_NAME
+            try:
+                pushed_raw = await reader.describe_all(
+                    resolved, snapshot_depth=None,
+                    source_timeout=source_timeout, probe=probe_containers,
+                )
+            except DeviceError as e:
+                # The reader is new and opt-in; a read it cannot make is made
+                # the way it was before, and `backend` on the answer says
+                # which one served it.
+                logger.warning("[coredevice] read of %s failed, using WDA: %s",
+                               resolved[:8], e)
+                if isinstance(e, AppExitedDuringRead):
+                    # Said on the answer, not only in the log: the screen the
+                    # caller sees next is the one the crash left (#669).
+                    self._push_crashed_apps.setdefault(resolved, set()).add(e.app)
+                    if lookup:
+                        # Not looked up on what the crash left: on SpringBoard
+                        # a tap by label tapped an icon, and not_exists passed,
+                        # each answering ok (#664 phase 2b review).
+                        raise DeviceError(
+                            f"{e}. Nothing was looked up: the screen this lookup was "
+                            "for is gone. This device's screens will be read through "
+                            "WDA until the server restarts; read the screen again "
+                            "before acting.", tool=self.coredevice_ax.TOOL_NAME) from e
+                    _READ_NOTE.set(
+                        f"{e}. This read is WDA's, and this device's screens will be "
+                        "read through WDA until the server restarts.")
+                reader = None
+                if lookup and snapshot_depth is None:
+                    # A lookup asked for no depth because the push needs none;
+                    # through WDA it takes the action depth, never the full
+                    # walk that took 34.5 s on an iPhone 11 (F35).
+                    snapshot_depth = self._read_depth(resolved, None)
+                    use_cache = False
+
         # WDA direct query: physical device + filters + cache miss → query directly
         if has_filters and reader is None and self._served_by_wda(resolved):
             # Recorded here too: this path returns before the general one
@@ -2794,55 +2836,19 @@ class DeviceControllerUI:
         self._last_read_backend[resolved] = getattr(
             backend, "TOOL_NAME", "unknown",
         )
-        if mode == "flat" and hasattr(backend, "describe_all_flat"):
+        if pushed_raw is not None:
+            raw = pushed_raw
+        elif mode == "flat" and hasattr(backend, "describe_all_flat"):
             raw = await backend.describe_all_flat(
                 resolved, snapshot_depth=snapshot_depth,
                 source_timeout=source_timeout,
             )
             use_cache = False  # flat mode returns different elements
         else:
-            try:
-                raw = await backend.describe_all(
-                    resolved, snapshot_depth=snapshot_depth,
-                    source_timeout=source_timeout, probe=probe_containers,
-                )
-            except DeviceError as e:
-                if backend is not reader:
-                    raise
-                # The reader is new and opt-in; a read it cannot make is made
-                # the way it was before, and `backend` on the answer says
-                # which one served it.
-                logger.warning("[coredevice] read of %s failed, using WDA: %s",
-                               resolved[:8], e)
-                if isinstance(e, AppExitedDuringRead):
-                    # Said on the answer, not only in the log: the screen the
-                    # caller sees next is the one the crash left (#669).
-                    self._push_crashed_apps.setdefault(resolved, set()).add(e.app)
-                    if lookup:
-                        # Not looked up on what the crash left: on SpringBoard
-                        # a tap by label tapped an icon, and not_exists passed,
-                        # each answering ok (#664 phase 2b review).
-                        raise DeviceError(
-                            f"{e}. Nothing was looked up: the screen this lookup was "
-                            "for is gone. This device's screens will be read through "
-                            "WDA until the server restarts; read the screen again "
-                            "before acting.", tool=self.coredevice_ax.TOOL_NAME) from e
-                    _READ_NOTE.set(
-                        f"{e}. This read is WDA's, and this device's screens will be "
-                        "read through WDA until the server restarts.")
-                backend = self._ui_backend(resolved)
-                self._last_read_backend[resolved] = getattr(
-                    backend, "TOOL_NAME", "unknown",
-                )
-                # A lookup asked for no depth because the push needs none; its
-                # WDA read takes the action depth, never the full walk that
-                # took 34.5 s on an iPhone 11 (F35, #664 phase 2b review).
-                raw = await backend.describe_all(
-                    resolved,
-                    snapshot_depth=(self._read_depth(resolved, None)
-                                    if lookup and snapshot_depth is None else snapshot_depth),
-                    source_timeout=source_timeout, probe=probe_containers,
-                )
+            raw = await backend.describe_all(
+                resolved, snapshot_depth=snapshot_depth,
+                source_timeout=source_timeout, probe=probe_containers,
+            )
 
         # Who made it, after any fallback: a lookup's matches are read by it.
         pushed = reader is not None and backend is reader
@@ -3766,7 +3772,11 @@ class DeviceControllerUI:
                 sweep["attempted"] = True
                 scrolled = await self._ios_scroll_to_element(
                     resolved, label=label, identifier=identifier, max_swipes=10,
-                    target_known_absent=not served_from_cache,
+                    # A pushed miss proves nothing about WDA's tree: the push
+                    # holds what VoiceOver reaches, so the sweep's opening WDA
+                    # lookup -- its one read that looks deeper -- still runs
+                    # (CodeRabbit on #672).
+                    target_known_absent=not served_from_cache and not pushed,
                     report=sweep, snapshot_depth=read_depth,
                     deepen=_deepen_allowed(snapshot_depth, deepen),
                 )

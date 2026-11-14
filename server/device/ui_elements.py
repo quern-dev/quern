@@ -264,12 +264,17 @@ def find_element(
         # Button filter asked for (#664 phase 2b review).
         exact = _narrowed(find_by_label(elements, label), label, identifier,
                           element_type, prefilter)
-        if exact:
-            return exact
         lower = label.lower()
-        titled = [e for e in elements
-                  if e.label.lower() != lower and title_of(e.label).lower() == lower]
-        return _narrowed(titled, label, identifier, element_type, prefilter)
+        titled = _narrowed(
+            [e for e in elements
+             if e.label.lower() != lower and title_of(e.label).lower() == lower],
+            label, identifier, element_type, prefilter)
+        if prefilter:
+            # Both, for the caller's own match to choose from: an exact Cell
+            # that the related-type prefilter keeps, and the final rule then
+            # drops, must not have hidden the Button row (CodeRabbit on #672).
+            return exact + titled
+        return exact or titled
 
     # Start with label or identifier search, then narrow by type
     if label:
