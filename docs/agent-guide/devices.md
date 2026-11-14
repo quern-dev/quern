@@ -13,7 +13,7 @@ This topic is split into pages, one per subject. Read the one you need:
 - `quern://guide/devices/preview` -- Live Preview of Devices and Simulators: live video with preview_device
 - `quern://guide/devices/builds` -- Building and installing: build_and_install for Xcode schemes and Gradle projects, onto one or more devices
 - `quern://guide/devices/checkpoints` -- Starting from a known state: simulator app checkpoints (save/restore_app_state, the keychain for logged-in states) and app plists
-- `quern://guide/devices/settings` -- Device settings: text input, hardware keyboard, locale, location and permissions, hardware buttons, factory reset
+- `quern://guide/devices/settings` -- Device settings: text input, hardware keyboard, locale, location and permissions, orientation, hardware buttons, factory reset
 - `quern://guide/devices/foldables` -- Foldable simulators: iPhone Duo, set_hinge and get_hinge
 - `quern://guide/devices/mistakes` -- Mistakes to avoid: hardcoding device UDIDs
 - `quern://guide/devices/troubleshooting` -- When something is wrong: an empty screen summary on a physical device, and WDA read budgets

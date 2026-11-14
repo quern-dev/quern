@@ -440,6 +440,42 @@ A 400 on any other device. After a fold, quern waits for the screen to settle be
     }
   });
 
+  server.registerTool("set_orientation", {
+    description: `Turn an iOS simulator to portrait, pud (portrait upside down), landscape-left or landscape-right, as Simulator.app's Rotate does. For landscape layouts, and with press_button LOCK for StandBy.
+
+The device turns; the app in front decides whether its interface follows. So the response reads the interface back: interface_orientation is what the screen shows now, and a note says when the app did not follow (the iPhone home screen, and many apps, are portrait only). Afterwards tap, tap_element, get_ui_tree and take_screenshot all work in the turned interface's points.
+
+On an iPhone Duo this goes through Device Hub's orientation picker, as set_hinge's orientation does. A 400 on a physical iPhone or an Android device.`,
+    inputSchema: strictParams({
+      orientation: z
+        .enum(["portrait", "pud", "landscape-left", "landscape-right"])
+        .describe("How the device is held, as UIDeviceOrientation names it."),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ orientation, udid }) => {
+    try {
+      const body: Record<string, unknown> = { orientation };
+      if (udid) body.udid = udid;
+      const data = await apiRequest("POST", "/api/v1/device/orientation", undefined, body);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: errorText(e),
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("get_hinge", {
     description: `Read a foldable simulator's hinge angle and which panel is lit (iPhone Duo, Xcode 27.1+). lit_panel gives the screen_id, orientation and size in points of the panel taps and reads go to. angle is null when the guest gives no reading, which happens after SpringBoard restarts until the hinge next moves. A 400 on any other device.`,
     inputSchema: strictParams({

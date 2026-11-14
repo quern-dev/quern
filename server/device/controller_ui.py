@@ -935,6 +935,80 @@ class DeviceControllerUI:
                 "Duo, Xcode 27.1+) has a hinge to move.", tool="hinge-control")
         return lit
 
+    #: UIDeviceOrientation by name: what sim-bridge sets and reads back (#243).
+    _DEVICE_ORIENTATIONS = {"portrait": 1, "pud": 2, "landscape-left": 3, "landscape-right": 4}
+    #: How long a turn may take to show: the rotation animation is ~0.4s.
+    _ORIENTATION_SETTLE_S = 3.0
+
+    async def set_orientation(self, orientation: str, udid: str | None = None) -> dict:
+        """Turn a simulator, as Simulator.app's Rotate does, and report what the
+        interface did (#243).
+
+        The device turns; the app in front decides whether its interface
+        follows -- a portrait-only app, or the iPhone home screen, stays put.
+        So the interface orientation is read back from the screen rather than
+        assumed, and one that did not follow is said, not raised: the device
+        did turn. A foldable (iPhone Duo) turns through Device Hub's
+        orientation picker instead, which is all it answered to (measured).
+        """
+        value = self._DEVICE_ORIENTATIONS.get(orientation)
+        if value is None:
+            raise InvalidDeviceRequestError(
+                f"orientation must be one of {', '.join(self._DEVICE_ORIENTATIONS)}, "
+                f"not {orientation!r}", tool="sim-bridge")
+        resolved = await self.resolve_udid(udid)
+        if self._is_android(resolved) or self._is_physical(resolved):
+            raise InvalidDeviceRequestError(
+                "Turning the device is for iOS simulators: a physical iPhone has no way "
+                "to be turned remotely, and Android is not supported yet.", tool="sim-bridge")
+        self._require_simulator(resolved, "Set orientation")
+        if not self._sim_bridge_ok:
+            raise DeviceOperationUnsupportedError(
+                "Turning a simulator needs sim-bridge, and it is not available.",
+                tool="sim-bridge")
+
+        before, panels = await self.sim_bridge.orientation(resolved)
+        if panels > 1:
+            await self.hinge.orient(resolved, orientation)
+        else:
+            await self.sim_bridge.orientation(resolved, set_to=value)
+        # The device has turned: nothing below may turn that into an error,
+        # or a caller retries. A read that fails is reported.
+        self._invalidate_ui_cache(resolved)
+        read = await self._await_orientation(resolved, value)
+        self._invalidate_ui_cache(resolved)  # again, so the next tap settles
+
+        names = {v: k for k, v in self._DEVICE_ORIENTATIONS.items()}
+        result: dict = {"udid": resolved, "status": "ok", "orientation": orientation,
+                        "interface_orientation": names.get(read) if read else None,
+                        "interface_orientation_before": names.get(before) if before else None}
+        if read is None:
+            result["note"] = ("The device was turned, but the screen's orientation could not "
+                              "be read back.")
+        elif read != value:
+            result["note"] = (
+                f"The device turned to {orientation}, but the interface stayed "
+                f"{names.get(read, read)}: the app in front does not support {orientation} "
+                "(the iPhone home screen, and many apps, are portrait only). Taps and reads "
+                "follow the interface as it is.")
+        return result
+
+    async def _await_orientation(self, udid: str, want: int) -> int | None:
+        """The screen's orientation once a turn has played out: `want` as soon
+        as it reads that, else the last reading after _ORIENTATION_SETTLE_S --
+        which is the answer when the app in front does not turn. None when no
+        read worked."""
+        read: int | None = None
+        deadline = time.monotonic() + self._ORIENTATION_SETTLE_S
+        while True:
+            try:
+                read, _ = await self.sim_bridge.orientation(udid)
+            except DeviceError:
+                logger.debug("Could not read the orientation of %s", udid[:8], exc_info=True)
+            if read == want or time.monotonic() >= deadline:
+                return read
+            await asyncio.sleep(0.25)
+
     async def get_hinge(self, udid: str | None = None) -> dict:
         """The hinge's angle and the panel that is lit (#537)."""
         resolved = await self.resolve_udid(udid)

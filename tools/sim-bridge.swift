@@ -441,6 +441,13 @@ nonisolated(unsafe) var lastLitPanel: [String: UInt32] = [:]
 /// definite one: a device still booting reports none, and is asked again.
 nonisolated(unsafe) var singlePanelDevices: Set<String> = []
 
+/// A one-panel device's panel and display descriptor, kept so its orientation
+/// can be read without enumerating its ports again (#243): one property read
+/// through the descriptor a tap already pays for, not the ~15ms above.
+/// Dropped when the HID client finds the device rebooted, since a descriptor
+/// belongs to one boot and a stale one could report the old boot's turn.
+nonisolated(unsafe) var singlePanelDescriptors: [String: (Panel, NSObject)] = [:]
+
 /// Which panel is lit, from what each says about itself -- pure, so the
 /// self-test drives it. Nil for fewer than two panels: a phone, and the one
 /// case this must never get wrong, since every caller then keeps the
@@ -468,12 +475,38 @@ func readPanels(udid: String, device: NSObject) -> (lit: (Panel, NSObject)?, all
     let found = integratedPanels(device: device)
     if recordsSinglePanel(found: found.count, interfacesAvailable: screenPropertiesAvailable()) {
         singlePanelDevices.insert(udid)
+        if found.count == 1 { singlePanelDescriptors[udid] = found[0] }
     }
     let all = found.map { $0.0 }
     guard let chosen = choosePanel(all, last: lastLitPanel[udid]),
           let desc = found.first(where: { $0.0.screenID == chosen.screenID })?.1 else { return (nil, all) }
     lastLitPanel[udid] = chosen.screenID
     return ((chosen, desc), all)
+}
+
+/// A one-panel device's orientation as its screen reports it now
+/// (UIDeviceOrientation, 1-4), or nil when it cannot be read: not yet known
+/// to have one panel, an Xcode without the screen interfaces, or a descriptor
+/// that no longer answers, which is forgotten so the next read enumerates.
+func singlePanelOrientation(udid: String, device: NSObject) -> (Panel, UInt32)? {
+    if !singlePanelDevices.contains(udid) { _ = readPanels(udid: udid, device: device) }
+    guard let (panel, desc) = singlePanelDescriptors[udid] else { return nil }
+    guard let props = screenProperties(of: desc) else {
+        singlePanelDescriptors.removeValue(forKey: udid)
+        singlePanelDevices.remove(udid)
+        return nil
+    }
+    return (panel, props.orientation)
+}
+
+/// A one-panel device's panel when its interface is turned away from
+/// portrait (#243), for touches: nil in portrait, which keeps the path every
+/// tap took before rotation was possible.
+func turnedSinglePanel(udid: String, device: NSObject) -> Panel? {
+    guard let (panel, orientation) = singlePanelOrientation(udid: udid, device: device),
+          (2...4).contains(orientation) else { return nil }
+    return Panel(screenID: panel.screenID, deviceName: panel.deviceName, orientation: orientation,
+                 nativeSize: panel.nativeSize, lit: true)
 }
 
 func litPanelAndDescriptor(udid: String, device: NSObject) -> (Panel, NSObject)? {
@@ -738,6 +771,14 @@ func touchSpace(udid: String, device: NSObject) -> TouchSpace {
     if let panel = litPanel(udid: udid, device: device) {
         return TouchSpace(size: panel.screenSize, target: panel.target, panel: panel)
     }
+    if let turned = turnedSinglePanel(udid: udid, device: device) {
+        // One panel, turned: its digitizer still takes portrait points, so the
+        // interface point is rotated into them, as on a Duo's panel -- but
+        // through the device's own digitizer, not a per-panel one. Without
+        // this a landscape tap was scaled against the portrait size and
+        // landed elsewhere (#243).
+        return TouchSpace(size: turned.screenSize, target: touchDigitizer, panel: turned)
+    }
     return TouchSpace(size: devicePointSize(for: device), target: touchDigitizer, panel: nil)
 }
 
@@ -904,6 +945,14 @@ func axChildren(of element: NSObject) -> [NSObject] {
 }
 
 // MARK: - AX Frame Transform
+
+/// The points an app's accessibility frames are scaled to on a one-panel
+/// device: the interface's, turned. An app reports its root at the interface's
+/// size, so in landscape the portrait size scaled every frame by 402/874 on an
+/// iPhone 18 Pro (iOS 27.2) and a tap at its centre landed elsewhere (#243).
+func axPointSize(udid: String, device: NSObject) -> CGSize {
+    turnedSinglePanel(udid: udid, device: device)?.screenSize ?? devicePointSize(for: device)
+}
 
 struct AXFrameTransform {
     let rootFrame: CGRect
@@ -1155,7 +1204,7 @@ func describeUI(udid: String, nested: Bool, hitX: Double? = nil, hitY: Double? =
     stampElementTranslation(token: token, on: rootElement)
     stampSubtree(rootElement, token: token)
 
-    let pointSize = devicePointSize(for: device)
+    let pointSize = axPointSize(udid: udid, device: device)
     let rootFrame = axFrame(of: rootElement)
     let panel = litPanel(udid: udid, device: device)
     let transform = AXFrameTransform(
@@ -1220,7 +1269,7 @@ func probePoint(udid: String, x: Double, y: Double, nested: Bool) -> Any? {
     // refused the tap as covered (#536). A single-panel transform skips a
     // zero root, which is why this went unnoticed.
     stampElementTranslation(token: token, on: frontmostRoot)
-    let pointSize = devicePointSize(for: device)
+    let pointSize = axPointSize(udid: udid, device: device)
     let rootFrame = axFrame(of: frontmostRoot)
     let panel = litPanel(udid: udid, device: device)
     let transform = AXFrameTransform(
@@ -1392,38 +1441,60 @@ func primeKeyboardService(_ client: AnyObject) {
     usleep(20_000)
 }
 
+/// Why the last `ensureHIDClient` returned nil, for a caller's error: a
+/// button that failed said only "failed", and the reason was on stderr,
+/// which quern does not keep (#680).
+nonisolated(unsafe) var lastHIDClientError = ""
+
 func ensureHIDClient(udid: String) -> AnyObject? {
+    lastHIDClientError = ""
     if let existing = hidClients[udid] {
         if isHIDClientAlive(existing) {
             return existing
         }
         logErr("[hid] cached client for \(udid) is stale (device rebooted?) — recreating")
         hidClients.removeValue(forKey: udid)
+        singlePanelDescriptors.removeValue(forKey: udid)
+        singlePanelDevices.remove(udid)
     }
     guard resolveHIDSymbols() else {
         logErr("[hid] symbol resolution failed")
+        lastHIDClientError = "SimulatorKit's HID symbols could not be resolved"
         return nil
     }
     guard let device = resolveDevice(udid: udid) else {
         logErr("[hid] device not found: \(udid)")
+        lastHIDClientError = "no simulator with udid \(udid)"
         return nil
     }
     guard let cls = NSClassFromString("_TtC12SimulatorKit24SimDeviceLegacyHIDClient") else {
         logErr("[hid] SimDeviceLegacyHIDClient class not found")
+        lastHIDClientError = "SimulatorKit has no SimDeviceLegacyHIDClient"
         return nil
     }
     let initSel = NSSelectorFromString("initWithDevice:error:")
-    guard let imp = class_getMethodImplementation(cls, initSel) else { return nil }
+    guard let imp = class_getMethodImplementation(cls, initSel) else {
+        lastHIDClientError = "SimDeviceLegacyHIDClient has no initWithDevice:error:"
+        return nil
+    }
     typealias InitFn = @convention(c) (AnyObject, Selector, AnyObject, AutoreleasingUnsafeMutablePointer<NSError?>) -> AnyObject?
     let initFn = unsafeBitCast(imp, to: InitFn.self)
     guard let metaCls = object_getClass(cls),
-          let allocImp = class_getMethodImplementation(metaCls, NSSelectorFromString("alloc")) else { return nil }
+          let allocImp = class_getMethodImplementation(metaCls, NSSelectorFromString("alloc")) else {
+        lastHIDClientError = "SimDeviceLegacyHIDClient could not be allocated"
+        return nil
+    }
     typealias AllocFn = @convention(c) (AnyClass, Selector) -> AnyObject?
-    guard let allocated = unsafeBitCast(allocImp, to: AllocFn.self)(cls, NSSelectorFromString("alloc")) else { return nil }
+    guard let allocated = unsafeBitCast(allocImp, to: AllocFn.self)(cls, NSSelectorFromString("alloc")) else {
+        lastHIDClientError = "SimDeviceLegacyHIDClient could not be allocated"
+        return nil
+    }
 
     var err: NSError?
     guard let client = initFn(allocated, initSel, device, &err) else {
         if let err { logErr("[hid] SimDeviceLegacyHIDClient init failed: \(err)") }
+        lastHIDClientError = "the simulator's HID client could not be created"
+            + (err.map { ": \($0.localizedDescription)" } ?? "")
         return nil
     }
 
@@ -1583,8 +1654,13 @@ func doSwipe(udid: String, x1: Double, y1: Double, x2: Double, y2: Double, durat
                               client: client) && ok >= steps / 2
 }
 
-func doButton(udid: String, name: String) -> Bool {
-    guard let client = ensureHIDClient(udid: udid) else { return false }
+/// Press a hardware button. Nil when it was pressed, else why not -- the
+/// reason reaches the caller rather than only this process's stderr (#680).
+func doButton(udid: String, name: String) -> String? {
+    guard let client = ensureHIDClient(udid: udid) else {
+        return lastHIDClientError.isEmpty ? "the simulator's HID client is unavailable"
+                                          : lastHIDClientError
+    }
     let holdUs: UInt32 = 100_000
 
     // Normalize: lowercase, drop underscores/hyphens so "SIDE_BUTTON",
@@ -1605,28 +1681,98 @@ func doButton(udid: String, name: String) -> Bool {
         return pressIndigoButton(code: 0x1, holdUs: 1_500_000, client: client)
     case "applepay":
         // Double-press side/lock button.
-        guard pressIndigoButton(code: 0x1, holdUs: 80_000, client: client) else { return false }
+        if let why = pressIndigoButton(code: 0x1, holdUs: 80_000, client: client) { return why }
         usleep(120_000)
         return pressIndigoButton(code: 0x1, holdUs: 80_000, client: client)
     case "volumeup":
         return pressArbitraryHID(page: 12, usage: 233, holdUs: holdUs, client: client)
+            ? nil : "the volume-up event could not be built"
     case "volumedown":
         return pressArbitraryHID(page: 12, usage: 234, holdUs: holdUs, client: client)
+            ? nil : "the volume-down event could not be built"
 
     default:
         logErr("[hid] unknown button: \(name)")
-        return false
+        return "unknown button '\(name)'"
     }
 }
 
-func pressIndigoButton(code: UInt32, holdUs: UInt32, client: AnyObject) -> Bool {
-    guard let bfn = buttonFn else { return false }
-    guard let down = bfn(code, 1, 0x33) else { return false }
-    sendHIDMessage(down, to: client)
+// MARK: - Orientation (#243)
+
+/// Turn the device, as Simulator.app's Rotate does: a GSEvent
+/// (`GSEventTypeDeviceOrientationChanged`) to the guest's
+/// `PurpleWorkspacePort`. Layout from tddworks/baguette's OrientationEvent,
+/// which documents it from Simulator.app's `gsEventsSendOrientation:`.
+///
+/// `orientation` is a UIDeviceOrientation, the value a panel reads back. The
+/// event numbers the two landscapes the other way round -- measured on an
+/// iPhone 17 Pro (iOS 27.0, Xcode 27.2): event 4 read back 3 -- so they are
+/// swapped here, and callers only ever see the read-back value.
+/// Nil when sent, else why not. Not for a foldable: iPhone Duo ignored it
+/// (measured), and turns through its orientation picker instead.
+func sendOrientation(udid: String, orientation: UInt32) -> String? {
+    guard (1...4).contains(orientation) else { return "orientation must be 1-4, not \(orientation)" }
+    guard let device = resolveDevice(udid: udid) else { return "no simulator with udid \(udid)" }
+    let sel = NSSelectorFromString("lookup:error:")
+    guard device.responds(to: sel) else { return "SimDevice has no lookup:error:" }
+    typealias Lookup = @convention(c) (
+        AnyObject, Selector, NSString, AutoreleasingUnsafeMutablePointer<NSError?>
+    ) -> UInt32
+    let lookup = unsafeBitCast(device.method(for: sel), to: Lookup.self)
+    var err: NSError?
+    let port = lookup(device, sel, "PurpleWorkspacePort" as NSString, &err)
+    guard port != 0 else {
+        return "the simulator has no PurpleWorkspacePort (still booting?)"
+            + (err.map { ": \($0.localizedDescription)" } ?? "")
+    }
+    let wire: UInt32 = orientation == 3 ? 4 : orientation == 4 ? 3 : orientation
+    var bytes = [UInt8](repeating: 0, count: 112)
+    func put(_ value: UInt32, at offset: Int) {
+        var le = value.littleEndian
+        withUnsafeBytes(of: &le) { for i in 0..<4 { bytes[offset + i] = $0[i] } }
+    }
+    put(0x13, at: 0x00)             // msgh_bits: MACH_MSG_TYPE_COPY_SEND
+    put(108, at: 0x04)              // msgh_size
+    put(port, at: 0x08)             // msgh_remote_port
+    put(0x7B, at: 0x14)             // msgh_id: GSEventMachMessageID
+    put(50 | 0x20000, at: 0x18)     // GSEventTypeDeviceOrientationChanged | host flag
+    put(4, at: 0x48)                // record_info_size
+    put(wire, at: 0x4C)             // the orientation
+    let kr = bytes.withUnsafeMutableBytes { raw -> kern_return_t in
+        guard let base = raw.baseAddress else { return KERN_FAILURE }
+        return mach_msg_send(base.assumingMemoryBound(to: mach_msg_header_t.self))
+    }
+    return kr == KERN_SUCCESS ? nil : "mach_msg_send to PurpleWorkspacePort failed: \(kr)"
+}
+
+/// The interface orientation the screen reports now (UIDeviceOrientation),
+/// with how many built-in panels the device has; nil when it cannot be read.
+/// A Duo answers for its lit panel.
+func readOrientation(udid: String, device: NSObject) -> (orientation: UInt32?, panels: Int) {
+    if let (_, orientation) = singlePanelOrientation(udid: udid, device: device) {
+        return (orientation, 1)
+    }
+    let read = readPanels(udid: udid, device: device)
+    return (read.lit?.0.orientation, read.all.count)
+}
+
+/// Nil when pressed, else why not. The press is checked as delivered, as one
+/// discrete action is worth the round trip; the release is not, so a press
+/// that went through is not reported as failed.
+func pressIndigoButton(code: UInt32, holdUs: UInt32, client: AnyObject) -> String? {
+    guard let bfn = buttonFn else { return "SimulatorKit has no IndigoHIDMessageForButton" }
+    guard let down = bfn(code, 1, 0x33) else {
+        return "IndigoHIDMessageForButton gave no message for button \(code)"
+    }
+    guard sendHIDMessageChecked(down, to: client) else {
+        return "the simulator did not take the button press"
+    }
     usleep(holdUs)
-    guard let up = bfn(code, 2, 0x33) else { return false }
+    guard let up = bfn(code, 2, 0x33) else {
+        return "IndigoHIDMessageForButton gave no release for button \(code)"
+    }
     sendHIDMessage(up, to: client)
-    return true
+    return nil
 }
 
 func pressArbitraryHID(page: UInt32, usage: UInt32, holdUs: UInt32, client: AnyObject) -> Bool {
@@ -2368,10 +2514,10 @@ func handleCommand(_ dict: [String: Any]) {
             respond(["ok": false, "error": "missing 'udid' or 'name'"])
             return
         }
-        if doButton(udid: udid, name: name) {
-            respond(["ok": true])
+        if let why = doButton(udid: udid, name: name) {
+            respond(["ok": false, "error": "button '\(name)' failed: \(why)"])
         } else {
-            respond(["ok": false, "error": "button '\(name)' failed"])
+            respond(["ok": true])
         }
 
     case "set-hardware-keyboard":
@@ -2395,6 +2541,24 @@ func handleCommand(_ dict: [String: Any]) {
         // failure: an Xcode before 27.1 has no foldable to drive.
         respond(["ok": failures.isEmpty, "failures": failures,
                  "screen_interfaces_missing": screenInterfaceProblems()])
+
+    case "orientation":
+        // Read the screen's orientation, after turning the device when `set`
+        // is given (#243). The turn is the guest's to play out, so the read
+        // in the same answer may still be the old one: callers poll.
+        guard let udid = dict["udid"] as? String, let device = resolveDevice(udid: udid) else {
+            respond(["ok": false, "error": "missing 'udid' or device not found"])
+            return
+        }
+        if let set = dict["set"] as? Int {
+            if let why = sendOrientation(udid: udid, orientation: UInt32(clamping: set)) {
+                respond(["ok": false, "error": "could not turn the simulator: \(why)"])
+                return
+            }
+        }
+        let read = readOrientation(udid: udid, device: device)
+        respond(["ok": true, "orientation": read.orientation.map { Int($0) } as Any,
+                 "panels": read.panels])
 
     case "panels":
         // The built-in panels and which one is lit (#536). `lit` is null on a
