@@ -51,13 +51,28 @@ class TestTheVerdict:
         assert why in verdict["screen_change"]["reason"]
 
 
+class TestTheCrop:
+    def test_an_ipad_nav_bar_change_is_a_change(self):
+        """7% of an iPad's height covers its nav bar too: a relabelled bar
+        button read as unchanged (verify_changed review)."""
+        ipad = _png(size=(768, 1024))
+        relabelled = _png(size=(768, 1024), box=(600, 40, 120, 20, 255))   # y 40-60 pt: the nav bar
+        verdict = frames.changed_verdict((ipad, 1, "wda"), (relabelled, 1, "wda"))
+        assert verdict["screen_changed"] is True
+
+    def test_an_iphone_status_bar_is_still_left_out(self):
+        clock = _png(box=(20, 10, 60, 20, 255))                             # inside 7% of 800
+        verdict = frames.changed_verdict((SAME, 1, "wda"), (clock, 1, "wda"))
+        assert verdict["screen_changed"] is False
+
+
 class TestTheCapture:
     @staticmethod
     def _phone():
         ctrl = MagicMock()
         ctrl._is_android = lambda udid: False
         ctrl._is_physical = lambda udid: True
-        ctrl.raw_screenshot = AsyncMock(return_value=SAME)
+        ctrl.pmd3.screenshot = AsyncMock(return_value=SAME)
         return ctrl
 
     async def test_a_phone_with_no_wda_frame_uses_its_own_screenshot(self, monkeypatch):
@@ -80,20 +95,26 @@ class TestTheCapture:
         wda.assert_not_called()
 
         wda.return_value = (None, 1.0, "wda")
-        ctrl.raw_screenshot.reset_mock()
+        ctrl.pmd3.screenshot.reset_mock()
         png, _, source = await frames.capture_for_check(ctrl, "PHONE", source="wda")
         assert png is None and source == "wda"                # not switched to the device's
-        ctrl.raw_screenshot.assert_not_called()
+        ctrl.pmd3.screenshot.assert_not_called()
 
     async def test_a_simulator_never_takes_the_device_route(self):
         ctrl = self._phone()
         ctrl._is_physical = lambda udid: False
         assert await frames._device_screenshot(ctrl, "SIM") is None
-        ctrl.raw_screenshot.assert_not_called()
+        ctrl.pmd3.screenshot.assert_not_called()
+
+    async def test_the_device_route_never_recovers_tunneld(self):
+        """Recovery drops every connected device's tunnels: not for one tap."""
+        ctrl = self._phone()
+        await frames._device_screenshot(ctrl, "PHONE")
+        assert ctrl.pmd3.screenshot.await_args.kwargs == {"recover_tunneld": False}
 
     async def test_a_failed_device_screenshot_is_no_frame(self):
         ctrl = self._phone()
-        ctrl.raw_screenshot = AsyncMock(side_effect=OSError("tunnel gone"))
+        ctrl.pmd3.screenshot = AsyncMock(side_effect=OSError("tunnel gone"))
         assert await frames._device_screenshot(ctrl, "PHONE") is None
 
 
@@ -167,6 +188,44 @@ class TestTheRoutes:
         assert body["screen_changed"] is False
         assert frames_shown["sources"] == ["wda"]              # only the after-frame
 
+    @pytest.mark.parametrize("moved", [
+        {"waited_for_settle_ms": 400}, {"waited_for_rest_ms": 300},
+        {"target_moving": True}, {"scroll": {"attempted": True}},
+    ])
+    async def test_a_screen_that_moved_before_the_tap_cannot_be_judged(
+            self, app, controller, frames_shown, moved):
+        """The before-frame predates the settle or sweep: comparing it would
+        credit the tap with the screen's own movement."""
+        frames_shown["pngs"] = [SAME, CHANGED]
+        controller.tap_element.return_value = {
+            "status": "ok", "tapped": {"label": "Go", "type": "Button", "x": 1, "y": 2}, **moved}
+        _, body = await _post(app, "tap-element", {"label": "Go", "verify_changed": True,
+                                                   "note_unchanged": False})
+        assert body["screen_changed"] is None
+        assert "moving before the tap" in body["screen_change"]["reason"]
+
+    async def test_tap_answers_null_when_no_frame_came_before(self, app, controller,
+                                                              frames_shown):
+        frames_shown["pngs"] = [None, SAME]
+        _, body = await _post(app, "tap", {"x": 10, "y": 20, "verify_changed": True})
+        assert body["screen_changed"] is None
+        assert frames_shown["n"] == 1             # no wait, no second capture
+
+    async def test_an_after_capture_that_raises_is_null_not_a_500(self, app, controller,
+                                                                  monkeypatch):
+        calls = []
+
+        async def capture(controller, udid, source=None):
+            calls.append(source)
+            if source is not None:
+                raise RuntimeError("capture blew up")
+            return SAME, 1.0, "wda"
+
+        monkeypatch.setattr(frames, "capture_for_check", capture)
+        monkeypatch.setattr(frames, "VERIFY_WAIT_S", 0.0)
+        status, body = await _post(app, "tap", {"x": 10, "y": 20, "verify_changed": True})
+        assert status == 200 and body["screen_changed"] is None
+
     async def test_a_tap_element_that_did_not_tap_is_not_judged(self, app, controller,
                                                                 frames_shown):
         controller.tap_element.return_value = {"status": "ambiguous", "matches": []}
@@ -191,3 +250,52 @@ class TestTheRoutes:
         monkeypatch.setattr(routes.asyncio, "sleep", sleep)
         await _post(app, "tap", {"x": 10, "y": 20, "verify_changed": True})
         assert 0.7 in waited
+
+
+class TestThePmd3Screenshot:
+    async def test_an_abandoned_capture_kills_its_child(self, monkeypatch, tmp_path):
+        """A timeout cancelled communicate() and left `dvt screenshot` running
+        after its output file was gone (verify_changed review)."""
+        import asyncio
+
+        from server.device.ios import pmd3, tunneld
+
+        monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda: tmp_path / "pmd3")
+        monkeypatch.setattr(tunneld, "is_tunneld_running", AsyncMock(return_value=True))
+        monkeypatch.setattr(tunneld, "resolve_tunnel_udid", AsyncMock(return_value="T"))
+        proc = MagicMock(returncode=None)
+
+        async def hang():
+            await asyncio.Event().wait()
+
+        proc.communicate = hang
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc))
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(pmd3.Pmd3Backend().screenshot("U"), 0.1)
+        proc.kill.assert_called_once()
+
+    async def test_no_recovery_when_asked_not_to(self, monkeypatch, tmp_path):
+        from server.device.ios import pmd3, tunneld
+
+        recover = AsyncMock(return_value=True)
+        monkeypatch.setattr(pmd3, "_recover_tunneld_if_wedged", recover)
+        monkeypatch.setattr(tunneld, "find_pymobiledevice3_binary", lambda: tmp_path / "pmd3")
+        monkeypatch.setattr(tunneld, "is_tunneld_running", AsyncMock(return_value=False))
+        proc = MagicMock(returncode=1)
+        proc.communicate = AsyncMock(return_value=(b"", b"no device"))
+        monkeypatch.setattr("asyncio.create_subprocess_exec", AsyncMock(return_value=proc))
+        from server.models import DeviceError
+        with pytest.raises(DeviceError):
+            await pmd3.Pmd3Backend().screenshot("U", recover_tunneld=False)
+        recover.assert_not_called()
+
+
+async def test_a_comparison_that_fails_is_null_not_a_500(app, controller, frames_shown,
+                                                         monkeypatch):
+    """The tap was delivered: the check failing must not turn it into an error."""
+    def broken(before, after):
+        raise ValueError("PIL said no")
+
+    monkeypatch.setattr(frames, "changed_verdict", broken)
+    status, body = await _post(app, "tap", {"x": 10, "y": 20, "verify_changed": True})
+    assert status == 200 and body["screen_changed"] is None

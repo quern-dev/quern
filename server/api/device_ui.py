@@ -725,9 +725,29 @@ async def restore_input(request: Request, body: RestoreInputRequest):
         raise _handle_device_error(e)
 
 
-async def _verify_changed(controller, udid: str, before: tuple) -> dict:
+#: Signs on a tap's answer that the screen moved between the before-frame and
+#: the tap itself: it waited for a settle or for a moving target, or swept.
+#: The before-frame then shows a screen the tap never saw.
+_MOVED_BEFORE_TAP = ("waited_for_settle_ms", "waited_for_rest_ms", "target_moving")
+
+
+def _moved_before_tap(result: dict) -> bool:
+    return (any(result.get(k) for k in _MOVED_BEFORE_TAP)
+            or bool((result.get("scroll") or {}).get("attempted")))
+
+
+async def _verify_changed(controller, udid: str, before: tuple, result: dict) -> dict:
     """`screen_changed` for a tap the caller asked to verify: the frame taken
-    before it against one `frames.VERIFY_WAIT_S` after, on the same path."""
+    before it against one `frames.VERIFY_WAIT_S` after, on the same path.
+
+    None -- could not tell -- when the screen moved between the before-frame
+    and the tap (`_MOVED_BEFORE_TAP`): comparing then would credit the tap
+    with a change it did not make (verify_changed review)."""
+    if _moved_before_tap(result):
+        return {"screen_changed": None, "screen_change": {
+            "waited_s": 0.0,
+            "reason": "the screen was moving before the tap -- it settled, or was "
+                      "scrolled to the target -- so no frame shows it just before"}}
     after = None
     if before[0] is not None:
         await asyncio.sleep(frames.VERIFY_WAIT_S)
@@ -735,7 +755,12 @@ async def _verify_changed(controller, udid: str, before: tuple) -> dict:
             after = await frames.capture_for_check(controller, udid, source=before[2])
         except Exception:  # noqa: BLE001 -- no frame is "could not tell", never a failure
             logger.debug("frame after the tap failed", exc_info=True)
-    return frames.changed_verdict(before, after)
+    try:
+        return frames.changed_verdict(before, after)
+    except Exception:  # noqa: BLE001 -- the tap is delivered: never a 500 over the check
+        logger.debug("comparing the frames failed", exc_info=True)
+        return {"screen_changed": None, "screen_change": {
+            "waited_s": frames.VERIFY_WAIT_S, "reason": "the frames could not be compared"}}
 
 
 @router.post("/ui/tap")
@@ -761,7 +786,7 @@ async def tap(request: Request, body: TapRequest):
             if body.duration is not None:
                 payload["duration"] = body.duration
             if before is not None:
-                payload.update(await _verify_changed(controller, udid, before))
+                payload.update(await _verify_changed(controller, udid, before, report))
             return _with_input_warning(controller, udid, payload)
         except DeviceError as e:
             raise _handle_device_error(e)
@@ -916,7 +941,7 @@ async def tap_element(request: Request, body: TapElementRequest):
 
             if (verify_before is not None and isinstance(result, dict)
                     and result.get("status") == "ok"):
-                result.update(await _verify_changed(controller, resolved, verify_before))
+                result.update(await _verify_changed(controller, resolved, verify_before, result))
 
             # Remembered for the next miss only when the tap was not already
             # checked: a verified arrival must not be blamed later, and a

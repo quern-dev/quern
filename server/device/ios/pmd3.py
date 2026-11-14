@@ -111,13 +111,17 @@ class Pmd3Backend:
             return False
         return await probe_command(str(binary), "version", tool="pymobiledevice3")
 
-    async def screenshot(self, uuid: str) -> bytes:
+    async def screenshot(self, uuid: str, recover_tunneld: bool = True) -> bytes:
         """Capture a screenshot from a physical device via pymobiledevice3.
 
         iOS 17+: Uses tunneld for RemoteXPC tunnel, then
                  `pymobiledevice3 developer dvt screenshot --tunnel <udid>`
         iOS 16-: Falls back to usbmuxd-based connection without tunnel:
                  `pymobiledevice3 developer dvt screenshot`
+
+        `recover_tunneld=False` leaves a wedged tunneld alone: recovery drops
+        every connected device's tunnels, which a check on one tap must not do
+        (`frames.capture_for_check`).
         """
         from server.device.ios.tunneld import (
             find_pymobiledevice3_binary,
@@ -135,7 +139,7 @@ class Pmd3Backend:
         # Try tunneld route first (iOS 17+)
         tunnel_udid = None
         tunneld_serving = await is_tunneld_running()
-        if not tunneld_serving:
+        if not tunneld_serving and recover_tunneld:
             tunneld_serving = await _recover_tunneld_if_wedged()
         if tunneld_serving:
             tunnel_udid = await resolve_tunnel_udid(uuid)
@@ -179,7 +183,14 @@ class Pmd3Backend:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _, stderr = await proc.communicate()
+            try:
+                _, stderr = await proc.communicate()
+            except BaseException:
+                # Abandoned -- a caller's timeout, a cancelled request: the
+                # child would otherwise run on after its output file is gone.
+                if proc.returncode is None:
+                    proc.kill()
+                raise
 
             if proc.returncode != 0:
                 error_msg = stderr.decode().strip()

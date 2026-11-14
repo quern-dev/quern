@@ -45,6 +45,13 @@ FRAME_WIDTH = 100
 #: the safe direction.
 STATUS_BAR_FRACTION = {"ios": 0.07, "android": 0.05}
 
+#: An iPad's status bar is 24 pt of 1024 or more: 7% of its height would also
+#: cover its navigation bar, so a change made only there -- a relabelled bar
+#: button, a new title -- read as "unchanged" (verify_changed review). A
+#: portrait frame wider than this is taken for an iPad.
+IPAD_ASPECT = 0.6
+IPAD_STATUS_BAR_FRACTION = 0.025
+
 #: The whole capture, fallback included, is abandoned past this: the tap must
 #: not wait on it.
 CAPTURE_TIMEOUT = 3.0
@@ -151,9 +158,12 @@ def prepare(png: bytes | None, platform: str):
         logger.debug("frame could not be decoded", exc_info=True)
         return None
     portrait = image.height >= image.width
+    fraction = STATUS_BAR_FRACTION[platform]
+    if platform == "ios" and image.width / image.height > IPAD_ASPECT:
+        fraction = IPAD_STATUS_BAR_FRACTION
     height = max(1, round(image.height * FRAME_WIDTH / image.width))
     image = image.resize((FRAME_WIDTH, height))
-    top = int(image.height * STATUS_BAR_FRACTION[platform]) if portrait else 0
+    top = int(image.height * fraction) if portrait else 0
     return image.crop((0, top, image.width, image.height))
 
 
@@ -232,7 +242,11 @@ async def _device_screenshot(controller, udid: str) -> bytes | None:
     if controller._is_android(udid) or not controller._is_physical(udid):
         return None
     try:
-        png = await asyncio.wait_for(controller.raw_screenshot(udid), CAPTURE_TIMEOUT)
+        # pmd3's own capture, without its tunneld recovery: that drops every
+        # device's tunnels, which one tap's check must not do. A capture past
+        # the timeout is killed, not left running (pmd3.screenshot).
+        png = await asyncio.wait_for(
+            controller.pmd3.screenshot(udid, recover_tunneld=False), CAPTURE_TIMEOUT)
     except Exception:  # noqa: BLE001 -- no frame is an answer, never a failure
         logger.debug("device screenshot failed", exc_info=True)
         return None
@@ -248,8 +262,11 @@ async def capture_for_check(controller, udid: str,
     """A frame for `verify_changed`: the tap path's capture, or failing that a
     physical iPhone's own screenshot.
 
-    `source` keeps the after-frame on the before-frame's path: two captures of
-    one screen compare at 0.0 within a path, and are not known to across them.
+    `source` keeps the after-frame off the device-screenshot route when the
+    before-frame was not on it, and on it when it was. Within `capture` the
+    backend still picks its own path -- u2 or adb, sim-bridge or simctl -- as
+    it does for #502's note; every frame is decoded to one width, which reads
+    a mismatch as changed rather than unchanged.
     """
     start = time.monotonic()
     if source != DEVICE_SOURCE:
