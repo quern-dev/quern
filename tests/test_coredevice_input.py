@@ -50,6 +50,10 @@ class FakeLib:
         #: Names of calls that never return: "send", "display".
         self.hang: set[str] = set()
         self.contacts = 0
+        self.keyboards = 0
+        self.keys = 0
+        #: Fail the keyboard report with this number (1 is the first).
+        self.fail_key: tuple[int, Exception] | None = None
         lib = self
 
         async def maybe_hang(what):
@@ -94,6 +98,20 @@ class FakeLib:
             async def close(self):
                 lib.closed.append(self.name)
 
+            async def create_keyboard_service(self):
+                if "keyboard" in lib.fail:
+                    raise lib.fail["keyboard"]
+                lib.keyboards += 1
+                self.name = "keyboard"
+                return 0x100002001
+
+            async def send_keyboard(self, service, usages):
+                await maybe_hang("send")
+                lib.keys += 1
+                if lib.fail_key and lib.fail_key[0] == lib.keys:
+                    raise lib.fail_key[1]
+                lib.sent.append(("keys", tuple(usages)))
+
             async def send_touchscreen(self, state, x, y):
                 await maybe_hang("send")
                 if state == RELEASE and "release" in lib.fail:
@@ -127,10 +145,14 @@ class FakeLib:
             RemoteServiceDiscoveryService=RSD, DeviceInfoService=DeviceInfo,
             UniversalHID=HID, IndigoHID=Indigo,
             CONTACT=CONTACT, RELEASE=RELEASE, BUTTON_DOWN=DOWN, BUTTON_UP=UP,
+            KEYS={"a": (0x04, False), "A": (0x04, True), " ": (0x2C, False)}, SHIFT=0xE1,
         )
 
     def __call__(self):
         return self.ns
+
+    def keystrokes(self):
+        return [s[1] for s in self.sent if s[0] == "keys"]
 
     def touches(self):
         return [s for s in self.sent if s[0] == "touch"]
@@ -143,6 +165,7 @@ def lib(monkeypatch):
     monkeypatch.setattr("server.device.performance._device_address",
                         AsyncMock(return_value=("fd00::1", 51000)))
     monkeypatch.setattr(coredevice_input, "TAP_HOLD_S", 0)
+    monkeypatch.setattr(coredevice_input, "KEY_HOLD_S", 0)
     return fake
 
 
@@ -150,6 +173,75 @@ def lib(monkeypatch):
 def wda():
     return SimpleNamespace(TOOL_NAME="wda", tap=AsyncMock(), swipe=AsyncMock(),
                            press_button=AsyncMock(), type_text=AsyncMock())
+
+
+class TestTyping:
+    """US key positions on a virtual keyboard of its own (#664)."""
+
+    async def test_keys_go_down_and_up_with_shift_pressed_first(self, lib, wda):
+        hid = CoreDeviceInput(wda)
+
+        assert await hid.type_text(PHONE, "aA ") == "coredevice"
+
+        assert lib.keystrokes() == [
+            (0x04,), (),                        # a
+            (0xE1,), (0xE1, 0x04), (),          # A: Shift on its own first
+            (0x2C,), (),                        # space
+        ]
+        wda.type_text.assert_not_called()
+
+    async def test_the_keyboard_is_closed_after_the_text(self, lib, wda):
+        """While one is attached iOS hides the on-screen keyboard, so it is not
+        left on the session held for the next minute."""
+        hid = CoreDeviceInput(wda)
+        await hid.type_text(PHONE, "a")
+        assert "keyboard" in lib.closed
+        assert "hid" not in lib.closed          # the touch service stays held
+
+    async def test_each_call_has_a_keyboard_of_its_own(self, lib, wda):
+        hid = CoreDeviceInput(wda)
+        await hid.type_text(PHONE, "a")
+        await hid.type_text(PHONE, "a")
+        assert lib.keyboards == 2 and lib.closed.count("keyboard") == 2
+
+    async def test_a_character_with_no_us_key_goes_through_wda(self, lib, wda):
+        hid = CoreDeviceInput(wda)
+
+        assert await hid.type_text(PHONE, "aé") == "wda"
+
+        wda.type_text.assert_awaited_once_with(PHONE, "aé")
+        assert lib.keystrokes() == []           # nothing half typed first
+
+    async def test_a_keyboard_that_cannot_attach_goes_through_wda(self, lib, wda):
+        lib.fail["keyboard"] = ConnectionResetError("gone")
+        hid = CoreDeviceInput(wda)
+
+        assert await hid.type_text(PHONE, "a") == "wda"
+
+        wda.type_text.assert_awaited_once_with(PHONE, "a")
+        assert "keyboard" not in lib.closed or lib.keyboards == 0
+
+    async def test_a_failure_part_way_is_not_retried(self, lib, wda):
+        """Some keys reached the field: typing it all again through WDA would
+        type them twice."""
+        lib.fail_key = (3, ConnectionResetError("gone"))
+        hid = CoreDeviceInput(wda)
+
+        with pytest.raises(DeviceError, match="partly delivered"):
+            await hid.type_text(PHONE, "aa")
+
+        wda.type_text.assert_not_called()
+        assert "keyboard" in lib.closed
+
+    def test_what_us_keys_type(self, lib):
+        assert coredevice_input.types_on_us_keys("aA a")
+        assert not coredevice_input.types_on_us_keys("aé")
+
+    def test_without_the_hid_services_nothing_types(self, monkeypatch):
+        def missing():
+            raise coredevice_input.NotSent("no pymobiledevice3")
+        monkeypatch.setattr(coredevice_input, "_pmd3", missing)
+        assert not coredevice_input.types_on_us_keys("a")
 
 
 class TestTheScreen:
@@ -545,16 +637,6 @@ def _phone(monkeypatch, reader="coredevice", os_version="iOS 27.2.1"):
 
 
 class TestTheControllerRoutes:
-    async def test_typing_stays_with_wda(self, monkeypatch):
-        """A HID keyboard types through the phone's hardware-keyboard layout:
-        "Hello abc" arrived as "Hっぉあ BC" on a phone with a Japanese
-        keyboard. WDA inserts the text itself."""
-        ctrl = _phone(monkeypatch)
-        ctrl.wda_client.type_text = AsyncMock()
-        await ctrl.type_text("Hello abc", udid=PHONE)
-        ctrl.wda_client.type_text.assert_awaited_once_with(PHONE, "Hello abc")
-        assert not hasattr(ctrl.coredevice_input, "type_text")
-
     async def test_opted_in_on_ios_27_taps_over_hid(self, monkeypatch):
         ctrl = _phone(monkeypatch)
         await ctrl.tap(10, 20, udid=PHONE)
