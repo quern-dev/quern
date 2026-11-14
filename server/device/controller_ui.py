@@ -1007,6 +1007,12 @@ class DeviceControllerUI:
     _FLAT_ORIENTATIONS = ("face-up", "face-down")
     #: How long a turn may take to show: the rotation animation is ~0.4s.
     _ORIENTATION_SETTLE_S = 3.0
+    #: The least a single read-back is given, however little of the settle
+    #: time is left. A read the bridge has been sent answers in milliseconds;
+    #: one cancelled after it was sent makes the bridge restart, for every
+    #: simulator, since it cannot tell a late answer from the next one's.
+    #: So the bound cuts a read stuck behind another command, and no other.
+    _ORIENTATION_READ_FLOOR_S = 2.0
 
     async def set_orientation(self, orientation: str, udid: str | None = None) -> dict:
         """Turn a simulator and report what the interface did (#243).
@@ -1093,9 +1099,12 @@ class DeviceControllerUI:
         read: int | None = None
         deadline = time.monotonic() + self._ORIENTATION_SETTLE_S
         while True:
+            budget = max(deadline - time.monotonic(), self._ORIENTATION_READ_FLOOR_S)
             try:
-                read, _ = await self.sim_bridge.orientation(udid)
-            except DeviceError:
+                read, _ = await asyncio.wait_for(self.sim_bridge.orientation(udid), budget)
+            except (DeviceError, TimeoutError):
+                # Bounded (review): the bridge's lock can hold a read for 20s
+                # and its answer for 30s more, far past the settle time.
                 logger.debug("Could not read the orientation of %s", udid[:8], exc_info=True)
                 read = None
             if read == want or time.monotonic() >= deadline:

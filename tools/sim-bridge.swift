@@ -1392,15 +1392,17 @@ final class HIDSendResult {
     var error: NSError?
 }
 
-/// Send a message and wait for delivery confirmation. Returns false when the
-/// client's connection is dead (e.g. the device rebooted after the client was
-/// created) or no completion arrives in time.
-func sendHIDMessageChecked(_ message: UnsafeMutableRawPointer,
-                           to client: AnyObject,
-                           timeout: TimeInterval = 1.0) -> Bool {
+/// Why a checked send failed, or nil when it was delivered: the reason the
+/// completion gave, or that none arrived in time. Kept for the caller's error
+/// rather than only this process's stderr (#680 review).
+func sendHIDMessageCheckedReason(_ message: UnsafeMutableRawPointer,
+                                 to client: AnyObject,
+                                 timeout: TimeInterval = 1.0) -> String? {
     let sel = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
     guard let cls = object_getClass(client),
-          let imp = class_getMethodImplementation(cls, sel) else { return false }
+          let imp = class_getMethodImplementation(cls, sel) else {
+        return "the HID client cannot send"
+    }
 
     let result = HIDSendResult()
     let completion: @convention(block) (NSError?) -> Void = { error in
@@ -1417,13 +1419,22 @@ func sendHIDMessageChecked(_ message: UnsafeMutableRawPointer,
     )
     if result.semaphore.wait(timeout: .now() + timeout) == .timedOut {
         logErr("[hid] checked send timed out")
-        return false
+        return "no delivery confirmation within \(timeout)s"
     }
     if let error = result.error {
         logErr("[hid] checked send failed: \(error)")
-        return false
+        return "delivery failed: \(error.localizedDescription)"
     }
-    return true
+    return nil
+}
+
+/// Send a message and wait for delivery confirmation. Returns false when the
+/// client's connection is dead (e.g. the device rebooted after the client was
+/// created) or no completion arrives in time.
+func sendHIDMessageChecked(_ message: UnsafeMutableRawPointer,
+                           to client: AnyObject,
+                           timeout: TimeInterval = 1.0) -> Bool {
+    sendHIDMessageCheckedReason(message, to: client, timeout: timeout) == nil
 }
 
 /// Verify a cached client still reaches the device's current boot.
@@ -1782,7 +1793,7 @@ func pressIndigoButton(code: UInt32, holdUs: UInt32, client: AnyObject) -> Strin
     guard let down = bfn(code, 1, 0x33) else {
         return "IndigoHIDMessageForButton gave no message for button \(code)"
     }
-    let confirmed = sendHIDMessageChecked(down, to: client)
+    let unconfirmed = sendHIDMessageCheckedReason(down, to: client)
     usleep(holdUs)
     // Released whether or not the press was confirmed: a press delivered late
     // and never released holds the button down -- Siri, or the power-off
@@ -1791,8 +1802,9 @@ func pressIndigoButton(code: UInt32, holdUs: UInt32, client: AnyObject) -> Strin
         return "IndigoHIDMessageForButton gave no release for button \(code)"
     }
     sendHIDMessage(up, to: client)
-    return confirmed ? nil
-        : "the simulator did not confirm the button press, so it may or may not have happened"
+    return unconfirmed.map {
+        "the simulator did not confirm the button press (\($0)), so it may or may not have happened"
+    }
 }
 
 func pressArbitraryHID(page: UInt32, usage: UInt32, holdUs: UInt32, client: AnyObject) -> Bool {

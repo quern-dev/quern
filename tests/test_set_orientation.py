@@ -127,6 +127,35 @@ async def test_a_failure_after_a_stale_read_is_no_reading():
     assert "could not be read back" in result["note"]
 
 
+async def test_a_read_held_up_is_bounded_and_is_no_reading():
+    """A read stuck behind another command could wait 20s for the bridge's
+    lock and 30s more for its answer (review). It is cut at what is left of
+    the settle time -- never less than the floor -- and counts as no reading."""
+    import asyncio
+
+    ctrl = _controller(reads=(1, 1))
+    ctrl._ORIENTATION_SETTLE_S = 0.2
+    ctrl._ORIENTATION_READ_FLOOR_S = 0.1
+    calls = 0
+    inner = ctrl.sim_bridge.orientation.side_effect
+
+    async def stuck_after_the_turn(udid, set_to=None):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:  # the read before, and the turn
+            return await inner(udid, set_to)
+        await asyncio.sleep(30)
+
+    ctrl.sim_bridge.orientation = AsyncMock(side_effect=stuck_after_the_turn)
+    started = time.monotonic()
+
+    result = await ctrl.set_orientation("landscape-left")
+
+    assert time.monotonic() - started < 2
+    assert result["interface_orientation"] is None
+    assert "could not be read back" in result["note"]
+
+
 async def test_the_change_is_marked_after_the_turn_has_played_out():
     """Marked again once the wait is over, so a tap straight after the call
     still finds the rotation recent and waits for it to settle."""

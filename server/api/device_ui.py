@@ -683,7 +683,7 @@ async def set_hinge(request: Request, body: HingeRequest):
 
 @router.post("/orientation")
 @logged_action("set_orientation", category="device.action")
-async def set_orientation(request: Request, body: OrientationRequest):
+async def set_orientation(request: Request, body: OrientationRequest) -> dict:
     """Turn an iOS simulator, as Simulator.app's Rotate does (#243).
 
     The device turns; the app in front decides whether its interface
