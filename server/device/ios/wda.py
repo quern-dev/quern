@@ -17,6 +17,7 @@ import shutil
 import signal
 import uuid
 import weakref
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1142,14 +1143,131 @@ def _is_process_alive(pid: int) -> bool:
         return False
 
 
+async def _runner_url(udid: str, os_version: str) -> str:
+    """Where a phone's WDA answers: the tunnel address on iOS 17+, else the
+    usbmux forward on localhost."""
+    from server.device.ios.tunneld import get_tunneld_devices, resolve_tunnel_udid
+
+    if _parse_ios_major_version(os_version) >= 17:
+        devices = await get_tunneld_devices()
+        tunnel_udid = await resolve_tunnel_udid(udid)
+        tunnels = devices.get(tunnel_udid or udid, [])
+        if tunnels:
+            addr = tunnels[0].get("tunnel-address")
+            if addr:
+                return f"http://[{addr}]:8100"
+    return "http://localhost:8100"
+
+
+#: The line WDA's runner prints once its HTTP server is listening. This is
+#: the runner saying it is ready, where a live pid only says xcodebuild runs.
+RUNNER_ANNOUNCEMENT = "ServerURLHere->"
+
+#: How often the runner's log is read for its announcement. The runner
+#: appends to a local file, so this bounds how late the line is noticed; it is
+#: not a guess at when WDA might be ready.
+ANNOUNCEMENT_READ_S = 0.1
+
+#: The one start in flight per device. Concurrent callers join it rather than
+#: each deciding WDA is down and starting it (#667).
+_starts: dict[str, asyncio.Future] = {}
+
+
+def start_in_flight(udid: str) -> asyncio.Future | None:
+    """The start under way for this device, if any, for a caller to join."""
+    task = _starts.get(udid)
+    return task if task is not None and not task.done() else None
+
+
+async def _await_announcement(log_path: Path, alive: Callable[[], bool],
+                              timeout: float) -> str | None:
+    """Wait for the runner to announce its server. None once it has; else why
+    not -- "exited" when the runner died first, "timeout" when it never said.
+
+    Reads the log from the start, so a runner that announced before anyone
+    asked -- one an earlier server process started -- is ready at once.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    offset, carry = 0, ""
+    while True:
+        try:
+            with open(log_path, "rb") as f:
+                f.seek(offset)
+                chunk = f.read()
+        except OSError:
+            chunk = b""
+        if chunk:
+            offset += len(chunk)
+            text = carry + chunk.decode(errors="replace")
+            if RUNNER_ANNOUNCEMENT in text:
+                return None
+            # The announcement may straddle two reads.
+            carry = text[-len(RUNNER_ANNOUNCEMENT):]
+        if not alive():
+            return "exited"
+        if loop.time() >= deadline:
+            return "timeout"
+        await asyncio.sleep(ANNOUNCEMENT_READ_S)
+
+
+async def _status_answers(url: str) -> bool:
+    """One `/status` request: the confirmation after the runner's announcement."""
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            resp = await client.get(f"{url}/status", timeout=3.0)
+            return resp.status_code == 200
+    except Exception:
+        return False
+
+
+async def _runner_ready(udid: str, os_version: str, log_path: Path,
+                        alive: Callable[[], bool]) -> tuple[bool, str | None]:
+    """Whether the runner is serving: it announced, and `/status` answers.
+
+    Returns (ready, error): the error says why not -- the runner's own failure
+    from its log when it has one, which a 30-second poll used to report only
+    after the 30 seconds.
+    """
+    why = await _await_announcement(log_path, alive, DRIVER_START_TIMEOUT)
+    if why is None:
+        if await _status_answers(await _runner_url(udid, os_version)):
+            return True, None
+        return False, "WDA announced its server, but /status did not answer"
+    diagnosis = _diagnose_runner_failure(log_path)
+    if why == "exited":
+        return False, diagnosis or "the WDA runner exited before its server started"
+    return False, diagnosis or (
+        f"WDA did not announce its server within {DRIVER_START_TIMEOUT}s")
+
+
 async def start_driver(udid: str, os_version: str) -> dict:
     """Start WDA on a physical device via xcodebuild test-without-building.
 
     Spawns xcodebuild as a background process with output redirected to a log file.
     Tracks PID in wda-state.json so the process persists across server restarts.
 
+    Idempotent: every call for a device while a start is under way joins that
+    start and gets its answer, so there is one runner and one decision about
+    whether it is ready. Shielded, so a caller that gives up does not cancel
+    the start for the others.
+
     Returns dict with {status, udid, pid, ready}.
     """
+    task = start_in_flight(udid)
+    if task is None:
+        task = asyncio.ensure_future(_start_driver(udid, os_version))
+        _starts[udid] = task
+
+        def forget(done: asyncio.Future, udid: str = udid) -> None:
+            if _starts.get(udid) is done:
+                del _starts[udid]
+
+        task.add_done_callback(forget)
+    return dict(await asyncio.shield(task))
+
+
+async def _start_driver(udid: str, os_version: str) -> dict:
     xctestrun_path = _find_xctestrun()
 
     state = read_wda_state()
@@ -1160,9 +1278,30 @@ async def start_driver(udid: str, os_version: str) -> dict:
     if existing:
         pid = existing.get("pid")
         if pid and _is_process_alive(pid):
+            # A live pid says xcodebuild is running, not that WDA is serving:
+            # the runner takes seconds to start its test session (#667). Its
+            # announcement is in its log, or will be.
             logger.info("WDA driver already running for %s (pid %d)", udid[:8], pid)
-            return {"status": "already_running", "udid": udid, "pid": pid, "ready": True,
-                    **wda_version_report(read_wda_state().get("build_wda_version"))}
+            log_path = existing.get("log_path")
+            if log_path:
+                ready, error = await _runner_ready(
+                    udid, os_version, Path(log_path), lambda: _is_process_alive(pid))
+            else:
+                # Recorded before runners had a log path: only WDA can say.
+                ready = await _poll_wda_status(await _runner_url(udid, os_version),
+                                               timeout=DRIVER_START_TIMEOUT)
+                error = None if ready else (
+                    f"WDA did not answer within {DRIVER_START_TIMEOUT}s")
+            result: dict[str, Any] = {
+                "status": "already_running", "udid": udid, "pid": pid, "ready": ready,
+                **wda_version_report(read_wda_state().get("build_wda_version"))}
+            if not ready:
+                logger.warning("WDA runner %d for %s is not serving: %s",
+                               pid, udid[:8], error)
+                result["error"] = error
+                if log_path:
+                    result["log_path"] = log_path
+            return result
         # Stale PID — clean up
         logger.info("Cleaning stale WDA runner for %s (pid %s)", udid[:8], pid)
         del runners[udid]
@@ -1196,7 +1335,7 @@ async def start_driver(udid: str, os_version: str) -> dict:
             stderr=log_file,
         )
 
-    # Save runner state immediately (before polling)
+    # Save runner state immediately (before waiting)
     state = read_wda_state()
     state.setdefault("runners", {})[udid] = {
         "pid": proc.pid,
@@ -1206,30 +1345,12 @@ async def start_driver(udid: str, os_version: str) -> dict:
     }
     save_wda_state(state)
 
-    # Poll for WDA to become responsive
-    # For tunneld devices, use the tunnel address; for usbmux, use localhost
-    from server.device.ios.tunneld import get_tunneld_devices
-
-    wda_url = None
-    if major >= 17:
-        devices = await get_tunneld_devices()
-        tunnel_udid = await resolve_tunnel_udid(udid)
-        tunnels = devices.get(tunnel_udid or udid, [])
-        if tunnels:
-            addr = tunnels[0].get("tunnel-address")
-            if addr:
-                wda_url = f"http://[{addr}]:8100"
-
-    if not wda_url:
-        wda_url = "http://localhost:8100"
-
-    ready = await _poll_wda_status(wda_url, timeout=DRIVER_START_TIMEOUT)
-
+    # Our own child: its exit is reported, so a runner that dies ends the
+    # wait at once instead of after the timeout.
+    ready, error = await _runner_ready(udid, os_version, log_path,
+                                       lambda: proc.returncode is None)
     if not ready:
-        logger.warning(
-            "WDA did not become responsive within %ds for %s",
-            DRIVER_START_TIMEOUT, udid[:8],
-        )
+        logger.warning("WDA did not start for %s: %s", udid[:8], error)
 
     result: dict[str, Any] = {
         "status": "started",
@@ -1240,14 +1361,9 @@ async def start_driver(udid: str, os_version: str) -> dict:
         # needs signing -- so a build behind the pin starts as it is and says so.
         **wda_version_report(read_wda_state().get("build_wda_version")),
     }
-
-    # If WDA failed to become ready, diagnose from the runner log
     if not ready:
-        diagnosis = _diagnose_runner_failure(log_path)
-        if diagnosis:
-            result["error"] = diagnosis
+        result["error"] = error
         result["log_path"] = str(log_path)
-
     return result
 
 
@@ -1257,6 +1373,14 @@ async def stop_driver(udid: str) -> dict:
     Sends SIGTERM, waits up to 5s, then SIGKILL if needed.
     Removes runner entry from wda-state.json.
     """
+    # A start still under way has not recorded its runner yet, so a stop read
+    # now would say "not running" and the runner would come up after it
+    # (CodeRabbit on #670). Wait for it -- shielded, so this does not cancel it
+    # for its other callers -- and stop what it started. A start that fails
+    # still lets the stop go on to read the state.
+    pending = start_in_flight(udid)
+    if pending is not None:
+        await asyncio.wait([pending])
     state = read_wda_state()
     runners = state.get("runners", {})
     existing = runners.get(udid)

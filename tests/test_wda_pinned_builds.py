@@ -569,6 +569,8 @@ class TestTheKeptDeviceBuild:
                       "runners": {"UDID": {"pid": 1234, "started_at": "x"}}})
         monkeypatch.setattr(wda, "_is_process_alive", lambda pid: True)
         monkeypatch.setattr(wda, "_find_xctestrun", lambda: Path("/x.xctestrun"))
+        monkeypatch.setattr(wda, "_runner_url", AsyncMock(return_value="http://localhost:8100"))
+        monkeypatch.setattr(wda, "_poll_wda_status", AsyncMock(return_value=True))
         result = await wda.start_driver("UDID", "18.0")
         assert result["status"] == "already_running"
         assert result["wda_version"] == "11.4.0" and "wda_update" in result
