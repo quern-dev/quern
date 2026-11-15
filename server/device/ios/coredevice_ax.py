@@ -38,7 +38,7 @@ import logging
 import plistlib
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -89,6 +89,16 @@ TRAIT_ADJUSTABLE = 1 << 12
 TRAIT_HEADER = 1 << 16
 TRAIT_TEXT_ENTRY = 1 << 18
 TRAIT_TOGGLE = 1 << 53
+
+#: How long a crash report takes to appear after its crash, at most, and how
+#: often to look. ReportCrash writes it once the process has gone.
+CRASH_REPORT_WAIT_S = 6.0
+CRASH_REPORT_POLL_S = 1.5
+#: How far before the read that saw the app a report may be dated: a report's
+#: time is to the second, in the phone's local time.
+CRASH_REPORT_SLACK_S = 2.0
+#: The frame every report of #669's crash has: UIKit inserting nil there.
+CRASH_669_FRAME = "_accessibilityWindowSections"
 
 #: How long a read may take. AXe stops at 20 s too, which it measured as about
 #: 330 elements; the screens measured here took 1.8-2.5 s.
@@ -169,6 +179,29 @@ class AppExitedDuringRead(DeviceError):
             f"{app or 'the app'} (pid {pid}) exited while its screen was read through "
             "the accessibility service: an iOS 27 bug in UIKit's accessibility code "
             "crashes some apps under this read (#669)",
+            tool="coredevice")
+        self.app = app
+        self.pid = pid
+
+
+class AppExitedAfterRead(AppExitedDuringRead):
+    """The app a read saw crashed after the read had answered (#669).
+
+    The crash can land after the tree has arrived and the read has settled --
+    measured on an iPhone 11: the probe's whole Widgets tree at 4.0 s, the app
+    gone at 4.3 s -- so the read that caused it saw nothing wrong, and every
+    read after it showed SpringBoard as if that were the screen. The next read
+    tells, from the process list and the phone's crash report for that pid.
+    A subclass, so every guard against a read's crash covers it.
+    """
+
+    def __init__(self, app: str, pid: int) -> None:
+        DeviceError.__init__(
+            self,
+            f"{app or 'the app'} (pid {pid}) crashed after an earlier read of its screen "
+            "through the accessibility service, so this read shows what the crash left: "
+            "an iOS 27 bug in UIKit's accessibility code crashes some apps under this "
+            "read (#669)",
             tool="coredevice")
         self.app = app
         self.pid = pid
@@ -758,9 +791,16 @@ async def front_app(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> tuple[int 
     return await _with_settled_tree(uuid, timeout, "reading the app on screen", use)
 
 
-async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]:
+async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
+                    previous_pid: int | None = None,
+                    seen: dict | None = None) -> list[dict]:
     """The on-screen accessibility tree of a physical iPhone, as `describe_all`
-    returns it. Raises DeviceError when it cannot be read."""
+    returns it. Raises DeviceError when it cannot be read.
+
+    `seen`, when given, is filled with the app in front (`pid`, `app`), and --
+    when that is not `previous_pid` -- whether `previous_pid` is still running
+    (`previous_alive`: True, False, or None when the phone could not be asked),
+    asked on this read's own connection."""
     from server.device.performance import _device_address
 
     lib = _pmd3()
@@ -783,6 +823,11 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
                 if (first.app_pid is not None and newest.app_pid != first.app_pid
                         and await _app_alive(conn.rsd, lib, first.app_pid) is False):
                     raise AppExitedDuringRead(first.elements[0]["AXLabel"], first.app_pid)
+                if seen is not None:
+                    seen["pid"] = newest.app_pid
+                    seen["app"] = newest.elements[0]["AXLabel"]
+                    if previous_pid is not None and newest.app_pid != previous_pid:
+                        seen["previous_alive"] = await _app_alive(conn.rsd, lib, previous_pid)
         finally:
             await _close(conn.provider, conn.rsd)
     except TimeoutError as e:
@@ -811,6 +856,10 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
     return _refuse_bare(elements, uuid)
 
 
+#: `(udid, since) -> [(pid, report text)]`, as `CoreDeviceAxReader.crash_reports`.
+CrashReports = Callable[[str, float], Awaitable[list[tuple[int | None, str]]]]
+
+
 class CoreDeviceAxReader:
     """`describe_all` for a physical iPhone, from the tree push.
 
@@ -821,14 +870,64 @@ class CoreDeviceAxReader:
 
     TOOL_NAME = "coredevice"
 
+    def __init__(self) -> None:
+        #: The app each device's last read saw in front: (pid, name, when).
+        self._front: dict[str, tuple[int, str, float]] = {}
+        #: `(udid, since) -> [(pid, report text)]`: the phone's crash reports
+        #: dated since `since` (a time.time()). Set by the controller, which
+        #: knows the phone's hardware UDID; None reads none, and no crash
+        #: after a read is ever claimed.
+        self.crash_reports: CrashReports | None = None
+
+    def forget_front(self, udid: str) -> None:
+        """quern ended the app itself (terminate_app): its pid going is no crash."""
+        self._front.pop(udid, None)
+
     async def describe_all(self, udid: str, *, snapshot_depth: int | None = None,
                            source_timeout: float | None = None,
                            probe: bool = True) -> list[dict]:
         # snapshot_depth and probe are WDA's and sim-bridge's knobs; the push
         # is the whole on-screen tree, so there is nothing for them to change.
         timeout = source_timeout or READ_TIMEOUT_S
+        previous = self._front.get(udid)
+        seen: dict = {}
+        kwargs = {"previous_pid": previous[0] if previous else None, "seen": seen}
         try:
-            return await read_tree(udid, timeout=timeout)
+            elements = await read_tree(udid, timeout=timeout, **kwargs)
         except BareAppTree:
             await asyncio.sleep(BARE_CONFIRM_S)
-            return await read_tree(udid, timeout=timeout)
+            elements = await read_tree(udid, timeout=timeout, **kwargs)
+        if isinstance(seen.get("pid"), int):
+            self._front[udid] = (seen["pid"], seen.get("app") or "", time.time())
+        # Another app in front, and the one before gone: a crash after the
+        # read that saw it, if the phone's report says so (#669). The same app
+        # under a new pid was relaunched, which is not the case asked about.
+        if (previous is not None and seen.get("previous_alive") is False
+                and seen.get("app") != previous[1]
+                and await self._crashed_under_a_read(udid, previous)):
+            raise AppExitedAfterRead(previous[1], previous[0])
+        return elements
+
+    async def _crashed_under_a_read(self, udid: str, previous: tuple[int, str, float]) -> bool:
+        """Whether the phone has a report of #669's crash for that pid.
+
+        Waits a few seconds for it: ReportCrash writes the report after the
+        process has gone. Anything else -- no report, another crash, a report
+        that cannot be read -- is not claimed as #669.
+        """
+        if self.crash_reports is None:
+            return False
+        pid, _, when = previous
+        deadline = time.monotonic() + CRASH_REPORT_WAIT_S
+        while True:
+            try:
+                reports = await self.crash_reports(udid, when - CRASH_REPORT_SLACK_S)
+            except Exception as e:  # noqa: BLE001 -- could not tell, so no claim
+                logger.info("[coredevice] crash reports of %s unread: %s", udid[:8], e)
+                return False
+            for report_pid, text in reports:
+                if report_pid == pid:
+                    return CRASH_669_FRAME in text
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(CRASH_REPORT_POLL_S)

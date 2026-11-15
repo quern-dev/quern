@@ -118,6 +118,21 @@ def report_time(name: str) -> datetime | None:
         return None
 
 
+def report_pid(text: str) -> int | None:
+    """The crashed process's pid, from a report's text: an `.ips` body's
+    `pid`, or a `.crash` file's `Process:  Name [pid]` line. None when it
+    says none."""
+    _, _, body = text.partition("\n")
+    try:
+        pid = json.loads(body).get("pid")
+    except (ValueError, AttributeError):
+        pid = None
+    if isinstance(pid, int):
+        return pid
+    m = re.search(r"^Process:\s+.*\[(\d+)\]\s*$", text, re.M)
+    return int(m.group(1)) if m else None
+
+
 def select_recent(names: list[str], days: int, now: datetime) -> Selection:
     """The reports dated within `days` of `now`, plus undated ones.
 

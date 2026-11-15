@@ -126,6 +126,8 @@ class DeviceController(DeviceControllerUI):
         self.usbmux = UsbmuxBackend()
         self.wda_client = WdaBackend()
         self.coredevice_ax = CoreDeviceAxReader()
+        # Its check for a crash after a read (#669) needs the phone's reports.
+        self.coredevice_ax.crash_reports = self._crash_reports_since
         self.coredevice_input = CoreDeviceInput(self.wda_client)
         self.adb = AdbBackend()
         self.u2 = U2Backend()
@@ -1801,6 +1803,33 @@ class DeviceController(DeviceControllerUI):
             return False
         return any((e.label or "") == name for e in elements)
 
+    async def _crash_reports_since(self, udid: str, since: float) -> list[tuple[int | None, str]]:
+        """A phone's crash reports dated from `since` on, each as (pid, text).
+
+        For the push reader's check for a crash after a read (#669). Read over
+        USB, so a phone quern reaches only over the network has none to give.
+        A report's time is the phone's local time, taken as the Mac's.
+        """
+        import tempfile
+        from datetime import datetime
+        from pathlib import Path
+
+        from server.sources import ios_crash
+
+        lib_udid = await self.get_libimobiledevice_udid(udid)
+        cmd = ios_crash.command()
+        if not lib_udid or not cmd:
+            return []
+        cutoff = datetime.fromtimestamp(since).replace(microsecond=0)
+        names = [n for n in await ios_crash.list_reports(cmd, lib_udid)
+                 if (t := ios_crash.report_time(n)) is not None and t >= cutoff]
+        if not names:
+            return []
+        with tempfile.TemporaryDirectory() as out:
+            pulled = await ios_crash.pull_reports(cmd, lib_udid, names, Path(out))
+            texts = [(Path(out) / name).read_text(errors="replace") for name in pulled]
+        return [(ios_crash.report_pid(text), text) for text in texts]
+
     async def terminate_app(
         self, bundle_id: str, udid: str | None = None,
     ) -> tuple[str, bool | None]:
@@ -1825,6 +1854,8 @@ class DeviceController(DeviceControllerUI):
         elif self._is_physical(resolved) and self._coredevice_serves(resolved):
             # Over CoreDevice, no WDA (#664): found by its running process.
             was_running = await self.devicectl.terminate_app(resolved, bundle_id)
+            # Its pid gone at the next read is quern's doing, not a crash.
+            self.coredevice_ax.forget_front(resolved)
         elif self._is_physical(resolved):
             was_running = await self.wda_client.terminate_app(resolved, bundle_id)
             if was_running is False and not await self.devicectl.is_installed(

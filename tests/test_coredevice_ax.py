@@ -646,7 +646,7 @@ class TestReadingADevice:
     async def test_source_timeout_bounds_the_read(self, monkeypatch):
         seen = {}
 
-        async def fake_read(uuid, *, timeout):
+        async def fake_read(uuid, *, timeout, **_):
             seen["timeout"] = timeout
             return []
 
@@ -763,6 +763,179 @@ def _phone_controller(os_version: str | None = "iOS 27.2.1", *, reader: str = "c
     ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[])
     ctrl._mark_on_screen = AsyncMock()
     return ctrl
+
+
+class TestACrashAfterTheRead:
+    """#669's crash can land after the read has answered: the whole tree at
+    4.0 s, the app gone at 4.3 s (iPhone 11). The next read tells, from the
+    process list and the phone's crash report for that pid."""
+
+    REPORT_669 = ('{"app_name":"QuernProbeScene"}\n'
+                  '{"pid": 100, "frames": "-[UIView _accessibilityWindowSections]"}')
+    REPORT_OTHER = '{"app_name":"QuernProbeScene"}\n{"pid": 100, "frames": "abort()"}'
+
+    def _reader(self, monkeypatch, reads, reports=None):
+        """A reader whose reads fill `seen` from `reads`, in turn."""
+        calls = []
+
+        async def fake_read(udid, *, timeout, previous_pid=None, seen=None):
+            calls.append(previous_pid)
+            pid, app, alive = reads[len(calls) - 1]
+            seen.update(pid=pid, app=app)
+            if previous_pid is not None and pid != previous_pid:
+                seen["previous_alive"] = alive
+            return [{"type": "Application", "AXLabel": app}]
+        monkeypatch.setattr(coredevice_ax, "read_tree", fake_read)
+        monkeypatch.setattr(coredevice_ax, "CRASH_REPORT_WAIT_S", 0.0)
+        reader = CoreDeviceAxReader()
+        if reports is not None:
+            reader.crash_reports = AsyncMock(return_value=reports)
+        return reader, calls
+
+    async def test_the_next_read_names_it(self, monkeypatch):
+        reader, calls = self._reader(
+            monkeypatch, [(100, "QuernProbeScene", None), (37, "SpringBoard", False)],
+            reports=[(100, self.REPORT_669)])
+
+        await reader.describe_all(PHONE)
+        with pytest.raises(coredevice_ax.AppExitedAfterRead) as caught:
+            await reader.describe_all(PHONE)
+
+        assert (caught.value.app, caught.value.pid) == ("QuernProbeScene", 100)
+        assert isinstance(caught.value, coredevice_ax.AppExitedDuringRead)  # every guard
+        assert "after an earlier read" in str(caught.value)
+        assert calls == [None, 100]
+
+    @pytest.mark.parametrize(("reads", "reports"), [
+        # Switched away, still running.
+        ([(100, "QuernProbeScene", None), (37, "SpringBoard", True)], [(100, REPORT_669)]),
+        # Gone, but the phone could not be asked.
+        ([(100, "QuernProbeScene", None), (37, "SpringBoard", None)], [(100, REPORT_669)]),
+        # Relaunched: the same app under a new pid.
+        ([(100, "QuernProbeScene", None), (101, "QuernProbeScene", False)], [(100, REPORT_669)]),
+        # Gone with a crash of its own, not #669's.
+        ([(100, "QuernProbeScene", None), (37, "SpringBoard", False)], [(100, REPORT_OTHER)]),
+        # Gone, and no report for that pid.
+        ([(100, "QuernProbeScene", None), (37, "SpringBoard", False)], [(99, REPORT_669)]),
+        ([(100, "QuernProbeScene", None), (37, "SpringBoard", False)], []),
+    ])
+    async def test_anything_else_is_not_claimed(self, monkeypatch, reads, reports):
+        reader, _ = self._reader(monkeypatch, reads, reports=reports)
+
+        await reader.describe_all(PHONE)
+        await reader.describe_all(PHONE)
+
+    async def test_unreadable_reports_claim_nothing(self, monkeypatch):
+        reader, _ = self._reader(
+            monkeypatch, [(100, "QuernProbeScene", None), (37, "SpringBoard", False)])
+        reader.crash_reports = AsyncMock(side_effect=DeviceError("usb gone", tool="pmd3"))
+
+        await reader.describe_all(PHONE)
+        await reader.describe_all(PHONE)
+
+    async def test_with_no_reports_to_read_nothing_is_claimed(self, monkeypatch):
+        reader, _ = self._reader(
+            monkeypatch, [(100, "QuernProbeScene", None), (37, "SpringBoard", False)])
+
+        await reader.describe_all(PHONE)
+        await reader.describe_all(PHONE)
+
+    async def test_an_app_quern_ended_is_no_crash(self, monkeypatch):
+        reader, calls = self._reader(
+            monkeypatch, [(100, "QuernProbeScene", None), (37, "SpringBoard", False)],
+            reports=[(100, self.REPORT_669)])
+
+        await reader.describe_all(PHONE)
+        reader.forget_front(PHONE)
+        await reader.describe_all(PHONE)
+
+        assert calls == [None, None]
+
+    async def test_a_report_written_late_is_waited_for(self, monkeypatch):
+        """ReportCrash writes it after the process has gone."""
+        reader, _ = self._reader(
+            monkeypatch, [(100, "QuernProbeScene", None), (37, "SpringBoard", False)])
+        monkeypatch.setattr(coredevice_ax, "CRASH_REPORT_WAIT_S", 5.0)
+        monkeypatch.setattr(coredevice_ax, "CRASH_REPORT_POLL_S", 0.01)
+        reader.crash_reports = AsyncMock(side_effect=[[], [], [(100, self.REPORT_669)]])
+
+        await reader.describe_all(PHONE)
+        with pytest.raises(coredevice_ax.AppExitedAfterRead):
+            await reader.describe_all(PHONE)
+        assert reader.crash_reports.await_count == 3
+
+    async def test_the_read_asks_about_the_previous_app_on_its_connection(
+            self, monkeypatch, phone_address):
+        lib, state = _fake_lib([_as("InitialDump", SAFARI), SAFARI])
+        state.processes = [618]                       # Safari in front; 617 gone
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        seen: dict = {}
+
+        await asyncio.wait_for(read_tree(PHONE, timeout=5, previous_pid=617, seen=seen), 10)
+
+        assert seen == {"pid": 618, "app": "Safari", "previous_alive": False}
+
+    async def test_the_same_app_asks_nothing(self, monkeypatch, phone_address):
+        lib, state = _fake_lib([_as("InitialDump", SAFARI), SAFARI])
+        state.processes = None                        # a process query would raise
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        seen: dict = {}
+
+        await asyncio.wait_for(read_tree(PHONE, timeout=5, previous_pid=618, seen=seen), 10)
+
+        assert "previous_alive" not in seen
+
+    async def test_the_controller_records_it_like_any_read_crash(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = AsyncMock(
+            side_effect=coredevice_ax.AppExitedAfterRead("QuernProbeScene", 100))
+
+        await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+
+        assert ctrl._push_crashed_apps[PHONE] == {"QuernProbeScene"}
+        assert "after an earlier read" in ctrl.read_note()
+
+
+class TestThePhonesCrashReports:
+    async def test_only_reports_since_are_pulled_and_read(self, monkeypatch, tmp_path):
+        from datetime import datetime
+
+        from server.sources import ios_crash
+
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.get_libimobiledevice_udid = AsyncMock(return_value="00008030-000C59623A69802E")
+        since = datetime(2026, 11, 15, 10, 6, 15).timestamp()
+        monkeypatch.setattr(ios_crash, "command", lambda: ["pmd3"])
+        monkeypatch.setattr(ios_crash, "list_reports", AsyncMock(return_value=[
+            "QuernProbeScene-2026-11-15-100617.ips",      # after: wanted
+            "QuernProbeScene-2026-11-15-085221.ips",      # before
+            "JetsamEvent-2026-11-15-100700.ips",          # after: wanted, any process
+        ]))
+        pulled = []
+
+        async def pull(cmd, udid, names, out):
+            pulled.extend(names)
+            for n in names:
+                body = '{"pid": 1933}' if n.startswith("Quern") else "{}"
+                (out / n).write_text('{"h":1}\n' + body)
+            return names
+        monkeypatch.setattr(ios_crash, "pull_reports", pull)
+
+        reports = await ctrl._crash_reports_since(PHONE, since)
+
+        assert pulled == ["QuernProbeScene-2026-11-15-100617.ips",
+                          "JetsamEvent-2026-11-15-100700.ips"]
+        assert [pid for pid, _ in reports] == [1933, None]
+
+    async def test_a_phone_off_usb_has_none(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.get_libimobiledevice_udid = AsyncMock(return_value=None)
+
+        assert await ctrl._crash_reports_since(PHONE, 0.0) == []
+
+    def test_the_reader_is_given_them(self):
+        ctrl = DeviceController()
+        assert ctrl.coredevice_ax.crash_reports == ctrl._crash_reports_since
 
 
 class TestWhenTheReaderServes:
