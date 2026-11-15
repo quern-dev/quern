@@ -376,13 +376,17 @@ class TestSettingAValue:
 
 
 class TestPasswordFieldsFromThePush:
-    """The push types a password field as a plain TextField; attribute 28 is
+    """The push types a password field as a plain TextField; a trait bit is
     what marks it. Unmarked, its dots read as the keyboard's change and the
     password was set through accessibility (found live on an iPhone 11)."""
 
     @pytest.mark.parametrize(("bundle", "traits", "expected"), [
+        # The iPhone 11's password field, empty and then filled.
+        ({coredevice_ax.ATTR_SECURE: False}, 0x2201040000, "AXSecureTextField"),
+        ({coredevice_ax.ATTR_SECURE: True}, 0x2201240000, "AXSecureTextField"),
+        # Its ordinary text fields.
+        ({coredevice_ax.ATTR_SECURE: False}, 0x2200040000, ""),
         ({coredevice_ax.ATTR_SECURE: True}, 0, "AXSecureTextField"),
-        ({coredevice_ax.ATTR_SECURE: False}, 0, ""),
         ({}, coredevice_ax.TRAIT_SEARCH_FIELD, "AXSearchField"),
         ({coredevice_ax.ATTR_SECURE: True}, coredevice_ax.TRAIT_SEARCH_FIELD,
          "AXSecureTextField"),
