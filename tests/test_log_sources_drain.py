@@ -114,10 +114,17 @@ async def test_a_line_written_just_before_stop_is_kept(name):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", SOURCES)
-async def test_output_still_arriving_after_terminate_is_kept(name):
+async def test_output_still_arriving_after_terminate_is_kept(name, monkeypatch):
     """The process has exited but its pipe still holds output the loop has
     not read. Above, the loop got its turn while stop() waited for the exit;
     here it only gets it if stop() actually drains."""
+    from server.sources import BaseSourceAdapter
+
+    # What is under test is that stop() drains at all, not how long it may:
+    # `..._cannot_hold_up_stop` pins the bound. At the real 2 s a loaded CI
+    # runner stalled long enough to cut the drain after "late one" (syslog,
+    # Python 3.13: 2.46 s, ['late one']).
+    monkeypatch.setattr(BaseSourceAdapter, "DRAIN_TIMEOUT", 10.0)
     emitted = []
 
     async def on_entry(entry):
@@ -132,6 +139,10 @@ async def test_output_still_arriving_after_terminate_is_kept(name):
             out.feed_data(_line(name, f"late {message}"))
             await asyncio.sleep(0.02)
         out.feed_eof()
+        # Terminating ends both streams, as `_process` models. Left open,
+        # device_log's stderr reader held every run for the whole drain.
+        if not proc.stderr.at_eof():
+            proc.stderr.feed_eof()
 
     pending = []
 
