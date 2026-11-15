@@ -5,7 +5,7 @@ landmark_conventions: 2
 scrollable: true
 landmarks:
   - { element: "Heading", label: "Lazy" }
-  - { element: "Group", identifier: "lazy_list" }
+  - { element: "Cell", identifier: "lazy_row_0" }
 leads_to:
   - screen: "[[screens/more]]"
     action: 'tap_element label="More" element_type="Button"'

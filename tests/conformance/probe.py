@@ -249,7 +249,7 @@ IOS = ProbeContract(
         "location": "location_auth", "web": "web_heading_native",
         "diag": "diag_crash_uncaught", "state": "state_counter",
         "widgets": "widget_nav_done", "lists": "lists_row_0",
-        "lazy": "lazy_list", "taps": "taps_heading",
+        "lazy": "lazy_row_0", "taps": "taps_heading",
     },
     row_identifier_template="row_{index}",
     row_label_template="Row {index}",
@@ -310,7 +310,9 @@ IOS = ProbeContract(
         # shape #475 was about. Scrolls, unlike the other More screens.
         "lazy": {"scrollable": True, "landmarks": [
             {"element": "Heading", "label": "Lazy"},
-            {"element": "Group", "identifier": "lazy_list"},
+            # Its first row, not the list: a push read has no containers, and
+            # the row is a Cell, a Group or a StaticText by reader (#664).
+            {"element": "Cell", "identifier": "lazy_row_0"},
         ]},
         # Every button counts its own taps (#511). The heading is a label of
         # its own, beside the navigation title, so both platforms share it.
