@@ -15,11 +15,13 @@ complained about. Retire ios-preview when there is a reason beyond tidiness.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 from server.config import CONFIG_DIR
@@ -58,17 +60,102 @@ def binary_path() -> Path:
     return QUERN_BIN_DIR / BINARY_NAME
 
 
-def _newest_source_mtime(package: Path) -> float:
-    """Most recent mtime across the package's sources and manifest.
+# Bumped by hand when the build itself changes what it produces from the same
+# sources -- the swift build arguments below, say. Part of the digest so that
+# change rebuilds too; the sources alone would not notice it.
+_DIGEST_RECIPE = "quern-media build 1"
 
-    Walks the tree rather than checking Package.swift alone: editing a source
-    file without touching the manifest is the normal case, and a freshness
-    test that misses it would serve a stale binary indefinitely.
+# One build at a time. The server's start-up check and a first simulator
+# stream can both find the binary out of date, and two `swift build`s into one
+# scratch directory wait on SwiftPM's lock and then both install. The second
+# caller, let in after the first, finds the stamp current and returns.
+_build_lock = threading.Lock()
+
+
+def _sources(package: Path) -> list[Path]:
+    """What the binary is built from: the manifest and everything under
+    Sources, not Tests. Every file, not only *.swift, so a resource added
+    later is covered without anyone remembering this list -- except hidden
+    ones: Finder's .DS_Store would rebuild on a folder opened in Finder, and
+    no shipped copy (#663) would ever match it."""
+    sources = package / "Sources"
+    return [package / "Package.swift",
+            *sorted(p for p in sources.rglob("*")
+                    if p.is_file()
+                    and not any(part.startswith(".")
+                                for part in p.relative_to(sources).parts))]
+
+
+def source_digest(package: Path) -> str:
+    """A hash of what quern-media is built from: each file's path within the
+    package and its bytes, then the build recipe.
+
+    Content, not file times. A release tarball is made by `git archive`, which
+    stamps every file with its commit's time, and extracting it keeps that --
+    so an extracted source can look older than a binary built last week, and
+    the old mtime check kept the stale binary. The same defeat sim-bridge's
+    stamp exists for.
+
+    The local build's paths and toolchain are left out, so a signed copy built
+    elsewhere from the same sources (#663) is current here: its release step
+    writes this digest beside it.
     """
-    newest = (package / "Package.swift").stat().st_mtime
-    for path in (package / "Sources").rglob("*.swift"):
-        newest = max(newest, path.stat().st_mtime)
-    return newest
+    h = hashlib.sha256()
+    for path in _sources(package):
+        # One line per file, its own bytes hashed apart: a path cannot hold a
+        # NUL or a newline here, but a resource's bytes can, and run together
+        # they could shift a file boundary without changing the input (CR).
+        h.update(path.relative_to(package).as_posix().encode())
+        h.update(b"\0")
+        h.update(hashlib.sha256(path.read_bytes()).hexdigest().encode())
+        h.update(b"\n")
+    h.update(_DIGEST_RECIPE.encode())
+    return h.hexdigest()
+
+
+def expected_digest() -> str | None:
+    """The digest these sources build, or None when they are not here."""
+    package = package_dir()
+    return None if package is None else source_digest(package)
+
+
+def stamp_path() -> Path:
+    """What the installed binary was built from, and which binary that was.
+    Beside the binary rather than inside it, as sim-bridge's is: a signed
+    binary cannot be written to, and a missing stamp and a half-installed
+    binary both read as "rebuild"."""
+    return binary_path().with_name(f"{BINARY_NAME}.sha256")
+
+
+def binary_digest(path: Path) -> str:
+    """The sha256 of the binary itself. ~650 KB, so about a millisecond."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def stamp_text(source: str, binary: str) -> str:
+    """The stamp's contents: the source digest, then the binary's own. #663's
+    release step writes the same line beside the binary it ships."""
+    return f"{source} {binary}\n"
+
+
+def installed_digest() -> str | None:
+    """The source digest recorded for the installed binary, or None when there
+    is no binary, no readable stamp, or a stamp for some other binary.
+
+    The binary's own hash is in the stamp because a source digest alone says
+    nothing about which file it describes: a checkout from before stamps, or a
+    second process building other sources, replaces the binary and leaves the
+    stamp, which then still matches these sources (review).
+    """
+    binary = binary_path()
+    try:
+        fields = stamp_path().read_text().split()
+        if len(fields) != 2:
+            return None  # empty, or the one-field stamp of an early build
+        source, recorded = fields
+        return source if binary_digest(binary) == recorded else None
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 async def build_media_engine(force: bool = False) -> Path:
@@ -80,10 +167,10 @@ async def build_media_engine(force: bool = False) -> Path:
     is `build_media_engine_sync`, which the tests call directly because they
     have no loop to protect.
 
-    `quern setup` builds it too (`build_simulator_preview_engine`, #285), so
-    this is normally a no-op mtime check. It still builds when the sources
-    are newer than the installed binary -- a pull or a branch switch -- or
-    when setup could not.
+    `quern setup` builds it too (`build_simulator_preview_engine`, #285), and
+    the server checks it at start, so this is normally a no-op digest check.
+    It still builds when the sources changed since the installed binary was
+    built -- a pull or a branch switch -- or when nothing else could.
     """
     return await asyncio.to_thread(build_media_engine_sync, force)
 
@@ -91,11 +178,16 @@ async def build_media_engine(force: bool = False) -> Path:
 def build_media_engine_sync(force: bool = False) -> Path:
     """The blocking half of `build_media_engine`.
 
-    A no-op when the installed binary is newer than every source. Raises
+    A no-op when the installed binary's stamp matches the sources. Raises
     RuntimeError with an actionable message when sources or the toolchain are
     missing, so callers can decide whether that is fatal or a skipped
     optional step.
     """
+    with _build_lock:
+        return _build_locked(force)
+
+
+def _build_locked(force: bool) -> Path:
     package = package_dir()
     if package is None:
         raise RuntimeError(
@@ -104,13 +196,24 @@ def build_media_engine_sync(force: bool = False) -> Path:
         )
 
     installed = binary_path()
-    if not force and installed.exists():
-        if installed.stat().st_mtime >= _newest_source_mtime(package):
-            return installed
+    try:
+        digest = source_digest(package)
+    except OSError as exc:
+        raise RuntimeError(f"Could not read the QuernMedia sources: {exc}") from exc
+    if not force and installed_digest() == digest:
+        return installed
 
     # Asked before `which`: /usr/bin/swift is a stub on every Mac, and running
     # it without the developer tools shows macOS's install dialog (#659).
     swift = shutil.which("swift") if xcode_available() else None
+    if swift is None and not force and installed.exists():
+        # An out-of-date engine that runs beats none: a macOS update that
+        # breaks the Command Line Tools would otherwise end simulator preview
+        # and video until they are reinstalled -- and every binary from before
+        # stamps reads as out of date (review). Doctor still says so.
+        logger.warning("quern-media is out of date and there is no Swift toolchain to "
+                       "rebuild it; using the installed one")
+        return installed
     if swift is None:
         raise RuntimeError(
             "swift not found. Install Xcode or the Command Line Tools: "
@@ -159,6 +262,10 @@ def build_media_engine_sync(force: bool = False) -> Path:
     # in the destination directory so it is the same one. A running process
     # keeps the old inode and finishes on it; the next launch sees a complete
     # file.
+    # The old stamp goes first: between the binary landing and the new stamp
+    # being written, the old one would describe a file that is no longer there.
+    stamp = stamp_path()
+    stamp.unlink(missing_ok=True)
     tmp_fd, tmp_name = tempfile.mkstemp(
         prefix=f".{BINARY_NAME}.", suffix=".new", dir=str(QUERN_BIN_DIR)
     )
@@ -170,8 +277,56 @@ def build_media_engine_sync(force: bool = False) -> Path:
     except OSError:
         tmp_path.unlink(missing_ok=True)
         raise
+    # After the install, never before: a stamp written first would mark a
+    # failed build current. Renamed into place for the same reason as the
+    # binary -- a half-written stamp would read as some other digest.
+    tmp_stamp = stamp.with_name(f".{stamp.name}.new")
+    try:
+        tmp_stamp.write_text(stamp_text(digest, binary_digest(installed)))
+        os.replace(tmp_stamp, stamp)
+    except OSError:
+        # A stamp that cannot be written costs a rebuild next time, which is
+        # the safe direction. It must not fail the build that worked.
+        tmp_stamp.unlink(missing_ok=True)
+        logger.warning("Could not write %s; quern-media is rebuilt next time", stamp,
+                       exc_info=True)
     logger.info("quern-media installed at %s", installed)
     return installed
+
+
+def refresh_at_server_start() -> bool | None:
+    """The server's start-up check of quern-media: whether it was rebuilt, or
+    None where there is nothing to check (not a Mac, no developer tools, no
+    sources, or a checkout that does not own the bin dir).
+
+    The server builds it before every simulator stream anyway. This is for the
+    Screen Mirror app run without a server, which starts the quern-media
+    installed beside it as it finds it -- and a checkout moved by `git pull`
+    never ran setup to rebuild it.
+    """
+    import platform
+
+    from server.device.media import preview
+
+    if platform.system() != "Darwin" or not xcode_available() or package_dir() is None:
+        return None
+    if not preview._owns_the_bin_dir():
+        return None
+    before = file_identity(binary_path())
+    installed = build_media_engine_sync()
+    # The file replaced, not the stamp changed: a binary deleted under an
+    # intact stamp rebuilds to the same digest.
+    return file_identity(installed) != before
+
+
+def file_identity(path: Path) -> tuple[int, int] | None:
+    """A file's inode and mtime, None when it is not there: whether a build
+    replaced it."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_ino, st.st_mtime_ns
 
 
 def _locate_built_binary(swift: str, package: Path) -> Path:

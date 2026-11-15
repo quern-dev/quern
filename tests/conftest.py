@@ -870,3 +870,7 @@ def _no_real_screen_mirror_refresh(monkeypatch):
     from server.device.media import preview
 
     monkeypatch.setattr(preview, "refresh_at_server_start", lambda: None)
+    # And quern-media after it: a real `swift build` of the package.
+    from server.device.media import media_engine
+
+    monkeypatch.setattr(media_engine, "refresh_at_server_start", lambda: None)

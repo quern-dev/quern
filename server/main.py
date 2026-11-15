@@ -23,11 +23,11 @@ import re
 import signal
 import sys
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -330,6 +330,43 @@ async def _gauge_stream(app: FastAPI, udid: str, app_id: str,
     async with contextlib.aclosing(controller.gauge_stream(udid, app_id, interval)) as stream:
         async for snap in stream:
             yield snap
+
+
+_T = TypeVar("_T")
+
+
+async def _in_daemon_thread(fn: Callable[[], _T]) -> _T:
+    """`fn()` on a daemon thread, awaited. For start-up work that may still be
+    running at shutdown: `asyncio.to_thread`'s pool is joined at exit even
+    when the task is cancelled, so a cold `swift build` held `quern stop` past
+    its grace and was killed (review). A daemon thread is abandoned instead,
+    and what it was building is never stamped, so it is rebuilt next time."""
+    import threading
+
+    loop = asyncio.get_running_loop()
+    done = loop.create_future()
+
+    def settle(result: _T | None, exc: BaseException | None) -> None:
+        if not done.done():
+            if exc is None:
+                done.set_result(result)  # type: ignore[arg-type]
+            else:
+                done.set_exception(exc)
+
+    def work() -> None:
+        result: _T | None
+        exc: BaseException | None
+        try:
+            result, exc = fn(), None
+        except BaseException as e:  # noqa: BLE001 -- handed to the awaiting task
+            result, exc = None, e
+        try:
+            loop.call_soon_threadsafe(settle, result, exc)
+        except RuntimeError:
+            pass  # the loop has closed: nobody is waiting
+
+    threading.Thread(target=work, name=f"quern-{fn.__name__}", daemon=True).start()
+    return await done
 
 
 @asynccontextmanager
@@ -712,7 +749,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "Quern Preview %s is still running an older build and would not quit; "
                 "quit it and reopen it from the menu bar", refreshed.left_running)
 
-    app.state._mirror_task = asyncio.create_task(_refresh_screen_mirror())
+    async def _refresh_media_engine() -> None:
+        """quern-media, rebuilt if its sources changed: the Screen Mirror app
+        run without a server starts the one installed as it finds it. In the
+        background: a cold build takes seconds, up to minutes."""
+        from server.device.media import media_engine
+
+        try:
+            rebuilt = await _in_daemon_thread(media_engine.refresh_at_server_start)
+        except (RuntimeError, OSError) as exc:
+            logger.warning("Could not bring quern-media up to date: %s", exc)
+            return
+        if rebuilt:
+            logger.info("Rebuilt quern-media: its sources had changed")
+
+    async def _refresh_mirror_tools() -> None:
+        # The engine first: the app starts it, so an app reopened by its own
+        # refresh before the engine is rebuilt would start the old one.
+        await _refresh_media_engine()
+        await _refresh_screen_mirror()
+
+    app.state._mirror_task = asyncio.create_task(_refresh_mirror_tools())
 
     # Re-probe the simulator UI backend periodically. Selection used to be
     # latched at startup and never revisited, so an Xcode upgrade under a
@@ -2131,6 +2188,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     registrations_complete = _report_mcp_registrations()
     menubar_checked, menubar_repaired = _report_menubar(fix)
     mirror_checked, mirror_repaired = _report_screen_mirror(fix)
+    media_checked, media_repaired = _report_media_engine(fix)
     services_complete = _report_service_health(fix)
 
     if fix:
@@ -2140,9 +2198,10 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         # an unreadable Info.plist would have failed `doctor --fix && quern
         # start` after the venv repair succeeded.
         sys.exit(0 if repaired is not False and menubar_repaired is not False
-                 and mirror_repaired is not False else 1)
+                 and mirror_repaired is not False and media_repaired is not False else 1)
     sys.exit(0 if tools is not None and services_complete and node_complete
-             and registrations_complete and menubar_checked and mirror_checked else 1)
+             and registrations_complete and menubar_checked and mirror_checked
+             and media_checked else 1)
 
 
 def _report_menubar(fix: bool = False) -> tuple[bool, bool | None]:
@@ -2246,6 +2305,65 @@ def _report_screen_mirror(fix: bool = False) -> tuple[bool, bool | None]:
             print("  \u2713 up to date" + (" -- reopened" if refreshed.relaunched else ""))
         return True, True
     return stale_windows is not None, None
+
+
+def _report_media_engine(fix: bool = False) -> tuple[bool, bool | None]:
+    """quern-media, the simulator preview and video engine: whether the
+    installed build is the one these sources make. Returns `(checked,
+    repaired)`, as `_report_screen_mirror` does, and like it reports an out of
+    date build rather than failing it: the server rebuilds it at its next
+    start, and before any simulator stream.
+    """
+    import platform
+
+    if platform.system() != "Darwin":
+        return True, None
+    from server.device.media import media_engine
+
+    print()
+    print("Simulator preview engine (quern-media):")
+    if not media_engine.binary_path().exists():
+        print("  \u2013 not built: `quern setup` builds it when the developer tools are present")
+        return True, None
+    try:
+        expected = media_engine.expected_digest()
+        installed = media_engine.installed_digest()
+    except Exception as exc:  # noqa: BLE001 -- doctor reports, it does not crash
+        print(f"  ? could not be checked ({exc})")
+        return False, None
+    if expected is None:
+        print("  \u2013 its sources are not in this install")
+        return True, None
+    built = installed[:8] if installed else "a build with no stamp for it"
+    if installed == expected:
+        print(f"  \u2713 {built}, current")
+        return True, None
+    print(f"  \u2717 {built}: out of date, these sources build {expected[:8]}")
+    from server.device.ios._xcode import xcode_available
+    from server.device.media import preview
+
+    if not xcode_available():
+        print("      rebuilding it needs the developer tools: xcode-select --install")
+    elif preview._owns_the_bin_dir():
+        print("      it is rebuilt when the server next starts, or run `quern doctor --fix`")
+    else:
+        # The start-up check leaves a bin dir shared with another checkout alone.
+        print("      run `quern doctor --fix` from the checkout this Mac's quern runs")
+    if not fix:
+        return True, None
+    print("  --fix: rebuilding quern-media")
+    try:
+        media_engine.build_media_engine_sync()
+        rebuilt = media_engine.installed_digest() == expected
+    except (RuntimeError, OSError) as exc:
+        print(f"  \u2717 could not: {exc}")
+        return True, False
+    if not rebuilt:
+        # Without a toolchain the build keeps the old binary rather than fail.
+        print("  \u2717 could not: it is still the old build (is there a Swift toolchain?)")
+        return True, False
+    print("  \u2713 up to date")
+    return True, True
 
 
 def _report_node() -> bool:
