@@ -198,10 +198,9 @@ class AppExitedAfterRead(AppExitedDuringRead):
     def __init__(self, app: str, pid: int) -> None:
         DeviceError.__init__(
             self,
-            f"{app or 'the app'} (pid {pid}) crashed after an earlier read of its screen "
-            "through the accessibility service, so this read shows what the crash left: "
-            "an iOS 27 bug in UIKit's accessibility code crashes some apps under this "
-            "read (#669)",
+            f"{app or 'the app'} (pid {pid}) crashed after a read of its screen through "
+            "the accessibility service, so the screen it was on is gone: an iOS 27 bug "
+            "in UIKit's accessibility code crashes some apps under this read (#669)",
             tool="coredevice")
         self.app = app
         self.pid = pid
@@ -856,8 +855,9 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
     return _refuse_bare(elements, uuid)
 
 
-#: `(udid, since) -> [(pid, report text)]`, as `CoreDeviceAxReader.crash_reports`.
-CrashReports = Callable[[str, float], Awaitable[list[tuple[int | None, str]]]]
+#: `(udid, since) -> [(pid, report text)]`, as `CoreDeviceAxReader.crash_reports`:
+#: the phone's newest reports, None when it cannot be asked at all.
+CrashReports = Callable[[str, float], Awaitable[list[tuple[int | None, str]] | None]]
 
 
 class CoreDeviceAxReader:
@@ -873,15 +873,21 @@ class CoreDeviceAxReader:
     def __init__(self) -> None:
         #: The app each device's last read saw in front: (pid, name, when).
         self._front: dict[str, tuple[int, str, float]] = {}
-        #: `(udid, since) -> [(pid, report text)]`: the phone's crash reports
-        #: dated since `since` (a time.time()). Set by the controller, which
-        #: knows the phone's hardware UDID; None reads none, and no crash
-        #: after a read is ever claimed.
+        #: The phone's newest crash reports (`CrashReports`). Set by the
+        #: controller, which knows the phone's hardware UDID; None reads none,
+        #: and no crash after a read is ever claimed.
         self.crash_reports: CrashReports | None = None
 
     def forget_front(self, udid: str) -> None:
-        """quern ended the app itself (terminate_app): its pid going is no crash."""
+        """quern ended or replaced the app itself (terminate, install,
+        uninstall): its pid going is no crash."""
         self._front.pop(udid, None)
+
+    def note_front(self, udid: str, pid: int | None, app: str, when: float) -> None:
+        """A push read made elsewhere saw this app in front -- launch_app's
+        check -- so a crash that read causes is looked for too."""
+        if isinstance(pid, int):
+            self._front[udid] = (pid, app, when)
 
     async def describe_all(self, udid: str, *, snapshot_depth: int | None = None,
                            source_timeout: float | None = None,
@@ -892,16 +898,26 @@ class CoreDeviceAxReader:
         previous = self._front.get(udid)
         seen: dict = {}
         kwargs = {"previous_pid": previous[0] if previous else None, "seen": seen}
+        # The window a report may be dated in starts when the read did: a
+        # crash during its close or its process query predates the return.
+        started = time.time()
         try:
             elements = await read_tree(udid, timeout=timeout, **kwargs)
         except BareAppTree:
             await asyncio.sleep(BARE_CONFIRM_S)
             elements = await read_tree(udid, timeout=timeout, **kwargs)
-        if isinstance(seen.get("pid"), int):
-            self._front[udid] = (seen["pid"], seen.get("app") or "", time.time())
+        pid = seen.get("pid")
+        if isinstance(pid, int) and (
+                previous is None or pid == previous[0]
+                or seen.get("previous_alive") is not None):
+            # Kept as it was while whether the earlier app lives is unknown --
+            # the phone could not be asked, or the deadline came first -- so
+            # the next read asks again rather than the question being lost.
+            self._front[udid] = (pid, seen.get("app") or "", started)
         # Another app in front, and the one before gone: a crash after the
         # read that saw it, if the phone's report says so (#669). The same app
-        # under a new pid was relaunched, which is not the case asked about.
+        # under a new pid was relaunched, which is not the case asked about --
+        # a crash and a relaunch before the next read are not told apart.
         if (previous is not None and seen.get("previous_alive") is False
                 and seen.get("app") != previous[1]
                 and await self._crashed_under_a_read(udid, previous)):
@@ -918,16 +934,21 @@ class CoreDeviceAxReader:
         if self.crash_reports is None:
             return False
         pid, _, when = previous
+        # The whole wait is bounded, a slow listing or pull included.
         deadline = time.monotonic() + CRASH_REPORT_WAIT_S
         while True:
+            left = deadline - time.monotonic()
             try:
-                reports = await self.crash_reports(udid, when - CRASH_REPORT_SLACK_S)
-            except Exception as e:  # noqa: BLE001 -- could not tell, so no claim
+                reports = await asyncio.wait_for(
+                    self.crash_reports(udid, when - CRASH_REPORT_SLACK_S), max(left, 0.1))
+            except Exception as e:  # noqa: BLE001 -- not this time: try again in the time left
                 logger.info("[coredevice] crash reports of %s unread: %s", udid[:8], e)
-                return False
+                reports = []
+            if reports is None:
+                return False      # the phone cannot be asked (no USB): never will be
             for report_pid, text in reports:
                 if report_pid == pid:
                     return CRASH_669_FRAME in text
-            if time.monotonic() >= deadline:
+            if time.monotonic() + CRASH_REPORT_POLL_S >= deadline:
                 return False
             await asyncio.sleep(CRASH_REPORT_POLL_S)

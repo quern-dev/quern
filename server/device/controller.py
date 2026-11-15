@@ -1503,6 +1503,8 @@ class DeviceController(DeviceControllerUI):
                 await self._install_app_legacy(resolved, app_path)
             else:
                 await self.devicectl.install_app(resolved, app_path)
+            # An install over the running app ends it: quern's doing (#669).
+            self.coredevice_ax.forget_front(resolved)
         else:
             await self.simctl.install_app(resolved, app_path)
         return resolved
@@ -1631,9 +1633,13 @@ class DeviceController(DeviceControllerUI):
             try:
                 # Bounded by what is left of the grace, so a stalled read
                 # (#684) does not run on for its own 20 s (#689 review).
+                read_at = time.time()
                 front = await coredevice_ax.front_app(
                     udid, timeout=max(deadline - time.monotonic(), self._PUSH_READ_MIN_S))
                 error = ""
+                # A push read like any other, so a crash it causes after it
+                # answers is looked for at the next read (#669 review).
+                self.coredevice_ax.note_front(udid, front[0], front[1], read_at)
             except coredevice_ax.AppExitedDuringRead as exc:
                 self._push_crashed_apps.setdefault(udid, set()).add(exc.app)
                 return {"launch_confirmed": None,
@@ -1803,15 +1809,26 @@ class DeviceController(DeviceControllerUI):
             return False
         return any((e.label or "") == name for e in elements)
 
-    async def _crash_reports_since(self, udid: str, since: float) -> list[tuple[int | None, str]]:
-        """A phone's crash reports dated from `since` on, each as (pid, text).
+    #: How many of a phone's newest crash reports the check after a push read
+    #: pulls (#669). The crash it looks for has just happened.
+    _NEWEST_REPORTS = 3
 
-        For the push reader's check for a crash after a read (#669). Read over
-        USB, so a phone quern reaches only over the network has none to give.
-        A report's time is the phone's local time, taken as the Mac's.
+    async def _crash_reports_since(
+        self, udid: str, since: float,
+    ) -> list[tuple[int | None, str]] | None:
+        """A phone's newest crash reports, each as (pid, text); None when the
+        phone cannot be asked at all.
+
+        For the push reader's check for a crash after a read (#669). Newest by
+        the time in each report's name, which is the phone's local time, so
+        the order holds whatever zone the phone and the Mac are in; `since`
+        bounds them only loosely, a day back, as `select_recent` does. Read
+        over USB, so a phone quern reaches only over the network has none.
+        A pull that copies some reports and not others gives the ones it
+        copied.
         """
         import tempfile
-        from datetime import datetime
+        from datetime import datetime, timedelta
         from pathlib import Path
 
         from server.sources import ios_crash
@@ -1819,14 +1836,21 @@ class DeviceController(DeviceControllerUI):
         lib_udid = await self.get_libimobiledevice_udid(udid)
         cmd = ios_crash.command()
         if not lib_udid or not cmd:
-            return []
-        cutoff = datetime.fromtimestamp(since).replace(microsecond=0)
-        names = [n for n in await ios_crash.list_reports(cmd, lib_udid)
-                 if (t := ios_crash.report_time(n)) is not None and t >= cutoff]
+            return None
+        cutoff = datetime.fromtimestamp(since) - timedelta(days=1)
+        dated = sorted(
+            ((t, n) for n in await ios_crash.list_reports(cmd, lib_udid)
+             if (t := ios_crash.report_time(n)) is not None and t >= cutoff),
+            reverse=True)
+        names = [n for _, n in dated[:self._NEWEST_REPORTS]]
         if not names:
             return []
         with tempfile.TemporaryDirectory() as out:
-            pulled = await ios_crash.pull_reports(cmd, lib_udid, names, Path(out))
+            try:
+                pulled = await ios_crash.pull_reports(cmd, lib_udid, names, Path(out))
+            except ios_crash.IosCrashError as e:
+                # One still being written (empty) is no reason to drop the rest.
+                pulled = e.copied
             texts = [(Path(out) / name).read_text(errors="replace") for name in pulled]
         return [(ios_crash.report_pid(text), text) for text in texts]
 
@@ -1854,8 +1878,11 @@ class DeviceController(DeviceControllerUI):
         elif self._is_physical(resolved) and self._coredevice_serves(resolved):
             # Over CoreDevice, no WDA (#664): found by its running process.
             was_running = await self.devicectl.terminate_app(resolved, bundle_id)
-            # Its pid gone at the next read is quern's doing, not a crash.
-            self.coredevice_ax.forget_front(resolved)
+            if was_running:
+                # Its pid gone at the next read is quern's doing, not a crash.
+                # (It may have been in the background, and another app's
+                # crash then goes unlooked-for: a terminate is rare there.)
+                self.coredevice_ax.forget_front(resolved)
         elif self._is_physical(resolved):
             was_running = await self.wda_client.terminate_app(resolved, bundle_id)
             if was_running is False and not await self.devicectl.is_installed(
@@ -1882,6 +1909,7 @@ class DeviceController(DeviceControllerUI):
             await self.adb.uninstall_app(resolved, bundle_id)
         elif self._is_physical(resolved):
             await self.devicectl.uninstall_app(resolved, bundle_id)
+            self.coredevice_ax.forget_front(resolved)   # as install_app
         else:
             await self.simctl.uninstall_app(resolved, bundle_id)
         return resolved

@@ -603,6 +603,15 @@ class TestLaunching:
         ctrl.wda_client.launch_app.assert_not_called()
         ctrl.wda_client.app_state.assert_not_called()
 
+    async def test_the_check_is_remembered_as_a_read(self, monkeypatch):
+        """A push read like any other: a crash it causes after it answers is
+        looked for at the next read (#669 review)."""
+        ctrl = self._ctrl(monkeypatch, [(37, " "), (1583, "QuernProbeScene")])
+
+        await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert ctrl.coredevice_ax._front[PHONE][:2] == (1583, "QuernProbeScene")
+
     async def test_env_restarts_the_app_so_it_applies(self, monkeypatch):
         ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])
 
