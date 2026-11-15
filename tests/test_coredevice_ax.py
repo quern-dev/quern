@@ -926,6 +926,43 @@ class TestACrashAfterTheRead:
 
         assert calls[1] == (1583, 100)
 
+    async def test_an_app_noted_during_the_read_is_kept(self, monkeypatch):
+        """A launch check that ran while this read was under way."""
+        reader = CoreDeviceAxReader()
+
+        async def read(udid, *, timeout, previous_pids=(), seen=None):
+            reader.note_front(PHONE, 1583, "Settings", time.time())
+            seen.update(pid=37, app="SpringBoard")
+            return []
+        monkeypatch.setattr(coredevice_ax, "read_tree", read)
+
+        await reader.describe_all(PHONE)
+
+        assert [e.pid for e in reader._front[PHONE]] == [37, 1583]
+
+    async def test_a_process_service_that_hangs_is_could_not_tell(
+            self, monkeypatch, phone_address):
+        """Its connect too: a hang there once held a read to its deadline."""
+        lib, state = _fake_lib([_as("InitialDump", SAFARI), SAFARI])
+
+        class Hangs:
+            def __init__(self, rsd):
+                pass
+
+            async def __aenter__(self):
+                await asyncio.sleep(30)
+
+            async def __aexit__(self, *a):
+                return False
+        lib.AppService = Hangs
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        monkeypatch.setattr(coredevice_ax, "CLOSE_S", 0.2)
+        seen: dict = {}
+
+        await asyncio.wait_for(read_tree(PHONE, timeout=5, previous_pids=(617,), seen=seen), 3)
+
+        assert seen["alive"] == {617: None}
+
     async def test_a_cancelled_check_leaves_the_question(self, monkeypatch):
         """The caller left during the report poll: the next read asks again."""
         reader, calls = self._reader(
