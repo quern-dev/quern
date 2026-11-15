@@ -21,6 +21,7 @@ from server.knowledge.landmarks import (
     check_conventions,
     conventions_report,
     needs_page_urls,
+    pushed_container_note,
     resolve_targets,
     scan_knowledge_base,
 )
@@ -346,11 +347,15 @@ async def identify_screen(request: Request, body: IdentifyRequest):
     controller = _get_controller(request)
 
     try:
+        # A whole-screen read, as get_screen_summary's identify makes: on a
+        # phone opted into the tree push it reads the push, not WDA (#664).
+        # A snapshot depth or a mode still asks for WDA's own read.
         elements, resolved = await controller.get_ui_elements(
             body.udid,
             snapshot_depth=body.snapshot_depth,
             source_timeout=body.source_timeout,
             mode=body.mode,
+            whole_screen=True,
         )
     except DeviceError as e:
         from server.api.device import _handle_device_error
@@ -360,7 +365,20 @@ async def identify_screen(request: Request, body: IdentifyRequest):
         await controller.web_page_urls(resolved)
         if needs_page_urls(registry.all_screens(body.app)) else None
     )
-    return registry.identify(elements, app=body.app, page_urls=page_urls)
+    result = registry.identify(elements, app=body.app, page_urls=page_urls)
+    # Which reader made the read, and what it had to say -- a crash it caused
+    # (#669) above all, which leaves another screen to identify.
+    # This request's reader, not the device's last: a concurrent read can
+    # rewrite that while page_urls is awaited.
+    result["backend"] = controller.read_by() or controller.backend_that_served(resolved)
+    warning = controller.read_note()
+    if warning:
+        result["warning"] = warning
+    if controller.read_by() == controller.coredevice_ax.TOOL_NAME:
+        note = pushed_container_note(result)
+        if note:
+            result["note"] = note
+    return result
 
 
 # ---------------------------------------------------------------------------

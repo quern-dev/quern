@@ -13,6 +13,7 @@ import yaml
 from pydantic import ValidationError
 
 from server.device.element_types import (
+    FAMILIES,
     element_rule,
     equivalence,
     portability_finding,
@@ -503,6 +504,46 @@ def identify_screen(
             "matched_landmarks": [],
             "partial_matches": partial_matches,
         }
+
+
+def pushed_container_note(result: dict) -> str | None:
+    """Why a screen missed on a read from the tree push, when only landmarks on
+    containers missed (#664).
+
+    The push carries no containers -- no Table, TabBar or NavigationBar, and a
+    Group or Other only when it is not one -- so a landmark on one, recorded
+    through WDA or a simulator, does not match it, and the screen reads as not
+    this one with nothing to say why. None when something matched, and for a
+    screen none of whose landmarks matched: that one is not a near miss.
+    """
+    if result.get("matched") is not None:
+        return None
+    containers = {t.lower() for t in FAMILIES["containers"]}
+    missed = []
+    for partial in result.get("partial_matches") or []:
+        unmatched = [r["landmark"] for r in partial.get("landmarks") or []
+                     if not r.get("matched")]
+        if partial.get("matched") and unmatched and all(
+                not lm.get("absent") and (lm.get("element") or "").lower() in containers
+                for lm in unmatched):
+            def name(lm: dict) -> str:
+                pinned = lm.get("identifier") or lm.get("label") or lm.get("label_contains")
+                return f"{lm['element']} {pinned or ''}".strip()
+            names = ", ".join(name(lm) for lm in unmatched)
+            missed.append(f"{partial['screen']} ({names})")
+    if not missed:
+        return None
+    return (
+        "Read from the tree the device pushes (backend coredevice), which has no "
+        "containers: a landmark on a Table, TabBar, NavigationBar, Toolbar or "
+        "CollectionView does not match it, nor one on a Group or Other that is a "
+        f"container. Missed only on such landmarks: {'; '.join(missed)}. "
+        "The knowledge base is out of step with how this device is read, so update "
+        "it: in each screen's landmarks, replace these with an element inside the "
+        "container that every reader sees -- a button, the heading, a row's "
+        "identifier -- then load_landmarks again and identify to confirm "
+        "(quern://app-knowledge-guide/landmarks-sync). Until then, snapshot_depth "
+        "identifies through WDA.")
 
 
 # ---------------------------------------------------------------------------

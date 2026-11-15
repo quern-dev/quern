@@ -389,7 +389,7 @@ def parse_tree(data: bytes) -> Tree:
             "role_description": _role_description(etype, traits),
             "AXLabel": _text(bundle.get(ATTR_LABEL)) or "",
             "AXUniqueId": _text(bundle.get(ATTR_IDENTIFIER)),
-            "AXValue": _text(bundle.get(ATTR_VALUE)),
+            "AXValue": _value(bundle.get(ATTR_VALUE)),
             "frame": _rect(bundle.get(ATTR_FRAME)),
             "enabled": not traits & TRAIT_NOT_ENABLED,
             "help": None,
@@ -399,6 +399,24 @@ def parse_tree(data: bytes) -> Tree:
     if not elements:
         raise AxTreeError(f"{dump_type or 'tree dump'} holds no elements")
     return Tree(dump_type, elements, app_pid, refs)
+
+
+def _value(value: Any) -> str | None:
+    """An element's value as text, whole numbers included.
+
+    A tab-bar item's value is an integer in the push -- 1 on the tab in front,
+    0 on the others -- and so is a segmented control's segment, where WDA
+    reports "1" for the selected one; read as text only, it was dropped, and
+    every landmark with `selected: true` missed (#664). Measured on an iPhone
+    11: the probe's tabs and segments and Clock's tabs, and nothing else on
+    those screens or Settings'. A bool is a number to the archive too. A
+    slider's float (50.0) is left out, as before: WDA says "50%".
+    """
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int):
+        return str(value)
+    return _text(value)
 
 
 def _role_description(etype: str, traits: int) -> str:
