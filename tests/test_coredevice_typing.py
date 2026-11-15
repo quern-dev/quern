@@ -404,3 +404,103 @@ class TestSettingAValue:
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
         with pytest.raises(DeviceError, match="failed"):
             await set_value(PHONE, lambda e: True, "x", timeout=5)
+
+
+class TestLaunching:
+    """launch_app over CoreDevice (#664): devicectl, confirmed from the push."""
+
+    def _ctrl(self, monkeypatch, fronts):
+        ctrl, _ = _phone(monkeypatch, before="", reads=[])
+        ctrl.devicectl.launch_app = AsyncMock(return_value=1583)
+        ctrl.wda_client.launch_app = AsyncMock()
+        ctrl.wda_client.app_state = AsyncMock()
+        monkeypatch.setattr("server.device.ios.coredevice_ax.front_app",
+                            AsyncMock(side_effect=fronts))
+        monkeypatch.setattr("server.device.controller.asyncio.sleep", AsyncMock())
+        return ctrl
+
+    async def test_it_launches_with_devicectl_and_confirms_the_pid(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert info == {}
+        ctrl.devicectl.launch_app.assert_awaited_once_with(
+            PHONE, "com.quern.probe.scene", env={"QUERN_AUTOMATION": "YES"},
+            terminate_existing=False)
+        ctrl.wda_client.launch_app.assert_not_called()
+        ctrl.wda_client.app_state.assert_not_called()
+
+    async def test_env_restarts_the_app_so_it_applies(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE,
+                                        env={"MODE": "test"})
+
+        kwargs = ctrl.devicectl.launch_app.await_args.kwargs
+        assert kwargs == {"env": {"QUERN_AUTOMATION": "YES", "MODE": "test"},
+                          "terminate_existing": True}
+        # devicectl does not say whether one was running.
+        assert info == {"env_applied": True, "restarted": None}
+
+    async def test_it_waits_for_the_app_to_come_to_the_front(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [(1, " "), (1583, "QuernProbeScene")])
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+        assert info == {}
+
+    async def test_an_app_that_never_comes_up_is_an_error(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [(1, " ")] * 50)
+        monkeypatch.setattr(ctrl, "_PUSH_FRONT_GRACE_S", 0)
+
+        with pytest.raises(DeviceError, match="not in the foreground: the home screen"):
+            await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+    async def test_an_unreadable_screen_is_no_verdict(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [DeviceError("no tunnel", tool="coredevice")] * 50)
+        monkeypatch.setattr(ctrl, "_PUSH_FRONT_GRACE_S", 0)
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert info["launch_confirmed"] is None and "no tunnel" in info["launch_check_error"]
+
+    async def test_no_pid_is_no_verdict(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [])
+        ctrl.devicectl.launch_app.return_value = 0
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert info["launch_confirmed"] is None
+
+    async def test_a_phone_not_on_the_push_launches_through_wda(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [])
+        monkeypatch.setattr("server.device.controller_ui.get_device_ui_reader", lambda: "wda")
+        ctrl.wda_client.app_state = AsyncMock(return_value=4)
+        ctrl.wda_client.activate_app = AsyncMock()
+
+        await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        ctrl.devicectl.launch_app.assert_not_called()
+        ctrl.wda_client.activate_app.assert_awaited_once()
+
+
+class TestDevicectlLaunch:
+    async def test_env_and_restart_reach_the_command(self):
+        from server.device.ios.devicectl import DevicectlBackend
+        backend = DevicectlBackend()
+        backend._run_devicectl = AsyncMock(
+            return_value=('{"result": {"process": {"processIdentifier": 1583}}}', ""))
+
+        pid = await backend.launch_app(PHONE, "com.x", env={"A": "1"}, terminate_existing=True)
+
+        assert pid == 1583
+        args = backend._run_devicectl.await_args.args
+        assert args[args.index("--environment-variables") + 1] == '{"A": "1"}'
+        assert "--terminate-existing" in args and args[-1] == "com.x"
+
+    async def test_no_options_by_default(self):
+        from server.device.ios.devicectl import DevicectlBackend
+        backend = DevicectlBackend()
+        backend._run_devicectl = AsyncMock(return_value=("{}", ""))
+        await backend.launch_app(PHONE, "com.x")
+        args = backend._run_devicectl.await_args.args
+        assert "--environment-variables" not in args and "--terminate-existing" not in args
