@@ -176,33 +176,24 @@ class TestTypes:
 
 
 class TestTheSelectedTab:
-    """A selected tab-bar item reads as value "1", as WDA reports it (#664).
-
-    The push gives it no value, only the Selected trait, so a landmark written
-    with `selected: true` -- every tab landmark -- missed on a pushed read.
-    """
+    """A tab-bar item's value is a number in the push: 1 in front, 0 for the
+    others. Read as text only, it was dropped, so every landmark with
+    `selected: true` -- every tab landmark -- missed (#664)."""
 
     def test_the_tab_in_front_and_only_it(self):
         _, elements = parse_push(PROBE_TEXT)
         tabs = {e["AXUniqueId"]: e["AXValue"] for e in elements
                 if (e["AXUniqueId"] or "").startswith("tab_")}
-        assert tabs == {"tab_text": "1", "tab_controls": None,
-                        "tab_scroll": None, "tab_links": None}
+        assert tabs == {"tab_text": "1", "tab_controls": "0",
+                        "tab_scroll": "0", "tab_links": "0"}
 
-    def test_nothing_else_reads_as_selected(self):
-        for push in (SETTINGS, SAFARI):
-            _, elements = parse_push(push)
-            assert not [e for e in elements if e["AXValue"] == "1"]
-
-    @pytest.mark.parametrize(("value", "traits", "expected"), [
-        (None, 0x210000009, "1"),       # the selected tab, measured
-        (None, 0x210000001, None),      # the others
-        ("3", 0x210000009, "3"),        # a value of its own is kept
-        ("", 0x2200040008, ""),         # an empty text field stays empty
-        (None, 0x0408, None),           # a search field too
+    @pytest.mark.parametrize(("value", "expected"), [
+        (1, "1"), (0, "0"), (True, "1"), (False, "0"), (42, "42"),
+        ("40%", "40%"), (None, None),
+        (50.0, None),           # a slider's: WDA says "50%", so not guessed at
     ])
-    def test_the_trait_fills_only_an_empty_value(self, value, traits, expected):
-        assert coredevice_ax._value(value, traits) == expected
+    def test_numbers_read_as_text(self, value, expected):
+        assert coredevice_ax._value(value) == expected
 
     def test_a_tab_landmark_matches_the_pushed_tree(self):
         """The probe knowledge base's own tab landmark, recorded through WDA."""
@@ -993,10 +984,77 @@ class TestIdentifyingTheScreen:
 
         result = client.post("/api/v1/landmarks/identify", json={
             "app": "tabled", "udid": PHONE, "snapshot_depth": 12}).json()
+        summary = client.get("/api/v1/device/screen-summary", params={
+            "udid": PHONE, "identify": True, "snapshot_depth": 12}).json()
+        assert "identify_note" not in summary
 
         ctrl.coredevice_ax.describe_all.assert_not_called()
         assert result["partial_matches"][0]["matched"] == 1   # only the Table missed
         assert "note" not in result
+
+
+class TestIdentifyingAfterAPushCrash:
+    """identify reads the push now, which can crash the app (#669): the answer
+    says so, and which reader made it, as get_ui_tree does."""
+
+    def test_the_crash_is_on_the_answer(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = AsyncMock(
+            side_effect=coredevice_ax.AppExitedDuringRead("QuernProbeScene", 711))
+
+        result = TestIdentifyingTheScreen()._client(ctrl).post(
+            "/api/v1/landmarks/identify", json={"app": "settings", "udid": PHONE}).json()
+
+        assert "QuernProbeScene" in result["warning"]
+        assert result["backend"] == ctrl.wda_client.TOOL_NAME
+
+    def test_a_clean_push_read_names_its_reader(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+
+        result = TestIdentifyingTheScreen()._client(ctrl).post(
+            "/api/v1/landmarks/identify", json={"app": "settings", "udid": PHONE}).json()
+
+        assert result["backend"] == CoreDeviceAxReader.TOOL_NAME
+        assert "warning" not in result
+
+
+class TestTheOtherIdentifyReads:
+    """The navigation check and an action's screen context identify too, and
+    read through WDA on a phone meant to run without it (#664 review)."""
+
+    async def test_the_navigation_check_reads_the_push(self, monkeypatch):
+        from server.api.device_ui import _identify_now
+        from server.knowledge.landmarks import LandmarkRegistry
+
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+
+        await _identify_now(ctrl, PHONE, LandmarkRegistry(), use_cache=False)
+
+        ctrl.coredevice_ax.describe_all.assert_awaited()
+        ctrl.wda_client.describe_all.assert_not_called()
+
+    async def test_after_a_crash_it_keeps_the_action_depth(self, monkeypatch):
+        """WDA with no depth is the full walk, 34.5 s of a long list."""
+        from server.api.device_ui import _identify_now
+        from server.knowledge.landmarks import LandmarkRegistry
+
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+
+        await _identify_now(ctrl, PHONE, LandmarkRegistry(), use_cache=False)
+
+        ctrl.coredevice_ax.describe_all.assert_not_called()
+        assert ctrl.wda_client.describe_all.await_args.kwargs.get("snapshot_depth") == 12
+
+    async def test_an_actions_screen_context_reads_the_push(self, monkeypatch):
+        from server.api.device import _capture_screen_context
+
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+
+        context = await _capture_screen_context(ctrl, PHONE)
+
+        assert context["backend"] == CoreDeviceAxReader.TOOL_NAME
+        ctrl.wda_client.describe_all.assert_not_called()
 
 
 class TestReadsInsideActionsStayOnWda:

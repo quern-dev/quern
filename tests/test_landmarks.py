@@ -1223,3 +1223,35 @@ class TestThePushedContainerNote:
 
         assert pushed_container_note(
             self._identify(Landmark(element="Button", identifier="ok"))) is None
+
+    def test_not_beside_a_screen_that_matched(self):
+        """Review: an exact match elsewhere is the answer, and the note
+        would read as a rival to it."""
+        from server.knowledge.landmarks import identify_screen as identify
+        from server.knowledge.landmarks import pushed_container_note
+
+        result = identify([_el("Button", "OK", "ok")], [
+            ScreenLandmarks(screen="home", landmarks=[Landmark(element="Button", identifier="ok")]),
+            ScreenLandmarks(screen="profile", landmarks=[
+                Landmark(element="Button", identifier="ok"),
+                Landmark(element="Other", identifier="settings_header")]),
+        ])
+
+        assert result["matched"] == "home"
+        assert pushed_container_note(result) is None
+
+    def test_not_for_a_screen_nothing_of_matched(self):
+        """A screen of container landmarks alone misses on every push read;
+        naming it each time says nothing about this screen."""
+        from server.knowledge.landmarks import pushed_container_note
+
+        assert pushed_container_note(
+            self._identify(Landmark(element="Table", identifier="results_table"))) is None
+
+    def test_a_label_contains_landmark_is_named_by_it(self):
+        from server.knowledge.landmarks import pushed_container_note
+
+        result = self._identify(Landmark(element="Button", identifier="ok"),
+                                Landmark(element="TabBar", label_contains="Tab"))
+
+        assert "s (TabBar Tab)" in pushed_container_note(result)

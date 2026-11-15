@@ -82,7 +82,6 @@ TRAIT_SECURE_TEXT = 0x1000000
 TRAIT_BUTTON = 1 << 0
 TRAIT_LINK = 1 << 1
 TRAIT_IMAGE = 1 << 2
-TRAIT_SELECTED = 1 << 3
 TRAIT_STATIC_TEXT = 1 << 6
 TRAIT_NOT_ENABLED = 1 << 8
 TRAIT_SEARCH_FIELD = 1 << 10
@@ -390,7 +389,7 @@ def parse_tree(data: bytes) -> Tree:
             "role_description": _role_description(etype, traits),
             "AXLabel": _text(bundle.get(ATTR_LABEL)) or "",
             "AXUniqueId": _text(bundle.get(ATTR_IDENTIFIER)),
-            "AXValue": _value(bundle.get(ATTR_VALUE), traits),
+            "AXValue": _value(bundle.get(ATTR_VALUE)),
             "frame": _rect(bundle.get(ATTR_FRAME)),
             "enabled": not traits & TRAIT_NOT_ENABLED,
             "help": None,
@@ -402,21 +401,22 @@ def parse_tree(data: bytes) -> Tree:
     return Tree(dump_type, elements, app_pid, refs)
 
 
-def _value(value: Any, traits: int) -> str | None:
-    """An element's value, or ``"1"`` for a selected one that has none.
+def _value(value: Any) -> str | None:
+    """An element's value as text, whole numbers included.
 
-    A selected tab-bar item has no value in the push, only the Selected trait;
-    WDA reports it as value "1", and that is where landmarks' `selected` and
-    every other reader of selection look (#664). Measured on an iPhone 11: the
-    trait is on the tab in front and on no other element of the screen.
+    A tab-bar item's value is an integer in the push -- 1 on the tab in front,
+    0 on the others -- and so is a segmented control's segment, where WDA
+    reports "1" for the selected one; read as text only, it was dropped, and
+    every landmark with `selected: true` missed (#664). Measured on an iPhone
+    11: the probe's tabs and segments and Clock's tabs, and nothing else on
+    those screens or Settings'. A bool is a number to the archive too. A
+    slider's float (50.0) is left out, as before: WDA says "50%".
     """
-    text = _text(value)
-    # Never a text input's: an empty field read as "1" is text typing's
-    # read-back would see that is not there.
-    if (not text and traits & TRAIT_SELECTED
-            and not traits & (TRAIT_TEXT_ENTRY | TRAIT_SEARCH_FIELD)):
-        return "1"
-    return text
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int):
+        return str(value)
+    return _text(value)
 
 
 def _role_description(etype: str, traits: int) -> str:

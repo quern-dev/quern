@@ -366,6 +366,12 @@ async def identify_screen(request: Request, body: IdentifyRequest):
         if needs_page_urls(registry.all_screens(body.app)) else None
     )
     result = registry.identify(elements, app=body.app, page_urls=page_urls)
+    # Which reader made the read, and what it had to say -- a crash it caused
+    # (#669) above all, which leaves another screen to identify.
+    result["backend"] = controller.backend_that_served(resolved)
+    warning = controller.read_note()
+    if warning:
+        result["warning"] = warning
     if controller.read_by() == controller.coredevice_ax.TOOL_NAME:
         note = pushed_container_note(result)
         if note:

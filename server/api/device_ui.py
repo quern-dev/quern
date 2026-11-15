@@ -83,10 +83,17 @@ async def _identify_now(
     documented tap. A landmark deeper than 12 therefore leaves the screen
     unidentified here, which makes no claim rather than a wrong one. Raises on
     a failed read, which the check treats as "could not tell".
+
+    On a phone the tree push serves, it reads the push, as `identify_screen`
+    does, so the check starts no WDA (#664). A depth there would mean WDA's
+    read, and after a crash (#669) the push does not serve, so the depth stays.
     """
+    udid = await controller.resolve_udid(udid)
+    pushed = controller._device_tree_reader(udid) is not None
     elements, resolved = await controller.get_ui_elements(
         udid, use_cache=use_cache,
-        snapshot_depth=controller._read_depth(udid, None),
+        snapshot_depth=None if pushed else controller._read_depth(udid, None),
+        whole_screen=pushed,
     )
     page_urls = (
         await controller.web_page_urls(resolved)
