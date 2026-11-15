@@ -811,16 +811,20 @@ class TestACrashAfterTheRead:
                   '{"pid": 100, "frames": "-[UIView _accessibilityWindowSections]"}')
     REPORT_OTHER = '{"app_name":"QuernProbeScene"}\n{"pid": 100, "frames": "abort()"}'
 
-    def _reader(self, monkeypatch, reads, reports=None):
-        """A reader whose reads fill `seen` from `reads`, in turn."""
+    def _reader(self, monkeypatch, reads, reports=None, *, read_s=0.0):
+        """A reader whose reads see `reads` in turn: (pid, app, alive), alive
+        being the answer for every earlier pid asked about."""
         calls = []
 
-        async def fake_read(udid, *, timeout, previous_pid=None, seen=None):
-            calls.append(previous_pid)
+        async def fake_read(udid, *, timeout, previous_pids=(), seen=None):
+            calls.append(previous_pids)
+            if read_s:
+                await asyncio.sleep(read_s)
             pid, app, alive = reads[len(calls) - 1]
             seen.update(pid=pid, app=app)
-            if previous_pid is not None and pid != previous_pid:
-                seen["previous_alive"] = alive
+            others = [p for p in previous_pids if p != pid]
+            if others:
+                seen["alive"] = dict.fromkeys(others, alive)
             return [{"type": "Application", "AXLabel": app}]
         monkeypatch.setattr(coredevice_ax, "read_tree", fake_read)
         monkeypatch.setattr(coredevice_ax, "CRASH_REPORT_WAIT_S", 0.0)
@@ -841,7 +845,9 @@ class TestACrashAfterTheRead:
         assert (caught.value.app, caught.value.pid) == ("QuernProbeScene", 100)
         assert isinstance(caught.value, coredevice_ax.AppExitedDuringRead)  # every guard
         assert "crashed after a read" in str(caught.value)
-        assert calls == [None, 100]
+        assert calls == [(), (100,)]
+        # Asked for the app's own reports first.
+        assert reader.crash_reports.await_args.args[2] == "QuernProbeScene"
 
     @pytest.mark.parametrize(("reads", "reports"), [
         # Switched away, still running.
@@ -867,9 +873,8 @@ class TestACrashAfterTheRead:
         assert reader.crash_reports.await_count == (1 if dead_elsewhere else 0)
 
     async def test_could_not_tell_is_asked_again(self, monkeypatch):
-        """Not knowing whether the earlier app lives -- the phone could not be
-        asked, or the deadline came first -- keeps it, so the question is not
-        lost (review)."""
+        """Not knowing whether the earlier app lives keeps it, so the question
+        is not lost (review)."""
         reader, calls = self._reader(
             monkeypatch, [(100, "QuernProbeScene", None), (37, "SpringBoard", None),
                           (37, "SpringBoard", False)],
@@ -880,15 +885,24 @@ class TestACrashAfterTheRead:
         with pytest.raises(coredevice_ax.AppExitedAfterRead):
             await reader.describe_all(PHONE)
 
-        assert calls == [None, 100, 100]
+        assert calls == [(), (100,), (37, 100)]
+
+    async def test_but_not_for_ever(self, monkeypatch):
+        """A phone that never answers stops being asked after a few reads."""
+        reads = [(100, "QuernProbeScene", None)] + [(37, "SpringBoard", None)] * 5
+        reader, calls = self._reader(monkeypatch, reads, reports=[])
+
+        for _ in reads:
+            await reader.describe_all(PHONE)
+
+        assert [100 in c for c in calls] == [False, True, True, True, False, False]
 
     async def test_a_deadline_before_the_question_keeps_it_too(self, monkeypatch):
         reader, calls = self._reader(
-            monkeypatch, [(100, "QuernProbeScene", None), (37, "SpringBoard", None)],
-            reports=[])
+            monkeypatch, [(100, "QuernProbeScene", None)], reports=[])
 
-        async def answered_at_the_deadline(udid, *, timeout, previous_pid=None, seen=None):
-            calls.append(previous_pid)
+        async def answered_at_the_deadline(udid, *, timeout, previous_pids=(), seen=None):
+            calls.append(previous_pids)
             seen.update(pid=37, app="SpringBoard")       # and nothing about 100
             return [{"type": "Application", "AXLabel": "SpringBoard"}]
 
@@ -896,7 +910,43 @@ class TestACrashAfterTheRead:
         monkeypatch.setattr(coredevice_ax, "read_tree", answered_at_the_deadline)
         await reader.describe_all(PHONE)
 
-        assert reader._front[PHONE][0] == 100
+        assert [e.pid for e in reader._front[PHONE]] == [37, 100]
+
+    async def test_a_launch_check_does_not_erase_an_earlier_question(self, monkeypatch):
+        """Read A; A crashes after the read; launch_app's check sees B. The
+        next read still asks about A (review)."""
+        reader, calls = self._reader(
+            monkeypatch, [(100, "QuernProbeScene", None), (1583, "Settings", False)],
+            reports=[(100, self.REPORT_669)])
+
+        await reader.describe_all(PHONE)
+        reader.note_front(PHONE, 1583, "Settings", time.time())
+        with pytest.raises(coredevice_ax.AppExitedAfterRead):
+            await reader.describe_all(PHONE)
+
+        assert calls[1] == (1583, 100)
+
+    async def test_a_cancelled_check_leaves_the_question(self, monkeypatch):
+        """The caller left during the report poll: the next read asks again."""
+        reader, calls = self._reader(
+            monkeypatch, [(100, "QuernProbeScene", None), (37, "SpringBoard", False),
+                          (37, "SpringBoard", False)])
+        started = asyncio.Event()
+
+        async def hangs(udid, since, app):
+            started.set()
+            await asyncio.sleep(30)
+        reader.crash_reports = hangs
+        monkeypatch.setattr(coredevice_ax, "CRASH_REPORT_WAIT_S", 30.0)
+
+        await reader.describe_all(PHONE)
+        task = asyncio.create_task(reader.describe_all(PHONE))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert [e.pid for e in reader._front[PHONE]] == [100]
 
     async def test_an_unreadable_listing_is_tried_again(self, monkeypatch):
         """A report still being written fails the pull; the next look has it."""
@@ -927,7 +977,7 @@ class TestACrashAfterTheRead:
             monkeypatch, [(100, "QuernProbeScene", None), (37, "SpringBoard", False)])
         monkeypatch.setattr(coredevice_ax, "CRASH_REPORT_WAIT_S", 0.3)
 
-        async def slow(udid, since):
+        async def slow(udid, since, app):
             await asyncio.sleep(30)
         reader.crash_reports = slow
 
@@ -937,16 +987,17 @@ class TestACrashAfterTheRead:
         assert time.monotonic() - started < 2
 
     async def test_the_window_opens_when_the_earlier_read_began(self, monkeypatch):
+        """Not when it returned: a crash during its close predates that."""
         reader, _ = self._reader(
             monkeypatch, [(100, "QuernProbeScene", None), (37, "SpringBoard", False)],
-            reports=[])
-        before = time.time()
+            reports=[], read_s=0.5)
 
+        began = time.time()
         await reader.describe_all(PHONE)
         await reader.describe_all(PHONE)
 
         since = reader.crash_reports.await_args.args[1]
-        assert before - coredevice_ax.CRASH_REPORT_SLACK_S <= since <= time.time() - 1.9
+        assert abs(since - (began - coredevice_ax.CRASH_REPORT_SLACK_S)) < 0.2
 
     async def test_unreadable_reports_claim_nothing(self, monkeypatch):
         from server.sources.ios_crash import IosCrashError
@@ -974,7 +1025,7 @@ class TestACrashAfterTheRead:
         reader.forget_front(PHONE)
         await reader.describe_all(PHONE)
 
-        assert calls == [None, None]
+        assert calls == [(), ()]
 
     async def test_a_report_written_late_is_waited_for(self, monkeypatch):
         """ReportCrash writes it after the process has gone."""
@@ -989,26 +1040,27 @@ class TestACrashAfterTheRead:
             await reader.describe_all(PHONE)
         assert reader.crash_reports.await_count == 3
 
-    async def test_the_read_asks_about_the_previous_app_on_its_connection(
+    async def test_the_read_asks_about_earlier_apps_on_its_connection(
             self, monkeypatch, phone_address):
         lib, state = _fake_lib([_as("InitialDump", SAFARI), SAFARI])
-        state.processes = [618]                       # Safari in front; 617 gone
+        state.processes = [618, 500]                  # Safari in front; 617 gone, 500 not
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
         seen: dict = {}
 
-        await asyncio.wait_for(read_tree(PHONE, timeout=5, previous_pid=617, seen=seen), 10)
+        await asyncio.wait_for(
+            read_tree(PHONE, timeout=5, previous_pids=(617, 618, 500), seen=seen), 10)
 
-        assert seen == {"pid": 618, "app": "Safari", "previous_alive": False}
+        assert seen == {"pid": 618, "app": "Safari", "alive": {617: False, 500: True}}
 
-    async def test_a_previous_app_still_running_says_so(self, monkeypatch, phone_address):
+    async def test_a_phone_that_cannot_list_says_so(self, monkeypatch, phone_address):
         lib, state = _fake_lib([_as("InitialDump", SAFARI), SAFARI])
-        state.processes = [617, 618]                  # switched away, not gone
+        state.processes = None                        # the process service refuses
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
         seen: dict = {}
 
-        await asyncio.wait_for(read_tree(PHONE, timeout=5, previous_pid=617, seen=seen), 10)
+        await asyncio.wait_for(read_tree(PHONE, timeout=5, previous_pids=(617,), seen=seen), 10)
 
-        assert seen["previous_alive"] is True
+        assert seen["alive"] == {617: None}
 
     async def test_the_same_app_asks_nothing(self, monkeypatch, phone_address):
         lib, state = _fake_lib([_as("InitialDump", SAFARI), SAFARI])
@@ -1016,9 +1068,9 @@ class TestACrashAfterTheRead:
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
         seen: dict = {}
 
-        await asyncio.wait_for(read_tree(PHONE, timeout=5, previous_pid=618, seen=seen), 10)
+        await asyncio.wait_for(read_tree(PHONE, timeout=5, previous_pids=(618,), seen=seen), 10)
 
-        assert "previous_alive" not in seen
+        assert "alive" not in seen
 
     async def test_the_controller_records_it_like_any_read_crash(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
@@ -1068,8 +1120,25 @@ class TestThePhonesCrashReports:
 
         assert pulled == ["JetsamEvent-2026-11-15-100700.ips",
                           "QuernProbeScene-2026-11-15-100617.ips",
-                          "Other-2026-11-15-090000.ips"]
-        assert [pid for pid, _ in reports] == [None, 1933, None]
+                          "Other-2026-11-15-090000.ips",
+                          "QuernProbeScene-2026-11-15-085221.ips"]
+        assert [pid for pid, _ in reports] == [None, 1933, None, None]
+
+    async def test_the_apps_own_reports_come_first(self, monkeypatch):
+        """A burst of newer reports from others does not crowd it out."""
+        from datetime import datetime
+
+        names = ["QuernProbeScene-2026-11-15-100617.ips"] + [
+            f"JetsamEvent-2026-11-15-1007{i:02d}.ips" for i in range(10)]
+        ctrl, pulled = self._ctrl(monkeypatch, names,
+                                  {"QuernProbeScene-2026-11-15-100617.ips": '{"pid": 100}'})
+
+        reports = await ctrl._crash_reports_since(
+            PHONE, datetime(2026, 11, 15, 10, 6, 15).timestamp(), "QuernProbeScene")
+
+        assert pulled[0] == "QuernProbeScene-2026-11-15-100617.ips"
+        assert len(pulled) == ctrl._NEWEST_REPORTS
+        assert reports[0][0] == 100
 
     async def test_newest_by_the_phones_clock_whatever_the_zone(self, monkeypatch):
         """A phone hours behind the Mac dates its reports before `since`;
@@ -1121,7 +1190,7 @@ class TestThePhonesCrashReports:
 
         await ctrl.terminate_app("com.example.other", udid=PHONE)
 
-        assert ctrl.coredevice_ax._front[PHONE][0] == 100
+        assert ctrl.coredevice_ax._front[PHONE][0].pid == 100
 
     @pytest.mark.parametrize("action", ["install", "uninstall"])
     async def test_an_install_or_uninstall_forgets_it(self, monkeypatch, action):

@@ -10,6 +10,7 @@ keyboard: "Hello abc #@" arrived as "Helloあbc＃＠", and the set put it right
 from __future__ import annotations
 
 import plistlib
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -610,7 +611,10 @@ class TestLaunching:
 
         await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
 
-        assert ctrl.coredevice_ax._front[PHONE][:2] == (1583, "QuernProbeScene")
+        first = ctrl.coredevice_ax._front[PHONE][0]
+        assert (first.pid, first.app) == (1583, "QuernProbeScene")
+        # Dated from when its read began, so a crash under it is in the window.
+        assert first.when <= time.time() and time.time() - first.when < 5
 
     async def test_env_restarts_the_app_so_it_applies(self, monkeypatch):
         ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])
