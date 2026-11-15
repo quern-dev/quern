@@ -17,6 +17,7 @@ from server.models import (
     DeviceOperationUnsupportedError,
     DeviceState,
     DeviceType,
+    InvalidDeviceRequestError,
 )
 from server.tooling.tool_probe import probe_command
 
@@ -417,23 +418,65 @@ class DevicectlBackend:
 
         return pid
 
-    async def terminate_app(self, uuid: str, bundle_id: str) -> None:
-        """Terminate an app on a physical device using stored PID."""
-        pid = self._launched_pids.get((uuid, bundle_id))
-        if not pid:
-            raise DeviceError(
-                f"No known PID for {bundle_id} on {uuid[:8]}. "
-                "App must be launched via Quern to track its PID.",
-                tool="devicectl",
-            )
-
-        await self._run_devicectl(
-            "device", "process", "terminate",
-            "--device", uuid,
-            "--pid", str(pid),
+    async def app_url(self, uuid: str, bundle_id: str) -> str | None:
+        """The installed app's bundle URL, system apps included, or None when
+        it is not installed. Raises DeviceError when devicectl cannot say."""
+        stdout, _ = await self._run_devicectl(
+            "device", "info", "apps", "--device", uuid, "--include-all-apps",
+            "--bundle-id", bundle_id, json_output=True,
         )
+        try:
+            apps = json.loads(stdout)["result"]["apps"]
+            urls = [a.get("url") for a in apps if a.get("bundleIdentifier") == bundle_id]
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            raise DeviceError(
+                f"devicectl's app list could not be read: {e}", tool="devicectl",
+            ) from e
+        return urls[0] if urls and isinstance(urls[0], str) else None
 
+    async def running_pids(self, uuid: str, app_url: str) -> list[int]:
+        """The pids of an app's main executable: a process whose executable
+        sits directly inside the bundle at `app_url` -- not an extension,
+        which lives deeper, under PlugIns. Raises DeviceError when devicectl
+        cannot say."""
+        stdout, _ = await self._run_devicectl(
+            "device", "info", "processes", "--device", uuid, json_output=True,
+        )
+        bundle = app_url if app_url.endswith("/") else app_url + "/"
+        try:
+            processes = json.loads(stdout)["result"]["runningProcesses"]
+            pids = []
+            for p in processes:
+                executable = str(p.get("executable") or "")
+                pid = p.get("processIdentifier")
+                rest = executable[len(bundle):] if executable.startswith(bundle) else None
+                if rest and "/" not in rest and isinstance(pid, int):
+                    pids.append(pid)
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            raise DeviceError(
+                f"devicectl's process list could not be read: {e}", tool="devicectl",
+            ) from e
+        return pids
+
+    async def terminate_app(self, uuid: str, bundle_id: str) -> bool:
+        """Terminate an app on a physical device: whether it was running.
+
+        Found by what is running now, not by a pid quern stored when it
+        launched it -- that is wrong for an app started any other way, or
+        restarted since (#664). Raises InvalidDeviceRequestError for an app
+        that is not installed, so a mistyped bundle id is not a clean stop
+        (#629).
+        """
+        url = await self.app_url(uuid, bundle_id)
+        if url is None:
+            raise InvalidDeviceRequestError(
+                f"{bundle_id} is not installed on {uuid[:8]}", tool="devicectl")
+        pids = await self.running_pids(uuid, url)
+        for pid in pids:
+            await self._run_devicectl(
+                "device", "process", "terminate", "--device", uuid, "--pid", str(pid))
         self._launched_pids.pop((uuid, bundle_id), None)
+        return bool(pids)
 
     async def uninstall_app(self, uuid: str, bundle_id: str) -> None:
         """Uninstall an app from a physical device."""

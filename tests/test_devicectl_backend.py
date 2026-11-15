@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from server.device.ios.devicectl import DevicectlBackend
-from server.models import DeviceError, DeviceState, DeviceType
+from server.models import DeviceError, DeviceState, DeviceType, InvalidDeviceRequestError
 
 #: This file *is* the discovery code -- the autouse stubs in conftest replace
 #: these very methods, so it opts out rather than asserting against them.
@@ -181,30 +181,82 @@ class TestLaunchApp:
 # ---------------------------------------------------------------------------
 
 
+APP_URL = "file:///private/var/containers/Bundle/Application/DF56/QuernProbeScene.app/"
+
+
+def _apps(*apps) -> str:
+    return json.dumps({"result": {"apps": list(apps)}})
+
+
+def _processes(*processes) -> str:
+    return json.dumps({"result": {"runningProcesses": list(processes)}})
+
+
 class TestTerminateApp:
-    async def test_terminate_with_known_pid(self):
-        backend = DevicectlBackend()
-        backend._launched_pids[("UUID", "com.example.app")] = 999
-        backend._run_devicectl = AsyncMock(return_value=("", ""))
+    """By what is running now, not a pid stored at launch (#664): measured on an
+    iPhone 11, an app's bundle URL is the prefix of its main executable."""
 
-        await backend.terminate_app("UUID", "com.example.app")
-
-        backend._run_devicectl.assert_called_once_with(
-            "device",
-            "process",
-            "terminate",
-            "--device",
-            "UUID",
-            "--pid",
-            "999",
-        )
-        assert ("UUID", "com.example.app") not in backend._launched_pids
-
-    async def test_terminate_unknown_pid_raises(self):
+    def _backend(self, apps: str, processes: str) -> DevicectlBackend:
         backend = DevicectlBackend()
 
-        with pytest.raises(DeviceError, match="No known PID"):
-            await backend.terminate_app("UUID", "com.example.app")
+        async def run(*args, **kwargs):
+            if args[:3] == ("device", "info", "apps"):
+                return apps, ""
+            if args[:3] == ("device", "info", "processes"):
+                return processes, ""
+            return "", ""
+        backend._run_devicectl = AsyncMock(side_effect=run)
+        return backend
+
+    def _terminated(self, backend) -> list[str]:
+        return [c.args[-1] for c in backend._run_devicectl.await_args_list
+                if c.args[:3] == ("device", "process", "terminate")]
+
+    async def test_the_running_app_is_found_and_terminated(self):
+        backend = self._backend(
+            _apps({"bundleIdentifier": "com.quern.probe.scene", "url": APP_URL}),
+            _processes(
+                {"executable": APP_URL + "QuernProbeScene", "processIdentifier": 1653},
+                # An extension of the same app, deeper in the bundle: left alone.
+                {"executable": APP_URL + "PlugIns/Widget.appex/Widget",
+                 "processIdentifier": 1654},
+                {"executable": "file:///Applications/Preferences.app/Preferences",
+                 "processIdentifier": 1488}))
+
+        assert await backend.terminate_app("UUID", "com.quern.probe.scene") is True
+
+        assert self._terminated(backend) == ["1653"]
+
+    async def test_one_launched_elsewhere_is_found_too(self):
+        """No pid stored: started by a person, or by another tool."""
+        backend = self._backend(
+            _apps({"bundleIdentifier": "com.quern.probe.scene", "url": APP_URL}),
+            _processes({"executable": APP_URL + "QuernProbeScene", "processIdentifier": 7}))
+        assert backend._launched_pids == {}
+
+        assert await backend.terminate_app("UUID", "com.quern.probe.scene") is True
+
+    async def test_an_app_not_running_is_said_and_nothing_terminated(self):
+        backend = self._backend(
+            _apps({"bundleIdentifier": "com.quern.probe.scene", "url": APP_URL}),
+            _processes())
+
+        assert await backend.terminate_app("UUID", "com.quern.probe.scene") is False
+        assert self._terminated(backend) == []
+
+    async def test_an_app_not_installed_is_refused(self):
+        """A mistyped bundle id is not a clean stop (#629)."""
+        backend = self._backend(_apps(), _processes())
+
+        with pytest.raises(InvalidDeviceRequestError, match="not installed"):
+            await backend.terminate_app("UUID", "com.example.nothere")
+
+    async def test_an_unreadable_list_is_an_error_not_not_running(self):
+        backend = self._backend(
+            _apps({"bundleIdentifier": "com.quern.probe.scene", "url": APP_URL}), "not json")
+
+        with pytest.raises(DeviceError, match="process list could not be read"):
+            await backend.terminate_app("UUID", "com.quern.probe.scene")
 
 
 # ---------------------------------------------------------------------------
