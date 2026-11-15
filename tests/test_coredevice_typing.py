@@ -587,6 +587,7 @@ class TestTheLaunchCheck:
 
     async def test_each_read_is_bounded_by_what_is_left(self, monkeypatch):
         ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])
+        monkeypatch.setattr(ctrl, "_PUSH_READ_MIN_S", 1.0)    # the floor below the grace
         monkeypatch.setattr("server.device.controller.time.monotonic", _clock([100.0]))
 
         await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
@@ -601,3 +602,11 @@ def _clock(times: list[float]):
     def now() -> float:
         return left.pop(0) if len(left) > 1 else left[0]
     return now
+
+
+
+def test_a_launch_read_has_room_for_a_fresh_subscription():
+    """At 4 s, a launch whose first subscription stalled was cut off just
+    before the fresh connection's tree came (#684, live on an iPhone 11)."""
+    from server.device.controller import DeviceController
+    assert DeviceController._PUSH_READ_MIN_S >= coredevice_ax.FIRST_PUSH_S + 2.0

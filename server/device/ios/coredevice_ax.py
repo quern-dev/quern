@@ -130,8 +130,9 @@ BARE_CONFIRM_S = 1.0
 #: subscription made the moment an app was relaunched got nothing for 20 s,
 #: in 2 of 3 tries; asking again on the same connection got nothing either,
 #: and a fresh connection had the tree 1.6 s later. A healthy first push
-#: comes at about 1.0-1.3 s.
-FIRST_PUSH_S = 5.0
+#: comes at about 1.0-1.3 s, every time it was measured; a needless fresh
+#: connection costs only itself.
+FIRST_PUSH_S = 3.0
 
 #: Each cleanup step's bound: unsubscribing and closing must not hold a read
 #: up, or change its outcome.

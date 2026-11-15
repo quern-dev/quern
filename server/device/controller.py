@@ -1598,9 +1598,11 @@ class DeviceController(DeviceControllerUI):
     #: How long a launched app has to come to the front of the tree push. A
     #: push read is ~2 s, so this allows two or three.
     _PUSH_FRONT_GRACE_S = 6.0
-    #: The least a confirming read is given, even with the grace spent: a push
-    #: read takes ~2.5 s, and a shorter bound would fail every one.
-    _PUSH_READ_MIN_S = 4.0
+    #: The least a confirming read is given, even with the grace spent: room for
+    #: a subscription that stays silent to be made again on a fresh connection
+    #: (#684) and still deliver, ~1.6 s after it. Measured: at 4 s, a launch
+    #: whose first subscription stalled was cut off just before its tree came.
+    _PUSH_READ_MIN_S = 6.5
 
     async def _confirm_in_front_over_coredevice(
         self, udid: str, bundle_id: str, pid: int,
