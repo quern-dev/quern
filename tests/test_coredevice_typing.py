@@ -384,6 +384,8 @@ class TestSettingAValue:
         async def newest(queue, held=None):
             return bare, bare, bare
         monkeypatch.setattr(coredevice_ax, "_newest_tree", newest)
+        # No pushes reach the queue here: not a silence to resubscribe over.
+        monkeypatch.setattr(coredevice_ax, "_first_push", AsyncMock(return_value=True))
 
         with pytest.raises(coredevice_ax.BareAppTree):
             await set_value(PHONE, lambda e: True, "x", timeout=5)
@@ -400,6 +402,8 @@ class TestSettingAValue:
         async def newest(queue, held=None):
             return newest_tree, first, newest_tree
         monkeypatch.setattr(coredevice_ax, "_newest_tree", newest)
+        # No pushes reach the queue here: not a silence to resubscribe over.
+        monkeypatch.setattr(coredevice_ax, "_first_push", AsyncMock(return_value=True))
 
         with pytest.raises(DeviceError, match="changed"):
             await set_value(PHONE, lambda e: e["AXUniqueId"] == "com.apple.settings.general",
