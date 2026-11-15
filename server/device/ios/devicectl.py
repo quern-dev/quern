@@ -363,12 +363,25 @@ class DevicectlBackend:
 
         return devices
 
-    async def launch_app(self, uuid: str, bundle_id: str) -> int:
-        """Launch an app on a physical device. Returns the PID."""
+    async def launch_app(self, uuid: str, bundle_id: str, *,
+                         env: dict[str, str] | None = None,
+                         terminate_existing: bool = False) -> int:
+        """Launch an app on a physical device. Returns the PID.
+
+        A running app is brought forward with the same pid unless
+        `terminate_existing`; `env` reaches only a process that starts
+        (measured on an iPhone 11, iOS 27.2.1).
+        """
+        options: list[str] = []
+        if env:
+            options += ["--environment-variables", json.dumps(env)]
+        if terminate_existing:
+            options.append("--terminate-existing")
         try:
             stdout, _ = await self._run_devicectl(
                 "device", "process", "launch",
                 "--device", uuid,
+                *options,
                 bundle_id,
                 json_output=True,
             )

@@ -81,6 +81,9 @@ SEND_S = 5.0
 #: pymobiledevice3's own `type` uses.
 KEY_HOLD_S = 0.02
 
+#: Between the tap that focuses a field and the first key for it.
+FOCUS_S = 0.4
+
 #: Hardware buttons quern names, as (HID usage page, usage). Consumer page:
 #: AXe's capture and #624's probe agree on these.
 BUTTONS = {
@@ -176,6 +179,9 @@ def _pmd3() -> SimpleNamespace:
             BUTTON_UP=hid_service.HID_BUTTON_STATE_UP,
             KEYS=hid_service.ASCII_TO_HID,
             SHIFT=hid_service.KEY_LEFT_SHIFT,
+            COMMAND=hid_service.KEY_LEFT_GUI,
+            KEY_A=hid_service.KEY_A,
+            BACKSPACE=hid_service.KEY_BACKSPACE,
         )
     except (ImportError, AttributeError) as e:
         raise NotSent(f"pymobiledevice3's HID services are not available ({e})") from e
@@ -189,6 +195,37 @@ def types_on_us_keys(text: str) -> bool:
     except NotSent:
         return False
     return all(ch in keys for ch in text)
+
+
+async def _press(lib: SimpleNamespace, session: Any, progress: Any,
+                 chords: list[tuple[int | None, int]]) -> None:
+    """Press each (modifier, key) on a virtual keyboard of its own (#664).
+
+    Registered on a HID service of its own and closed with it afterwards:
+    while one is attached iOS hides the on-screen keyboard, so a keyboard left
+    on the held session would hide it for the minute that session stays open.
+    Measured on an iPhone 11: closing the service brings the on-screen
+    keyboard straight back.
+    """
+    keyboard = lib.UniversalHID(session.rsd)
+    try:
+        await asyncio.wait_for(keyboard.connect(), CONNECT_S)
+        service = await asyncio.wait_for(keyboard.create_keyboard_service(), CONNECT_S)
+        progress.reached = True
+        for modifier, usage in chords:
+            if modifier is not None:
+                # Pressed on its own first: iOS can ignore a modifier that
+                # arrives with the key, as pymobiledevice3's own `type` found
+                # for Shift.
+                await _report(keyboard.send_keyboard(service, (modifier,)))
+                await _sleep(KEY_HOLD_S)
+            held = (modifier, usage) if modifier is not None else (usage,)
+            await _report(keyboard.send_keyboard(service, held))
+            await _sleep(KEY_HOLD_S)
+            await _report(keyboard.send_keyboard(service, ()))
+            await _sleep(KEY_HOLD_S)
+    finally:
+        await asyncio.shield(_bounded_close(keyboard.close))
 
 
 async def _report(send: Any) -> None:
@@ -326,14 +363,9 @@ class CoreDeviceInput:
     async def type_text(self, udid: str, text: str) -> str:
         """Type `text` as US key positions on a virtual keyboard (#664).
 
-        The keyboard is registered on a HID service of its own and closed with
-        it when the text is typed: while one is attached iOS hides the
-        on-screen keyboard, so a keyboard left on the held session would hide
-        it for the minute that session stays open. Measured on an iPhone 11:
-        closing the service brings the on-screen keyboard straight back.
-
-        Text with a character no US key types goes through WDA, as anything
-        HID cannot send does; the controller sets such text through the
+        On a keyboard of its own, closed after the text (`_press`). Text
+        with a character no US key types goes through WDA, as anything HID
+        cannot send does; the controller sets such text through the
         accessibility service instead when it has a field to set it in.
         """
         async def send(lib: SimpleNamespace, session: _Session, screen: Screen | None,
@@ -341,30 +373,38 @@ class CoreDeviceInput:
             keys = [lib.KEYS.get(ch) for ch in text]
             if None in keys:
                 raise NotSent("the text has a character no US key types")
-            keyboard = lib.UniversalHID(session.rsd)
-            try:
-                await asyncio.wait_for(keyboard.connect(), CONNECT_S)
-                service = await asyncio.wait_for(keyboard.create_keyboard_service(),
-                                                 CONNECT_S)
-                progress.reached = True
-                for usage, shift in keys:
-                    if shift:
-                        # Pressed on its own first: iOS can ignore a Shift that
-                        # arrives with the key, as pymobiledevice3's own
-                        # `type` found.
-                        await _report(keyboard.send_keyboard(service, (lib.SHIFT,)))
-                        await _sleep(KEY_HOLD_S)
-                    held = (lib.SHIFT, usage) if shift else (usage,)
-                    await _report(keyboard.send_keyboard(service, held))
-                    await _sleep(KEY_HOLD_S)
-                    await _report(keyboard.send_keyboard(service, ()))
-                    await _sleep(KEY_HOLD_S)
-            finally:
-                await asyncio.shield(_bounded_close(keyboard.close))
+            await _press(lib, session, progress,
+                         [(lib.SHIFT if shift else None, usage) for usage, shift in keys])
 
         return await self._or_fallback(udid, "typing", send,
                                        lambda: self._fallback.type_text(udid, text),
                                        needs_screen=False)
+
+    async def select_all_and_delete(self, udid: str, x: float, y: float,
+                                    element_type: str | None = None,
+                                    identifier: str | None = None) -> str:
+        """Clear the field at (x, y): tap it, then Cmd+A and Backspace (#664).
+
+        Keystrokes, as WDA's clear is, so the app sees the edit: measured on an
+        iPhone 11, its delegate saw one replacement of all 8 characters of an
+        email field with "" -- a password field's 6 too. The type and
+        identifier WDA's version takes are not needed here.
+        """
+        async def send(lib: SimpleNamespace, session: _Session, screen: Screen,
+                       progress: _Progress) -> None:
+            hx, hy = screen.point(x, y)
+            progress.reached = True
+            await _report(session.hid.send_touchscreen(lib.CONTACT, hx, hy))
+            await _sleep(TAP_HOLD_S)
+            await _report(session.hid.send_touchscreen(lib.RELEASE, hx, hy))
+            await _sleep(FOCUS_S)
+            await _press(lib, session, progress,
+                         [(lib.COMMAND, lib.KEY_A), (None, lib.BACKSPACE)])
+
+        return await self._or_fallback(
+            udid, "clearing", send,
+            lambda: self._fallback.select_all_and_delete(
+                udid, x=x, y=y, element_type=element_type, identifier=identifier))
 
     # -- delivery ----------------------------------------------------------
 

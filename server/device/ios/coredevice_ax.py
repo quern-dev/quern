@@ -580,16 +580,14 @@ async def _close(provider: Any, rsd: Any) -> None:
             await asyncio.wait_for(step(), CLOSE_S)
 
 
-async def set_value(uuid: str, match: Callable[[dict], bool], value: str, *,
-                    timeout: float = READ_TIMEOUT_S) -> None:
-    """Set the value of the first on-screen element `match` accepts, through
-    the accessibility service (#664).
+async def _with_settled_tree(uuid: str, timeout: float, what: str,
+                             use: Callable[[Any, Tree, Tree, Tree], Any]) -> Any:
+    """Connect, subscribe, take the settled tree, and hand it to `use` with the
+    provider, then close: `use(provider, tree, first, newest)`'s answer.
 
-    The text is set, not typed: the app's editing callbacks do not run for it
-    (`UITextFieldDelegate` did not fire, measured on an iPhone 11). Nothing
-    here says whether it took; the caller reads the field back. Raises
-    DeviceError when the element is not on screen or the request cannot be
-    sent.
+    A DeviceError from `use` passes through; a timeout says it may have
+    happened (`what` names it); anything else from pymobiledevice3 is a
+    DeviceError.
     """
     from server.device.performance import _device_address
 
@@ -608,41 +606,74 @@ async def set_value(uuid: str, match: Callable[[dict], bool], value: str, *,
                 await provider.dtx._ctrl_channel.invoke(
                     "clientNeedsAccessibility:", True, expects_reply=False)
                 tree, first, newest = await _newest_tree(queue, {})
-                if first.app_pid is not None and newest.app_pid != first.app_pid:
-                    # Switched, or killed by the read (#669): whatever is on
-                    # screen now is not the field's app (#682 review).
-                    raise DeviceError(
-                        f"the app on {uuid[:8]}'s screen changed while the field was "
-                        "looked up; nothing was set", tool="coredevice")
-                _refuse_bare(tree.elements, uuid)
-                found = [i for i, e in enumerate(tree.elements) if match(e)]
-                if len(found) != 1:
-                    # More than one is refused, never the first taken: the text
-                    # would go to whichever came first (#682 review).
-                    raise DeviceError(
-                        f"the field to set is not in {uuid[:8]}'s accessibility tree"
-                        if not found else
-                        f"{len(found)} elements on {uuid[:8]}'s screen match the field; "
-                        "nothing was set", tool="coredevice")
-                ref = tree.refs[found[0]] if found[0] < len(tree.refs) else None
-                if ref is None:
-                    raise DeviceError(
-                        f"{uuid[:8]}'s accessibility tree does not say how to address "
-                        "the field", tool="coredevice")
-                await provider.dtx._ctrl_channel.invoke(
-                    "processDataFromHost:", set_value_request(*ref, value),
-                    expects_reply=True)
+                if (first.app_pid is not None and newest.app_pid != first.app_pid
+                        and await _app_alive(rsd, lib, first.app_pid) is False):
+                    # The read killed the app (#669): said, as read_tree says
+                    # it, so the caller can stop reading this device's push.
+                    raise AppExitedDuringRead(first.elements[0]["AXLabel"], first.app_pid)
+                return await use(provider, tree, first, newest)
             finally:
                 await _close(provider, rsd)
     except DeviceError:
         raise
     except TimeoutError as e:
-        # The request may have gone before the deadline: not "nothing set".
-        raise DeviceError(f"setting a value on {uuid[:8]} timed out after {timeout:g}s; "
-                          "it may or may not have been set", tool="coredevice") from e
+        raise DeviceError(f"{what} on {uuid[:8]} timed out after {timeout:g}s",
+                          tool="coredevice") from e
     except Exception as e:  # pymobiledevice3 raises its own hierarchy
         raise DeviceError(f"accessibility service on {uuid[:8]} failed: {e!r}",
                           tool="coredevice") from e
+
+
+async def set_value(uuid: str, match: Callable[[dict], bool], value: str, *,
+                    timeout: float = READ_TIMEOUT_S) -> None:
+    """Set the value of the first on-screen element `match` accepts, through
+    the accessibility service (#664).
+
+    The text is set, not typed: the app's editing callbacks do not run for it
+    (`UITextFieldDelegate` did not fire, measured on an iPhone 11). Nothing
+    here says whether it took; the caller reads the field back. Raises
+    DeviceError when the element is not on screen or the request cannot be
+    sent. A timeout may come after the request went: it says so.
+    """
+    async def use(provider: Any, tree: Tree, first: Tree, newest: Tree) -> None:
+        if first.app_pid is not None and newest.app_pid != first.app_pid:
+            # Switched, or killed by the read (#669): whatever is on screen
+            # now is not the field's app (#682 review).
+            raise DeviceError(
+                f"the app on {uuid[:8]}'s screen changed while the field was "
+                "looked up; nothing was set", tool="coredevice")
+        _refuse_bare(tree.elements, uuid)
+        found = [i for i, e in enumerate(tree.elements) if match(e)]
+        if len(found) != 1:
+            # More than one is refused, never the first taken: the text would
+            # go to whichever came first (#682 review).
+            raise DeviceError(
+                f"the field to set is not in {uuid[:8]}'s accessibility tree"
+                if not found else
+                f"{len(found)} elements on {uuid[:8]}'s screen match the field; "
+                "nothing was set", tool="coredevice")
+        ref = tree.refs[found[0]] if found[0] < len(tree.refs) else None
+        if ref is None:
+            raise DeviceError(
+                f"{uuid[:8]}'s accessibility tree does not say how to address "
+                "the field", tool="coredevice")
+        await provider.dtx._ctrl_channel.invoke(
+            "processDataFromHost:", set_value_request(*ref, value), expects_reply=True)
+
+    await _with_settled_tree(
+        uuid, timeout, "setting a value (it may or may not have been set)", use)
+
+
+async def front_app(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> tuple[int | None, str]:
+    """The pid and name of the app on screen, from the tree push (#664).
+
+    Measured on an iPhone 11: the pid is the one `devicectl process launch`
+    reports for it. SpringBoard's name is a single space.
+    """
+    async def use(provider: Any, tree: Tree, first: Tree, newest: Tree) -> tuple:
+        return tree.app_pid, tree.elements[0].get("AXLabel") or ""
+
+    return await _with_settled_tree(uuid, timeout, "reading the app on screen", use)
 
 
 async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]:
