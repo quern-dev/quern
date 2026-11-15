@@ -1838,6 +1838,27 @@ class DeviceControllerUI:
         # caller says so, having read through the push itself; a device the
         # push has crashed an app on sweeps through WDA as it reads.
         backend = self.coredevice_input if pushed else self._ui_backend(resolved)
+
+        def _push_or_stop(what: str) -> None:
+            """Stop a pushed sweep whose read was not the push's (#685 review).
+
+            A push read that fails falls back to WDA: after a crash (#669) that
+            reads SpringBoard, where a match is an icon the tap would open and
+            answer ok for; after a bare tree it is a full-depth /source per
+            step, starting WDA on a phone without it. Neither is a sweep worth
+            finishing, and mixing readers also breaks the at-rest and movement
+            reasoning, which assume one.
+            """
+            if pushed and _READ_BY.get() != self.coredevice_ax.TOOL_NAME:
+                note = self.read_note()
+                raise DeviceError(
+                    f"The scroll sweep stopped: its {what} could not be read through "
+                    "the accessibility push" + (f" ({note})" if note else "")
+                    + ". Nothing was tapped; read the screen before acting.",
+                    tool=self.coredevice_ax.TOOL_NAME)
+
+        _push_or_stop("first read of the screen")
+
         # idb cannot hold a swipe, so its swipes still fling and a read after
         # one can catch the list in flight. It keeps a settle per step; the
         # controlled backends do not need one.
@@ -1979,6 +2000,7 @@ class DeviceControllerUI:
                     resolved, use_cache=False,
                     filter_label=label, filter_identifier=identifier, lookup=True,
                 )
+                _push_or_stop("lookup")
                 return _pick(find_element(els, label=label, identifier=identifier,
                                           merged_labels=True))
             if deepen:
@@ -2071,6 +2093,7 @@ class DeviceControllerUI:
                 # row's merged label also answers to its title (#672).
                 els, _ = await self.get_ui_elements(resolved, use_cache=False,
                                                     whole_screen=True)
+                _push_or_stop("read after a swipe")
                 matches = find_element(els, label=label, identifier=identifier,
                                        merged_labels=True)
                 return _pick(matches), _fingerprint(els)
@@ -4045,6 +4068,9 @@ class DeviceControllerUI:
                         [scrolled], label=label, label_contains=label_contains,
                         label_prefix=label_prefix, identifier=identifier,
                         element_type=element_type,
+                        # By the rule the pushed sweep found it by: a row's
+                        # title matches its merged label (#685 review).
+                        merged_labels=pushed,
                     )
                     if matches and not pushed and self._served_by_wda(resolved):
                         # On screen after the sweep is not the same as
@@ -4109,7 +4135,8 @@ class DeviceControllerUI:
                 result["detail"] += f". {hint}"
             if note := self.read_note():
                 result["warning"] = note
-            if pushed and not sweep.get("attempted"):
+            if pushed:
+                # Swept or not: a pushed sweep reads the push too (#678).
                 result["detail"] += PUSHED_MISS_DETAIL
             elif read_depth is not None and self._served_by_wda(resolved):
                 # A shallow read is a reason something can be missing, so the
@@ -5052,14 +5079,15 @@ class DeviceControllerUI:
         # the rule tap_element's lookup follows (#470).
         read_depth = self._read_depth(resolved, snapshot_depth)
         _begin_lookup()  # the not-found below reports on this sweep's looks only
+        # As tap_element's lookups decide (#672): the push unless a WDA depth
+        # was asked for (#678).
+        pushed = snapshot_depth is None and self._device_tree_reader(resolved) is not None
         el = await self._ios_scroll_to_element(
             resolved, label=label, identifier=identifier,
             max_swipes=10 if max_swipes is None else max_swipes,
             snapshot_depth=read_depth,
             deepen=_deepen_allowed(snapshot_depth, deepen),
-            # As tap_element's lookups decide (#672): the push unless a WDA
-            # depth was asked for (#678).
-            pushed=snapshot_depth is None and self._device_tree_reader(resolved) is not None,
+            pushed=pushed,
         )
         # Only its frame is reported, so a deep hit is done with now.
         await self._done_with_deep_element(resolved, read_depth)
@@ -5072,7 +5100,9 @@ class DeviceControllerUI:
                 "status": "not_found",
                 "detail": detail,
             }
-            if read_depth is not None and self._served_by_wda(resolved):
+            if pushed:
+                result["detail"] += PUSHED_MISS_DETAIL
+            elif read_depth is not None and self._served_by_wda(resolved):
                 result["snapshot_depth"] = read_depth
                 result["detail"] += _depth_detail(
                     read_depth, tried=_DEEPEN_TRIED.get(), timed_out=_DEEP_TIMED_OUT.get(),
