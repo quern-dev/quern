@@ -984,8 +984,11 @@ class TestIdentifyingTheScreen:
 
         result = client.post("/api/v1/landmarks/identify", json={
             "app": "tabled", "udid": PHONE, "snapshot_depth": 12}).json()
+        # The summary identifies against every set: the matching one goes.
+        client.delete("/api/v1/landmarks/", params={"app": "settings"}).raise_for_status()
         summary = client.get("/api/v1/device/screen-summary", params={
             "udid": PHONE, "identify": True, "snapshot_depth": 12}).json()
+        assert summary["identified_as"] is None
         assert "identify_note" not in summary
 
         ctrl.coredevice_ax.describe_all.assert_not_called()
