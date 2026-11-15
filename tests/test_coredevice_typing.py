@@ -373,3 +373,40 @@ class TestSettingAValue:
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
         with pytest.raises(DeviceError, match="failed"):
             await set_value(PHONE, lambda e: True, "x", timeout=5)
+
+
+class TestPasswordFieldsFromThePush:
+    """The push types a password field as a plain TextField; attribute 28 is
+    what marks it. Unmarked, its dots read as the keyboard's change and the
+    password was set through accessibility (found live on an iPhone 11)."""
+
+    @pytest.mark.parametrize(("bundle", "traits", "expected"), [
+        ({coredevice_ax.ATTR_SECURE: True}, 0, "AXSecureTextField"),
+        ({coredevice_ax.ATTR_SECURE: False}, 0, ""),
+        ({}, coredevice_ax.TRAIT_SEARCH_FIELD, "AXSearchField"),
+        ({coredevice_ax.ATTR_SECURE: True}, coredevice_ax.TRAIT_SEARCH_FIELD,
+         "AXSecureTextField"),
+    ])
+    def test_the_subrole(self, bundle, traits, expected):
+        assert coredevice_ax._role_description(bundle, traits) == expected
+
+    async def test_a_marked_password_field_is_checked_by_length_and_never_set(
+            self, monkeypatch):
+        ctrl, setter = _phone(monkeypatch, before="", reads=["•" * 6])
+        ctrl._find_text_field.return_value = UIElement(
+            type="TextField", role_description="AXSecureTextField", label="",
+            identifier="field_secure", value="", frame=FRAME)
+
+        result = await ctrl.type_text("pass12", udid=PHONE, identifier="field_secure")
+
+        assert result["verified"] is True and "value" not in result
+        setter.assert_not_called()
+
+    async def test_dots_are_never_a_keyboard_change(self, monkeypatch):
+        """Even on a field the push did not mark."""
+        ctrl, setter = _phone(monkeypatch, before="field_secure", reads=["•" * 6])
+
+        with pytest.raises(DeviceError):
+            await ctrl.type_text("pass12", udid=PHONE, identifier="field_secure")
+
+        setter.assert_not_called()
