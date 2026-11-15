@@ -676,3 +676,29 @@ def test_a_launch_read_has_room_for_a_fresh_subscription():
     before the fresh connection's tree came (#684, live on an iPhone 11)."""
     from server.device.controller import DeviceController
     assert DeviceController._PUSH_READ_MIN_S >= coredevice_ax.FIRST_PUSH_S + 2.0
+
+
+class TestTerminating:
+    """terminate_app over CoreDevice (#664): devicectl, by the running process."""
+
+    async def test_an_opted_in_phone_terminates_through_devicectl(self, monkeypatch):
+        ctrl, _ = _phone(monkeypatch, before="", reads=[])
+        ctrl.devicectl.terminate_app = AsyncMock(return_value=True)
+        ctrl.wda_client.terminate_app = AsyncMock()
+
+        _, was_running = await ctrl.terminate_app("com.quern.probe.scene", udid=PHONE)
+
+        assert was_running is True
+        ctrl.devicectl.terminate_app.assert_awaited_once_with(PHONE, "com.quern.probe.scene")
+        ctrl.wda_client.terminate_app.assert_not_called()
+
+    async def test_a_phone_not_on_the_push_terminates_through_wda(self, monkeypatch):
+        ctrl, _ = _phone(monkeypatch, before="", reads=[])
+        monkeypatch.setattr("server.device.controller_ui.get_device_ui_reader", lambda: "wda")
+        ctrl.devicectl.terminate_app = AsyncMock()
+        ctrl.wda_client.terminate_app = AsyncMock(return_value=True)
+
+        await ctrl.terminate_app("com.quern.probe.scene", udid=PHONE)
+
+        ctrl.wda_client.terminate_app.assert_awaited_once()
+        ctrl.devicectl.terminate_app.assert_not_called()

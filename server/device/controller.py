@@ -1822,6 +1822,9 @@ class DeviceController(DeviceControllerUI):
                 )
             await self.adb.terminate_app(resolved, bundle_id)
             was_running = None
+        elif self._is_physical(resolved) and self._coredevice_serves(resolved):
+            # Over CoreDevice, no WDA (#664): found by its running process.
+            was_running = await self.devicectl.terminate_app(resolved, bundle_id)
         elif self._is_physical(resolved):
             was_running = await self.wda_client.terminate_app(resolved, bundle_id)
             if was_running is False and not await self.devicectl.is_installed(
