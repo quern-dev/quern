@@ -42,13 +42,23 @@ struct HostedScreen: UIViewControllerRepresentable {
 /// on the tab or its Label is dropped, and the item reports its image's name --
 /// so each bar item under the TabView gets the `tab_<title>` main.swift sets.
 /// SwiftUI's tab bar controller holds no viewControllers, only the bar's items.
+///
+/// Set again every half second, for the life of the app: once on appear was
+/// not enough -- a cold launch's bar is built after `onAppear`, and the
+/// conformance run found its items with no identifier at all.
 enum TabIdentifiers {
+    static func start() {
+        apply()
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in apply() }
+    }
+
     static func apply() {
         DispatchQueue.main.async {
             for scene in UIApplication.shared.connectedScenes {
                 for window in (scene as? UIWindowScene)?.windows ?? [] {
                     for item in tabBarController(in: window.rootViewController)?.tabBar.items ?? [] {
-                        if let title = item.title {
+                        if let title = item.title,
+                           item.accessibilityIdentifier != "tab_\(title.lowercased())" {
                             item.accessibilityIdentifier = "tab_\(title.lowercased())"
                         }
                     }
@@ -96,7 +106,7 @@ struct HostedApp: App {
                         .tabItem { Label(tabs[i].0, systemImage: tabs[i].1) }
                 }
             }
-            .onAppear(perform: TabIdentifiers.apply)
+            .onAppear(perform: TabIdentifiers.start)
             // SwiftUI's delivery paths, recorded as the other bundles record theirs.
             .onOpenURL { url in DeepLinkStore.shared.record(url, via: "swiftui:onOpenURL") }
             .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
