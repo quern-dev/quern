@@ -1595,8 +1595,9 @@ class DeviceController(DeviceControllerUI):
             return {"env_applied": True, "restarted": None, **confirmed}
         return confirmed
 
-    #: How long a launched app has to come to the front of the tree push. A
-    #: push read is ~2 s, so this allows two or three.
+    #: How long a launched app has to come to the front of the tree push,
+    #: counted from the launch: no read starts after it. Each read gets at
+    #: least _PUSH_READ_MIN_S, so the whole check can run to about 13 s.
     _PUSH_FRONT_GRACE_S = 6.0
     #: The least a confirming read is given, even with the grace spent: room for
     #: a subscription that stays silent to be made again on a fresh connection

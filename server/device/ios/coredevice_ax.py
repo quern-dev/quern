@@ -596,17 +596,41 @@ async def _first_push(queue: asyncio.Queue, within: float) -> bool:
 
 async def _subscribed(uuid: str, lib: SimpleNamespace, address: Any,
                       conn: SimpleNamespace) -> asyncio.Queue:
-    """A subscription that has pushed something: made once more on a fresh
-    connection when the first stays silent (#684). The second is not watched:
-    the caller's own deadline ends it."""
+    """A subscription that has pushed something (#684).
+
+    When the first stays silent for FIRST_PUSH_S, a second is opened on a
+    fresh connection beside it, and whichever pushes first is kept; the other
+    is closed. The first is not closed to make room: a heavy screen whose
+    first push is merely late still wins, rather than being thrown away for a
+    read that starts over (#692 review). Neither wait is bounded here: the
+    caller's deadline ends both, and `conn` -- which the caller closes -- holds
+    the first until the second has won, the spare is closed on any way out.
+    """
     queue = await _subscribe(lib, address, conn)
     if await _first_push(queue, FIRST_PUSH_S):
         return queue
     logger.info("[coredevice] no push from %s in %gs: subscribing on a fresh "
-                "connection (#684)", uuid[:8], FIRST_PUSH_S)
+                "connection beside it (#684)", uuid[:8], FIRST_PUSH_S)
+    spare = SimpleNamespace(rsd=None, provider=None)
+    try:
+        try:
+            spare_queue = await _subscribe(lib, address, spare)
+        except Exception as e:  # noqa: BLE001 - the first may still answer
+            logger.info("[coredevice] the fresh connection to %s failed (%r); "
+                        "waiting on the first", uuid[:8], e)
+            await _close(spare.provider, spare.rsd)
+            return queue
+        while queue.empty() and spare_queue.empty():
+            await asyncio.sleep(0.05)
+    except BaseException:
+        await asyncio.shield(_close(spare.provider, spare.rsd))
+        raise
+    if not queue.empty():
+        await _close(spare.provider, spare.rsd)
+        return queue
     await _close(conn.provider, conn.rsd)
-    conn.rsd = conn.provider = None
-    return await _subscribe(lib, address, conn)
+    conn.rsd, conn.provider = spare.rsd, spare.provider
+    return spare_queue
 
 
 async def _close(provider: Any, rsd: Any) -> None:

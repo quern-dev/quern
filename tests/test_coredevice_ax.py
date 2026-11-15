@@ -1132,9 +1132,11 @@ class TestTheSetting:
         assert config.get_device_ui_reader() == expected
 
 
-def _silent_first(lib, silent: int) -> list:
+def _silent_first(lib, silent: int, *, late: float | None = None,
+                  fail_second: bool = False) -> list:
     """Make the first `silent` subscriptions get no push at all, as one made
-    the moment an app is relaunched did on an iPhone 11 (#684)."""
+    the moment an app is relaunched did on an iPhone 11 (#684). With `late`,
+    the first pushes after all, that many seconds after subscribing."""
     made: list = []
     original = lib.RemoteAX
 
@@ -1142,10 +1144,24 @@ def _silent_first(lib, silent: int) -> list:
         def __init__(self, rsd):
             super().__init__(rsd)
             made.append(self)
-            if len(made) <= silent:
-                self.dtx._ctrl_channel._on_subscribe = lambda: None
+            channel = self.dtx._ctrl_channel
+            if len(made) == 1 and late is not None:
+                deliver = channel._on_subscribe
+                channel._on_subscribe = (
+                    lambda: asyncio.get_running_loop().call_later(late, deliver))
+            elif len(made) <= silent:
+                channel._on_subscribe = lambda: None
+
+        async def connect(self):
+            if fail_second and len(made) == 2:
+                raise ConnectionRefusedError(61, "refused")
+            await super().connect()
     lib.RemoteAX = Maybe
     return made
+
+
+def _unsubscribed(ax) -> bool:
+    return ("clientNeedsAccessibility:", (False,)) in ax.dtx._ctrl_channel.calls
 
 
 @pytest.mark.usefixtures("phone_address")
@@ -1161,8 +1177,9 @@ class TestASilentSubscription:
         elements = await asyncio.wait_for(read_tree(PHONE, timeout=5), 10)
 
         assert len(elements) == 14 and len(made) == 2
-        # The silent one was unsubscribed and closed, not left open.
-        assert ("clientNeedsAccessibility:", (False,)) in made[0].dtx._ctrl_channel.calls
+        # Both were unsubscribed: the silent one once the fresh one pushed,
+        # the fresh one when the read was done.
+        assert _unsubscribed(made[0]) and _unsubscribed(made[1])
 
     async def test_a_healthy_read_makes_one_connection(self, monkeypatch):
         lib, _ = _fake_lib([SETTINGS])
@@ -1182,7 +1199,8 @@ class TestASilentSubscription:
         with pytest.raises(DeviceError, match="no complete accessibility tree"):
             await asyncio.wait_for(read_tree(PHONE, timeout=1.0), 10)
 
-        assert len(made) == 2 and state.provider_closed and state.rsd_closed
+        # Each one, not just whichever set the fake's shared flags (#692 review).
+        assert len(made) == 2 and _unsubscribed(made[0]) and _unsubscribed(made[1])
 
     async def test_the_app_in_front_recovers_the_same_way(self, monkeypatch):
         monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 0.2)
@@ -1192,3 +1210,26 @@ class TestASilentSubscription:
 
         assert await coredevice_ax.front_app(PHONE, timeout=5) == (617, "Settings")
         assert len(made) == 2
+
+    async def test_a_late_first_push_still_wins(self, monkeypatch):
+        """A heavy screen whose first push is merely late is not thrown away
+        for a read that starts over (#692 review)."""
+        monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 0.2)
+        lib, _ = _fake_lib([SETTINGS])
+        made = _silent_first(lib, 2, late=0.4)          # the spare stays silent
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        elements = await asyncio.wait_for(read_tree(PHONE, timeout=5), 10)
+
+        assert len(elements) == 14 and len(made) == 2
+        assert _unsubscribed(made[1])                   # the spare is closed
+
+    async def test_a_spare_that_cannot_connect_leaves_the_first(self, monkeypatch):
+        monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 0.2)
+        lib, _ = _fake_lib([SETTINGS])
+        made = _silent_first(lib, 1, late=0.4, fail_second=True)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        elements = await asyncio.wait_for(read_tree(PHONE, timeout=5), 10)
+
+        assert len(elements) == 14 and len(made) == 2

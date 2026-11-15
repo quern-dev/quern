@@ -585,6 +585,17 @@ class TestTheLaunchCheck:
 
         assert info["launch_confirmed"] is None and "timed out" in info["launch_check_error"]
 
+    async def test_a_read_with_the_grace_nearly_spent_still_gets_the_floor(
+            self, monkeypatch):
+        """Room for a silent subscription's fresh one to deliver (#684)."""
+        ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])
+        monkeypatch.setattr("server.device.controller.time.monotonic",
+                            _clock([0.0, 5.9]))
+
+        await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert self.front.await_args.kwargs["timeout"] == pytest.approx(ctrl._PUSH_READ_MIN_S)
+
     async def test_each_read_is_bounded_by_what_is_left(self, monkeypatch):
         ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])
         monkeypatch.setattr(ctrl, "_PUSH_READ_MIN_S", 1.0)    # the floor below the grace
