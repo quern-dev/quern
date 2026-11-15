@@ -89,6 +89,17 @@ def _remember_identity(canonical: str, *spellings: str) -> None:
             _identity_aliases[spelling] = canonical
 
 
+def _comparable_path(url: str) -> str:
+    """A file URL or path as one spelling: decoded, NFC, without the
+    /private that /var and /tmp are reached through."""
+    from unicodedata import normalize
+    from urllib.parse import unquote, urlparse
+
+    path = unquote(urlparse(url).path if url.startswith("file:") else url)
+    path = normalize("NFC", path)
+    return path.removeprefix("/private") if path.startswith("/private/") else path
+
+
 class DevicectlBackend:
     """Manages physical iOS devices via xcrun devicectl subprocess calls."""
 
@@ -106,7 +117,6 @@ class DevicectlBackend:
 
     def __init__(self) -> None:
         # Track launched PIDs: (uuid, bundle_id) -> PID
-        self._launched_pids: dict[tuple[str, str], int] = {}
         self._orientation_supported: bool | None = None
         self._standby_supported: bool | None = None
 
@@ -413,43 +423,51 @@ class DevicectlBackend:
         except (json.JSONDecodeError, KeyError):
             pid = 0
 
-        if pid:
-            self._launched_pids[(uuid, bundle_id)] = pid
-
         return pid
 
     async def app_url(self, uuid: str, bundle_id: str) -> str | None:
         """The installed app's bundle URL, system apps included, or None when
-        it is not installed. Raises DeviceError when devicectl cannot say."""
+        it is not installed. Raises DeviceError when devicectl cannot say --
+        an app listed without a URL included, which is not "not installed"."""
         stdout, _ = await self._run_devicectl(
             "device", "info", "apps", "--device", uuid, "--include-all-apps",
             "--bundle-id", bundle_id, json_output=True,
         )
         try:
             apps = json.loads(stdout)["result"]["apps"]
-            urls = [a.get("url") for a in apps if a.get("bundleIdentifier") == bundle_id]
+            # Filtered here as well: devicectl's help says --include-all-apps
+            # makes it ignore other filters.
+            mine = [a for a in apps if a.get("bundleIdentifier") == bundle_id]
         except (ValueError, KeyError, TypeError, AttributeError) as e:
             raise DeviceError(
                 f"devicectl's app list could not be read: {e}", tool="devicectl",
             ) from e
-        return urls[0] if urls and isinstance(urls[0], str) else None
+        if not mine:
+            return None
+        url = mine[0].get("url")
+        if not isinstance(url, str) or not url:
+            raise DeviceError(
+                f"{bundle_id} is installed on {uuid[:8]}, but devicectl gave no bundle "
+                "URL to find its process by", tool="devicectl")
+        return url
 
     async def running_pids(self, uuid: str, app_url: str) -> list[int]:
         """The pids of an app's main executable: a process whose executable
         sits directly inside the bundle at `app_url` -- not an extension,
-        which lives deeper, under PlugIns. Raises DeviceError when devicectl
-        cannot say."""
+        which lives deeper, under PlugIns. Paths are compared decoded and
+        normalised, so the two listings need not spell them alike. Raises
+        DeviceError when devicectl cannot say."""
         stdout, _ = await self._run_devicectl(
             "device", "info", "processes", "--device", uuid, json_output=True,
         )
-        bundle = app_url if app_url.endswith("/") else app_url + "/"
+        bundle = _comparable_path(app_url).rstrip("/") + "/"
         try:
             processes = json.loads(stdout)["result"]["runningProcesses"]
             pids = []
             for p in processes:
-                executable = str(p.get("executable") or "")
+                executable = _comparable_path(str(p.get("executable") or ""))
                 pid = p.get("processIdentifier")
-                rest = executable[len(bundle):] if executable.startswith(bundle) else None
+                rest = executable[len(bundle):] if executable.startswith(bundle) else ""
                 if rest and "/" not in rest and isinstance(pid, int):
                     pids.append(pid)
         except (ValueError, KeyError, TypeError, AttributeError) as e:
@@ -458,25 +476,60 @@ class DevicectlBackend:
             ) from e
         return pids
 
+    #: How long a terminated app has to leave the process list, and how often
+    #: it is looked for. Measured on an iPhone 11: a foreground app and one
+    #: suspended in the background for 35 s were both gone within 0.5 s.
+    TERMINATE_WAIT_S = 2.0
+    TERMINATE_POLL_S = 0.25
+
     async def terminate_app(self, uuid: str, bundle_id: str) -> bool:
         """Terminate an app on a physical device: whether it was running.
 
-        Found by what is running now, not by a pid quern stored when it
-        launched it -- that is wrong for an app started any other way, or
-        restarted since (#664). Raises InvalidDeviceRequestError for an app
-        that is not installed, so a mistyped bundle id is not a clean stop
-        (#629).
+        Found by what is running now, not by a pid stored at launch, which is
+        wrong for an app started any other way or restarted since (#664).
+        Confirmed from the process list rather than taken from devicectl's
+        acceptance: a pid that refuses SIGTERM is sent SIGKILL, and an app
+        still running after that is an error, not "terminated". A pid that is
+        gone by the time it is signalled -- a dying instance beside a new one
+        -- is not an error. Raises InvalidDeviceRequestError for an app that
+        is not installed (#629). An instance started after the listing is not
+        seen: the window is the length of one devicectl call.
         """
         url = await self.app_url(uuid, bundle_id)
         if url is None:
             raise InvalidDeviceRequestError(
                 f"{bundle_id} is not installed on {uuid[:8]}", tool="devicectl")
         pids = await self.running_pids(uuid, url)
+        if not pids:
+            return False
+        left = await self._signal_and_wait(uuid, url, pids, kill=False)
+        if left:
+            left = await self._signal_and_wait(uuid, url, left, kill=True)
+        if left:
+            raise DeviceError(
+                f"{bundle_id} is still running on {uuid[:8]} (pid "
+                f"{', '.join(map(str, left))}) after SIGTERM and SIGKILL", tool="devicectl")
+        return True
+
+    async def _signal_and_wait(self, uuid: str, url: str, pids: list[int],
+                               kill: bool) -> list[int]:
+        """Signal each pid, then the ones of them still running once
+        TERMINATE_WAIT_S has passed (fewer as soon as all are gone)."""
         for pid in pids:
-            await self._run_devicectl(
-                "device", "process", "terminate", "--device", uuid, "--pid", str(pid))
-        self._launched_pids.pop((uuid, bundle_id), None)
-        return bool(pids)
+            try:
+                await self._run_devicectl(
+                    "device", "process", "terminate", "--device", uuid, "--pid", str(pid),
+                    *(("--kill",) if kill else ()))
+            except DeviceError as e:
+                # Gone already, most likely; the list below says either way.
+                logger.info("devicectl terminate of pid %s on %s: %s", pid, uuid[:8], e)
+        loop = asyncio.get_running_loop()
+        end = loop.time() + self.TERMINATE_WAIT_S
+        while True:
+            left = [p for p in await self.running_pids(uuid, url) if p in pids]
+            if not left or loop.time() >= end:
+                return left
+            await asyncio.sleep(self.TERMINATE_POLL_S)
 
     async def uninstall_app(self, uuid: str, bundle_id: str) -> None:
         """Uninstall an app from a physical device."""
