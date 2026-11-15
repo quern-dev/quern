@@ -962,6 +962,43 @@ func axChildren(of element: NSObject) -> [NSObject] {
 /// device: the interface's, turned. An app reports its root at the interface's
 /// size, so in landscape the portrait size scaled every frame by 402/874 on an
 /// iPhone 18 Pro (iOS 27.2) and a tap at its centre landed elsewhere (#243).
+/// Whether the front process is SpringBoard, by its executable's path: a
+/// simulator's processes are the Mac's own, so the translation's pid names
+/// one. Nil when the pid or path cannot be read.
+func frontIsSpringBoard(_ front: NSObject) -> Bool? {
+    let pidSel = NSSelectorFromString("pid")
+    guard front.responds(to: pidSel) else { return nil }
+    typealias PidFn = @convention(c) (AnyObject, Selector) -> Int32
+    let pid = unsafeBitCast(front.method(for: pidSel), to: PidFn.self)(front, pidSel)
+    var path = [CChar](repeating: 0, count: 4096)
+    guard pid > 0, proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return nil }
+    return String(cString: path).hasSuffix("/SpringBoard.app/SpringBoard")
+}
+
+/// How the front app's accessibility frames reach the interface's points.
+///
+/// A Duo's lit panel decides it as before. On a turned one-panel device an
+/// app reports its frames in the turned interface's points, and SpringBoard
+/// -- the lock screen and StandBy, on an iPhone -- in the panel's portrait
+/// ones, as a Duo's SpringBoard does: measured on an iPhone 18 Pro (iOS 27.2)
+/// showing StandBy, its Continue button read 48x306 inside an 874x402 root,
+/// and a tap at its centre landed nowhere (#680). Told apart by the front
+/// process, which is certain, not by frames, which an app scrolled off the
+/// screen can also put outside it.
+func axTransform(udid: String, device: NSObject, root: NSObject, front: NSObject,
+                 lit panel: Panel?) -> AXFrameTransform {
+    let rootFrame = axFrame(of: root)
+    if panel == nil, let turned = turnedSinglePanel(udid: udid, device: device),
+       frontIsSpringBoard(front) == true {
+        return AXFrameTransform(rootFrame: rootFrame, pointSize: turned.screenSize,
+                                panel: turned, panelSpace: true)
+    }
+    let pointSize = axPointSize(udid: udid, device: device, panel: panel)
+    return AXFrameTransform(
+        rootFrame: rootFrame, pointSize: pointSize, panel: panel,
+        panelSpace: panel.map { AXFrameTransform.panelSpace(root: rootFrame, panel: $0) } ?? false)
+}
+
 func axPointSize(udid: String, device: NSObject, panel: Panel?) -> CGSize {
     if panel != nil { return devicePointSize(for: device) }  // a Duo: its own path
     return turnedSinglePanel(udid: udid, device: device)?.screenSize ?? devicePointSize(for: device)
@@ -1217,12 +1254,8 @@ func describeUI(udid: String, nested: Bool, hitX: Double? = nil, hitY: Double? =
     stampElementTranslation(token: token, on: rootElement)
     stampSubtree(rootElement, token: token)
 
-    let panel = litPanel(udid: udid, device: device)
-    let pointSize = axPointSize(udid: udid, device: device, panel: panel)
-    let rootFrame = axFrame(of: rootElement)
-    let transform = AXFrameTransform(
-        rootFrame: rootFrame, pointSize: pointSize, panel: panel,
-        panelSpace: panel.map { AXFrameTransform.panelSpace(root: rootFrame, panel: $0) } ?? false)
+    let transform = axTransform(udid: udid, device: device, root: rootElement,
+                                front: translation, lit: litPanel(udid: udid, device: device))
 
     let tree = walkElement(rootElement, transform: transform, depth: 0,
                           deadline: deadline, nested: true)
@@ -1283,18 +1316,16 @@ func probePoint(udid: String, x: Double, y: Double, nested: Bool) -> Any? {
     // zero root, which is why this went unnoticed.
     stampElementTranslation(token: token, on: frontmostRoot)
     let panel = litPanel(udid: udid, device: device)
-    let pointSize = axPointSize(udid: udid, device: device, panel: panel)
-    let rootFrame = axFrame(of: frontmostRoot)
-    let transform = AXFrameTransform(
-        rootFrame: rootFrame, pointSize: pointSize, panel: panel,
-        panelSpace: panel.map { AXFrameTransform.panelSpace(root: rootFrame, panel: $0) } ?? false)
+    let transform = axTransform(udid: udid, device: device, root: frontmostRoot,
+                                front: frontmost, lit: panel)
 
     let macPoint = transform.unmap(CGPoint(x: x, y: y))
 
     guard let hitTranslation = objectAtPointOnTranslator(
         // The lit panel's own display: asked on display 0, the hit-test on
         // an unfolded Duo found nothing anywhere (#536).
-        translator: translator, point: macPoint, displayId: transform.panel?.screenID ?? 0, token: token
+        // A one-panel device's turned panel is not a display of its own: 0.
+        translator: translator, point: macPoint, displayId: panel?.screenID ?? 0, token: token
     ) else {
         logErr("[ax] objectAtPoint returned nil for device=(\(x),\(y)) mac=(\(macPoint.x),\(macPoint.y))")
         return nil

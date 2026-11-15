@@ -100,6 +100,7 @@ class DevicectlBackend:
         # Track launched PIDs: (uuid, bundle_id) -> PID
         self._launched_pids: dict[tuple[str, str], int] = {}
         self._orientation_supported: bool | None = None
+        self._standby_supported: bool | None = None
 
     async def _run_devicectl(
         self, *args: str, json_output: bool = False,
@@ -179,6 +180,46 @@ class DevicectlBackend:
             raise DeviceError(
                 f"devicectl did not turn {udid[:8]} within {self._ORIENTATION_TIMEOUT_S:.0f}s",
                 tool="devicectl") from e
+
+    async def can_standby(self) -> bool:
+        """Whether this devicectl has `device settings standby` (Xcode 27.2's
+        does). Asked once: it is the Xcode's."""
+        if self._standby_supported is None:
+            self._standby_supported = xcode_available() and await probe_command(
+                "xcrun", "devicectl", "device", "settings", "standby", "--help",
+                tool="devicectl")
+        return self._standby_supported
+
+    async def standby_state(self, udid: str) -> str:
+        """StandBy's state as the device reports it: `showing`, `hidden` (it
+        could show) or `unavailable` (it cannot now: measured on an iOS 27.2
+        simulator, any time it is not on its lock screen)."""
+        return await self._standby("info", "standby", "--device", udid)
+
+    async def set_standby(self, udid: str, show: bool) -> str:
+        """Show or hide StandBy, and the state the device reports after. A
+        device that cannot present it -- not on its lock screen -- raises with
+        devicectl's own reason."""
+        return await self._standby("settings", "standby", "--device", udid,
+                                   "--show" if show else "--hide")
+
+    async def _standby(self, *args: str) -> str:
+        try:
+            out, _ = await asyncio.wait_for(
+                self._run_devicectl("device", *args, json_output=True),
+                timeout=self._ORIENTATION_TIMEOUT_S)
+        except TimeoutError as e:
+            raise DeviceError(
+                f"devicectl did not answer about StandBy within "
+                f"{self._ORIENTATION_TIMEOUT_S:.0f}s", tool="devicectl") from e
+        try:
+            state = json.loads(out)["result"]["state"]
+        except (ValueError, KeyError, TypeError) as e:
+            raise DeviceError(f"devicectl's StandBy answer had no state: {out[:200]}",
+                              tool="devicectl") from e
+        if not isinstance(state, str):
+            raise DeviceError(f"devicectl's StandBy state was {state!r}", tool="devicectl")
+        return state
 
     async def list_devices(self) -> list[DeviceInfo]:
         """List connected physical devices by parsing devicectl list devices output.
