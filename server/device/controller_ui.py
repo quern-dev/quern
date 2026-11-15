@@ -814,8 +814,9 @@ class DeviceControllerUI:
         whole-screen reads, else None (#664).
 
         None too on a device where a push read has crashed an app (#669):
-        that device is read through WDA until the server restarts. Input is
-        unaffected -- the dump is what crashes, not a tap.
+        that device is read through WDA until the server restarts. Taps and
+        swipes are unaffected -- the dump is what crashes, not a tap -- but
+        typing into a named field follows the reads (`type_text`).
         """
         if not self._coredevice_serves(udid):
             return None
@@ -839,7 +840,9 @@ class DeviceControllerUI:
 
         Typing goes over a HID keyboard too, but by its own path,
         `_type_over_coredevice`: the phone decodes keys with its own keyboard
-        and input method, so a named field is read back and corrected.
+        and input method, so a named field is read back and corrected -- and
+        after a push read crashed an app, when there is no push to read it back
+        from, typing into a named field goes through WDA (#669).
         """
         return self.coredevice_input if self._coredevice_serves(udid) else self._ui_backend(udid)
 
@@ -5249,12 +5252,14 @@ class DeviceControllerUI:
         """
         resolved = await self.resolve_udid(udid)
         await self._warn_if_input_is_suppressed(resolved)
-        # Not on a device where a push read crashed an app (#669): its reads go
-        # through WDA until the server restarts, and keystrokes over HID with
-        # no push to read the field back -- and no correction -- arrived as
-        # kana on a Japanese keyboard and were only reported (phase 4 run).
+        # A named field not on a device where a push read crashed an app
+        # (#669): its reads go through WDA until the server restarts, and
+        # keystrokes over HID with no push to read the field back -- and no
+        # correction -- arrived as kana on a Japanese keyboard and were only
+        # reported (phase 4 run). Untargeted typing reads nothing, so it stays.
+        crashed = self._push_crashed_apps.get(resolved)
         if (self._coredevice_serves(resolved) and snapshot_depth is None
-                and not self._push_crashed_apps.get(resolved)):
+                and not (crashed and (label or identifier))):
             return await self._type_over_coredevice(resolved, text, label, identifier)
         if not (label or identifier):
             await self._ui_backend(resolved).type_text(resolved, text)
@@ -5290,6 +5295,13 @@ class DeviceControllerUI:
             # What the field holds now, so a caller can compare for itself.
             # Never for a secure field, which reports dots.
             result["value"] = after
+        if crashed and self._coredevice_serves(resolved):
+            # Said on the answer: this phone's typing was over CoreDevice, and
+            # a caller sees `input` disappear with nothing else to say why.
+            result["note"] = (
+                f"Typed through WDA: a screen read crashed {', '.join(sorted(crashed))} "
+                "on this device (#669), so its screens, and typing into a named "
+                "field, go through WDA until the server restarts.")
         return result
 
     async def _type_over_coredevice(self, udid: str, text: str, label: str | None,
@@ -5321,8 +5333,10 @@ class DeviceControllerUI:
                     "read back and corrected.")
             return result
 
+        crashed_before = frozenset(self._push_crashed_apps.get(udid, ()))
         target = await self._find_text_field(udid, label=label, identifier=identifier,
                                              whole_screen=True)
+        self._refuse_after_a_crash(udid, crashed_before, "typed")
         before = target.value or ""
         secure = self._is_secure_field(target)
         cx, cy = get_tap_point(target)
@@ -5389,13 +5403,33 @@ class DeviceControllerUI:
                 "accessibility service. The app's editing callbacks "
                 "(shouldChangeCharactersIn, formatters, input masks) did not run for it.")
         if outcome != "landed":
-            raise DeviceError(
-                self._typing_failure(outcome, before, after, text, label or identifier,
-                                     secure),
-                tool=via)
+            message = self._typing_failure(outcome, before, after, text,
+                                           label or identifier, secure)
+            crashed = self._push_crashed_apps.get(udid, set()) - crashed_before
+            if crashed:
+                # Not the keyboard's doing, as the failure may read: the read-back
+                # crashed the app, and nothing could be corrected (#669).
+                message += (f". Reading the field back crashed {', '.join(sorted(crashed))} "
+                            "(#669), so it was read through WDA and not corrected")
+            raise DeviceError(message, tool=via)
         if not secure:
             result["value"] = after
         return result
+
+    def _refuse_after_a_crash(self, udid: str, before: frozenset, what: str) -> None:
+        """Refuse an action whose own read of the screen crashed an app (#669).
+
+        The read fell back to WDA and found the field on the screen the crash
+        left, so acting on it would type into, or clear, something else -- as
+        lookups and sweeps refuse for the same reason.
+        """
+        crashed = self._push_crashed_apps.get(udid, set()) - before
+        if crashed:
+            raise DeviceError(
+                f"Reading the screen crashed {', '.join(sorted(crashed))} (#669). Nothing "
+                f"was {what}: the screen the field was on is gone. This device's screens "
+                "will be read through WDA until the server restarts; read the screen "
+                "again before acting.", tool=self.coredevice_ax.TOOL_NAME)
 
     @staticmethod
     def _is_secure_field(target: UIElement) -> bool:
@@ -5629,8 +5663,10 @@ class DeviceControllerUI:
         # Over CoreDevice (#664): the field is found in the push and cleared
         # with keystrokes over HID, unless a WDA depth was asked for.
         coredevice = self._coredevice_serves(resolved) and snapshot_depth is None
+        crashed_before = frozenset(self._push_crashed_apps.get(resolved, ()))
         elements, _ = await self.get_ui_elements(
             udid=resolved, snapshot_depth=snapshot_depth, whole_screen=coredevice)
+        self._refuse_after_a_crash(resolved, crashed_before, "cleared")
         text_fields = [
             e for e in elements
             if e.type.lower() in self._TEXT_FIELD_TYPES and e.frame
