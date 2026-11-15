@@ -82,6 +82,7 @@ TRAIT_SECURE_TEXT = 0x1000000
 TRAIT_BUTTON = 1 << 0
 TRAIT_LINK = 1 << 1
 TRAIT_IMAGE = 1 << 2
+TRAIT_SELECTED = 1 << 3
 TRAIT_STATIC_TEXT = 1 << 6
 TRAIT_NOT_ENABLED = 1 << 8
 TRAIT_SEARCH_FIELD = 1 << 10
@@ -389,7 +390,7 @@ def parse_tree(data: bytes) -> Tree:
             "role_description": _role_description(etype, traits),
             "AXLabel": _text(bundle.get(ATTR_LABEL)) or "",
             "AXUniqueId": _text(bundle.get(ATTR_IDENTIFIER)),
-            "AXValue": _text(bundle.get(ATTR_VALUE)),
+            "AXValue": _value(bundle.get(ATTR_VALUE), traits),
             "frame": _rect(bundle.get(ATTR_FRAME)),
             "enabled": not traits & TRAIT_NOT_ENABLED,
             "help": None,
@@ -399,6 +400,23 @@ def parse_tree(data: bytes) -> Tree:
     if not elements:
         raise AxTreeError(f"{dump_type or 'tree dump'} holds no elements")
     return Tree(dump_type, elements, app_pid, refs)
+
+
+def _value(value: Any, traits: int) -> str | None:
+    """An element's value, or ``"1"`` for a selected one that has none.
+
+    A selected tab-bar item has no value in the push, only the Selected trait;
+    WDA reports it as value "1", and that is where landmarks' `selected` and
+    every other reader of selection look (#664). Measured on an iPhone 11: the
+    trait is on the tab in front and on no other element of the screen.
+    """
+    text = _text(value)
+    # Never a text input's: an empty field read as "1" is text typing's
+    # read-back would see that is not there.
+    if (not text and traits & TRAIT_SELECTED
+            and not traits & (TRAIT_TEXT_ENTRY | TRAIT_SEARCH_FIELD)):
+        return "1"
+    return text
 
 
 def _role_description(etype: str, traits: int) -> str:

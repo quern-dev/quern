@@ -346,11 +346,15 @@ async def identify_screen(request: Request, body: IdentifyRequest):
     controller = _get_controller(request)
 
     try:
+        # A whole-screen read, as get_screen_summary's identify makes: on a
+        # phone opted into the tree push it reads the push, not WDA (#664).
+        # A snapshot depth or a mode still asks for WDA's own read.
         elements, resolved = await controller.get_ui_elements(
             body.udid,
             snapshot_depth=body.snapshot_depth,
             source_timeout=body.source_timeout,
             mode=body.mode,
+            whole_screen=True,
         )
     except DeviceError as e:
         from server.api.device import _handle_device_error

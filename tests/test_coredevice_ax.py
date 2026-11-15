@@ -33,6 +33,8 @@ from server.models import DeviceError, DeviceType, WdaNotSetUpError
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "coredevice_ax"
 SETTINGS = (FIXTURES / "settings_root.bin").read_bytes()
 SAFARI = (FIXTURES / "safari_example.bin").read_bytes()
+#: The probe app's Text tab, with its tab bar.
+PROBE_TEXT = (FIXTURES / "probe_text_fields.bin").read_bytes()
 
 PHONE = "B34C4EE9-AF48-53C6-BD13-2BFA66E7EE91"
 
@@ -171,6 +173,49 @@ class TestTypes:
 
     def test_the_root_is_the_application_whatever_its_traits(self):
         assert _element_type(1 << 0, is_root=True) == "Application"
+
+
+class TestTheSelectedTab:
+    """A selected tab-bar item reads as value "1", as WDA reports it (#664).
+
+    The push gives it no value, only the Selected trait, so a landmark written
+    with `selected: true` -- every tab landmark -- missed on a pushed read.
+    """
+
+    def test_the_tab_in_front_and_only_it(self):
+        _, elements = parse_push(PROBE_TEXT)
+        tabs = {e["AXUniqueId"]: e["AXValue"] for e in elements
+                if (e["AXUniqueId"] or "").startswith("tab_")}
+        assert tabs == {"tab_text": "1", "tab_controls": None,
+                        "tab_scroll": None, "tab_links": None}
+
+    def test_nothing_else_reads_as_selected(self):
+        for push in (SETTINGS, SAFARI):
+            _, elements = parse_push(push)
+            assert not [e for e in elements if e["AXValue"] == "1"]
+
+    @pytest.mark.parametrize(("value", "traits", "expected"), [
+        (None, 0x210000009, "1"),       # the selected tab, measured
+        (None, 0x210000001, None),      # the others
+        ("3", 0x210000009, "3"),        # a value of its own is kept
+        ("", 0x2200040008, ""),         # an empty text field stays empty
+        (None, 0x0408, None),           # a search field too
+    ])
+    def test_the_trait_fills_only_an_empty_value(self, value, traits, expected):
+        assert coredevice_ax._value(value, traits) == expected
+
+    def test_a_tab_landmark_matches_the_pushed_tree(self):
+        """The probe knowledge base's own tab landmark, recorded through WDA."""
+        from server.device.ui_elements import parse_elements
+        from server.knowledge.landmarks import match_landmark
+        from server.models import Landmark
+
+        _, raw = parse_push(PROBE_TEXT)
+        elements = parse_elements(raw)
+        assert match_landmark(elements, Landmark(
+            element="RadioButton", identifier="tab_text", selected=True))
+        assert not match_landmark(elements, Landmark(
+            element="RadioButton", identifier="tab_links", selected=True))
 
 
 class TestBadPushes:
@@ -858,6 +903,50 @@ class TestReadsThroughTheController:
         elements, _ = await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
 
         assert [e.label for e in elements] == ["from WDA"]
+        ctrl.coredevice_ax.describe_all.assert_not_called()
+
+
+class TestIdentifyingTheScreen:
+    """POST /landmarks/identify reads the screen as get_screen_summary does:
+    through the push on a phone opted in (#664). It read through WDA, so on a
+    phone with no WDA running, identifying a screen started it."""
+
+    def _client(self, ctrl):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from server.api.landmarks import router
+        from server.knowledge.landmarks import LandmarkRegistry
+
+        app = FastAPI()
+        app.include_router(router)
+        app.state.landmark_registry = LandmarkRegistry()
+        app.state.device_controller = ctrl
+        client = TestClient(app)
+        client.post("/api/v1/landmarks/load", json={"app": "settings", "landmarks": {
+            "root": {"landmarks": [
+                {"element": "Button", "identifier": "com.apple.settings.general"}]},
+        }}).raise_for_status()
+        return client
+
+    def test_it_reads_the_push(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+
+        resp = self._client(ctrl).post("/api/v1/landmarks/identify",
+                                       json={"app": "settings", "udid": PHONE})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["matched"] == "root"
+        ctrl.coredevice_ax.describe_all.assert_awaited()
+        ctrl.wda_client.describe_all.assert_not_called()
+
+    def test_a_depth_asks_for_wdas_read(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+
+        self._client(ctrl).post("/api/v1/landmarks/identify",
+                                json={"app": "settings", "udid": PHONE, "snapshot_depth": 12})
+
+        ctrl.wda_client.describe_all.assert_awaited()
         ctrl.coredevice_ax.describe_all.assert_not_called()
 
 
