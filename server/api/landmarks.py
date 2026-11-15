@@ -368,7 +368,9 @@ async def identify_screen(request: Request, body: IdentifyRequest):
     result = registry.identify(elements, app=body.app, page_urls=page_urls)
     # Which reader made the read, and what it had to say -- a crash it caused
     # (#669) above all, which leaves another screen to identify.
-    result["backend"] = controller.backend_that_served(resolved)
+    # This request's reader, not the device's last: a concurrent read can
+    # rewrite that while page_urls is awaited.
+    result["backend"] = controller.read_by() or controller.backend_that_served(resolved)
     warning = controller.read_note()
     if warning:
         result["warning"] = warning

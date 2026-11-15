@@ -72,8 +72,34 @@ def _with_input_warning(
 
 
 
+class NavigationReadCrashed(DeviceError):
+    """The navigation check's own read of the screen crashed the app (#669).
+
+    The read then falls back to WDA and reads the screen the crash left --
+    SpringBoard, where a tap by label taps an icon -- so the check does not
+    carry on as if it had read the screen it was for.
+    """
+
+    def __init__(self, apps: set[str], *, after_tap: bool) -> None:
+        names = ", ".join(sorted(apps))
+        if after_tap:
+            message = (
+                f"Reading the screen after the tap, for the navigation check, crashed "
+                f"{names} (#669): where the tap went could not be checked. This device's "
+                "screens will be read through WDA until the server restarts; read the "
+                "screen again before acting.")
+        else:
+            message = (
+                f"Reading the screen for the navigation check crashed {names} (#669). "
+                "Nothing was tapped: the screen this tap was for is gone. This device's "
+                "screens will be read through WDA until the server restarts; read the "
+                "screen again before acting.")
+        super().__init__(message, tool="coredevice")
+
+
 async def _identify_now(
     controller: DeviceController, udid: str, registry, *, use_cache: bool,
+    after_tap: bool = False,
 ) -> navigation.Identified:
     """Read the whole screen and identify it, for the navigation check (#491).
 
@@ -88,13 +114,18 @@ async def _identify_now(
     does, so the check starts no WDA (#664). A depth there would mean WDA's
     read, and after a crash (#669) the push does not serve, so the depth stays.
     """
-    udid = await controller.resolve_udid(udid)
     pushed = controller._device_tree_reader(udid) is not None
+    crashed_before = frozenset(controller._push_crashed_apps.get(udid, ()))
     elements, resolved = await controller.get_ui_elements(
         udid, use_cache=use_cache,
         snapshot_depth=None if pushed else controller._read_depth(udid, None),
         whole_screen=pushed,
     )
+    # The push read can crash the app (#669), and fell back to WDA's read of
+    # what the crash left: not the screen this check is about (review).
+    crashed = controller._push_crashed_apps.get(udid, set()) - crashed_before
+    if crashed:
+        raise NavigationReadCrashed(crashed, after_tap=after_tap)
     page_urls = (
         await controller.web_page_urls(resolved)
         if needs_page_urls(registry.all_screens()) else None
@@ -133,6 +164,10 @@ async def _navigation_plan(
     except HTTPException:
         # The disconnect guard's 499: the caller has gone, and the tap must
         # not go ahead for nobody.
+        raise
+    except NavigationReadCrashed:
+        # Not "could not tell": the screen the tap was for is gone, so the tap
+        # is refused, as a lookup whose read crashed the app is.
         raise
     except Exception:  # noqa: BLE001 -- the check is an addition; the tap is not
         logger.debug("navigation plan failed", exc_info=True)
@@ -959,13 +994,24 @@ async def tap_element(request: Request, body: TapElementRequest):
             # waits for the screen to arrive, so both then show where it went.
             if (nav_plan is not None and isinstance(result, dict)
                     and result.get("status") == "ok" and result.get("tapped")):
+                # A read that crashed the app is not "could not tell", which is
+                # all verify makes of a failed read: kept here, and said (#669).
+                crashed: list[NavigationReadCrashed] = []
+
+                async def identify_after() -> navigation.Identified:
+                    try:
+                        return await _identify_now(
+                            controller, resolved, nav_registry, use_cache=False,
+                            after_tap=True)
+                    except NavigationReadCrashed as e:
+                        crashed.append(e)
+                        raise
+
                 try:
                     nav = await _run_until_client_leaves(
                         request,
                         navigation.verify(
-                            nav_plan, result["tapped"],
-                            lambda: _identify_now(
-                                controller, resolved, nav_registry, use_cache=False),
+                            nav_plan, result["tapped"], identify_after,
                             timeout=body.navigation_timeout,
                         ),
                         what="tap_element navigation check",
@@ -975,6 +1021,12 @@ async def tap_element(request: Request, body: TapElementRequest):
                 except Exception:  # noqa: BLE001 -- the tap already happened
                     logger.debug("navigation check failed", exc_info=True)
                     nav = None
+                if crashed:
+                    # The tap happened; the check could not see where it went,
+                    # and a verdict made from SpringBoard is no verdict.
+                    nav = None
+                    result["warning"] = " ".join(
+                        w for w in (result.get("warning"), str(crashed[0])) if w)
                 if nav is not None:
                     result["navigation"] = nav
                     warning = navigation.warning_for(nav)

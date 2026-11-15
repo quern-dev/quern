@@ -1049,6 +1049,17 @@ class TestTheOtherIdentifyReads:
         ctrl.coredevice_ax.describe_all.assert_not_called()
         assert ctrl.wda_client.describe_all.await_args.kwargs.get("snapshot_depth") == 12
 
+    async def test_a_crash_in_the_context_read_is_on_the_context(self, monkeypatch):
+        from server.api.device import _capture_screen_context
+
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = AsyncMock(
+            side_effect=coredevice_ax.AppExitedDuringRead("QuernProbeScene", 711))
+
+        context = await _capture_screen_context(ctrl, PHONE)
+
+        assert "QuernProbeScene" in context["warning"]
+
     async def test_an_actions_screen_context_reads_the_push(self, monkeypatch):
         from server.api.device import _capture_screen_context
 
@@ -1058,6 +1069,90 @@ class TestTheOtherIdentifyReads:
 
         assert context["backend"] == CoreDeviceAxReader.TOOL_NAME
         ctrl.wda_client.describe_all.assert_not_called()
+
+
+class TestANavigationCheckThatCrashesTheApp:
+    """The navigation check reads the push, which can crash the app (#669),
+    and its fallback reads SpringBoard: a tap by label there taps an icon
+    (review). Before the tap that is a refusal; after it, a warning."""
+
+    PUSHED_TEXT = [
+        {"type": "Application", "AXLabel": "QuernProbeScene", "AXUniqueId": None,
+         "frame": {"x": 0, "y": 0, "width": 414, "height": 896}},
+        {"type": "Heading", "AXLabel": "Text", "AXUniqueId": None,
+         "frame": {"x": 150, "y": 60, "width": 100, "height": 20}},
+        {"type": "Button", "AXLabel": "More", "AXUniqueId": None, "enabled": True,
+         "frame": {"x": 330, "y": 820, "width": 60, "height": 50}},
+    ]
+    SPRINGBOARD = [
+        {"type": "Application", "AXLabel": "SpringBoard", "AXUniqueId": None,
+         "frame": {"x": 0, "y": 0, "width": 414, "height": 896}},
+        {"type": "Button", "AXLabel": "More", "AXUniqueId": "More", "enabled": True,
+         "frame": {"x": 20, "y": 100, "width": 60, "height": 60}},
+    ]
+
+    async def _tap(self, ctrl):
+        from httpx import ASGITransport, AsyncClient
+
+        from server.config import ServerConfig
+        from server.main import create_app
+        from server.models import Landmark, NavEdge, ScreenLandmarks
+
+        app = create_app(config=ServerConfig(api_key="k"), enable_oslog=False,
+                         enable_crash=False, enable_proxy=False)
+        ctrl.resolve_udid = AsyncMock(return_value=PHONE)
+        ctrl.wda_client.describe_all = AsyncMock(return_value=self.SPRINGBOARD)
+        ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=self.SPRINGBOARD[1:])
+        ctrl.wda_client._set_snapshot_depth = AsyncMock()
+        ctrl.wda_client._ensure_session = AsyncMock(return_value="s")
+        ctrl.wda_client.tap = AsyncMock()
+        app.state.device_controller = ctrl
+        app.state.landmark_registry.load("probe", [
+            ScreenLandmarks(screen="text", landmarks=[Landmark(element="Heading", label="Text")],
+                            leads_to=[NavEdge(target="more", label="More", element_type="Button")]),
+            ScreenLandmarks(screen="more", landmarks=[Landmark(element="Heading", label="More")]),
+        ])
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            return await c.post(
+                "/api/v1/device/ui/tap-element",
+                json={"label": "More", "udid": PHONE, "verify_navigation": True,
+                      "navigation_timeout": 1},
+                headers={"Authorization": "Bearer k"})
+
+    async def test_before_the_tap_it_taps_nothing(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = AsyncMock(
+            side_effect=coredevice_ax.AppExitedDuringRead("QuernProbeScene", 711))
+        ctrl.coredevice_input.tap = AsyncMock()
+
+        resp = await self._tap(ctrl)
+
+        assert resp.status_code >= 400, resp.text
+        assert "Nothing was tapped" in resp.text and "QuernProbeScene" in resp.text
+        ctrl.coredevice_input.tap.assert_not_called()
+        ctrl.wda_client.tap.assert_not_called()
+
+    async def test_after_the_tap_it_says_so(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        tapped = []
+
+        async def read(*args, **kwargs):
+            if tapped:
+                raise coredevice_ax.AppExitedDuringRead("QuernProbeScene", 711)
+            return self.PUSHED_TEXT
+        ctrl.coredevice_ax.describe_all = AsyncMock(side_effect=read)
+
+        async def tap(*args, **kwargs):
+            tapped.append(args)
+            return "coredevice"
+        ctrl.coredevice_input.tap = AsyncMock(side_effect=tap)
+
+        resp = await self._tap(ctrl)
+
+        assert resp.status_code == 200, resp.text
+        assert tapped, "the tap went ahead"
+        assert "after the tap" in resp.json()["warning"]
+        assert "QuernProbeScene" in resp.json()["warning"]
 
 
 class TestReadsInsideActionsStayOnWda:
