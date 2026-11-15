@@ -21,6 +21,7 @@ when one side moves.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -581,7 +582,12 @@ class ProbeDriver:
     #: backends, so it costs nothing off WDA. The depth matches quern's own
     #: default for reads made on a caller's behalf: the full tree at 25 took
     #: 34s on an iPhone 11's Scroll tab, past even this timeout (F35).
-    READ = {"source_timeout": 30, "snapshot_depth": 12}
+    #: With QUERN_CONFORMANCE_NO_WDA set, no depth is passed, so a phone
+    #: opted into CoreDevice is read through the tree push rather than WDA:
+    #: a depth is the request for WDA's read (#664). Without it the suite
+    #: started WDA itself on every phone and measured WDA, not the push.
+    READ = ({"source_timeout": 30} if os.environ.get("QUERN_CONFORMANCE_NO_WDA")
+            else {"source_timeout": 30, "snapshot_depth": 12})
 
     def __init__(
         self,
