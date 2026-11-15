@@ -476,6 +476,69 @@ On an iPhone Duo this is set_hinge with that orientation, and answers as set_hin
     }
   });
 
+  server.registerTool("set_standby", {
+    description: `Show or hide StandBy on an iOS simulator: the full-screen clock, widgets and photos an iPhone shows on its side while charging. For testing a widget's or a Live Activity's StandBy presentation without a phone on a stand.
+
+StandBy presents only on the lock screen, so showing it on an unlocked simulator locks it first (with press_button LOCK) and says so in arranged and note: the app in front goes to the background. It turns itself to landscape. The first time, Apple's "Welcome to StandBy" screen comes first; tap Continue (tap_element) to reach StandBy itself.
+
+The response's standby is the state the simulator reports (showing, hidden or unavailable), with standby_before. Needs a booted iPhone simulator and Xcode 27.2's devicectl; one that cannot show it (an iPad, a shut-down simulator, or a runtime without StandBy) answers 400. A 400 on a physical iPhone or an Android device too.`,
+    inputSchema: strictParams({
+      show: z.boolean().describe("true to show StandBy, false to hide it."),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ show, udid }) => {
+    try {
+      const body: Record<string, unknown> = { show };
+      if (udid) body.udid = udid;
+      const data = await apiRequest("POST", "/api/v1/device/standby", undefined, body);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: errorText(e),
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("get_standby", {
+    description: `StandBy's state on an iOS simulator: showing, hidden (it could show: the simulator is on its lock screen) or unavailable (it is not on its lock screen). Needs a booted iPhone simulator and Xcode 27.2's devicectl.`,
+    inputSchema: strictParams({
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ udid }) => {
+    try {
+      const params: Record<string, string> = {};
+      if (udid) params.udid = udid;
+      const data = await apiRequest("GET", "/api/v1/device/standby", params);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: errorText(e),
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("get_hinge", {
     description: `Read a foldable simulator's hinge angle and which panel is lit (iPhone Duo, Xcode 27.1+). lit_panel gives the screen_id, orientation and size in points of the panel taps and reads go to. angle is null when the guest gives no reading, which happens after SpringBoard restarts until the hinge next moves. A 400 on any other device.`,
     inputSchema: strictParams({

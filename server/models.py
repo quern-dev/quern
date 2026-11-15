@@ -2675,6 +2675,15 @@ class OrientationRequest(BaseModel):
             "front decides whether its interface follows."))
 
 
+class StandbyRequest(BaseModel):
+    """Request body for POST /device/standby: show or hide StandBy (#680)."""
+
+    udid: str | None = None
+    show: bool = Field(description=(
+        "True to show StandBy, false to hide it. StandBy presents only on the lock screen, "
+        "so a show on an unlocked simulator locks it first and says so."))
+
+
 class RestoreInputRequest(BaseModel):
     """Request body for POST /device/ui/restore-input."""
 

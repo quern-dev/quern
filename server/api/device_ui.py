@@ -33,6 +33,7 @@ from server.models import (
     PressButtonRequest,
     RestoreInputRequest,
     ScrollToElementRequest,
+    StandbyRequest,
     SwipeRequest,
     TapElementRequest,
     TapRequest,
@@ -692,6 +693,29 @@ async def set_orientation(request: Request, body: OrientationRequest) -> dict:
     controller = _get_controller(request)
     try:
         return await controller.set_orientation(body.orientation, udid=body.udid)
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.get("/standby")
+@logged_action("get_standby", category="device.read")
+async def get_standby(request: Request, udid: str | None = Query(default=None)) -> dict:
+    """StandBy's state on an iOS simulator: showing, hidden or unavailable (#680)."""
+    controller = _get_controller(request)
+    try:
+        return await controller.get_standby(udid=udid)
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/standby")
+@logged_action("set_standby", category="device.action")
+async def set_standby(request: Request, body: StandbyRequest) -> dict:
+    """Show or hide StandBy on an iOS simulator, locking it first if a show
+    needs that (#680). The answer is the state the device reports."""
+    controller = _get_controller(request)
+    try:
+        return await controller.set_standby(body.show, udid=body.udid)
     except DeviceError as e:
         raise _handle_device_error(e)
 

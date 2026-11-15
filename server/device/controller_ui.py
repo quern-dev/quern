@@ -1100,6 +1100,109 @@ class DeviceControllerUI:
                 "follow the interface as it is.")
         return result
 
+    #: How long StandBy may take to become available after a lock, or to show.
+    _STANDBY_SETTLE_S = 3.0
+    #: The least one StandBy read is given, however little settle time is left:
+    #: a read took ~0.13s (measured), and a cancelled one leaves nothing behind.
+    _STANDBY_READ_FLOOR_S = 1.0
+
+    async def _standby_target(self, udid: str | None, tool: str) -> str:
+        """The iOS simulator to ask about StandBy, or a 400 saying why not."""
+        resolved = await self.resolve_udid(udid)
+        if self._is_android(resolved) or self._is_physical(resolved):
+            raise InvalidDeviceRequestError(
+                "StandBy is for iOS simulators here: Android has no StandBy, and a physical "
+                "iPhone is not supported yet.", tool=tool)
+        self._require_simulator(resolved, "StandBy")
+        if not await self.devicectl.can_standby():
+            raise DeviceOperationUnsupportedError(
+                "StandBy needs devicectl's `device settings standby` (Xcode 27.2+), which this "
+                "Xcode's devicectl does not have.", tool=tool)
+        return resolved
+
+    async def get_standby(self, udid: str | None = None) -> dict:
+        """StandBy's state on a simulator (#680): showing, hidden or unavailable."""
+        resolved = await self._standby_target(udid, "get_standby")
+        return {"udid": resolved, "standby": await self.devicectl.standby_state(resolved)}
+
+    async def set_standby(self, show: bool, udid: str | None = None) -> dict:
+        """Show or hide StandBy on a simulator, arranging what it needs (#680).
+
+        StandBy presents only on the lock screen -- devicectl says so in as
+        many words, and an unlocked simulator reads `unavailable` -- so a show
+        on one that is unlocked locks it first, with quern's own LOCK, and says
+        it did: the app in front goes to the background. Orientation is not
+        needed: shown from a portrait lock screen, StandBy turned to landscape
+        itself (measured, iPhone 18 Pro, iOS 27.2). The answer is the state the
+        device reports, not the one asked for.
+
+        Once quern has locked the simulator or shown StandBy, nothing after may
+        hide that: a read that fails is reported, and a refusal says what was
+        already done, as set_orientation does after a turn (review).
+        """
+        resolved = await self._standby_target(udid, "set_standby")
+        before = await self.devicectl.standby_state(resolved)
+        arranged: list[str] = []
+        state: str | None = before
+        if show and before != "showing":
+            if before == "unavailable":
+                await self.press_button("LOCK", udid=resolved)
+                arranged.append("locked")
+                self._invalidate_ui_cache(resolved)  # the app in front has gone
+                state = await self._await_standby(resolved, lambda s: s != "unavailable")
+                if state == "unavailable":
+                    raise DeviceError(
+                        "quern pressed LOCK to show StandBy, so the simulator is locked, but "
+                        "StandBy is still unavailable: it presents only on the lock screen, "
+                        f"and the simulator did not reach it within {self._STANDBY_SETTLE_S:.0f}s.",
+                        tool="set_standby")
+            try:
+                await self.devicectl.set_standby(resolved, show=True)
+            except DeviceError as e:
+                if not arranged:
+                    raise
+                raise DeviceError(
+                    f"quern pressed LOCK to show StandBy, so the simulator is locked, but "
+                    f"devicectl did not show it: {e}", tool="set_standby") from e
+            state = await self._await_standby(resolved, lambda s: s == "showing")
+        elif not show and before == "showing":
+            await self.devicectl.set_standby(resolved, show=False)
+            state = await self._await_standby(resolved, lambda s: s != "showing")
+        self._invalidate_ui_cache(resolved)
+
+        result: dict = {"udid": resolved, "status": "ok", "standby": state,
+                        "standby_before": before, "arranged": arranged}
+        notes = []
+        if "locked" in arranged:
+            notes.append("The simulator was locked to show StandBy, so the app in front went "
+                         "to the background.")
+        if state is None:
+            notes.append("StandBy's state could not be read back after the request.")
+        elif (state != "showing") if show else (state == "showing"):
+            notes.append(f"StandBy reports {state} after the request to "
+                         f"{'show' if show else 'hide'} it.")
+        if notes:
+            result["note"] = " ".join(notes)
+        return result
+
+    async def _await_standby(self, udid: str, done) -> str | None:
+        """StandBy's state once `done(state)` holds, else the last reading after
+        _STANDBY_SETTLE_S. None when the last read failed: an earlier reading
+        may be from before the change, and reporting it would call a change
+        that happened one that did not. Each read is bounded by what is left
+        of the settle time, never less than _STANDBY_READ_FLOOR_S."""
+        deadline = time.monotonic() + self._STANDBY_SETTLE_S
+        while True:
+            budget = max(deadline - time.monotonic(), self._STANDBY_READ_FLOOR_S)
+            try:
+                state = await asyncio.wait_for(self.devicectl.standby_state(udid), budget)
+            except (DeviceError, TimeoutError):
+                logger.debug("Could not read StandBy on %s", udid[:8], exc_info=True)
+                state = None
+            if (state is not None and done(state)) or time.monotonic() >= deadline:
+                return state
+            await asyncio.sleep(0.25)
+
     async def _await_orientation(self, udid: str, want: int) -> int | None:
         """The screen's orientation once a turn has played out: `want` as soon
         as it reads that, else the last reading after _ORIENTATION_SETTLE_S --
