@@ -12,10 +12,11 @@ from unittest.mock import patch
 
 import pytest
 
-from server.main import _cmd_doctor, _report_screen_mirror
+from server.main import _cmd_doctor, _report_media_engine, _report_screen_mirror
 
-#: Imported before any fixture stubs it, for the section's own tests.
+#: Imported before any fixture stubs them, for the sections' own tests.
 REAL_SCREEN_MIRROR = _report_screen_mirror
+REAL_MEDIA_ENGINE = _report_media_engine
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +42,8 @@ def _no_slow_sections(monkeypatch):
     # Reads the screen-mirror bundle and `ps`, and --fix compiles and quits
     # windows: real machine work.
     monkeypatch.setattr("server.main._report_screen_mirror", lambda fix=False: (True, None))
+    # Hashes the QuernMedia sources, and --fix runs `swift build`.
+    monkeypatch.setattr("server.main._report_media_engine", lambda fix=False: (True, None))
 
 
 @pytest.fixture
@@ -230,6 +233,19 @@ class TestDoctorExitContract:
         monkeypatch.setattr("server.main._report_screen_mirror", lambda fix=False: (True, False))
         assert _run(args_fix=True) != 0, "a failed mirror repair must fail --fix"
 
+    def test_the_media_engine_section_reaches_both_exit_codes(self, monkeypatch, capsys):
+        self._server(monkeypatch, {"adb": True})
+        monkeypatch.setattr("server.main._report_python_deps", lambda fix: True)
+        monkeypatch.setattr("server.main._report_external_tools", lambda fix: None)
+        monkeypatch.setattr("server.main._report_service_health", lambda fix: True)
+        assert _run() == 0, "the baseline must pass, or the two below prove nothing"
+
+        monkeypatch.setattr("server.main._report_media_engine", lambda fix=False: (False, None))
+        assert _run() != 0, "quern-media that could not be checked must not read as clean"
+
+        monkeypatch.setattr("server.main._report_media_engine", lambda fix=False: (True, False))
+        assert _run(args_fix=True) != 0, "a failed quern-media rebuild must fail --fix"
+
     def test_a_failed_repair_does_fail_fix(self, monkeypatch, capsys):
         monkeypatch.setattr("server.main._report_python_deps", lambda fix: True)
         monkeypatch.setattr("server.main._report_external_tools", lambda fix: None)
@@ -418,3 +434,86 @@ class TestTheScreenMirrorSection:
         assert report(True) == (True, None)
         assert calls == []
         assert "a signed build keeps its own version" in capsys.readouterr().out
+
+
+class TestTheMediaEngineSection:
+    """Whether the installed quern-media is the build these sources make."""
+
+    def _section(self, monkeypatch, tmp_path, *, installed, expected="b" * 64, built=True,
+                 rebuild=None):
+        from server.device.media import media_engine
+
+        binary = tmp_path / "quern-media"
+        if built:
+            binary.write_text("compiled")
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr(media_engine, "binary_path", lambda: binary)
+        monkeypatch.setattr(media_engine, "installed_digest", lambda: installed)
+        monkeypatch.setattr(media_engine, "expected_digest", lambda: expected)
+        calls = []
+
+        def build(force=False):
+            calls.append(force)
+            if isinstance(rebuild, Exception):
+                raise rebuild
+            return binary
+
+        monkeypatch.setattr(media_engine, "build_media_engine_sync", build)
+        return REAL_MEDIA_ENGINE, calls
+
+    def test_a_current_build_says_so(self, monkeypatch, tmp_path, capsys):
+        report, calls = self._section(monkeypatch, tmp_path, installed="b" * 64)
+
+        assert report(True) == (True, None)
+        assert calls == [], "a current build is not rebuilt, even by --fix"
+        assert "bbbbbbbb, current" in capsys.readouterr().out
+
+    def test_an_unstamped_build_is_out_of_date(self, monkeypatch, tmp_path, capsys):
+        """Every build before this change: no stamp beside it."""
+        report, calls = self._section(monkeypatch, tmp_path, installed=None)
+
+        assert report(False) == (True, None)
+        assert calls == [], "plain doctor must not rebuild"
+        out = capsys.readouterr().out
+        assert "before builds were stamped: out of date, these sources build bbbbbbbb" in out
+
+    def test_another_build_is_out_of_date(self, monkeypatch, tmp_path, capsys):
+        report, _ = self._section(monkeypatch, tmp_path, installed="a" * 64)
+
+        report(False)
+        assert "aaaaaaaa: out of date" in capsys.readouterr().out
+
+    def test_fix_rebuilds_it(self, monkeypatch, tmp_path, capsys):
+        report, calls = self._section(monkeypatch, tmp_path, installed=None)
+
+        assert report(True) == (True, True)
+        assert calls == [False]
+        assert "up to date" in capsys.readouterr().out
+
+    def test_fix_that_cannot_build_is_a_failed_repair(self, monkeypatch, tmp_path, capsys):
+        report, _ = self._section(monkeypatch, tmp_path, installed=None,
+                                  rebuild=RuntimeError("swift not found"))
+
+        assert report(True) == (True, False)
+        assert "could not: swift not found" in capsys.readouterr().out
+
+    def test_not_built_is_not_a_failure(self, monkeypatch, tmp_path, capsys):
+        report, calls = self._section(monkeypatch, tmp_path, installed=None, built=False)
+
+        assert report(True) == (True, None)
+        assert calls == []
+        assert "not built" in capsys.readouterr().out
+
+    def test_sources_that_cannot_be_read_are_not_a_clean_check(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        from server.device.media import media_engine
+
+        report, _ = self._section(monkeypatch, tmp_path, installed=None)
+
+        def unreadable():
+            raise PermissionError("Package.swift")
+
+        monkeypatch.setattr(media_engine, "expected_digest", unreadable)
+        assert report(False) == (False, None)
+        assert "could not be checked" in capsys.readouterr().out

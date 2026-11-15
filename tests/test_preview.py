@@ -3034,6 +3034,40 @@ async def test_a_mirror_app_that_cannot_build_does_not_stop_the_server(monkeypat
     assert "swiftc not found" in caplog.text
 
 
+async def test_the_server_checks_quern_media_at_start_even_when_the_mirror_app_fails(
+    monkeypatch, caplog,
+):
+    """The Screen Mirror app run without a server starts the quern-media beside
+    it as it finds it, so a checkout moved by `git pull` needs this checked at
+    start too -- and the mirror app failing to build must not skip it."""
+    from server.config import ServerConfig
+    from server.device.media import media_engine, preview
+    from server.lifecycle import network_monitor, update_check
+    from server.main import create_app, lifespan
+
+    async def _never(*a, **k):
+        return None
+
+    def boom():
+        raise RuntimeError("swiftc not found")
+
+    def media_boom():
+        raise RuntimeError("swift build failed")
+
+    monkeypatch.setattr(network_monitor, "update_network_state", lambda *a: None)
+    monkeypatch.setattr(network_monitor, "network_monitor_loop", _never)
+    monkeypatch.setattr(update_check, "periodic_update_check", _never)
+    monkeypatch.setattr(preview, "refresh_at_server_start", boom)
+    monkeypatch.setattr(media_engine, "refresh_at_server_start", media_boom)
+    app = create_app(config=ServerConfig(api_key="k"),
+                     enable_oslog=False, enable_crash=False, enable_proxy=False)
+    async with lifespan(app):
+        await asyncio.wait_for(app.state._mirror_task, 5)
+
+    assert "swiftc not found" in caplog.text
+    assert "Could not bring quern-media up to date: swift build failed" in caplog.text
+
+
 class TestTheServerStartRefreshStaysInItsCheckout:
     """A worktree started for a live test without its own QUERN_STATE_DIR
     shares ~/.quern/bin: refreshing there rebuilt the person's Screen Mirror

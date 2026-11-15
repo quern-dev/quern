@@ -712,7 +712,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "Quern Preview %s is still running an older build and would not quit; "
                 "quit it and reopen it from the menu bar", refreshed.left_running)
 
-    app.state._mirror_task = asyncio.create_task(_refresh_screen_mirror())
+    async def _refresh_media_engine():
+        """quern-media, rebuilt if its sources changed: the Screen Mirror app
+        run without a server starts the one installed as it finds it. After
+        the app's own check, in the background: a cold build takes seconds."""
+        from server.device.media import media_engine
+
+        try:
+            rebuilt = await asyncio.to_thread(media_engine.refresh_at_server_start)
+        except (RuntimeError, OSError) as exc:
+            logger.warning("Could not bring quern-media up to date: %s", exc)
+            return
+        if rebuilt:
+            logger.info("Rebuilt quern-media: its sources had changed")
+
+    async def _refresh_mirror_tools():
+        await _refresh_screen_mirror()
+        await _refresh_media_engine()
+
+    app.state._mirror_task = asyncio.create_task(_refresh_mirror_tools())
 
     # Re-probe the simulator UI backend periodically. Selection used to be
     # latched at startup and never revisited, so an Xcode upgrade under a
@@ -2131,6 +2149,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     registrations_complete = _report_mcp_registrations()
     menubar_checked, menubar_repaired = _report_menubar(fix)
     mirror_checked, mirror_repaired = _report_screen_mirror(fix)
+    media_checked, media_repaired = _report_media_engine(fix)
     services_complete = _report_service_health(fix)
 
     if fix:
@@ -2140,9 +2159,10 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         # an unreadable Info.plist would have failed `doctor --fix && quern
         # start` after the venv repair succeeded.
         sys.exit(0 if repaired is not False and menubar_repaired is not False
-                 and mirror_repaired is not False else 1)
+                 and mirror_repaired is not False and media_repaired is not False else 1)
     sys.exit(0 if tools is not None and services_complete and node_complete
-             and registrations_complete and menubar_checked and mirror_checked else 1)
+             and registrations_complete and menubar_checked and mirror_checked
+             and media_checked else 1)
 
 
 def _report_menubar(fix: bool = False) -> tuple[bool, bool | None]:
@@ -2246,6 +2266,51 @@ def _report_screen_mirror(fix: bool = False) -> tuple[bool, bool | None]:
             print("  \u2713 up to date" + (" -- reopened" if refreshed.relaunched else ""))
         return True, True
     return stale_windows is not None, None
+
+
+def _report_media_engine(fix: bool = False) -> tuple[bool, bool | None]:
+    """quern-media, the simulator preview and video engine: whether the
+    installed build is the one these sources make. Returns `(checked,
+    repaired)`, as `_report_screen_mirror` does, and like it reports an out of
+    date build rather than failing it: the server rebuilds it at its next
+    start, and before any simulator stream.
+    """
+    import platform
+
+    if platform.system() != "Darwin":
+        return True, None
+    from server.device.media import media_engine
+
+    print()
+    print("Simulator preview engine (quern-media):")
+    if not media_engine.binary_path().exists():
+        print("  \u2013 not built: `quern setup` builds it when the developer tools are present")
+        return True, None
+    try:
+        expected = media_engine.expected_digest()
+        installed = media_engine.installed_digest()
+    except Exception as exc:  # noqa: BLE001 -- doctor reports, it does not crash
+        print(f"  ? could not be checked ({exc})")
+        return False, None
+    if expected is None:
+        print("  \u2013 its sources are not in this install")
+        return True, None
+    built = installed[:8] if installed else "a build from before builds were stamped"
+    if installed == expected:
+        print(f"  \u2713 {built}, current")
+        return True, None
+    print(f"  \u2717 {built}: out of date, these sources build {expected[:8]}")
+    print("      it is rebuilt when the server next starts, or run `quern doctor --fix`")
+    if not fix:
+        return True, None
+    print("  --fix: rebuilding quern-media")
+    try:
+        media_engine.build_media_engine_sync()
+    except (RuntimeError, OSError) as exc:
+        print(f"  \u2717 could not: {exc}")
+        return True, False
+    print("  \u2713 up to date")
+    return True, True
 
 
 def _report_node() -> bool:

@@ -2004,6 +2004,28 @@ class TestBuildSimulatorPreviewEngine:
         build.assert_called_once_with()
         assert result.status == CheckStatus.OK
 
+    def test_it_says_whether_it_built_or_found_it_current(self, tmp_path):
+        """"Built" on every run said nothing; and a binary deleted under its
+        stamp rebuilds to the same digest, so it is the file that is compared."""
+        from server.device.media import media_engine
+        from server.lifecycle.setup import build_simulator_preview_engine
+
+        binary = tmp_path / "quern-media"
+
+        def rebuild():
+            binary.unlink(missing_ok=True)
+            binary.write_text("new")
+
+        def check(build):
+            with patch("server.lifecycle.setup._which", return_value="/usr/bin/swift"), \
+                 patch.object(media_engine, "binary_path", return_value=binary), \
+                 patch.object(media_engine, "build_media_engine_sync", side_effect=build):
+                return build_simulator_preview_engine().message
+
+        assert check(rebuild).startswith("Built"), "not there before: built"
+        assert check(lambda: None).startswith("Up to date")
+        assert check(rebuild).startswith("Built"), "replaced: built"
+
     def test_no_swift_is_skipped_and_builds_nothing(self):
         """A missing feature, not a broken install. And no second installer
         prompt: `build_preview_app` has just offered one for the same tools."""
