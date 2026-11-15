@@ -36,6 +36,9 @@ SETTINGS = (FIXTURES / "settings_root.bin").read_bytes()
 SAFARI = (FIXTURES / "safari_example.bin").read_bytes()
 #: The probe app's Text tab, with its tab bar.
 PROBE_TEXT = (FIXTURES / "probe_text_fields.bin").read_bytes()
+#: The probe app's Lazy screen: a UICollectionView list, its rows with no
+#: traits, from the SwiftUI-hosted build (#664).
+PROBE_LAZY = (FIXTURES / "probe_lazy.bin").read_bytes()
 
 PHONE = "B34C4EE9-AF48-53C6-BD13-2BFA66E7EE91"
 
@@ -208,6 +211,36 @@ class TestTheSelectedTab:
             element="RadioButton", identifier="tab_text", selected=True))
         assert not match_landmark(elements, Landmark(
             element="RadioButton", identifier="tab_links", selected=True))
+
+
+class TestACollectionViewRow:
+    """A list row with no traits reads Group in the push; WDA calls it Cell and
+    a simulator StaticText, so a row landmark recorded on either matched
+    nothing there (#664)."""
+
+    def test_it_reads_as_a_group(self):
+        _, elements = parse_push(PROBE_LAZY)
+        row = _by_id(elements, "lazy_row_0")
+        assert (row["type"], row["AXLabel"]) == ("Group", "Lazy row 0")
+
+    @pytest.mark.parametrize("recorded", ["Cell", "StaticText", "Button"])
+    def test_a_row_landmark_from_any_reader_matches_it(self, recorded):
+        from server.device.ui_elements import parse_elements
+        from server.knowledge.landmarks import match_landmark
+        from server.models import Landmark
+
+        _, raw = parse_push(PROBE_LAZY)
+        assert match_landmark(parse_elements(raw),
+                              Landmark(element=recorded, identifier="lazy_row_0"))
+
+    def test_but_not_by_its_label(self):
+        from server.device.ui_elements import parse_elements
+        from server.knowledge.landmarks import match_landmark
+        from server.models import Landmark
+
+        _, raw = parse_push(PROBE_LAZY)
+        assert not match_landmark(parse_elements(raw),
+                                  Landmark(element="Cell", label="Lazy row 0"))
 
 
 class TestBadPushes:

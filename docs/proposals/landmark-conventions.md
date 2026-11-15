@@ -142,7 +142,7 @@ generic types the accessibility tree uses for it:
 
 - containers: `Group`, `Other`, `TabBar`, `NavigationBar`, `Toolbar`, `Table`,
   `CollectionView`
-- rows: `Button`, `StaticText`, `Cell`
+- rows: `Button`, `StaticText`, `Cell`, `Group` (a collection-view list row in a physical iPhone's tree push, #664)
 - indicators: `GenericElement`, `ProgressIndicator`, `ActivityIndicator`,
   `ColorWell`, `StaticText`
 - headers: `Heading`, `Other`, `StaticText`
