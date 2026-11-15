@@ -15,6 +15,7 @@ backend already, so both cases are the same path.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Iterator
 
 import pytest
@@ -37,6 +38,11 @@ def lazy(request: pytest.FixtureRequest, quern: QuernClient) -> Iterator:
         probe.goto("lazy")
         yield probe
     finally:
+        # Left at the top: a lazy list holds only the rows on screen, and the
+        # screen is known by its first row (#664), so the next visit -- this
+        # fixture's other param -- would not find it far down the list.
+        with contextlib.suppress(Exception):
+            _top(probe)
         if started:
             # Back to sim-bridge, so the rest of the session reads the way it
             # would have without this module.
