@@ -220,6 +220,18 @@ class TestTheStamp:
 
         assert media_engine.source_digest(package) == before
 
+    def test_bytes_cannot_shift_a_file_boundary(self, package):
+        """Run together, a\\0<path>\\0b in one file and a, b in two read the
+        same: each file is hashed apart (CR)."""
+        res = package / "Sources" / "QuernMedia" / "Resources"
+        res.mkdir()
+        (res / "a.bin").write_bytes(b"x\0Sources/QuernMedia/Resources/b.bin\0y")
+        one = media_engine.source_digest(package)
+        (res / "a.bin").write_bytes(b"x")
+        (res / "b.bin").write_bytes(b"y")
+
+        assert media_engine.source_digest(package) != one
+
     def test_the_manifest_counts(self, package):
         before = media_engine.source_digest(package)
         (package / "Package.swift").write_text("// swift-tools-version: 6.1\n")

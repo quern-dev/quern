@@ -102,10 +102,13 @@ def source_digest(package: Path) -> str:
     """
     h = hashlib.sha256()
     for path in _sources(package):
+        # One line per file, its own bytes hashed apart: a path cannot hold a
+        # NUL or a newline here, but a resource's bytes can, and run together
+        # they could shift a file boundary without changing the input (CR).
         h.update(path.relative_to(package).as_posix().encode())
         h.update(b"\0")
-        h.update(path.read_bytes())
-        h.update(b"\0")
+        h.update(hashlib.sha256(path.read_bytes()).hexdigest().encode())
+        h.update(b"\n")
     h.update(_DIGEST_RECIPE.encode())
     return h.hexdigest()
 

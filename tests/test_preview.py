@@ -3101,7 +3101,7 @@ class TestTheStartUpBuildThread:
     async def test_it_returns_the_result(self):
         from server.main import _in_daemon_thread
 
-        assert await _in_daemon_thread(lambda: 42) == 42
+        assert await asyncio.wait_for(_in_daemon_thread(lambda: 42), 5) == 42
 
     async def test_it_raises_what_the_work_raised(self):
         from server.main import _in_daemon_thread
@@ -3110,7 +3110,7 @@ class TestTheStartUpBuildThread:
             raise RuntimeError("swift build failed")
 
         with pytest.raises(RuntimeError, match="swift build failed"):
-            await _in_daemon_thread(boom)
+            await asyncio.wait_for(_in_daemon_thread(boom), 5)
 
     async def test_the_thread_is_a_daemon(self):
         import threading
@@ -3123,7 +3123,7 @@ class TestTheStartUpBuildThread:
             seen["daemon"] = threading.current_thread().daemon
             return None
 
-        await _in_daemon_thread(work)
+        await asyncio.wait_for(_in_daemon_thread(work), 5)
         assert seen["daemon"] is True
 
     def test_a_loop_closed_under_it_is_not_an_error(self):

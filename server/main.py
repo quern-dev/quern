@@ -23,11 +23,11 @@ import re
 import signal
 import sys
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -332,7 +332,10 @@ async def _gauge_stream(app: FastAPI, udid: str, app_id: str,
             yield snap
 
 
-async def _in_daemon_thread(fn):
+_T = TypeVar("_T")
+
+
+async def _in_daemon_thread(fn: Callable[[], _T]) -> _T:
     """`fn()` on a daemon thread, awaited. For start-up work that may still be
     running at shutdown: `asyncio.to_thread`'s pool is joined at exit even
     when the task is cancelled, so a cold `swift build` held `quern stop` past
@@ -343,14 +346,16 @@ async def _in_daemon_thread(fn):
     loop = asyncio.get_running_loop()
     done = loop.create_future()
 
-    def settle(result, exc):
+    def settle(result: _T | None, exc: BaseException | None) -> None:
         if not done.done():
             if exc is None:
-                done.set_result(result)
+                done.set_result(result)  # type: ignore[arg-type]
             else:
                 done.set_exception(exc)
 
-    def work():
+    def work() -> None:
+        result: _T | None
+        exc: BaseException | None
         try:
             result, exc = fn(), None
         except BaseException as e:  # noqa: BLE001 -- handed to the awaiting task
@@ -744,7 +749,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "Quern Preview %s is still running an older build and would not quit; "
                 "quit it and reopen it from the menu bar", refreshed.left_running)
 
-    async def _refresh_media_engine():
+    async def _refresh_media_engine() -> None:
         """quern-media, rebuilt if its sources changed: the Screen Mirror app
         run without a server starts the one installed as it finds it. In the
         background: a cold build takes seconds, up to minutes."""
@@ -758,7 +763,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if rebuilt:
             logger.info("Rebuilt quern-media: its sources had changed")
 
-    async def _refresh_mirror_tools():
+    async def _refresh_mirror_tools() -> None:
         # The engine first: the app starts it, so an app reopened by its own
         # refresh before the engine is rebuilt would start the old one.
         await _refresh_media_engine()
