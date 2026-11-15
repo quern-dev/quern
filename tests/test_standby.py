@@ -11,6 +11,7 @@ show on an unlocked simulator, saying StandBy presents only on the lock screen.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -250,3 +251,133 @@ async def test_whether_devicectl_has_standby_is_asked_once(monkeypatch):
     assert await backend.can_standby()
     assert await backend.can_standby()
     assert probe.await_count == 1
+
+
+# -- once quern has acted, nothing hides it (review) ------------------------------
+
+
+async def test_a_read_that_fails_after_the_show_is_reported_not_raised():
+    """StandBy was shown: raising now would send a caller to retry a show that
+    happened."""
+    ctrl = _controller("hidden", DeviceError("devicectl device failed: transient"))
+
+    result = await ctrl.set_standby(True)
+
+    ctrl.devicectl.set_standby.assert_awaited_once()
+    assert result["standby"] is None
+    assert "could not be read back" in result["note"]
+
+
+async def test_a_refused_show_after_the_lock_says_quern_locked_it():
+    """devicectl's own refusal reads as "lock it first" -- straight after quern
+    did. The error says the simulator is locked."""
+    ctrl = _controller("unavailable", "hidden")
+    ctrl.devicectl.set_standby = AsyncMock(side_effect=DeviceError(
+        "devicectl device failed: ERROR: StandBy can only be presented while the device "
+        "is showing its lock screen."))
+
+    with pytest.raises(DeviceError, match="pressed LOCK.*locked.*lock screen"):
+        await ctrl.set_standby(True)
+
+
+async def test_a_refused_show_with_nothing_arranged_is_devicectls_own_error():
+    ctrl = _controller("hidden")
+    ctrl.devicectl.set_standby = AsyncMock(side_effect=DeviceError("devicectl device failed: x"))
+
+    with pytest.raises(DeviceError, match="^devicectl device failed: x$"):
+        await ctrl.set_standby(True)
+
+
+async def test_polls_that_fail_after_the_lock_still_try_the_show():
+    """Not knowing whether the lock landed is no reason to stop: the show
+    itself answers it."""
+    ctrl = _controller("unavailable", DeviceError("transient"), DeviceError("transient"),
+                       "showing")
+    ctrl._STANDBY_SETTLE_S = 0.3
+
+    result = await ctrl.set_standby(True)
+
+    ctrl.devicectl.set_standby.assert_awaited_once_with(SIM, show=True)
+    assert result["arranged"] == ["locked"]
+    assert result["standby"] == "showing"
+
+
+async def test_a_hide_waits_for_it_to_go():
+    ctrl = _controller("showing", "showing", "showing", "hidden")
+
+    result = await ctrl.set_standby(False)
+
+    assert result["standby"] == "hidden"
+    assert "note" not in result
+
+
+async def test_the_change_is_marked_after_the_last_read():
+    """StandBy covers the screen: the next tap must find it recent and settle."""
+    import time
+
+    ctrl = _controller("hidden", "showing")
+    read_at: list[float] = []
+    inner = ctrl.devicectl.standby_state.side_effect
+
+    async def timed(udid):
+        read_at.append(time.monotonic())
+        return await inner(udid)
+
+    ctrl.devicectl.standby_state = AsyncMock(side_effect=timed)
+
+    await ctrl.set_standby(True)
+
+    assert ctrl._last_ui_change[SIM] >= read_at[-1]
+
+
+async def test_a_devicectl_that_hangs_is_an_error_not_a_state():
+    import asyncio
+
+    backend = DevicectlBackend()
+    backend._ORIENTATION_TIMEOUT_S = 0.05
+
+    async def hang(*_a, **_k):
+        await asyncio.sleep(5)
+
+    backend._run_devicectl = hang
+
+    with pytest.raises(DeviceError, match="did not answer about StandBy"):
+        await backend.standby_state(SIM)
+
+
+async def test_a_simulator_that_cannot_show_it_is_a_400_with_what_to_do():
+    """Measured on a shut-down iOS 27.0 simulator: devicectl's capability error."""
+    backend, _ = _backend(DeviceError(
+        'devicectl device failed: ERROR: The capability "StandBy" is not supported by this '
+        "device. (com.apple.dt.CoreDeviceError error 1001 (0x3E9))"))
+
+    with pytest.raises(DeviceOperationUnsupportedError, match="iPhone feature.*booted"):
+        await backend.standby_state(SIM)
+
+
+async def test_a_cancelled_json_read_leaves_no_temp_file(monkeypatch, tmp_path):
+    import asyncio
+    import tempfile
+
+    from server.device.ios import devicectl as mod
+
+    made: list[str] = []
+    real = tempfile.NamedTemporaryFile
+
+    def named(*a, **k):
+        f = real(*a, dir=tmp_path, **k)
+        made.append(f.name)
+        return f
+
+    monkeypatch.setattr(mod.tempfile, "NamedTemporaryFile", named)
+
+    async def never(*_a, **_k):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", never)
+    backend = DevicectlBackend()
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(backend._run_devicectl("device", "info", "standby",
+                                                      json_output=True), 0.05)
+    assert made and not any(Path(m).exists() for m in made)

@@ -715,6 +715,40 @@ func panelSelfTest() -> [String] {
     } else {
         failures.append("SimulatorKit's digitizer builders did not load")
     }
+
+    // The turned one-panel rule (#243, #680), against frames measured on iOS
+    // 27.2: SpringBoard's are in the panel's portrait points and are turned,
+    // an app's are already the interface's and are left alone.
+    func turnedPanel(_ native: CGSize) -> Panel {
+        Panel(screenID: 1, deviceName: "primary", orientation: 4, nativeSize: native, lit: true)
+    }
+    let phone = turnedPanel(CGSize(width: 402, height: 874))
+    let phoneRoot = CGRect(x: 0, y: 0, width: 874, height: 402)
+    let standby = axTransformFor(rootFrame: phoneRoot, pointSize: phone.nativeSize, lit: nil,
+                                 turned: phone, springBoard: true)
+    let continueRaw = CGRect(x: 24, y: 284, width: 48, height: 306)
+    if standby.map(continueRaw) != CGRect(x: 284, y: 330, width: 306, height: 48) {
+        failures.append("StandBy's Continue -> \(standby.map(continueRaw)), measured (284, 330, 306, 48)")
+    }
+    let ipad = turnedPanel(CGSize(width: 820, height: 1180))
+    let home = axTransformFor(rootFrame: CGRect(x: 0, y: 0, width: 1180, height: 820),
+                              pointSize: ipad.nativeSize, lit: nil, turned: ipad, springBoard: true)
+    let settingsRaw = CGRect(x: 166, y: 144, width: 96, height: 72)
+    if home.map(settingsRaw) != CGRect(x: 144, y: 558, width: 72, height: 96) {
+        failures.append("iPad home's Settings -> \(home.map(settingsRaw)), measured (144, 558, 72, 96)")
+    }
+    let tabs = CGRect(x: 758, y: 10, width: 44, height: 44)
+    for front: Bool? in [false, nil] {
+        let app = axTransformFor(rootFrame: phoneRoot, pointSize: phone.nativeSize, lit: nil,
+                                 turned: phone, springBoard: front)
+        if app.map(tabs) != tabs { failures.append("a turned app's frame moved: \(app.map(tabs)) (\(String(describing: front)))") }
+    }
+    let portrait = axTransformFor(rootFrame: CGRect(x: 0, y: 0, width: 402, height: 874),
+                                  pointSize: phone.nativeSize, lit: nil, turned: nil,
+                                  springBoard: true)
+    if portrait.panel != nil || portrait.map(continueRaw) != continueRaw {
+        failures.append("portrait took the turned path")
+    }
     return failures
 }
 
@@ -958,10 +992,6 @@ func axChildren(of element: NSObject) -> [NSObject] {
 
 // MARK: - AX Frame Transform
 
-/// The points an app's accessibility frames are scaled to on a one-panel
-/// device: the interface's, turned. An app reports its root at the interface's
-/// size, so in landscape the portrait size scaled every frame by 402/874 on an
-/// iPhone 18 Pro (iOS 27.2) and a tap at its centre landed elsewhere (#243).
 /// Whether the front process is SpringBoard, by its executable's path: a
 /// simulator's processes are the Mac's own, so the translation's pid names
 /// one. Nil when the pid or path cannot be read.
@@ -987,21 +1017,33 @@ func frontIsSpringBoard(_ front: NSObject) -> Bool? {
 /// screen can also put outside it.
 func axTransform(udid: String, device: NSObject, root: NSObject, front: NSObject,
                  lit panel: Panel?) -> AXFrameTransform {
-    let rootFrame = axFrame(of: root)
-    if panel == nil, let turned = turnedSinglePanel(udid: udid, device: device),
-       frontIsSpringBoard(front) == true {
+    let turned = panel == nil ? turnedSinglePanel(udid: udid, device: device) : nil
+    return axTransformFor(rootFrame: axFrame(of: root), pointSize: devicePointSize(for: device),
+                          lit: panel, turned: turned,
+                          springBoard: turned == nil ? nil : frontIsSpringBoard(front))
+}
+
+/// `axTransform`'s decision, pure so the self-test can drive it: a lit panel
+/// (a Duo) decides as before; a turned one-panel device's SpringBoard is in
+/// panel space; anything else -- an app, or a front process that could not
+/// be named -- is in the turned interface's points, scaled to them. An app
+/// reports its root at the interface's size, so in landscape the portrait
+/// size scaled every frame by 402/874 on an iPhone 18 Pro (iOS 27.2) and a
+/// tap at its centre landed elsewhere (#243).
+func axTransformFor(rootFrame: CGRect, pointSize: CGSize, lit: Panel?, turned: Panel?,
+                    springBoard: Bool?) -> AXFrameTransform {
+    if let lit {
+        return AXFrameTransform(rootFrame: rootFrame, pointSize: pointSize, panel: lit,
+                                panelSpace: AXFrameTransform.panelSpace(root: rootFrame, panel: lit))
+    }
+    guard let turned else {
+        return AXFrameTransform(rootFrame: rootFrame, pointSize: pointSize)
+    }
+    if springBoard == true {
         return AXFrameTransform(rootFrame: rootFrame, pointSize: turned.screenSize,
                                 panel: turned, panelSpace: true)
     }
-    let pointSize = axPointSize(udid: udid, device: device, panel: panel)
-    return AXFrameTransform(
-        rootFrame: rootFrame, pointSize: pointSize, panel: panel,
-        panelSpace: panel.map { AXFrameTransform.panelSpace(root: rootFrame, panel: $0) } ?? false)
-}
-
-func axPointSize(udid: String, device: NSObject, panel: Panel?) -> CGSize {
-    if panel != nil { return devicePointSize(for: device) }  // a Duo: its own path
-    return turnedSinglePanel(udid: udid, device: device)?.screenSize ?? devicePointSize(for: device)
+    return AXFrameTransform(rootFrame: rootFrame, pointSize: turned.screenSize)
 }
 
 struct AXFrameTransform {

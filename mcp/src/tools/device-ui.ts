@@ -481,7 +481,7 @@ On an iPhone Duo this is set_hinge with that orientation, and answers as set_hin
 
 StandBy presents only on the lock screen, so showing it on an unlocked simulator locks it first (with press_button LOCK) and says so in arranged and note: the app in front goes to the background. It turns itself to landscape. The first time, Apple's "Welcome to StandBy" screen comes first; tap Continue (tap_element) to reach StandBy itself.
 
-The response's standby is the state the simulator reports (showing, hidden or unavailable), with standby_before. Needs Xcode 27.2's devicectl. A 400 on a physical iPhone or an Android device.`,
+The response's standby is the state the simulator reports (showing, hidden or unavailable), with standby_before. Needs a booted iPhone simulator and Xcode 27.2's devicectl; one that cannot show it (an iPad, a shut-down simulator, or a runtime without StandBy) answers 400. A 400 on a physical iPhone or an Android device too.`,
     inputSchema: strictParams({
       show: z.boolean().describe("true to show StandBy, false to hide it."),
       udid: z
@@ -511,7 +511,7 @@ The response's standby is the state the simulator reports (showing, hidden or un
   });
 
   server.registerTool("get_standby", {
-    description: `StandBy's state on an iOS simulator: showing, hidden (it could show: the simulator is on its lock screen) or unavailable (it is not on its lock screen). Needs Xcode 27.2's devicectl.`,
+    description: `StandBy's state on an iOS simulator: showing, hidden (it could show: the simulator is on its lock screen) or unavailable (it is not on its lock screen). Needs a booted iPhone simulator and Xcode 27.2's devicectl.`,
     inputSchema: strictParams({
       udid: z
         .string()

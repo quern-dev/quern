@@ -10,7 +10,14 @@ from pathlib import Path
 
 from server.device._subprocess import communicate
 from server.device.ios._xcode import xcode_available
-from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
+from server.models import (
+    AppInfo,
+    DeviceError,
+    DeviceInfo,
+    DeviceOperationUnsupportedError,
+    DeviceState,
+    DeviceType,
+)
 from server.tooling.tool_probe import probe_command
 
 logger = logging.getLogger(__name__)
@@ -122,12 +129,19 @@ class DevicectlBackend:
 
         cmd_args.extend(args)
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd_args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_bytes, stderr_bytes = await communicate(proc)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await communicate(proc)
+        except BaseException:
+            # A launch that failed, or a wait a caller cancelled or timed out,
+            # leaves no reader for the file (review).
+            if json_output:
+                Path(tmp_path).unlink(missing_ok=True)
+            raise
 
         if proc.returncode != 0:
             if json_output:
@@ -208,6 +222,17 @@ class DevicectlBackend:
             out, _ = await asyncio.wait_for(
                 self._run_devicectl("device", *args, json_output=True),
                 timeout=self._ORIENTATION_TIMEOUT_S)
+        except DeviceError as e:
+            # Both a booted iPad and a shut-down iPhone answered this (measured,
+            # iOS 27.2 and 27.0): a 400 naming both causes, not a 500 that
+            # reads as quern having broken.
+            if "is not supported by this device" in str(e):
+                raise DeviceOperationUnsupportedError(
+                    "devicectl says this simulator does not support StandBy. StandBy is an "
+                    "iPhone feature (an iPad answers this too), and the iPhone has to be "
+                    f"booted, on a runtime with StandBy (measured on iOS 27.2). devicectl: {e}",
+                    tool="devicectl") from e
+            raise
         except TimeoutError as e:
             raise DeviceError(
                 f"devicectl did not answer about StandBy within "
