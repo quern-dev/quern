@@ -1015,17 +1015,20 @@ class TestACrashAfterTheRead:
             (37, "SpringBoard", 0), (617, "Settings", 1)]
 
     async def test_a_forget_during_the_poll_stands(self, monkeypatch):
-        """quern ended an app while this read looked for a report."""
-        reader, _ = self._reader(
-            monkeypatch, [(100, "QuernProbeScene", None), (37, "SpringBoard", False)])
+        """quern ended an app while this read looked for a report: the
+        questions it had kept are dropped with it (review)."""
+        monkeypatch.setattr(coredevice_ax, "CRASH_REPORT_WAIT_S", 0.0)
+        reader = CoreDeviceAxReader()
+        reader.note_front(PHONE, 200, "B", 0.0)
+        reader.note_front(PHONE, 100, "QuernProbeScene", 0.0)
+        # 100 gone (so a poll runs), 200 unknown (so it would be kept).
+        self._reads(monkeypatch, reader, 37, "SpringBoard", {100: False, 200: None})
 
         async def forgets(udid, since, app):
             reader.forget_front(PHONE)
             return []
         reader.crash_reports = forgets
 
-        await reader.describe_all(PHONE)
-        reader.note_front(PHONE, 200, "B", 0.0)     # pending, unknown below
         await reader.describe_all(PHONE)
 
         assert [e.pid for e in reader._front[PHONE]] == [37]
