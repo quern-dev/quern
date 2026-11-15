@@ -765,6 +765,13 @@ def build_preview_app() -> CheckResult:
             message="Built, but an older Quern Preview is still running",
             detail="It would not quit: quit it and reopen Screen Mirror from the menu bar.",
         )
+    if refreshed.relaunched and not refreshed.reopened:
+        return CheckResult(
+            name=name,
+            status=CheckStatus.WARNING,
+            message="Rebuilt, and quit the old window, but could not reopen it",
+            detail="Open Screen Mirror from the menu bar.",
+        )
     reopened = " -- reopened the running window" if refreshed.relaunched else ""
     return CheckResult(
         name=name,

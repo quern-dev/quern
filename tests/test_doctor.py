@@ -340,11 +340,35 @@ class TestTheScreenMirrorSection:
 
         report, calls = self._section(
             monkeypatch, tmp_path, stamp=BundleStamp(None, None),
-            refreshed=PreviewRefresh(rebuilt=True, relaunched=[63800]))
+            refreshed=PreviewRefresh(rebuilt=True, relaunched=[63800], reopened=True))
 
         assert report(True) == (True, True)
         assert calls == [True]
         assert "up to date -- reopened" in capsys.readouterr().out
+
+    def test_fix_that_quit_a_window_it_could_not_reopen_says_so(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        from server.device.media.preview import BundleStamp, PreviewRefresh
+
+        report, _ = self._section(
+            monkeypatch, tmp_path, stamp=BundleStamp(None, None),
+            refreshed=PreviewRefresh(rebuilt=True, relaunched=[63800], reopened=False))
+
+        assert report(True) == (True, True)
+        assert "could not reopen it" in capsys.readouterr().out
+
+    def test_a_ps_that_could_not_look_is_not_a_clean_check(self, monkeypatch, tmp_path, capsys):
+        """"No old windows" and "could not look" must not read alike."""
+        from server.device.media.preview import BundleStamp
+
+        report, _ = self._section(monkeypatch, tmp_path,
+                                  stamp=BundleStamp("0.26.0-beta.4", "b" * 64))
+        from server.device.media import preview
+        monkeypatch.setattr(preview, "stale_mirror_pids", lambda b: None)
+
+        assert report(False) == (False, None)
+        assert "could not look for windows" in capsys.readouterr().out
 
     def test_fix_that_cannot_build_is_a_failed_repair(self, monkeypatch, tmp_path, capsys):
         from server.device.media.preview import BundleStamp

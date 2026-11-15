@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -205,13 +206,20 @@ def write_app_bundle(bundle: Path, digest: str) -> None:
     macos_dir.mkdir(parents=True, exist_ok=True)
     resources_dir.mkdir(parents=True, exist_ok=True)
 
-    (contents / "Info.plist").write_text(_INFO_PLIST.format(
-        version=get_version(), build=digest[:8], digest=digest))
-
     icon_src = _RESOURCES_DIR / "wda-icon.png"
     icon_dst = resources_dir / "AppIcon.png"
     if icon_src.exists():
         shutil.copy2(icon_src, icon_dst)
+
+    # The stamp is the success marker, so it is written last -- an icon copy
+    # that failed is repaired by the next check, not hidden behind a current
+    # stamp (review) -- and whole, by rename: a half-written plist would read
+    # as unstamped and rebuild, but a rename leaves no half-written plist.
+    plist = contents / "Info.plist"
+    staged = contents / ".Info.plist.writing"
+    staged.write_text(_INFO_PLIST.format(
+        version=get_version(), build=digest[:8], digest=digest))
+    os.replace(staged, plist)
 
     logger.info("Created app bundle: %s", bundle)
 
@@ -251,6 +259,9 @@ def source_digest(sources: list[Path]) -> str:
         h.update(p.read_bytes())
         h.update(b"\0")
     h.update(_DIGEST_RECIPE.encode())
+    # The bundle's own Info.plist, so a change to it reaches bundles already
+    # built rather than waiting for the next version (review).
+    h.update(_INFO_PLIST.encode())
     return h.hexdigest()
 
 
@@ -277,7 +288,13 @@ def read_stamp(bundle: Path) -> BundleStamp:
     try:
         with (bundle / "Contents" / "Info.plist").open("rb") as f:
             info = plistlib.load(f)
-    except (OSError, plistlib.InvalidFileException, ValueError):
+    except Exception:  # noqa: BLE001 -- see below
+        # Broad on purpose: a truncated XML plist raises expat's ExpatError,
+        # which is neither OSError nor ValueError, and escaped -- every build
+        # then raised instead of repairing the bundle, which is what reads
+        # this (review). Whatever the reason, unreadable is unstamped.
+        return BundleStamp(None, None)
+    if not isinstance(info, dict):
         return BundleStamp(None, None)
     version = info.get("CFBundleShortVersionString")
     digest = info.get("QuernSourceDigest")
@@ -419,31 +436,40 @@ class PreviewRefresh:
     relaunched: list[int] = field(default_factory=list)
     #: Ones that would not quit, still showing the old build.
     left_running: list[int] = field(default_factory=list)
+    #: Whether the app came back after `relaunched` were quit: `open` fails
+    #: from a session with no window server (ssh, launchd), and saying
+    #: "reopened" then would hide that the window is gone (review).
+    reopened: bool = False
 
 
-def stale_mirror_pids(binary: Path) -> list[int]:
+def stale_mirror_pids(binary: Path) -> list[int] | None:
     """Standalone Quern Preview processes running an older build of `binary`:
-    started before it was last written.
+    started before it was last written. None when `ps` could not answer, so a
+    caller can tell "none" from "could not look".
 
     A rebuild replaces the file, and a process keeps running what it started
     from -- and the menu bar's Screen Mirror item only brings a running
     instance to the front, so after an update the old window stayed. Only
-    standalone ones, opened from the menu bar with no arguments: the server's
-    own `--interactive` child is started from a fresh build, and quitting it
-    would end previews an agent is using. Empty when `ps` cannot answer.
+    standalone ones: the bare command, as the menu bar opens it. The server's
+    `--interactive` child, a `--list` run, or anything else given arguments is
+    someone else's, and quitting it would end what they are doing (review).
     """
+    target = os.path.realpath(binary)
     try:
         built = binary.stat().st_mtime
+        # The C locale: `lstart` follows LANG, and under de_DE or ja_JP the
+        # parse below matched nothing -- no old window was ever found (review).
         out = subprocess.run(["ps", "-axo", "pid=,lstart=,command="],  # noqa: S607
-                             capture_output=True, text=True, timeout=5).stdout
+                             capture_output=True, text=True, timeout=5,
+                             env={**os.environ, "LC_ALL": "C"}).stdout
     except (OSError, subprocess.SubprocessError):
-        return []
+        return None
     stale = []
     for line in out.splitlines():
         parts = line.split(None, 6)
-        if len(parts) < 7 or not parts[6].startswith(str(binary)):
-            continue
-        if "--interactive" in parts[6][len(str(binary)):]:
+        # Real paths: a symlinked state directory (/tmp is /private/tmp)
+        # starts the app under the real one.
+        if len(parts) < 7 or os.path.realpath(parts[6].strip()) != target:
             continue
         try:
             started = time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))
@@ -486,25 +512,43 @@ def refresh_preview_app(*, relaunch: bool = True) -> PreviewRefresh:
     is caught as well as an update. Raises RuntimeError, as
     `build_preview_bundle` does, when it cannot build.
     """
-    bundle, _ = bundle_paths()
-    before = read_stamp(bundle).digest
+    bundle, binary = bundle_paths()
+    before = _file_identity(binary)
     binary = build_preview_bundle()
-    rebuilt = before != read_stamp(bundle).digest
+    # The file replaced, not the stamp changed: a binary deleted under an
+    # intact Info.plist compiles with the same digest, and was reported as
+    # "up to date" right after compiling (review).
+    rebuilt = before != _file_identity(binary)
     if not relaunch:
         return PreviewRefresh(rebuilt=rebuilt)
-    stale = stale_mirror_pids(binary)
+    stale = stale_mirror_pids(binary) or []
     quit_ok = [pid for pid in stale if _quit(pid)]
     left = [pid for pid in stale if pid not in quit_ok]
+    reopened = False
     if quit_ok:
         try:
-            subprocess.run(["open", str(bundle)], capture_output=True,  # noqa: S607
-                           timeout=10, check=False)
+            reopened = subprocess.run(["open", str(bundle)], capture_output=True,  # noqa: S607
+                                      timeout=10, check=False).returncode == 0
         except (OSError, subprocess.SubprocessError):
-            logger.warning("Quit an old Quern Preview but could not reopen it", exc_info=True)
+            reopened = False
+        if not reopened:
+            logger.warning("Quit an old Quern Preview but could not reopen it: open Screen "
+                           "Mirror from the menu bar")
     if stale:
-        logger.info("Quern Preview: quit and reopened %s, left %s (older than the build)",
-                    quit_ok, left)
-    return PreviewRefresh(rebuilt=rebuilt, relaunched=quit_ok, left_running=left)
+        logger.info("Quern Preview: quit %s (reopened: %s), left %s (older than the build)",
+                    quit_ok, reopened, left)
+    return PreviewRefresh(rebuilt=rebuilt, relaunched=quit_ok, left_running=left,
+                          reopened=reopened)
+
+
+def _file_identity(path: Path) -> tuple[int, int] | None:
+    """(inode, mtime in ns) of a file, None when it is not there: what tells a
+    replaced file from the same one."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_ino, st.st_mtime_ns
 
 
 def refresh_at_server_start() -> PreviewRefresh | None:
@@ -520,7 +564,36 @@ def refresh_at_server_start() -> PreviewRefresh | None:
 
     if platform.system() != "Darwin" or not xcode_available():
         return None
+    if not _owns_the_bin_dir():
+        logger.info("Not refreshing the screen-mirror app: %s is not the checkout this "
+                    "Mac's quern runs, and it would rebuild that one's app from these "
+                    "sources", _PROJECT_ROOT)
+        return None
     return refresh_preview_app()
+
+
+def _owns_the_bin_dir() -> bool:
+    """Whether this checkout's sources are the ones the bin dir's app should be
+    built from. A worktree started for a live test without its own
+    QUERN_STATE_DIR shares ~/.quern/bin with the installed quern: refreshing
+    there rebuilt the person's Screen Mirror from the branch's sources and
+    reopened their window into it, and the next start of the installed quern
+    flipped it back (review). Its own QUERN_STATE_DIR is its own bin dir.
+    """
+    if CONFIG_DIR.resolve() != (Path.home() / ".quern").resolve():
+        return True
+    from server.lifecycle.setup import WRAPPER_PATH
+
+    try:
+        wrapper = WRAPPER_PATH.read_text()
+    except OSError:
+        return True  # no installed wrapper to defer to
+    installed = re.search(r'exec "(.+)/\.venv/bin/python"', wrapper)
+    if installed is None:
+        return True  # a wrapper this does not recognise: do as before
+    # The exec line's checkout, not a substring: "/x/quern" is a prefix of
+    # "/x/quern-dev97-...".
+    return Path(installed.group(1)).resolve() == _PROJECT_ROOT
 
 
 def _find_source() -> Path | None:

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from server.device.controller import DeviceError
-from server.device.media.preview import PreviewManager
+from server.device.media.preview import PreviewManager, refresh_at_server_start
 
 
 def _stage(tmp_path, monkeypatch):
@@ -40,6 +40,10 @@ def _stage(tmp_path, monkeypatch):
     monkeypatch.setattr(preview.shutil, "which", lambda _: "/usr/bin/swiftc")
     monkeypatch.setattr(preview.subprocess, "run", fake_run)
     return bundle, binary, compiled
+
+
+#: Imported before the conftest stub replaces it, for its own tests.
+REAL_REFRESH_AT_START = refresh_at_server_start
 
 
 class TestBuildBundle:
@@ -900,6 +904,66 @@ class TestTheStamp:
         assert compiled
         assert not preview.is_sealed(bundle)
         assert preview.read_stamp(bundle).digest == preview.expected_digest()
+
+    @pytest.mark.parametrize("plist", [
+        "not a plist",
+        # Cut off mid-XML: expat's ExpatError, which is neither OSError nor
+        # ValueError, escaped and blocked every rebuild (review).
+        '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n    <key>CF',
+        '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><array/></plist>',
+    ])
+    def test_any_unreadable_plist_reads_as_unstamped(self, tmp_path, plist):
+        from server.device.media import preview
+
+        bundle = tmp_path / "Quern Preview.app"
+        (bundle / "Contents").mkdir(parents=True)
+        (bundle / "Contents" / "Info.plist").write_text(plist)
+
+        assert preview.read_stamp(bundle) == preview.BundleStamp(None, None)
+
+    def test_a_failed_icon_copy_leaves_no_stamp_so_the_next_check_repairs_it(
+        self, tmp_path, monkeypatch,
+    ):
+        """The stamp is the success marker: written before the icon, a copy
+        that failed hid behind a current stamp for good (review)."""
+        from server.device.media import preview
+
+        bundle, binary, compiled = _stage(tmp_path, monkeypatch)
+        real_copy = preview.shutil.copy2
+
+        def failing_copy(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(preview.shutil, "copy2", failing_copy)
+        with pytest.raises(OSError):
+            preview.build_preview_bundle()
+        assert preview.read_stamp(bundle).digest is None
+
+        monkeypatch.setattr(preview.shutil, "copy2", real_copy)
+        compiled.clear()
+        preview.build_preview_bundle()
+
+        assert compiled, "the bundle the failed copy left was not built again"
+        assert (bundle / "Contents" / "Resources" / "AppIcon.png").exists()
+        assert preview.read_stamp(bundle).digest == preview.expected_digest()
+
+    def test_a_renamed_source_is_a_different_build(self, tmp_path, monkeypatch):
+        from server.device.media import preview
+
+        _stage(tmp_path, monkeypatch)
+        before = preview.source_digest([tmp_path / "main.swift"])
+        renamed = tmp_path / "other.swift"
+        renamed.write_text((tmp_path / "main.swift").read_text())
+        assert preview.source_digest([renamed]) != before
+
+    def test_a_change_to_the_bundles_plist_reaches_built_bundles(self, tmp_path, monkeypatch):
+        """Without it, a new Info.plist waited for the next version."""
+        from server.device.media import preview
+
+        _stage(tmp_path, monkeypatch)
+        before = preview.expected_digest()
+        monkeypatch.setattr(preview, "_INFO_PLIST", preview._INFO_PLIST + "<!-- -->")
+        assert preview.expected_digest() != before
 
     def test_an_unreadable_plist_reads_as_unstamped(self, tmp_path):
         from server.device.media import preview
@@ -2776,26 +2840,66 @@ class TestAnOldWindowStillRunning:
         """A real binary at a path with a space in it, as the bundle's is,
         last written at `built`."""
         binary = tmp_path / "Quern Preview.app" / "Contents" / "MacOS" / "ios-preview"
-        binary.parent.mkdir(parents=True)
+        binary.parent.mkdir(parents=True, exist_ok=True)
         binary.write_text("compiled")
         os.utime(binary, (built, built))
         return binary
+
+    def _ps(self, monkeypatch, out):
+        from server.device.media import preview
+
+        envs: list = []
+
+        def run(cmd, **kw):
+            envs.append(kw.get("env") or {})
+            return subprocess.CompletedProcess(cmd, 0, stdout=out)
+
+        monkeypatch.setattr(preview.subprocess, "run", run)
+        return envs
 
     def test_a_standalone_window_older_than_the_build_is_stale(self, monkeypatch, tmp_path):
         from server.device.media import preview
 
         built = time.mktime(time.strptime("Sat Nov 14 09:12:47 2026", "%a %b %d %H:%M:%S %Y"))
         binary = self._binary(tmp_path, built)
-        out = (
+        envs = self._ps(monkeypatch, (
             f"63800 Sat Nov 14 09:01:00 2026 {binary}\n"                 # older: stale
             f"63900 Sat Nov 14 09:16:28 2026 {binary}\n"                 # newer
             f"64000 Sat Nov 14 08:00:00 2026 {binary} --interactive\n"   # the server's
+            f"64050 Sat Nov 14 08:00:00 2026 {binary} --list 45\n"       # someone's run
+            f"64060 Sat Nov 14 08:00:00 2026 {binary}-foo\n"             # a prefix only
             "64100 Sat Nov 14 08:00:00 2026 /usr/bin/other\n"
-            "garbage line\n")
-        monkeypatch.setattr(preview.subprocess, "run",
-                            lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out))
+            "garbage line\n"))
 
         assert preview.stale_mirror_pids(binary) == [63800]
+        # lstart follows LANG: under de_DE or ja_JP nothing parsed (review).
+        assert envs and envs[0].get("LC_ALL") == "C"
+
+    def test_the_one_second_margin(self, monkeypatch, tmp_path):
+        """lstart is to the second: a window opened in the build's second is
+        not old, one two seconds before it is."""
+        from server.device.media import preview
+
+        built = time.mktime(time.strptime("Sat Nov 14 09:12:47 2026", "%a %b %d %H:%M:%S %Y"))
+        binary = self._binary(tmp_path, built)
+        self._ps(monkeypatch, (
+            f"1 Sat Nov 14 09:12:46 2026 {binary}\n"      # built - 1: not old
+            f"2 Sat Nov 14 09:12:45 2026 {binary}\n"))    # built - 2: old
+
+        assert preview.stale_mirror_pids(binary) == [2]
+
+    def test_a_symlinked_state_dir_still_matches(self, monkeypatch, tmp_path):
+        """LaunchServices starts the app under the real path."""
+        from server.device.media import preview
+
+        built = time.mktime(time.strptime("Sat Nov 14 09:12:47 2026", "%a %b %d %H:%M:%S %Y"))
+        real = self._binary(tmp_path / "real", built)
+        link = tmp_path / "link"
+        link.symlink_to(tmp_path / "real")
+        via_link = link / real.relative_to(tmp_path / "real")
+        self._ps(monkeypatch, f"7 Sat Nov 14 09:01:00 2026 {real}\n")
+
+        assert preview.stale_mirror_pids(via_link) == [7]
 
     def test_a_ps_that_fails_finds_none(self, monkeypatch, tmp_path):
         from server.device.media import preview
@@ -2805,9 +2909,10 @@ class TestAnOldWindowStillRunning:
 
         monkeypatch.setattr(preview.subprocess, "run", boom)
 
-        assert preview.stale_mirror_pids(self._binary(tmp_path, 1)) == []
+        # None, not []: doctor must tell "none" from "could not look".
+        assert preview.stale_mirror_pids(self._binary(tmp_path, 1)) is None
 
-    def _refresh(self, monkeypatch, tmp_path, stale, quits):
+    def _refresh(self, monkeypatch, tmp_path, stale, quits, open_rc=0):
         from server.device.media import preview
 
         bundle, binary, _ = _stage(tmp_path, monkeypatch)
@@ -2819,7 +2924,7 @@ class TestAnOldWindowStillRunning:
         def run(cmd, **kw):
             if cmd and cmd[0] == "open":
                 opened.append(cmd)
-                return subprocess.CompletedProcess(cmd, 0)
+                return subprocess.CompletedProcess(cmd, open_rc)
             return real_run(cmd, **kw)
 
         monkeypatch.setattr(preview.subprocess, "run", run)
@@ -2831,7 +2936,28 @@ class TestAnOldWindowStillRunning:
         assert result.rebuilt is True
         assert result.relaunched == [11, 12]
         assert result.left_running == []
+        assert result.reopened is True
         assert opened == [["open", str(bundle)]]
+
+    def test_an_open_that_fails_is_not_called_a_reopen(self, monkeypatch, tmp_path):
+        """From ssh or launchd there is no window server: the window was quit
+        and nothing came back, which must be said (review)."""
+        result, opened, _ = self._refresh(monkeypatch, tmp_path, [11], lambda pid: True,
+                                          open_rc=1)
+
+        assert result.relaunched == [11]
+        assert result.reopened is False
+
+    def test_a_binary_deleted_under_its_plist_is_a_rebuild(self, monkeypatch, tmp_path):
+        """Same digest before and after, so the stamp alone called it "up to
+        date" right after compiling (review)."""
+        from server.device.media import preview
+
+        self._refresh(monkeypatch, tmp_path, [], lambda pid: True)
+        bundle, binary = preview.bundle_paths()
+        binary.unlink()
+
+        assert preview.refresh_preview_app().rebuilt is True
 
     def test_a_window_that_would_not_quit_is_said_and_nothing_reopened(
         self, monkeypatch, tmp_path,
@@ -2906,3 +3032,66 @@ async def test_a_mirror_app_that_cannot_build_does_not_stop_the_server(monkeypat
         await asyncio.wait_for(app.state._mirror_task, 5)
 
     assert "swiftc not found" in caplog.text
+
+
+class TestTheServerStartRefreshStaysInItsCheckout:
+    """A worktree started for a live test without its own QUERN_STATE_DIR
+    shares ~/.quern/bin: refreshing there rebuilt the person's Screen Mirror
+    from the branch and reopened their window into it (review)."""
+
+    def _setup(self, monkeypatch, tmp_path, *, wrapper_root, default_config=True):
+        from server.device.media import preview
+        from server.lifecycle import setup
+
+        home = tmp_path / "home"
+        (home / ".quern").mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setattr(preview, "CONFIG_DIR",
+                            home / ".quern" if default_config else tmp_path / "state")
+        wrapper = tmp_path / "quern"
+        if wrapper_root is not None:
+            wrapper.write_text(
+                f'#!/bin/bash\nexec "{wrapper_root}/.venv/bin/python" -m server "$@"\n')
+        monkeypatch.setattr(setup, "WRAPPER_PATH", wrapper)
+        return preview
+
+    def test_the_installed_checkout_refreshes(self, monkeypatch, tmp_path):
+        from server.device.media import preview as mod
+
+        preview = self._setup(monkeypatch, tmp_path, wrapper_root=mod._PROJECT_ROOT)
+        assert preview._owns_the_bin_dir() is True
+
+    def test_another_checkout_sharing_the_bin_dir_does_not(self, monkeypatch, tmp_path):
+        preview = self._setup(monkeypatch, tmp_path, wrapper_root=tmp_path / "elsewhere")
+        assert preview._owns_the_bin_dir() is False
+
+    def test_a_checkout_whose_path_is_a_prefix_of_the_installed_one_does_not(
+        self, monkeypatch, tmp_path,
+    ):
+        """'/x/quern' is a prefix of '/x/quern-dev97-...': a substring test
+        would have called them the same."""
+        from server.device.media import preview as mod
+
+        preview = self._setup(monkeypatch, tmp_path,
+                              wrapper_root=f"{mod._PROJECT_ROOT}-other")
+        assert preview._owns_the_bin_dir() is False
+
+    def test_its_own_state_dir_is_its_own_bin_dir(self, monkeypatch, tmp_path):
+        preview = self._setup(monkeypatch, tmp_path, wrapper_root=tmp_path / "elsewhere",
+                              default_config=False)
+        assert preview._owns_the_bin_dir() is True
+
+    def test_no_installed_wrapper_defers_to_nobody(self, monkeypatch, tmp_path):
+        preview = self._setup(monkeypatch, tmp_path, wrapper_root=None)
+        assert preview._owns_the_bin_dir() is True
+
+    def test_refresh_at_start_skips_when_it_does_not_own_it(self, monkeypatch, tmp_path):
+        from server.device.media import preview
+
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr(preview, "xcode_available", lambda: True)
+        monkeypatch.setattr(preview, "_owns_the_bin_dir", lambda: False)
+        monkeypatch.setattr(preview, "refresh_preview_app",
+                            lambda **k: pytest.fail("refreshed another checkout's app"))
+
+        assert REAL_REFRESH_AT_START() is None

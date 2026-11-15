@@ -1861,11 +1861,24 @@ class TestBuildPreviewApp:
 
         with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
              patch("server.device.media.preview.refresh_preview_app",
-                   return_value=PreviewRefresh(rebuilt=True, relaunched=[42])):
+                   return_value=PreviewRefresh(rebuilt=True, relaunched=[42], reopened=True)):
             result = build_preview_app()
 
         assert result.status == CheckStatus.OK
         assert "reopened" in result.message
+
+    def test_a_window_it_quit_and_could_not_reopen_is_a_warning(self):
+        """From ssh there is no window server: the person's window is gone."""
+        from server.device.media.preview import PreviewRefresh
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
+             patch("server.device.media.preview.refresh_preview_app",
+                   return_value=PreviewRefresh(rebuilt=True, relaunched=[42], reopened=False)):
+            result = build_preview_app()
+
+        assert result.status == CheckStatus.WARNING
+        assert "could not reopen" in result.message
 
     def test_an_old_window_that_would_not_quit_is_a_warning(self):
         """Built, but the window the person is looking at is still the old

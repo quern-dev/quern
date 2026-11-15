@@ -2223,7 +2223,9 @@ def _report_screen_mirror(fix: bool = False) -> tuple[bool, bool | None]:
     else:
         print(f"  \u2717 {built}: out of date, these sources build {expected[:8]}")
         print("      it is rebuilt when the server next starts, or run `quern doctor --fix`")
-    if stale_windows:
+    if stale_windows is None:
+        print("  ? could not look for windows running an older build (ps did not answer)")
+    elif stale_windows:
         print(f"  \u2717 running an older build: pid {', '.join(map(str, stale_windows))} "
               "-- quit it and reopen Screen Mirror from the menu bar")
     if fix and (not current or stale_windows):
@@ -2237,9 +2239,13 @@ def _report_screen_mirror(fix: bool = False) -> tuple[bool, bool | None]:
             print(f"  \u2717 built, but pid {', '.join(map(str, refreshed.left_running))} "
                   "would not quit")
             return True, False
-        print("  \u2713 up to date" + (" -- reopened" if refreshed.relaunched else ""))
+        if refreshed.relaunched and not refreshed.reopened:
+            print("  \u2713 up to date -- quit the old window but could not reopen it: "
+                  "open Screen Mirror from the menu bar")
+        else:
+            print("  \u2713 up to date" + (" -- reopened" if refreshed.relaunched else ""))
         return True, True
-    return True, None
+    return stale_windows is not None, None
 
 
 def _report_node() -> bool:
