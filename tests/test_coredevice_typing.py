@@ -213,14 +213,103 @@ class TestWhatIsNotSet:
         setter.assert_not_called()
 
     async def test_not_after_the_push_crashed_an_app(self, monkeypatch):
-        """The set reads the push, which would run the crashing dump again (#669)."""
-        ctrl, setter = _phone(monkeypatch, before="", reads=["あ"])
+        """The set reads the push, which would run the crashing dump again
+        (#669): such a device types into a named field through WDA, which
+        inserts the text, and the answer says why."""
+        ctrl, _ = _phone(monkeypatch, before="", reads=["a"])
         ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+        ctrl.wda_client.tap = AsyncMock()
 
-        with pytest.raises(DeviceError):
+        result = await ctrl.type_text("a", udid=PHONE, identifier="field_default")
+
+        ctrl.wda_client.tap.assert_awaited_once()
+        ctrl.wda_client.type_text.assert_awaited_once()
+        ctrl.coredevice_input.tap.assert_not_called()
+        ctrl.coredevice_input.type_text.assert_not_called()
+        assert "input" not in result
+        assert "QuernProbeScene" in result["note"] and "#669" in result["note"]
+
+    async def test_a_crash_in_its_own_read_types_nothing(self, monkeypatch):
+        """The field read fell back to WDA on the screen the crash left, so a
+        tap there taps something else (#698 review)."""
+        ctrl, setter = _phone(monkeypatch, before="", reads=["a"])
+        target = ctrl._find_text_field.return_value
+
+        async def crashing(*args, **kwargs):
+            ctrl._push_crashed_apps.setdefault(PHONE, set()).add("QuernProbeScene")
+            return target
+        ctrl._find_text_field = AsyncMock(side_effect=crashing)
+
+        with pytest.raises(DeviceError, match="crashed QuernProbeScene.*Nothing was typed"):
+            await ctrl.type_text("a", udid=PHONE, identifier="field_default")
+
+        ctrl.coredevice_input.tap.assert_not_called()
+        ctrl.coredevice_input.type_text.assert_not_called()
+        ctrl.wda_client.type_text.assert_not_called()
+
+    async def test_a_crash_reading_it_back_is_not_corrected_and_says_so(self, monkeypatch):
+        """The correction's set reads the push again (#669); the failure names
+        the crash, not the keyboard alone."""
+        ctrl, setter = _phone(monkeypatch, before="", reads=[])
+
+        async def crashing(*args, **kwargs):
+            ctrl._push_crashed_apps.setdefault(PHONE, set()).add("QuernProbeScene")
+            return "あ"
+        ctrl._read_field_value = AsyncMock(side_effect=crashing)
+
+        with pytest.raises(DeviceError,
+                           match="Reading the field back crashed QuernProbeScene") as err:
             await ctrl.type_text("a", udid=PHONE, identifier="field_default")
 
         setter.assert_not_called()
+        assert ".." not in str(err.value)
+
+    async def test_a_crash_that_leaves_no_such_field_says_it_crashed(self, monkeypatch):
+        """The likelier case: the read fell back to WDA on SpringBoard, where
+        no field matches -- "no text field" alone would hide the crash (#698
+        review)."""
+        ctrl, _ = _phone(monkeypatch, before="", reads=["a"])
+
+        async def crashing(*args, **kwargs):
+            ctrl._push_crashed_apps.setdefault(PHONE, set()).add("QuernProbeScene")
+            raise DeviceError("No element found: no text field matching 'field_default'",
+                              tool="wda")
+        ctrl._find_text_field = AsyncMock(side_effect=crashing)
+
+        with pytest.raises(DeviceError, match="crashed QuernProbeScene.*Nothing was typed"):
+            await ctrl.type_text("a", udid=PHONE, identifier="field_default")
+
+        ctrl.coredevice_input.tap.assert_not_called()
+
+    async def test_a_field_that_is_not_there_is_still_not_there(self, monkeypatch):
+        """With no crash, the lookup's own error stands."""
+        ctrl, _ = _phone(monkeypatch, before="", reads=["a"])
+        ctrl._find_text_field = AsyncMock(side_effect=DeviceError(
+            "No element found: no text field matching 'field_default'", tool="wda"))
+
+        with pytest.raises(DeviceError, match="no text field matching"):
+            await ctrl.type_text("a", udid=PHONE, identifier="field_default")
+
+    async def test_a_crash_in_the_set_is_recorded(self, monkeypatch):
+        """The set reads the push too: its crash puts the device on WDA, as
+        every other read's does (#698 review)."""
+        ctrl, setter = _phone(monkeypatch, before="", reads=["あ"])
+        setter.side_effect = coredevice_ax.AppExitedDuringRead("QuernProbeScene", 123)
+
+        with pytest.raises(DeviceError, match="crashed the app"):
+            await ctrl.type_text("a", udid=PHONE, identifier="field_default")
+
+        assert ctrl._push_crashed_apps[PHONE] == {"QuernProbeScene"}
+
+    async def test_no_crash_note_when_a_depth_chose_wda(self, monkeypatch):
+        ctrl, _ = _phone(monkeypatch, before="", reads=["a"])
+        ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+        ctrl.wda_client.tap = AsyncMock()
+
+        result = await ctrl.type_text("a", udid=PHONE, identifier="field_default",
+                                      snapshot_depth=30)
+
+        assert "note" not in result
 
     async def test_a_failed_set_says_what_the_field_holds(self, monkeypatch):
         ctrl, setter = _phone(monkeypatch, before="", reads=["Helloあ"])
@@ -279,6 +368,23 @@ class TestClearing:
 
         assert ctrl.get_ui_elements.await_args.kwargs["whole_screen"] is True
         ctrl.coredevice_input.select_all_and_delete.assert_awaited_once()
+        ctrl.wda_client.select_all_and_delete.assert_not_called()
+
+    async def test_a_crash_in_its_own_read_clears_nothing(self, monkeypatch):
+        """Without a selector the first field of the screen the crash left
+        would be emptied (#698 review)."""
+        ctrl = self._ctrl(monkeypatch)
+        found = ctrl.get_ui_elements.return_value
+
+        async def crashing(*args, **kwargs):
+            ctrl._push_crashed_apps.setdefault(PHONE, set()).add("QuernProbeScene")
+            return found
+        ctrl.get_ui_elements = AsyncMock(side_effect=crashing)
+
+        with pytest.raises(DeviceError, match="Nothing was cleared"):
+            await ctrl.clear_text(udid=PHONE)
+
+        ctrl.coredevice_input.select_all_and_delete.assert_not_called()
         ctrl.wda_client.select_all_and_delete.assert_not_called()
 
     async def test_a_wda_depth_stays_with_wda(self, monkeypatch):
@@ -702,3 +808,16 @@ class TestTerminating:
 
         ctrl.wda_client.terminate_app.assert_awaited_once()
         ctrl.devicectl.terminate_app.assert_not_called()
+
+
+async def test_after_a_push_crash_untargeted_typing_stays_on_hid(monkeypatch):
+    """Untargeted typing reads nothing, so a crash gives it no reason to
+    start WDA -- which, on a phone with none, it cannot (#698 review)."""
+    ctrl, _ = _phone(monkeypatch, before="", reads=[])
+    ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+
+    result = await ctrl.type_text("abc", udid=PHONE)
+
+    ctrl.coredevice_input.type_text.assert_awaited_once_with(PHONE, "abc")
+    ctrl.wda_client.type_text.assert_not_called()
+    assert result["input"] == "coredevice"
