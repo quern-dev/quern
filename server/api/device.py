@@ -89,8 +89,10 @@ async def _capture_screen_context(controller, udid: str, registry=None) -> dict:
     tree. With no landmarks loaded nothing is added and nothing is read.
     """
     try:
+        # A whole-screen read, so on a phone the tree push serves it reads the
+        # push and starts no WDA (#664).
         summary, elements, _ = await controller.get_screen_summary(
-            max_elements=10, udid=udid,
+            max_elements=10, udid=udid, whole_screen=True,
         )
         context = {
             "screen_title": summary.get("screen_title", ""),
@@ -112,6 +114,10 @@ async def _capture_screen_context(controller, udid: str, registry=None) -> dict:
         # added next, so it copies what it is given.
         if summary.get("backend"):
             context["backend"] = summary["backend"]
+        # And a third: the read's own warning -- above all a crash it caused
+        # (#669), after which this context is the screen the crash left.
+        if summary.get("warning"):
+            context["warning"] = summary["warning"]
         context.update(await _identify_for_context(controller, udid, registry, elements))
         return context
     except Exception:
