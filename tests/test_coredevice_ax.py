@@ -721,7 +721,10 @@ class TestAnAppThatDiesUnderTheRead:
         """The crash replaces the app about a second after its last tree: the
         default quiet spell ended first and handed back the dying app's tree."""
         monkeypatch.setattr(coredevice_ax, "QUIET_S", 0.1)
-        monkeypatch.setattr(coredevice_ax, "UNSETTLED_QUIET_S", 0.6)
+        # Wide enough that a loaded CI runner's late `later()` still lands
+        # inside it: at 0.6 s it missed once on GitHub's macOS runners. Still
+        # a test: without the note, the 0.1 s spell ends before Safari arrives.
+        monkeypatch.setattr(coredevice_ax, "UNSETTLED_QUIET_S", 2.0)
         note = plistlib.dumps({"$archiver": "NSKeyedArchiver", "$version": 100000,
                                "$top": {"root": plistlib.UID(1)},
                                "$objects": ["$null", {"$class": plistlib.UID(2), "notification": 7},
