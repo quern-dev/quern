@@ -432,31 +432,34 @@ class TestWaitingForTheTree:
                                                                     monkeypatch):
         """A later complete tree does not restart it: SETTLE_HARD_S after the
         first, whatever follows (#677 review)."""
-        monkeypatch.setattr(coredevice_ax, "PAIR_BASE_S", 0.5)
+        # Spread wide, and churned slowly: at a 30 ms churn and a 0.4 s gap
+        # between the two outcomes, a loaded CI runner took 2.54 s once (#695).
+        monkeypatch.setattr(coredevice_ax, "QUIET_S", 0.4)       # longer than the churn's gap
+        monkeypatch.setattr(coredevice_ax, "PAIR_BASE_S", 1.2)   # outlasts the 1.0 s gap
         monkeypatch.setattr(coredevice_ax, "PAIR_PER_ELEMENT_S", 0.0)
-        monkeypatch.setattr(coredevice_ax, "SETTLE_HARD_S", 1.0)
+        monkeypatch.setattr(coredevice_ax, "SETTLE_HARD_S", 2.0)
         queue: asyncio.Queue = asyncio.Queue()
         queue.put_nowait((PUSH_SELECTOR, [SETTINGS]))
 
         async def churn():
-            await asyncio.sleep(0.03)
+            await asyncio.sleep(0.05)
             queue.put_nowait((PUSH_SELECTOR, [_as("InitialDump", SAFARI)]))
-            await asyncio.sleep(0.37)
-            # A second complete tree, at 0.4 s.
+            await asyncio.sleep(0.95)
+            # A second complete tree, at 1.0 s.
             queue.put_nowait((PUSH_SELECTOR, [SAFARI]))
             while True:
-                await asyncio.sleep(0.03)
+                await asyncio.sleep(0.15)
                 queue.put_nowait((PUSH_SELECTOR, [_as("InitialDump", SETTINGS)]))
 
         task = asyncio.create_task(churn())
         loop = asyncio.get_running_loop()
         started = loop.time()
         try:
-            await asyncio.wait_for(coredevice_ax._newest_tree(queue), 4)
+            await asyncio.wait_for(coredevice_ax._newest_tree(queue), 6)
         finally:
             task.cancel()
         elapsed = loop.time() - started
-        assert 0.9 <= elapsed < 1.3, elapsed     # renewed at 0.4 s it would run to 1.4
+        assert 1.9 <= elapsed < 2.7, elapsed     # renewed at 1.0 s it would run to 3.0
 
     async def test_an_initial_dump_alone_never_completes(self):
         """No identifiers yet, so not an answer: the read's deadline ends it."""
