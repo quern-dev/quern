@@ -75,6 +75,15 @@ class TestTheRule:
         assert type_matches("Group", "TabBar", "identifier")
         assert type_matches("GenericElement", "ProgressIndicator", "identifier")
 
+    def test_a_row_the_push_calls_a_group_is_a_row(self):
+        """A collection-view list row: Group in the tree push, Cell to WDA,
+        StaticText on a simulator -- one row, by identifier only (#664)."""
+        for recorded in ("Cell", "StaticText", "Button"):
+            assert type_matches(recorded, "Group", "identifier")
+            assert type_matches("Group", recorded, "identifier")
+        assert not type_matches("Cell", "Group", "label")
+        assert not type_matches("Group", "StaticText", "label")
+
     def test_an_identifier_also_earns_the_safe_pair(self):
         assert type_matches("CheckBox", "Switch", "identifier")
 
@@ -94,7 +103,7 @@ class TestTheRule:
     def test_wda_names_keep_their_case_and_add_no_lowercase_twin(self):
         assert related_type_names("Image") == ["Image"]
         assert related_type_names("button") == [
-            "Button", "Cell", "RadioButton", "StaticText", "button",
+            "Button", "Cell", "Group", "RadioButton", "StaticText", "button",
         ]
 
 
