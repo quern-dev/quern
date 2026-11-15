@@ -480,7 +480,7 @@ class TestTheMediaEngineSection:
         assert report(False) == (True, None)
         assert calls == [], "plain doctor must not rebuild"
         out = capsys.readouterr().out
-        assert "before builds were stamped: out of date, these sources build bbbbbbbb" in out
+        assert "a build with no stamp for it: out of date, these sources build bbbbbbbb" in out
 
     def test_another_build_is_out_of_date(self, monkeypatch, tmp_path, capsys):
         report, _ = self._section(monkeypatch, tmp_path, installed="a" * 64)

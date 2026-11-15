@@ -2329,7 +2329,7 @@ def _report_media_engine(fix: bool = False) -> tuple[bool, bool | None]:
     if expected is None:
         print("  \u2013 its sources are not in this install")
         return True, None
-    built = installed[:8] if installed else "a build from before builds were stamped"
+    built = installed[:8] if installed else "a build with no stamp for it"
     if installed == expected:
         print(f"  \u2713 {built}, current")
         return True, None
