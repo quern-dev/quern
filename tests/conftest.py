@@ -860,3 +860,13 @@ def _no_real_frame_capture(monkeypatch):
     monkeypatch.setattr(frames, "capture", no_frame)
     # verify_changed's route for a phone with no WDA frame to give.
     monkeypatch.setattr(frames, "device_screenshot", no_screenshot)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_screen_mirror_refresh(monkeypatch):
+    """Server start brings the screen-mirror app up to date: a real swiftc, a
+    real `ps`, and quitting real Quern Preview windows. Tests of the refresh
+    call `refresh_preview_app` with its tools faked."""
+    from server.device.media import preview
+
+    monkeypatch.setattr(preview, "refresh_at_server_start", lambda: None)

@@ -12,7 +12,10 @@ from unittest.mock import patch
 
 import pytest
 
-from server.main import _cmd_doctor
+from server.main import _cmd_doctor, _report_screen_mirror
+
+#: Imported before any fixture stubs it, for the section's own tests.
+REAL_SCREEN_MIRROR = _report_screen_mirror
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +38,9 @@ def _no_slow_sections(monkeypatch):
     monkeypatch.setattr("server.main._report_node", lambda: True)
     monkeypatch.setattr("server.main._report_mcp_registrations", lambda: True)
     monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (True, None))
+    # Reads the screen-mirror bundle and `ps`, and --fix compiles and quits
+    # windows: real machine work.
+    monkeypatch.setattr("server.main._report_screen_mirror", lambda fix=False: (True, None))
 
 
 @pytest.fixture
@@ -209,6 +215,21 @@ class TestDoctorExitContract:
         monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (False, None))
         assert _run(args_fix=True) == 0
 
+    def test_the_screen_mirror_section_reaches_both_exit_codes(self, monkeypatch, capsys):
+        """Could not look: plain doctor fails. Could not repair: --fix fails.
+        Each is a term in its expression, and nothing else would catch either
+        being dropped."""
+        self._server(monkeypatch, {"adb": True})
+        monkeypatch.setattr("server.main._report_python_deps", lambda fix: True)
+        monkeypatch.setattr("server.main._report_external_tools", lambda fix: None)
+        monkeypatch.setattr("server.main._report_service_health", lambda fix: True)
+
+        monkeypatch.setattr("server.main._report_screen_mirror", lambda fix=False: (False, None))
+        assert _run() != 0, "a mirror app that could not be checked must not read as clean"
+
+        monkeypatch.setattr("server.main._report_screen_mirror", lambda fix=False: (True, False))
+        assert _run(args_fix=True) != 0, "a failed mirror repair must fail --fix"
+
     def test_a_failed_repair_does_fail_fix(self, monkeypatch, capsys):
         monkeypatch.setattr("server.main._report_python_deps", lambda fix: True)
         monkeypatch.setattr("server.main._report_external_tools", lambda fix: None)
@@ -253,3 +274,107 @@ class TestDoctorExitContract:
         assert "without a tool list" in out
         assert "not checked — \n" not in out
         assert code != 0
+
+
+class TestTheScreenMirrorSection:
+    """Which build of the menu bar's Screen Mirror app is installed, and
+    whether these sources make it (stale preview app)."""
+
+    def _section(self, monkeypatch, tmp_path, *, stamp, expected="b" * 64, windows=(),
+                 refreshed=None):
+        from server.device.media import preview
+
+        bundle = tmp_path / "Quern Preview.app"
+        binary = bundle / "Contents" / "MacOS" / "ios-preview"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("compiled")
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
+        monkeypatch.setattr(preview, "read_stamp", lambda b: stamp)
+        monkeypatch.setattr(preview, "expected_digest", lambda: expected)
+        monkeypatch.setattr(preview, "stale_mirror_pids", lambda b: list(windows))
+        monkeypatch.setattr("server.get_version", lambda: "0.26.0-beta.4")
+        calls = []
+
+        def refresh():
+            calls.append(True)
+            if isinstance(refreshed, Exception):
+                raise refreshed
+            return refreshed
+
+        monkeypatch.setattr(preview, "refresh_preview_app", refresh)
+        # The real section: the autouse fixture above stubs the module's.
+        return REAL_SCREEN_MIRROR, calls
+
+    def test_a_current_build_says_its_version_and_build(self, monkeypatch, tmp_path, capsys):
+        from server.device.media.preview import BundleStamp
+
+        report, _ = self._section(monkeypatch, tmp_path,
+                                  stamp=BundleStamp("0.26.0-beta.4", "b" * 64))
+
+        assert report(False) == (True, None)
+        assert "0.26.0-beta.4 (bbbbbbbb), current" in capsys.readouterr().out
+
+    def test_an_unstamped_build_is_out_of_date(self, monkeypatch, tmp_path, capsys):
+        """This Mac's, before the fix: built Sep 11, before stamps."""
+        from server.device.media.preview import BundleStamp
+
+        report, calls = self._section(monkeypatch, tmp_path, stamp=BundleStamp(None, None))
+
+        assert report(False) == (True, None)
+        out = capsys.readouterr().out
+        assert "before versions were stamped: out of date" in out
+        assert calls == [], "plain doctor must not rebuild"
+
+    def test_an_old_window_is_named(self, monkeypatch, tmp_path, capsys):
+        from server.device.media.preview import BundleStamp
+
+        report, _ = self._section(monkeypatch, tmp_path,
+                                  stamp=BundleStamp("0.26.0-beta.4", "b" * 64), windows=[63800])
+
+        report(False)
+        assert "running an older build: pid 63800" in capsys.readouterr().out
+
+    def test_fix_brings_it_up_to_date(self, monkeypatch, tmp_path, capsys):
+        from server.device.media.preview import BundleStamp, PreviewRefresh
+
+        report, calls = self._section(
+            monkeypatch, tmp_path, stamp=BundleStamp(None, None),
+            refreshed=PreviewRefresh(rebuilt=True, relaunched=[63800]))
+
+        assert report(True) == (True, True)
+        assert calls == [True]
+        assert "up to date -- reopened" in capsys.readouterr().out
+
+    def test_fix_that_cannot_build_is_a_failed_repair(self, monkeypatch, tmp_path, capsys):
+        from server.device.media.preview import BundleStamp
+
+        report, _ = self._section(monkeypatch, tmp_path, stamp=BundleStamp(None, None),
+                                  refreshed=RuntimeError("swiftc not found"))
+
+        assert report(True) == (True, False)
+        assert "could not: swiftc not found" in capsys.readouterr().out
+
+    def test_fix_whose_old_window_would_not_quit_is_a_failed_repair(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """Built, but the person still sees the old app: not repaired."""
+        from server.device.media.preview import BundleStamp, PreviewRefresh
+
+        report, _ = self._section(
+            monkeypatch, tmp_path, stamp=BundleStamp("0.26.0-beta.4", "b" * 64),
+            windows=[63800], refreshed=PreviewRefresh(rebuilt=False, left_running=[63800]))
+
+        assert report(True) == (True, False)
+
+    def test_a_current_build_with_an_old_version_is_not_out_of_date(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        from server.device.media.preview import BundleStamp
+
+        report, calls = self._section(monkeypatch, tmp_path,
+                                      stamp=BundleStamp("0.26.0-beta.3", "b" * 64))
+
+        assert report(True) == (True, None)
+        assert calls == []
+        assert "the build is current" in capsys.readouterr().out

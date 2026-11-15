@@ -1843,14 +1843,43 @@ class TestBuildPreviewApp:
     """
 
     def test_builds_when_swiftc_is_available(self):
+        from server.device.media.preview import PreviewRefresh
         from server.lifecycle.setup import build_preview_app
 
         with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
-             patch("server.device.media.preview.build_preview_bundle") as build:
+             patch("server.device.media.preview.refresh_preview_app",
+                   return_value=PreviewRefresh(rebuilt=True)) as build:
             result = build_preview_app()
 
         build.assert_called_once()
         assert result.status == CheckStatus.OK
+        assert result.message.startswith("Rebuilt")
+
+    def test_a_window_it_reopened_is_said(self):
+        from server.device.media.preview import PreviewRefresh
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
+             patch("server.device.media.preview.refresh_preview_app",
+                   return_value=PreviewRefresh(rebuilt=True, relaunched=[42])):
+            result = build_preview_app()
+
+        assert result.status == CheckStatus.OK
+        assert "reopened" in result.message
+
+    def test_an_old_window_that_would_not_quit_is_a_warning(self):
+        """Built, but the window the person is looking at is still the old
+        one: saying OK would be the false all-clear."""
+        from server.device.media.preview import PreviewRefresh
+        from server.lifecycle.setup import build_preview_app
+
+        with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
+             patch("server.device.media.preview.refresh_preview_app",
+                   return_value=PreviewRefresh(rebuilt=True, left_running=[42])):
+            result = build_preview_app()
+
+        assert result.status == CheckStatus.WARNING
+        assert "still running" in result.message
 
     def test_the_swiftc_stub_alone_does_not_count_as_a_toolchain(self):
         """`which` finds /usr/bin/swiftc on every Mac; building then ran the
@@ -1860,7 +1889,7 @@ class TestBuildPreviewApp:
         with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
              patch("server.lifecycle.setup.xcode_available", return_value=False), \
              patch("server.lifecycle.setup._prompt_yn", return_value=False), \
-             patch("server.device.media.preview.build_preview_bundle") as build:
+             patch("server.device.media.preview.refresh_preview_app") as build:
             result = build_preview_app()
 
         build.assert_not_called()
@@ -1923,7 +1952,7 @@ class TestBuildPreviewApp:
         from server.lifecycle.setup import build_preview_app
 
         with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
-             patch("server.device.media.preview.build_preview_bundle",
+             patch("server.device.media.preview.refresh_preview_app",
                    side_effect=PermissionError("~/.quern is not writable")):
             result = build_preview_app()
 
@@ -1935,7 +1964,7 @@ class TestBuildPreviewApp:
         from server.lifecycle.setup import build_preview_app
 
         with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
-             patch("server.device.media.preview.build_preview_bundle",
+             patch("server.device.media.preview.refresh_preview_app",
                    side_effect=RuntimeError("swiftc exploded")):
             result = build_preview_app()
 

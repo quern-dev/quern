@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
+import plistlib
 import shutil
 import subprocess
 import tempfile
@@ -34,6 +36,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from server import get_version
 from server.config import CONFIG_DIR
 from server.device.ios._xcode import xcode_available
 from server.device.media.media_engine import build_media_engine
@@ -113,8 +116,12 @@ _INFO_PLIST = """\
     <string>AppIcon.png</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>{build}</string>
+    <key>QuernSourceDigest</key>
+    <string>{digest}</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSCameraUsageDescription</key>
@@ -181,8 +188,16 @@ def bundle_paths() -> tuple[Path, Path]:
     return bundle, bundle / "Contents" / "MacOS" / BINARY_NAME
 
 
-def write_app_bundle(bundle: Path) -> None:
-    """Create a minimal .app bundle so macOS shows the correct name and icon."""
+def write_app_bundle(bundle: Path, digest: str) -> None:
+    """Create a minimal .app bundle so macOS shows the correct name and icon,
+    stamped with what it was built from.
+
+    The stamp is for two readers. A person: the About panel reads
+    CFBundleShortVersionString and CFBundleVersion, so it says "Version
+    0.26.0-beta.4 (3f9a2c1d)" -- quern's version, and which sources the binary
+    is -- where it used to say "1.0" on every machine. And quern: the full
+    digest is what decides a rebuild (`build_preview_bundle`).
+    """
     contents = bundle / "Contents"
     macos_dir = contents / "MacOS"
     resources_dir = contents / "Resources"
@@ -190,7 +205,8 @@ def write_app_bundle(bundle: Path) -> None:
     macos_dir.mkdir(parents=True, exist_ok=True)
     resources_dir.mkdir(parents=True, exist_ok=True)
 
-    (contents / "Info.plist").write_text(_INFO_PLIST)
+    (contents / "Info.plist").write_text(_INFO_PLIST.format(
+        version=get_version(), build=digest[:8], digest=digest))
 
     icon_src = _RESOURCES_DIR / "wda-icon.png"
     icon_dst = resources_dir / "AppIcon.png"
@@ -198,6 +214,78 @@ def write_app_bundle(bundle: Path) -> None:
         shutil.copy2(icon_src, icon_dst)
 
     logger.info("Created app bundle: %s", bundle)
+
+
+#: The flags the compile is given, which go into the digest: a binary built
+#: with different frameworks is a different binary.
+_COMPILE_FLAGS = ("-framework", "AVFoundation", "-framework", "CoreMediaIO",
+                  "-framework", "AppKit")
+
+
+def source_digest(sources: list[Path]) -> str:
+    """What the binary is built from, as a hash: each file's name and
+    contents, in order, and the compile flags.
+
+    Content, not modification times. The times said nothing reliable: a
+    release tarball stamps every file with its commit's time, so a binary
+    built after that commit looked newer than the next release's sources and
+    was kept; and the check ran only from setup and the preview API, so a
+    checkout moved by `git pull` kept its first build -- measured on a
+    developer's Mac, a binary from Sep 11 behind six preview changes. A
+    digest is the same whatever the times say.
+    """
+    h = hashlib.sha256()
+    for p in sources:
+        h.update(p.name.encode() + b"\0")
+        h.update(p.read_bytes())
+        h.update(b"\0")
+    h.update(" ".join(_COMPILE_FLAGS).encode())
+    return h.hexdigest()
+
+
+@dataclass(frozen=True)
+class BundleStamp:
+    """What an installed bundle says it was built from; None for a field it
+    does not carry (one built before stamps, or unreadable)."""
+
+    version: str | None
+    digest: str | None
+
+
+def read_stamp(bundle: Path) -> BundleStamp:
+    """The installed bundle's stamp. Unreadable reads as unstamped, which is
+    rebuilt: the cost of a needless rebuild is 1.5s, of a wrong "current" an
+    app that stays old."""
+    try:
+        with (bundle / "Contents" / "Info.plist").open("rb") as f:
+            info = plistlib.load(f)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return BundleStamp(None, None)
+    version = info.get("CFBundleShortVersionString")
+    digest = info.get("QuernSourceDigest")
+    return BundleStamp(version if isinstance(version, str) else None,
+                       digest if isinstance(digest, str) else None)
+
+
+def _all_sources() -> list[Path]:
+    source = _find_source()
+    if source is None:
+        raise RuntimeError(
+            "ios-preview source not found. Expected at "
+            "tools/ios-preview/main.swift relative to the project root."
+        )
+    return [source, *_shared_sources()]
+
+
+def expected_digest() -> str:
+    """The digest the installed bundle should carry for these sources."""
+    try:
+        return source_digest(_all_sources())
+    except OSError as exc:
+        # A source vanished between the existence check and here -- a branch
+        # switch mid-build. The documented contract is RuntimeError; an
+        # OSError escaping reaches the preview API as an unhandled 500.
+        raise RuntimeError(f"ios-preview source disappeared while building: {exc}") from exc
 
 
 def build_preview_bundle() -> Path:
@@ -208,40 +296,21 @@ def build_preview_bundle() -> Path:
     implementation rather than two, because a second copy of the compile
     command is exactly the kind of thing that drifts.
 
-    A no-op when the binary is newer than the source. Raises RuntimeError with
-    an actionable message when the source or swiftc is missing -- callers
-    decide whether that is fatal (the preview API) or a skipped optional check
-    (setup).
+    Compiles when the bundle's stamped digest is not these sources' -- or it
+    has none, as every bundle built before stamps does, so each is rebuilt
+    once. A stamp whose digest matches but whose version does not -- a release
+    that did not touch the preview -- is rewritten without compiling, so the
+    About panel stays true. Raises RuntimeError with an actionable message
+    when the source or swiftc is missing -- callers decide whether that is
+    fatal (the preview API) or a skipped optional check (setup).
     """
-    source = _find_source()
-    if source is None:
-        raise RuntimeError(
-            "ios-preview source not found. Expected at "
-            "tools/ios-preview/main.swift relative to the project root."
-        )
-
-    # Every file that goes into the binary, so editing the shared parser
-    # rebuilds too. Comparing against the script alone would leave a stale app
-    # behind an edit that never appeared to take.
-    sources = [source, *_shared_sources()]
-    try:
-        newest_source = max(p.stat().st_mtime for p in sources)
-    except OSError as exc:
-        # A source vanished between the existence check and here -- a branch
-        # switch mid-build. The documented contract of this function is
-        # RuntimeError; an OSError escaping reaches the preview API as an
-        # unhandled 500 instead of an actionable message.
-        raise RuntimeError(f"ios-preview source disappeared while building: {exc}") from exc
-
+    sources = _all_sources()
+    digest = expected_digest()
     bundle, binary = bundle_paths()
-    if binary.exists() and binary.stat().st_mtime >= newest_source:
-        # Rewrite the bundle scaffolding even on the fast path. The freshness
-        # test only asks about the binary, so a run that compiled and then
-        # failed to finish the bundle -- no Info.plist, no icon -- leaves a
-        # binary newer than the source, and every later call would sail past
-        # this return and report success for an app macOS cannot launch.
-        # Idempotent and cheap: one small plist write and one icon copy.
-        write_app_bundle(bundle)
+    stamp = read_stamp(bundle)
+    if binary.exists() and stamp.digest == digest:
+        if stamp.version != get_version():
+            write_app_bundle(bundle, digest)
         return binary
 
     # Asked before `which`: /usr/bin/swiftc is a stub on every Mac, and running
@@ -269,7 +338,8 @@ def build_preview_bundle() -> Path:
             f"Could not stage the ios-preview build in {bundle.parent}: {exc}"
         ) from exc
     staged = staging / BINARY_NAME
-    logger.info("Compiling ios-preview: %s -> %s", source, binary)
+    logger.info("Compiling ios-preview %s (was %s): %s -> %s", digest[:8],
+                (stamp.digest or "unstamped")[:10], sources[0], binary)
 
     try:
         try:
@@ -278,9 +348,7 @@ def build_preview_bundle() -> Path:
                     swiftc,
                     "-o", str(staged),
                     *[str(p) for p in sources],
-                    "-framework", "AVFoundation",
-                    "-framework", "CoreMediaIO",
-                    "-framework", "AppKit",
+                    *_COMPILE_FLAGS,
                 ],
                 capture_output=True,
                 text=True,
@@ -311,8 +379,123 @@ def build_preview_bundle() -> Path:
             ) from exc
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    write_app_bundle(bundle)
+    # Stamped last: a compile that fails before here leaves the old stamp, or
+    # none, so the next check builds again rather than calling it current.
+    write_app_bundle(bundle, digest)
     return binary
+
+
+@dataclass(frozen=True)
+class PreviewRefresh:
+    """What `refresh_preview_app` did."""
+
+    rebuilt: bool
+    #: Standalone windows that ran an older binary, quit and reopened.
+    relaunched: list[int] = field(default_factory=list)
+    #: Ones that would not quit, still showing the old build.
+    left_running: list[int] = field(default_factory=list)
+
+
+def stale_mirror_pids(binary: Path) -> list[int]:
+    """Standalone Quern Preview processes running an older build of `binary`:
+    started before it was last written.
+
+    A rebuild replaces the file, and a process keeps running what it started
+    from -- and the menu bar's Screen Mirror item only brings a running
+    instance to the front, so after an update the old window stayed. Only
+    standalone ones, opened from the menu bar with no arguments: the server's
+    own `--interactive` child is started from a fresh build, and quitting it
+    would end previews an agent is using. Empty when `ps` cannot answer.
+    """
+    try:
+        built = binary.stat().st_mtime
+        out = subprocess.run(["ps", "-axo", "pid=,lstart=,command="],  # noqa: S607
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    stale = []
+    for line in out.splitlines():
+        parts = line.split(None, 6)
+        if len(parts) < 7 or not parts[6].startswith(str(binary)):
+            continue
+        if "--interactive" in parts[6][len(str(binary)):]:
+            continue
+        try:
+            started = time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        # lstart is to the second; a window opened in the same second as the
+        # build is not called old.
+        if started < built - 1:
+            stale.append(pid)
+    return stale
+
+
+def _quit(pid: int, timeout: float = 3.0) -> bool:
+    """SIGTERM, which an AppKit app takes as quit; True once it has gone."""
+    try:
+        os.kill(pid, 15)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        time.sleep(0.1)
+    return False
+
+
+def refresh_preview_app(*, relaunch: bool = True) -> PreviewRefresh:
+    """Bring the screen-mirror app up to date, and any window running an old
+    build of it: build if the sources changed, then quit and reopen standalone
+    windows that started before the binary was written.
+
+    Called from setup and at server start, so a checkout moved by `git pull`
+    is caught as well as an update. Raises RuntimeError, as
+    `build_preview_bundle` does, when it cannot build.
+    """
+    bundle, _ = bundle_paths()
+    before = read_stamp(bundle).digest
+    binary = build_preview_bundle()
+    rebuilt = before != read_stamp(bundle).digest
+    if not relaunch:
+        return PreviewRefresh(rebuilt=rebuilt)
+    stale = stale_mirror_pids(binary)
+    quit_ok = [pid for pid in stale if _quit(pid)]
+    left = [pid for pid in stale if pid not in quit_ok]
+    if quit_ok:
+        try:
+            subprocess.run(["open", str(bundle)], capture_output=True,  # noqa: S607
+                           timeout=10, check=False)
+        except (OSError, subprocess.SubprocessError):
+            logger.warning("Quit an old Quern Preview but could not reopen it", exc_info=True)
+    if stale:
+        logger.info("Quern Preview: quit and reopened %s, left %s (older than the build)",
+                    quit_ok, left)
+    return PreviewRefresh(rebuilt=rebuilt, relaunched=quit_ok, left_running=left)
+
+
+def refresh_at_server_start() -> PreviewRefresh | None:
+    """The server's start-up check of the screen-mirror app: None where there
+    is none to check (not a Mac, or no developer tools to build it with).
+
+    At start-up as well as in setup because setup runs only on install and
+    update: a checkout moved by `git pull` never ran it, and kept a build from
+    Sep 11 behind six preview changes (measured). Its own function so tests
+    that start the server can stub it without stubbing the refresh itself.
+    """
+    import platform
+
+    if platform.system() != "Darwin" or not xcode_available():
+        return None
+    return refresh_preview_app()
 
 
 def _find_source() -> Path | None:
@@ -445,9 +628,6 @@ class PreviewManager:
         stall every other request for.
         """
         return await asyncio.to_thread(build_preview_bundle)
-
-    def _create_app_bundle(self) -> None:
-        write_app_bundle(self._bundle_path)
 
     # ------------------------------------------------------------------
     # Process lifecycle

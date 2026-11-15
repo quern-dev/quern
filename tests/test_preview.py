@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import time
 from collections import deque
 from pathlib import Path
 
@@ -14,43 +15,49 @@ from server.device.controller import DeviceError
 from server.device.media.preview import PreviewManager
 
 
+def _stage(tmp_path, monkeypatch):
+    """A preview build over fake sources with swiftc faked: (bundle, binary,
+    compiled), where `compiled` collects each compile's command."""
+    from server.device.media import preview
+
+    bundle = tmp_path / "Quern Preview.app"
+    binary = bundle / "Contents" / "MacOS" / "ios-preview"
+    source = tmp_path / "main.swift"
+    source.write_text("// source")
+    shared = tmp_path / "JPEGFraming.swift"
+    shared.write_text("// parser")
+    compiled: list = []
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        compiled.append(cmd)
+        Path(cmd[cmd.index("-o") + 1]).write_text("compiled")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(preview, "_find_source", lambda: source)
+    monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [shared])
+    monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
+    monkeypatch.setattr(preview, "xcode_available", lambda: True)
+    monkeypatch.setattr(preview.shutil, "which", lambda _: "/usr/bin/swiftc")
+    monkeypatch.setattr(preview.subprocess, "run", fake_run)
+    return bundle, binary, compiled
+
+
 class TestBuildBundle:
-    def test_a_stale_bundle_is_repaired_on_the_fast_path(self, tmp_path, monkeypatch):
-        """The freshness test only asks about the binary. A run that compiled
-        and then failed to finish the bundle leaves a binary newer than the
-        source, so every later call would return it and report success for an
-        app macOS cannot launch."""
+    def test_a_bundle_without_its_stamp_is_rebuilt_not_trusted(self, tmp_path, monkeypatch):
+        """A compile that finished but whose Info.plist was never written --
+        or any bundle from before stamps -- carries no digest, so it is built
+        again rather than reported as current for an app macOS cannot
+        launch, or one that is months old."""
         from server.device.media import preview
 
-        bundle = tmp_path / "Quern Preview.app"
-        binary = bundle / "Contents" / "MacOS" / "ios-preview"
+        bundle, binary, compiled = _stage(tmp_path, monkeypatch)
         binary.parent.mkdir(parents=True)
         binary.write_text("compiled")
 
-        source = tmp_path / "main.swift"
-        source.write_text("// source")
-        import os
-        os.utime(source, (1, 1))  # older than the binary
-
-        monkeypatch.setattr(preview, "_find_source", lambda: source)
-        # Pinned empty so freshness is not compared against the real
-        # JPEGFraming.swift. Unpinned, this does not fail on its mtime -- it
-        # falls off the fast path and invokes the real /usr/bin/swiftc, which
-        # succeeds on a comment-only source and passes. Quietly running a
-        # compiler is worse than failing.
-        monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [])
-        monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
-
-        # This test is about the fast path, so reaching a compiler at all is a
-        # failure of the test rather than a slower route to the same answer.
-        def no_compiler(*a, **kw):  # noqa: ANN002, ANN003
-            raise AssertionError("the fast path shelled out to a compiler")
-
-        monkeypatch.setattr(preview.subprocess, "run", no_compiler)
-
-        assert not (bundle / "Contents" / "Info.plist").exists()
         preview.build_preview_bundle()
-        assert (bundle / "Contents" / "Info.plist").exists(), "bundle was not repaired"
+
+        assert compiled, "an unstamped bundle was trusted"
+        assert preview.read_stamp(bundle).digest == preview.expected_digest()
 
     def test_a_stuck_compiler_fails_instead_of_hanging(self, tmp_path, monkeypatch):
         """Unbounded, a stuck swiftc hangs `quern setup` with no output and no
@@ -755,41 +762,102 @@ class TestTeardownFailureReporting:
 class TestSharedSourceFreshness:
     def test_editing_the_shared_parser_rebuilds_the_app(self, tmp_path, monkeypatch):
         """The binary is compiled from the script *and* the shared frame
-        parser. Comparing the binary against the script alone would leave an
-        edit to the parser silently not taking — the app keeps running the
-        previous build and nothing says so."""
+        parser. A digest of the script alone would leave an edit to the
+        parser silently not taking -- the app keeps running the previous
+        build and nothing says so."""
         from server.device.media import preview
 
-        bundle = tmp_path / "Quern Preview.app"
-        binary = bundle / "Contents" / "MacOS" / "ios-preview"
-        binary.parent.mkdir(parents=True)
-        binary.write_text("compiled")
+        bundle, binary, compiled = _stage(tmp_path, monkeypatch)
+        preview.build_preview_bundle()
+        compiled.clear()
 
-        source = tmp_path / "main.swift"
-        source.write_text("// source")
-        os.utime(source, (1, 1))  # older than the binary
+        (tmp_path / "JPEGFraming.swift").write_text("// parser, edited")
+        preview.build_preview_bundle()
 
-        shared = tmp_path / "JPEGFraming.swift"
-        shared.write_text("// parser")  # newer than the binary
+        assert compiled, "an edit to the shared parser did not trigger a rebuild"
+        assert str(tmp_path / "JPEGFraming.swift") in compiled[0]
+        assert str(tmp_path / "main.swift") in compiled[0]
 
-        compiled: list = []
 
-        def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
-            compiled.append(cmd)
-            Path(cmd[cmd.index("-o") + 1]).write_text("recompiled")   # where swiftc writes
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+class TestTheStamp:
+    """What the bundle says it was built from (stale preview app): the About
+    panel's version and build, and the digest that decides a rebuild."""
 
-        monkeypatch.setattr(preview, "_find_source", lambda: source)
-        monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [shared])
-        monkeypatch.setattr(preview, "bundle_paths", lambda: (bundle, binary))
-        monkeypatch.setattr(preview.shutil, "which", lambda _: "/usr/bin/swiftc")
-        monkeypatch.setattr(preview.subprocess, "run", fake_run)
+    def test_a_current_bundle_is_not_recompiled_whatever_the_times_say(
+        self, tmp_path, monkeypatch,
+    ):
+        """Times said nothing reliable: a release tarball stamps its sources
+        with the commit's time. A matching digest is current even with
+        sources dated after the binary."""
+        from server.device.media import preview
+
+        bundle, binary, compiled = _stage(tmp_path, monkeypatch)
+        preview.build_preview_bundle()
+        compiled.clear()
+        os.utime(tmp_path / "main.swift", (4_000_000_000, 4_000_000_000))  # newer
 
         preview.build_preview_bundle()
 
-        assert compiled, "a newer shared source did not trigger a rebuild"
-        assert str(shared) in compiled[0], "the shared source was not compiled in"
-        assert str(source) in compiled[0]
+        assert compiled == []
+
+    def test_a_changed_source_is_rebuilt_whatever_the_times_say(self, tmp_path, monkeypatch):
+        """The case the times got wrong: a new source dated before the binary
+        -- as a tarball's commit-time stamps can be -- was kept."""
+        from server.device.media import preview
+
+        bundle, binary, compiled = _stage(tmp_path, monkeypatch)
+        preview.build_preview_bundle()
+        compiled.clear()
+        (tmp_path / "main.swift").write_text("// source, changed")
+        os.utime(tmp_path / "main.swift", (1, 1))  # older than the binary
+
+        preview.build_preview_bundle()
+
+        assert compiled, "a changed source dated before the binary was not rebuilt"
+
+    def test_the_about_panel_says_which_version_and_which_build(self, tmp_path, monkeypatch):
+        """It said "Version 1.0" on every machine, which told a person
+        nothing."""
+        import plistlib
+
+        from server.device.media import preview
+
+        bundle, binary, _ = _stage(tmp_path, monkeypatch)
+        monkeypatch.setattr(preview, "get_version", lambda: "0.26.0-beta.4")
+        preview.build_preview_bundle()
+
+        info = plistlib.loads((bundle / "Contents" / "Info.plist").read_bytes())
+        digest = preview.expected_digest()
+        assert info["CFBundleShortVersionString"] == "0.26.0-beta.4"
+        assert info["CFBundleVersion"] == digest[:8]
+        assert info["QuernSourceDigest"] == digest
+
+    def test_a_new_version_with_the_same_sources_is_restamped_not_recompiled(
+        self, tmp_path, monkeypatch,
+    ):
+        """A release that did not touch the preview: the About panel follows
+        the version, and nothing is compiled for it."""
+        from server.device.media import preview
+
+        bundle, binary, compiled = _stage(tmp_path, monkeypatch)
+        monkeypatch.setattr(preview, "get_version", lambda: "0.26.0-beta.4")
+        preview.build_preview_bundle()
+        compiled.clear()
+        monkeypatch.setattr(preview, "get_version", lambda: "0.26.0")
+
+        preview.build_preview_bundle()
+
+        assert compiled == []
+        assert preview.read_stamp(bundle).version == "0.26.0"
+
+    def test_an_unreadable_plist_reads_as_unstamped(self, tmp_path):
+        from server.device.media import preview
+
+        bundle = tmp_path / "Quern Preview.app"
+        (bundle / "Contents").mkdir(parents=True)
+        (bundle / "Contents" / "Info.plist").write_text("not a plist")
+
+        assert preview.read_stamp(bundle) == preview.BundleStamp(None, None)
 
 
 class TestSharedSourcesAreRequired:
@@ -2646,3 +2714,144 @@ class TestThePreviewAppStartsOnce:
 
         assert len(builds) == 1, "two concurrent compiles collide at link time"
         assert len(launches) == 1, "a second launch would orphan the first app"
+
+
+class TestAnOldWindowStillRunning:
+    """A rebuild replaces the file; a running window keeps the build it
+    started from, and the menu bar only brings it to the front. So after an
+    update the person kept seeing the old app (stale preview app)."""
+
+    def _binary(self, tmp_path, built):
+        """A real binary at a path with a space in it, as the bundle's is,
+        last written at `built`."""
+        binary = tmp_path / "Quern Preview.app" / "Contents" / "MacOS" / "ios-preview"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("compiled")
+        os.utime(binary, (built, built))
+        return binary
+
+    def test_a_standalone_window_older_than_the_build_is_stale(self, monkeypatch, tmp_path):
+        from server.device.media import preview
+
+        built = time.mktime(time.strptime("Sat Nov 14 09:12:47 2026", "%a %b %d %H:%M:%S %Y"))
+        binary = self._binary(tmp_path, built)
+        out = (
+            f"63800 Sat Nov 14 09:01:00 2026 {binary}\n"                 # older: stale
+            f"63900 Sat Nov 14 09:16:28 2026 {binary}\n"                 # newer
+            f"64000 Sat Nov 14 08:00:00 2026 {binary} --interactive\n"   # the server's
+            "64100 Sat Nov 14 08:00:00 2026 /usr/bin/other\n"
+            "garbage line\n")
+        monkeypatch.setattr(preview.subprocess, "run",
+                            lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out))
+
+        assert preview.stale_mirror_pids(binary) == [63800]
+
+    def test_a_ps_that_fails_finds_none(self, monkeypatch, tmp_path):
+        from server.device.media import preview
+
+        def boom(*a, **k):
+            raise OSError("no ps")
+
+        monkeypatch.setattr(preview.subprocess, "run", boom)
+
+        assert preview.stale_mirror_pids(self._binary(tmp_path, 1)) == []
+
+    def _refresh(self, monkeypatch, tmp_path, stale, quits):
+        from server.device.media import preview
+
+        bundle, binary, _ = _stage(tmp_path, monkeypatch)
+        opened: list = []
+        monkeypatch.setattr(preview, "stale_mirror_pids", lambda b: list(stale))
+        monkeypatch.setattr(preview, "_quit", lambda pid: quits(pid))
+        real_run = preview.subprocess.run
+
+        def run(cmd, **kw):
+            if cmd and cmd[0] == "open":
+                opened.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0)
+            return real_run(cmd, **kw)
+
+        monkeypatch.setattr(preview.subprocess, "run", run)
+        return preview.refresh_preview_app(), opened, bundle
+
+    def test_old_windows_are_quit_and_the_app_reopened_once(self, monkeypatch, tmp_path):
+        result, opened, bundle = self._refresh(monkeypatch, tmp_path, [11, 12], lambda pid: True)
+
+        assert result.rebuilt is True
+        assert result.relaunched == [11, 12]
+        assert result.left_running == []
+        assert opened == [["open", str(bundle)]]
+
+    def test_a_window_that_would_not_quit_is_said_and_nothing_reopened(
+        self, monkeypatch, tmp_path,
+    ):
+        result, opened, _ = self._refresh(monkeypatch, tmp_path, [11], lambda pid: False)
+
+        assert result.relaunched == []
+        assert result.left_running == [11]
+        assert opened == []
+
+    def test_no_old_window_opens_nothing(self, monkeypatch, tmp_path):
+        """Reopening when nothing was quit would put a window up unasked."""
+        result, opened, _ = self._refresh(monkeypatch, tmp_path, [], lambda pid: True)
+
+        assert opened == []
+        assert result.relaunched == []
+
+    def test_a_second_refresh_with_nothing_changed_is_not_a_rebuild(self, monkeypatch, tmp_path):
+        from server.device.media import preview
+
+        self._refresh(monkeypatch, tmp_path, [], lambda pid: True)
+
+        assert preview.refresh_preview_app().rebuilt is False
+
+
+async def test_the_server_brings_the_mirror_app_up_to_date_at_start(monkeypatch):
+    """Setup runs on install and update only, so a checkout moved by
+    `git pull` kept its first build. The server's own start checks it too:
+    pinned against the real lifespan."""
+    from server.config import ServerConfig
+    from server.device.media import preview
+    from server.lifecycle import network_monitor, update_check
+    from server.main import create_app, lifespan
+
+    async def _never(*a, **k):
+        return None
+
+    monkeypatch.setattr(network_monitor, "update_network_state", lambda *a: None)
+    monkeypatch.setattr(network_monitor, "network_monitor_loop", _never)
+    monkeypatch.setattr(update_check, "periodic_update_check", _never)
+    called: list = []
+    monkeypatch.setattr(preview, "refresh_at_server_start",
+                        lambda: called.append(True) or preview.PreviewRefresh(rebuilt=True))
+    app = create_app(config=ServerConfig(api_key="k"),
+                     enable_oslog=False, enable_crash=False, enable_proxy=False)
+    async with lifespan(app):
+        await asyncio.wait_for(app.state._mirror_task, 5)
+
+    assert called == [True]
+
+
+async def test_a_mirror_app_that_cannot_build_does_not_stop_the_server(monkeypatch, caplog):
+    """A convenience the server does not need: a failure is said, not raised."""
+    from server.config import ServerConfig
+    from server.device.media import preview
+    from server.lifecycle import network_monitor, update_check
+    from server.main import create_app, lifespan
+
+    async def _never(*a, **k):
+        return None
+
+    def boom():
+        raise RuntimeError("swiftc not found")
+
+    monkeypatch.setattr(network_monitor, "update_network_state", lambda *a: None)
+    monkeypatch.setattr(network_monitor, "network_monitor_loop", _never)
+    monkeypatch.setattr(update_check, "periodic_update_check", _never)
+    monkeypatch.setattr(preview, "refresh_at_server_start", boom)
+    app = create_app(config=ServerConfig(api_key="k"),
+                     enable_oslog=False, enable_crash=False, enable_proxy=False)
+    async with lifespan(app):
+        await asyncio.wait_for(app.state._mirror_task, 5)
+
+    assert "swiftc not found" in caplog.text
