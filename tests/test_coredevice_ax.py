@@ -985,6 +985,8 @@ class TestIdentifyingTheScreen:
     def test_not_on_a_read_through_wda(self, monkeypatch):
         """WDA has the containers: a miss there is a real one."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
+        # The same screen as the push serves, so only the reader differs.
+        ctrl.wda_client.describe_all = AsyncMock(return_value=parse_push(SETTINGS)[1])
         client = self._client(ctrl)
         client.post("/api/v1/landmarks/load",
                     json={"app": "tabled", "landmarks": self.TABLE_SCREEN}).raise_for_status()
@@ -992,6 +994,8 @@ class TestIdentifyingTheScreen:
         result = client.post("/api/v1/landmarks/identify", json={
             "app": "tabled", "udid": PHONE, "snapshot_depth": 12}).json()
 
+        ctrl.coredevice_ax.describe_all.assert_not_called()
+        assert result["partial_matches"][0]["matched"] == 1   # only the Table missed
         assert "note" not in result
 
 
