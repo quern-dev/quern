@@ -835,6 +835,80 @@ def _phone_controller(os_version: str | None = "iOS 27.2.1", *, reader: str = "c
     return ctrl
 
 
+class TestAPushThatStops:
+    """After a swipe the device can send an InitialDump or two and then
+    nothing, with the channel open: 3 to 6 reads in 50 on an iPhone 11. The
+    read waited 20 s for a complete tree and fell back to WDA (#684). Now a
+    pair that does not come in time is given up on, and a subscription on a
+    fresh connection -- which answered in about 2 s -- is tried."""
+
+    @staticmethod
+    def _queue(*pushes):
+        q: asyncio.Queue = asyncio.Queue()
+        for p in pushes:
+            q.put_nowait((PUSH_SELECTOR, [p]))
+        return q
+
+    async def test_a_pair_that_never_comes_is_given_up_on(self, monkeypatch):
+        monkeypatch.setattr(coredevice_ax, "STALL_MIN_S", 0.2)
+        monkeypatch.setattr(coredevice_ax, "STALL_PAIRS", 0.0)
+
+        with pytest.raises(coredevice_ax.PushStalled):
+            await asyncio.wait_for(coredevice_ax._newest_tree(
+                self._queue(_as("InitialDump", SETTINGS), _as("InitialDump", SETTINGS))), 5)
+
+    async def test_a_pair_in_time_is_not(self, monkeypatch):
+        monkeypatch.setattr(coredevice_ax, "STALL_MIN_S", 0.5)
+        q = self._queue(_as("InitialDump", SETTINGS))
+
+        async def late_pair():
+            await asyncio.sleep(0.3)
+            q.put_nowait((PUSH_SELECTOR, [SETTINGS]))
+        task = asyncio.create_task(late_pair())
+
+        tree, _, _ = await asyncio.wait_for(coredevice_ax._newest_tree(q), 5)
+        await task
+        assert tree.dump_type == "AdditionalData"
+
+    async def test_nothing_at_all_is_left_to_the_silent_subscription_rule(self, monkeypatch):
+        """Before any push there is no pair to time: #692's spare handles it."""
+        monkeypatch.setattr(coredevice_ax, "STALL_MIN_S", 0.1)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(coredevice_ax._newest_tree(asyncio.Queue()), 0.5)
+
+    async def test_a_fresh_subscription_is_tried(self, monkeypatch):
+        stalled = self._queue(_as("InitialDump", SETTINGS))
+        fresh = self._queue(_as("InitialDump", SETTINGS), SETTINGS)
+        queues = [stalled, fresh]
+        closed = []
+        monkeypatch.setattr(coredevice_ax, "STALL_MIN_S", 0.2)
+        monkeypatch.setattr(coredevice_ax, "STALL_PAIRS", 0.0)
+        monkeypatch.setattr(coredevice_ax, "_subscribed",
+                            AsyncMock(side_effect=lambda *a: queues.pop(0)))
+        monkeypatch.setattr(coredevice_ax, "_close",
+                            AsyncMock(side_effect=lambda p, r: closed.append(p)))
+        conn = SimpleNamespace(rsd="rsd1", provider="provider1")
+
+        tree, _, _ = await asyncio.wait_for(
+            coredevice_ax._settled(PHONE, None, None, conn, {}), 5)
+
+        assert tree.dump_type == "AdditionalData"
+        assert closed == ["provider1"]                  # the stalled one closed first
+        assert (conn.rsd, conn.provider) == (None, None)
+
+    async def test_it_gives_up_after_a_few(self, monkeypatch):
+        monkeypatch.setattr(coredevice_ax, "STALL_MIN_S", 0.05)
+        monkeypatch.setattr(coredevice_ax, "STALL_PAIRS", 0.0)
+        subscribed = AsyncMock(side_effect=lambda *a: self._queue(_as("InitialDump", SETTINGS)))
+        monkeypatch.setattr(coredevice_ax, "_subscribed", subscribed)
+        monkeypatch.setattr(coredevice_ax, "_close", AsyncMock())
+
+        with pytest.raises(coredevice_ax.PushStalled):
+            await asyncio.wait_for(coredevice_ax._settled(
+                PHONE, None, None, SimpleNamespace(rsd=None, provider=None), {}), 5)
+        assert subscribed.await_count == coredevice_ax.RESUBSCRIBES + 1
+
+
 class TestACrashAfterTheRead:
     """#669's crash can land after the read has answered: the whole tree at
     4.0 s, the app gone at 4.3 s (iPhone 11). The next read tells, from the
