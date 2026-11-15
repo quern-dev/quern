@@ -117,20 +117,40 @@ def expected_digest() -> str | None:
 
 
 def stamp_path() -> Path:
-    """The digest of the sources the installed binary was built from. Beside
-    the binary rather than inside it, as sim-bridge's is: a signed binary
-    cannot be written to, and a missing stamp and a half-installed binary
-    both read as "rebuild"."""
+    """What the installed binary was built from, and which binary that was.
+    Beside the binary rather than inside it, as sim-bridge's is: a signed
+    binary cannot be written to, and a missing stamp and a half-installed
+    binary both read as "rebuild"."""
     return binary_path().with_name(f"{BINARY_NAME}.sha256")
 
 
+def binary_digest(path: Path) -> str:
+    """The sha256 of the binary itself. ~650 KB, so about a millisecond."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def stamp_text(source: str, binary: str) -> str:
+    """The stamp's contents: the source digest, then the binary's own. #663's
+    release step writes the same line beside the binary it ships."""
+    return f"{source} {binary}\n"
+
+
 def installed_digest() -> str | None:
-    """The digest recorded for the installed binary, or None when there is no
-    binary or no readable stamp."""
-    if not binary_path().exists():
-        return None
+    """The source digest recorded for the installed binary, or None when there
+    is no binary, no readable stamp, or a stamp for some other binary.
+
+    The binary's own hash is in the stamp because a source digest alone says
+    nothing about which file it describes: a checkout from before stamps, or a
+    second process building other sources, replaces the binary and leaves the
+    stamp, which then still matches these sources (review).
+    """
+    binary = binary_path()
     try:
-        return stamp_path().read_text().strip() or None
+        fields = stamp_path().read_text().split()
+        if len(fields) != 2:
+            return None  # empty, or the one-field stamp of an early build
+        source, recorded = fields
+        return source if binary_digest(binary) == recorded else None
     except (OSError, UnicodeDecodeError):
         return None
 
@@ -183,6 +203,14 @@ def _build_locked(force: bool) -> Path:
     # Asked before `which`: /usr/bin/swift is a stub on every Mac, and running
     # it without the developer tools shows macOS's install dialog (#659).
     swift = shutil.which("swift") if xcode_available() else None
+    if swift is None and not force and installed.exists():
+        # An out-of-date engine that runs beats none: a macOS update that
+        # breaks the Command Line Tools would otherwise end simulator preview
+        # and video until they are reinstalled -- and every binary from before
+        # stamps reads as out of date (review). Doctor still says so.
+        logger.warning("quern-media is out of date and there is no Swift toolchain to "
+                       "rebuild it; using the installed one")
+        return installed
     if swift is None:
         raise RuntimeError(
             "swift not found. Install Xcode or the Command Line Tools: "
@@ -231,6 +259,10 @@ def _build_locked(force: bool) -> Path:
     # in the destination directory so it is the same one. A running process
     # keeps the old inode and finishes on it; the next launch sees a complete
     # file.
+    # The old stamp goes first: between the binary landing and the new stamp
+    # being written, the old one would describe a file that is no longer there.
+    stamp = stamp_path()
+    stamp.unlink(missing_ok=True)
     tmp_fd, tmp_name = tempfile.mkstemp(
         prefix=f".{BINARY_NAME}.", suffix=".new", dir=str(QUERN_BIN_DIR)
     )
@@ -245,10 +277,9 @@ def _build_locked(force: bool) -> Path:
     # After the install, never before: a stamp written first would mark a
     # failed build current. Renamed into place for the same reason as the
     # binary -- a half-written stamp would read as some other digest.
-    stamp = stamp_path()
     tmp_stamp = stamp.with_name(f".{stamp.name}.new")
     try:
-        tmp_stamp.write_text(digest)
+        tmp_stamp.write_text(stamp_text(digest, binary_digest(installed)))
         os.replace(tmp_stamp, stamp)
     except OSError:
         # A stamp that cannot be written costs a rebuild next time, which is

@@ -96,7 +96,62 @@ class TestTheStamp:
         installed, _ = _build(tmp_path, package)
 
         stamp = installed.with_name("quern-media.sha256")
-        assert stamp.read_text() == media_engine.source_digest(package)
+        assert stamp.read_text() == media_engine.stamp_text(
+            media_engine.source_digest(package), media_engine.binary_digest(installed))
+
+    def test_a_binary_replaced_under_a_correct_stamp_is_not_current(self, package, tmp_path):
+        """A checkout from before stamps, or a second process building other
+        sources, replaces the binary and leaves the stamp -- which still
+        matches these sources (review)."""
+        installed, _ = _build(tmp_path, package)
+        installed.write_text("#!/bin/sh\necho someone else's build\n")
+
+        with patch.object(media_engine, "binary_path", return_value=installed):
+            assert media_engine.installed_digest() is None
+        _, calls = _build(tmp_path, package)
+        assert calls and installed.read_text() == "fresh"
+
+    def test_a_one_field_stamp_reads_as_unstamped(self, package, tmp_path):
+        installed, _ = _build(tmp_path, package)
+        installed.with_name("quern-media.sha256").write_text(media_engine.source_digest(package))
+
+        with patch.object(media_engine, "binary_path", return_value=installed):
+            assert media_engine.installed_digest() is None
+
+    def test_the_old_stamp_is_gone_before_the_binary_is_replaced(self, package, tmp_path):
+        """An install that fails part way must not leave the old stamp beside
+        whatever is there."""
+        installed, _ = _build(tmp_path, package)
+        (package / "Package.swift").write_text("// changed\n")
+        _, patches = _fake_build(tmp_path, package)
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            stack.enter_context(patch.object(media_engine.shutil, "copy2",
+                                             side_effect=OSError("disk full")))
+            with pytest.raises(OSError):
+                media_engine.build_media_engine_sync()
+
+        assert not installed.with_name("quern-media.sha256").exists()
+
+    def test_without_a_toolchain_an_installed_binary_is_used(self, package, tmp_path, caplog):
+        """A macOS update that breaks the Command Line Tools must not end
+        simulator preview while a working binary is there (review)."""
+        installed, patches = _fake_build(tmp_path, package)
+        installed.write_text("unstamped but working")
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            stack.enter_context(patch.object(media_engine, "xcode_available", return_value=False))
+            run = stack.enter_context(patch("subprocess.run"))
+            assert media_engine.build_media_engine_sync() == installed
+            run.assert_not_called()
+            with pytest.raises(RuntimeError, match="xcode-select --install"):
+                media_engine.build_media_engine_sync(force=True)
+            installed.unlink()
+            with pytest.raises(RuntimeError, match="xcode-select --install"):
+                media_engine.build_media_engine_sync()
+        assert "no Swift toolchain" in caplog.text
 
     def test_a_second_build_with_nothing_changed_does_nothing(self, package, tmp_path):
         _build(tmp_path, package)
@@ -208,8 +263,8 @@ class TestTheStamp:
         """#663's release puts the binary and its stamp in ~/.quern/bin."""
         installed, patches = _fake_build(tmp_path, package)
         installed.write_text("signed")
-        installed.with_name("quern-media.sha256").write_text(
-            media_engine.source_digest(package) + "\n")
+        installed.with_name("quern-media.sha256").write_text(media_engine.stamp_text(
+            media_engine.source_digest(package), media_engine.binary_digest(installed)))
 
         _, calls = _build(tmp_path, package)
         assert calls == [] and installed.read_text() == "signed"

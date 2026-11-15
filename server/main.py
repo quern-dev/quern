@@ -332,6 +332,38 @@ async def _gauge_stream(app: FastAPI, udid: str, app_id: str,
             yield snap
 
 
+async def _in_daemon_thread(fn):
+    """`fn()` on a daemon thread, awaited. For start-up work that may still be
+    running at shutdown: `asyncio.to_thread`'s pool is joined at exit even
+    when the task is cancelled, so a cold `swift build` held `quern stop` past
+    its grace and was killed (review). A daemon thread is abandoned instead,
+    and what it was building is never stamped, so it is rebuilt next time."""
+    import threading
+
+    loop = asyncio.get_running_loop()
+    done = loop.create_future()
+
+    def settle(result, exc):
+        if not done.done():
+            if exc is None:
+                done.set_result(result)
+            else:
+                done.set_exception(exc)
+
+    def work():
+        try:
+            result, exc = fn(), None
+        except BaseException as e:  # noqa: BLE001 -- handed to the awaiting task
+            result, exc = None, e
+        try:
+            loop.call_soon_threadsafe(settle, result, exc)
+        except RuntimeError:
+            pass  # the loop has closed: nobody is waiting
+
+    threading.Thread(target=work, name=f"quern-{fn.__name__}", daemon=True).start()
+    return await done
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage server startup and shutdown."""
@@ -714,12 +746,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     async def _refresh_media_engine():
         """quern-media, rebuilt if its sources changed: the Screen Mirror app
-        run without a server starts the one installed as it finds it. After
-        the app's own check, in the background: a cold build takes seconds."""
+        run without a server starts the one installed as it finds it. In the
+        background: a cold build takes seconds, up to minutes."""
         from server.device.media import media_engine
 
         try:
-            rebuilt = await asyncio.to_thread(media_engine.refresh_at_server_start)
+            rebuilt = await _in_daemon_thread(media_engine.refresh_at_server_start)
         except (RuntimeError, OSError) as exc:
             logger.warning("Could not bring quern-media up to date: %s", exc)
             return
@@ -727,8 +759,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("Rebuilt quern-media: its sources had changed")
 
     async def _refresh_mirror_tools():
-        await _refresh_screen_mirror()
+        # The engine first: the app starts it, so an app reopened by its own
+        # refresh before the engine is rebuilt would start the old one.
         await _refresh_media_engine()
+        await _refresh_screen_mirror()
 
     app.state._mirror_task = asyncio.create_task(_refresh_mirror_tools())
 
@@ -2300,14 +2334,28 @@ def _report_media_engine(fix: bool = False) -> tuple[bool, bool | None]:
         print(f"  \u2713 {built}, current")
         return True, None
     print(f"  \u2717 {built}: out of date, these sources build {expected[:8]}")
-    print("      it is rebuilt when the server next starts, or run `quern doctor --fix`")
+    from server.device.ios._xcode import xcode_available
+    from server.device.media import preview
+
+    if not xcode_available():
+        print("      rebuilding it needs the developer tools: xcode-select --install")
+    elif preview._owns_the_bin_dir():
+        print("      it is rebuilt when the server next starts, or run `quern doctor --fix`")
+    else:
+        # The start-up check leaves a bin dir shared with another checkout alone.
+        print("      run `quern doctor --fix` from the checkout this Mac's quern runs")
     if not fix:
         return True, None
     print("  --fix: rebuilding quern-media")
     try:
         media_engine.build_media_engine_sync()
+        rebuilt = media_engine.installed_digest() == expected
     except (RuntimeError, OSError) as exc:
         print(f"  \u2717 could not: {exc}")
+        return True, False
+    if not rebuilt:
+        # Without a toolchain the build keeps the old binary rather than fail.
+        print("  \u2717 could not: it is still the old build (is there a Swift toolchain?)")
         return True, False
     print("  \u2713 up to date")
     return True, True
