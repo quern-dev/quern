@@ -33,6 +33,11 @@ BUNDLE_ID = "com.quern.probe"
 #: A second bundle the iOS app builds for scene-lifecycle coverage.
 SCENE_BUNDLE_ID = "com.quern.probe.scene"
 
+#: The same screens in a SwiftUI TabView (`build.sh --hosted`), for a phone read
+#: with no WDA: under a UIKit tab bar, the read crashes every screen behind More
+#: (#669); under SwiftUI's it does not.
+HOSTED_BUNDLE_ID = "com.quern.probe.hosted"
+
 #: The first iOS release that refuses to launch an app with no scene manifest.
 #: Below it, the app-delegate build is what this suite runs -- it is the older
 #: and more common shape, and dropping it would stop covering it anywhere.
@@ -243,7 +248,7 @@ IOS = ProbeContract(
         "scroll": "scroll_to_top", "links": "link_count", "logs": "log_start",
         "location": "location_auth", "web": "web_heading_native",
         "diag": "diag_crash_uncaught", "state": "state_counter",
-        "widgets": "widget_nav_done", "lists": "lists_table",
+        "widgets": "widget_nav_done", "lists": "lists_row_0",
         "lazy": "lazy_list", "taps": "taps_heading",
     },
     row_identifier_template="row_{index}",
@@ -263,7 +268,8 @@ IOS = ProbeContract(
         # it is the one screen whose title is not a landmark.
         "scroll": {"scrollable": True, "landmarks": [
             {"element": "RadioButton", "identifier": "tab_scroll", "selected": True},
-            {"element": "Group", "identifier": "scroll_table"},
+            # Not the table: a read of the tree push has no containers (#664).
+            {"element": "Button", "identifier": "scroll_to_top"},
         ]},
         "links": {"scrollable": False, "landmarks": [
             {"element": "Heading", "label": "Links"},
@@ -296,7 +302,8 @@ IOS = ProbeContract(
         ]},
         "lists": {"landmarks": [
             {"element": "Heading", "label": "Lists"},
-            {"element": "Group", "identifier": "lists_table"},
+            # A row, not the table, which a push read does not carry (#664).
+            {"element": "Button", "identifier": "lists_row_0"},
         ]},
         # A UICollectionView list that builds cells only as they scroll into
         # view, so a read holds the ~15 on screen and never the rest -- the
@@ -435,7 +442,8 @@ class ProbeUnavailable(RuntimeError):
 
 
 def build_ios(
-    *, scene: bool = False, device_udid: str | None = None, timeout: float = 600.0,
+    *, scene: bool = False, hosted: bool = False, device_udid: str | None = None,
+    timeout: float = 600.0,
 ) -> Path:
     """Build the iOS probe app and return the bundle path.
 
@@ -443,6 +451,9 @@ def build_ios(
     sources under two Info.plists, so which one a test runs against changes the
     lifecycle and nothing the contract names -- see `scene_lifecycle_required`
     for when the choice is forced.
+
+    `hosted` builds the SwiftUI-hosted variant (`HOSTED_BUNDLE_ID`), which has
+    a scene of its own, so it serves iOS 27 too.
 
     `device_udid` builds for that physical device, signed with a development
     profile that lists it (`find-profile.py` says what to do when none does).
@@ -461,7 +472,7 @@ def build_ios(
         result = subprocess.run(  # noqa: S603 - fixed path in this repo
             [
                 str(script),
-                *(["--scene"] if scene else []),
+                *(["--hosted"] if hosted else ["--scene"] if scene else []),
                 *(["--device", device_udid] if device_udid else []),
             ],
             cwd=str(IOS.source_dir),
@@ -475,7 +486,8 @@ def build_ios(
             f"probe-app build did not finish in {timeout:.0f}s"
         ) from exc
 
-    name = "QuernProbeScene.app" if scene else "QuernProbe.app"
+    name = ("QuernProbeHosted.app" if hosted
+            else "QuernProbeScene.app" if scene else "QuernProbe.app")
     # Device bundles are kept apart from simulator ones by build.sh.
     bundle = IOS.source_dir / "build" / ("device" if device_udid else "") / name
     if result.returncode != 0 or not bundle.exists():

@@ -4,7 +4,7 @@ status: documented
 landmark_conventions: 2
 landmarks:
   - { element: "Heading", label: "Lists" }
-  - { element: "Group", identifier: "lists_table" }
+  - { element: "Button", identifier: "lists_row_0" }
 leads_to:
   - screen: "[[screens/more]]"
     action: 'tap_element label="More" element_type="Button"'

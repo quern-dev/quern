@@ -464,9 +464,11 @@ def test_scroll_to_element_does_not_tap_what_it_scrolls_to(probe) -> None:
         f"{target} did not come into view; this test cannot check the "
         "no-tap property without it"
     )
-    container = probe.contract.id_for(Ids.SCROLL_CONTAINER)
-    assert probe.element(container) is not None, (
-        "the scroll container is gone — scrolling appears to have navigated away"
+    # The screen's own marker, not its list: a read of the tree push carries
+    # no containers (#664).
+    marker = probe.contract.screen_ready["scroll"]
+    assert probe.element(marker) is not None, (
+        "the scroll screen is gone — scrolling appears to have navigated away"
     )
 
 

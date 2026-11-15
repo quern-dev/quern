@@ -542,9 +542,12 @@ def ios_probe(quern: client_mod.QuernClient, any_ios: Device):
     # builds rather than fail afterwards. Below 27 the app-delegate build stays
     # the one under test: it is the older shape, and it is covered nowhere else.
     scene = probe_mod.scene_lifecycle_required(any_ios.os_version)
+    # A run with no WDA reads the tree push, which crashes the UIKit tab bar's
+    # More screens (#669): the same screens hosted in SwiftUI are read whole.
+    hosted = bool(os.environ.get("QUERN_CONFORMANCE_NO_WDA"))
     try:
         bundle = probe_mod.build_ios(
-            scene=scene,
+            scene=scene, hosted=hosted,
             device_udid=probe_mod.hardware_udid(any_ios.udid) if physical else None,
         )
     except probe_mod.ProbeUnavailable as exc:
@@ -552,7 +555,8 @@ def ios_probe(quern: client_mod.QuernClient, any_ios: Device):
 
     return _install_and_launch(
         quern, any_ios.udid, bundle, probe_mod.IOS,
-        probe_mod.SCENE_BUNDLE_ID if scene else probe_mod.BUNDLE_ID,
+        probe_mod.HOSTED_BUNDLE_ID if hosted
+        else probe_mod.SCENE_BUNDLE_ID if scene else probe_mod.BUNDLE_ID,
         physical=physical,
     )
 
