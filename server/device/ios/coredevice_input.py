@@ -54,6 +54,17 @@ IDLE_CLOSE_S = 60.0
 #: Each step's bound when opening a session or closing one.
 CONNECT_S = 5.0
 
+#: How long a newly opened HID session waits before its first report. One
+#: sent sooner is dropped: measured on an iPhone 11, a tap on Settings' General
+#: row straight after opening did nothing, three of three, and after 0.5 s
+#: opened General, three of three. Only 0 s and 0.5 s were measured.
+#: pymobiledevice3 waits 0.5 s too, but after starting a media stream, which
+#: quern does not open: its TOUCH_AUTH_SETTLE_SECONDS is a related wait, not
+#: this one. Sessions close after IDLE_CLOSE_S, so without
+#: this the first tap or swipe after any minute's pause was lost -- a scroll
+#: sweep read the dropped drag as the end of the list and swept back up.
+FIRST_REPORT_S = 0.5
+
 #: Each report's bound, and the display read's. A half-open tunnel otherwise
 #: hangs a write for good while it holds the device's session lock, and every
 #: later action on that phone queues behind it with no error and no fallback.
@@ -453,6 +464,10 @@ class CoreDeviceInput:
                 await asyncio.wait_for(rsd.connect(), CONNECT_S)
                 hid = lib.UniversalHID(rsd)
                 await asyncio.wait_for(hid.connect(), CONNECT_S)
+                # Inside the open, so every action on a new session waits and
+                # one cancelled here is closed like any half-open session; an
+                # action on a session already open does not wait.
+                await _sleep(FIRST_REPORT_S)
             except asyncio.CancelledError:
                 # Cancelled half open: neither is registered yet, so nothing
                 # else would ever close them. Still a cancellation, not NotSent
