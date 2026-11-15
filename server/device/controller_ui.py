@@ -5249,7 +5249,12 @@ class DeviceControllerUI:
         """
         resolved = await self.resolve_udid(udid)
         await self._warn_if_input_is_suppressed(resolved)
-        if self._coredevice_serves(resolved) and snapshot_depth is None:
+        # Not on a device where a push read crashed an app (#669): its reads go
+        # through WDA until the server restarts, and keystrokes over HID with
+        # no push to read the field back -- and no correction -- arrived as
+        # kana on a Japanese keyboard and were only reported (phase 4 run).
+        if (self._coredevice_serves(resolved) and snapshot_depth is None
+                and not self._push_crashed_apps.get(resolved)):
             return await self._type_over_coredevice(resolved, text, label, identifier)
         if not (label or identifier):
             await self._ui_backend(resolved).type_text(resolved, text)

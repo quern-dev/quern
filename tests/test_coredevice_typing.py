@@ -213,13 +213,17 @@ class TestWhatIsNotSet:
         setter.assert_not_called()
 
     async def test_not_after_the_push_crashed_an_app(self, monkeypatch):
-        """The set reads the push, which would run the crashing dump again (#669)."""
+        """The set reads the push, which would run the crashing dump again
+        (#669): such a device types through WDA, which inserts the text."""
         ctrl, setter = _phone(monkeypatch, before="", reads=["あ"])
         ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+        ctrl.wda_client.tap = AsyncMock()
 
         with pytest.raises(DeviceError):
             await ctrl.type_text("a", udid=PHONE, identifier="field_default")
 
+        ctrl.wda_client.type_text.assert_awaited_once()
+        ctrl.coredevice_input.type_text.assert_not_called()
         setter.assert_not_called()
 
     async def test_a_failed_set_says_what_the_field_holds(self, monkeypatch):
@@ -702,3 +706,16 @@ class TestTerminating:
 
         ctrl.wda_client.terminate_app.assert_awaited_once()
         ctrl.devicectl.terminate_app.assert_not_called()
+
+
+async def test_after_a_push_crash_typing_goes_through_wda(monkeypatch):
+    """The device's reads are WDA's until restart (#669), and HID typing
+    without the push could neither read the field back nor correct it: a
+    Japanese keyboard's kana were only reported (phase 4 conformance run)."""
+    ctrl, setter = _phone(monkeypatch, before="", reads=[])
+    ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+
+    await ctrl.type_text("abc", udid=PHONE)
+
+    ctrl.wda_client.type_text.assert_awaited_once_with(PHONE, "abc")
+    ctrl.coredevice_input.type_text.assert_not_called()
