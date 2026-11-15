@@ -251,6 +251,37 @@ class TestTheReadsTheyMake:
         assert ctrl.get_ui_elements.await_args.kwargs["whole_screen"] is True
 
 
+class TestClearing:
+    """clear_text over CoreDevice (#664): found in the push, cleared with
+    keystrokes over HID."""
+
+    def _ctrl(self, monkeypatch):
+        ctrl, _ = _phone(monkeypatch, before="", reads=[])
+        field = _field("hello")
+        ctrl.get_ui_elements = AsyncMock(return_value=([field], PHONE))
+        ctrl.coredevice_input.select_all_and_delete = AsyncMock(return_value="coredevice")
+        ctrl.wda_client.select_all_and_delete = AsyncMock()
+        return ctrl
+
+    async def test_it_reads_the_push_and_clears_over_hid(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch)
+
+        await ctrl.clear_text(udid=PHONE, identifier="field_default")
+
+        assert ctrl.get_ui_elements.await_args.kwargs["whole_screen"] is True
+        ctrl.coredevice_input.select_all_and_delete.assert_awaited_once()
+        ctrl.wda_client.select_all_and_delete.assert_not_called()
+
+    async def test_a_wda_depth_stays_with_wda(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch)
+
+        await ctrl.clear_text(udid=PHONE, identifier="field_default", snapshot_depth=12)
+
+        assert ctrl.get_ui_elements.await_args.kwargs["whole_screen"] is False
+        ctrl.wda_client.select_all_and_delete.assert_awaited_once()
+        ctrl.coredevice_input.select_all_and_delete.assert_not_called()
+
+
 class TestTheCorrection:
     @pytest.mark.parametrize(("before", "after", "keys", "text", "expected"), [
         # The keyboard's doing: set.
