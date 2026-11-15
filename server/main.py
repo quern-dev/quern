@@ -691,6 +691,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     app.state._conditions_task = asyncio.create_task(_clear_leftover_conditions())
 
+    async def _refresh_screen_mirror():
+        """The menu bar's Screen Mirror app, rebuilt if its sources changed and
+        reopened if an old build of it is still running. In the background: a
+        rebuild takes ~1.5s, and the app is a convenience the server does not
+        need."""
+        from server.device.media import preview
+
+        try:
+            refreshed = await asyncio.to_thread(preview.refresh_at_server_start)
+        except (RuntimeError, OSError) as exc:
+            logger.warning("Could not bring the screen-mirror app up to date: %s", exc)
+            return
+        if refreshed is None:
+            return
+        if refreshed.rebuilt:
+            logger.info("Rebuilt the screen-mirror app: its sources had changed")
+        if refreshed.left_running:
+            logger.warning(
+                "Quern Preview %s is still running an older build and would not quit; "
+                "quit it and reopen it from the menu bar", refreshed.left_running)
+
+    app.state._mirror_task = asyncio.create_task(_refresh_screen_mirror())
+
     # Re-probe the simulator UI backend periodically. Selection used to be
     # latched at startup and never revisited, so an Xcode upgrade under a
     # running server left every tap routed to a backend that could no longer
@@ -2107,6 +2130,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     node_complete = _report_node()
     registrations_complete = _report_mcp_registrations()
     menubar_checked, menubar_repaired = _report_menubar(fix)
+    mirror_checked, mirror_repaired = _report_screen_mirror(fix)
     services_complete = _report_service_health(fix)
 
     if fix:
@@ -2115,9 +2139,10 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         # folding both halves of the menu-bar section into one bool broke it:
         # an unreadable Info.plist would have failed `doctor --fix && quern
         # start` after the venv repair succeeded.
-        sys.exit(0 if repaired is not False and menubar_repaired is not False else 1)
+        sys.exit(0 if repaired is not False and menubar_repaired is not False
+                 and mirror_repaired is not False else 1)
     sys.exit(0 if tools is not None and services_complete and node_complete
-             and registrations_complete and menubar_checked else 1)
+             and registrations_complete and menubar_checked and mirror_checked else 1)
 
 
 def _report_menubar(fix: bool = False) -> tuple[bool, bool | None]:
@@ -2155,6 +2180,72 @@ def _report_menubar(fix: bool = False) -> tuple[bool, bool | None]:
         # against.
         return True, menubar.cmd_install() == 0
     return True, None
+
+
+def _report_screen_mirror(fix: bool = False) -> tuple[bool, bool | None]:
+    """The menu bar's Screen Mirror app: which build it is, and whether it is
+    the one these sources make.
+
+    Returns `(checked, repaired)`, as `_report_menubar` does. An app that is
+    out of date is reported, not failed: it still runs, and the server brings
+    it up to date at its next start. `--fix` does that now.
+    """
+    import platform
+
+    if platform.system() != "Darwin":
+        return True, None
+    from server import get_version
+    from server.device.media import preview
+
+    print()
+    print("Screen mirror (Quern Preview):")
+    bundle, binary = preview.bundle_paths()
+    if not binary.exists():
+        print("  \u2013 not built: `quern setup` builds it when the developer tools are present")
+        return True, None
+    try:
+        stamp = preview.read_stamp(bundle)
+        expected = preview.expected_digest()
+        stale_windows = preview.stale_mirror_pids(binary)
+    except Exception as exc:  # noqa: BLE001 -- doctor reports, it does not crash
+        print(f"  ? could not be checked ({exc})")
+        return False, None
+    built = (f"{stamp.version or 'no version'} ({stamp.digest[:8]})" if stamp.digest
+             else "a build from before versions were stamped")
+    current = stamp.digest == expected
+    if current and stamp.version == get_version():
+        print(f"  \u2713 {built}, current")
+    elif current and preview.is_sealed(bundle):
+        print(f"  \u2713 {built}, current (a signed build keeps its own version)")
+    elif current:
+        print(f"  \u2713 {built}: the build is current; its version is "
+              f"rewritten to {get_version()} at the next start")
+    else:
+        print(f"  \u2717 {built}: out of date, these sources build {expected[:8]}")
+        print("      it is rebuilt when the server next starts, or run `quern doctor --fix`")
+    if stale_windows is None:
+        print("  ? could not look for windows running an older build (ps did not answer)")
+    elif stale_windows:
+        print(f"  \u2717 running an older build: pid {', '.join(map(str, stale_windows))} "
+              "-- quit it and reopen Screen Mirror from the menu bar")
+    if fix and (not current or stale_windows):
+        print("  --fix: bringing the screen-mirror app up to date")
+        try:
+            refreshed = preview.refresh_preview_app()
+        except (RuntimeError, OSError) as exc:
+            print(f"  \u2717 could not: {exc}")
+            return True, False
+        if refreshed.left_running:
+            print(f"  \u2717 built, but pid {', '.join(map(str, refreshed.left_running))} "
+                  "would not quit")
+            return True, False
+        if refreshed.relaunched and not refreshed.reopened:
+            print("  \u2713 up to date -- quit the old window but could not reopen it: "
+                  "open Screen Mirror from the menu bar")
+        else:
+            print("  \u2713 up to date" + (" -- reopened" if refreshed.relaunched else ""))
+        return True, True
+    return stale_windows is not None, None
 
 
 def _report_node() -> bool:
