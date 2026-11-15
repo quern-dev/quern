@@ -1818,11 +1818,11 @@ class DeviceController(DeviceControllerUI):
         self, udid: str, since: float, app: str = "",
     ) -> list[tuple[int | None, str]] | None:
         """A phone's newest crash reports, each as (pid, text): the ones
-        named for `app` when there are any, else the newest; None when the
-        phone cannot be asked at all.
+        named for `app` first, then the newest others; None when the phone
+        cannot be asked at all.
 
         A report is named for its process, which is the app's name for many
-        apps (not Apple's: Settings is Preferences): taking those alone keeps
+        apps (not Apple's: Settings is Preferences): taking those first keeps
         a burst of others (Jetsam, faults) from crowding out the one looked
         for. Either way only a pid match claims anything.
 
@@ -1850,10 +1850,13 @@ class DeviceController(DeviceControllerUI):
              if (t := ios_crash.report_time(n)) is not None and t >= cutoff),
             reverse=True)
         named = f"{app}-" if app.strip() else None
-        own = [n for _, n in dated if named and n.startswith(named)]
-        # The app's own reports alone when it has any, else the newest few:
-        # each costs a pull, and the poll needs time for a second look.
-        names = own[:self._OWN_REPORTS] or [n for _, n in dated[:self._NEWEST_REPORTS]]
+        own = [n for _, n in dated if named and n.startswith(named)][:self._OWN_REPORTS]
+        # The app's own reports first, then the newest others in the slots
+        # left: a display name can differ from the process a report is named
+        # for (CodeRabbit on #701). Each costs a pull, and the poll needs
+        # time for a second look, so the slots stay few.
+        others = [n for _, n in dated if n not in own]
+        names = own + others[:max(self._NEWEST_REPORTS - len(own), 0)]
         if not names:
             return []
         with tempfile.TemporaryDirectory() as out:

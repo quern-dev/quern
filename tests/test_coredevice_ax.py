@@ -1014,6 +1014,56 @@ class TestACrashAfterTheRead:
         assert [(e.pid, e.app, e.unknown) for e in reader._front[PHONE]] == [
             (37, "SpringBoard", 0), (617, "Settings", 1)]
 
+    async def test_a_report_under_another_process_name_is_still_read(self, monkeypatch):
+        """An app labelled Foo can crash as FooRunner (CodeRabbit on #701)."""
+        from datetime import datetime
+
+        ctrl, pulled = TestThePhonesCrashReports()._ctrl(monkeypatch, [
+            "Foo-2026-11-15-090000.ips",            # an earlier crash, another pid
+            "FooRunner-2026-11-15-100617.ips",
+        ], {"FooRunner-2026-11-15-100617.ips": '{"pid": 100}'})
+
+        reports = await ctrl._crash_reports_since(
+            PHONE, datetime(2026, 11, 15, 10, 6, 15).timestamp(), "Foo")
+
+        assert pulled == ["Foo-2026-11-15-090000.ips", "FooRunner-2026-11-15-100617.ips"]
+        assert 100 in [pid for pid, _ in reports]
+
+    async def test_a_deadline_answer_still_remembers_its_app(self, monkeypatch, phone_address):
+        """A tree in hand when the deadline ended the settle (CodeRabbit on #701)."""
+        lib, state = _fake_lib([_as("InitialDump", SAFARI), SAFARI])
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        monkeypatch.setattr(coredevice_ax, "QUIET_S", 30.0)          # never settles
+        seen: dict = {}
+
+        await asyncio.wait_for(read_tree(PHONE, timeout=1.5, seen=seen), 10)
+
+        assert seen == {"pid": 618, "app": "Safari"}
+
+    async def test_a_launch_note_of_a_remembered_pid_is_kept(self, monkeypatch):
+        """Noted again during the read, still running: kept (CodeRabbit on #701)."""
+        reader = CoreDeviceAxReader()
+        reader.note_front(PHONE, 1583, "Settings", 0.0)
+        self._reads(monkeypatch, reader, 37, "SpringBoard", {1583: True},
+                    during=lambda: reader.note_front(PHONE, 1583, "Settings", 5.0))
+
+        await reader.describe_all(PHONE)
+
+        assert [(e.pid, e.when) for e in reader._front[PHONE]][1:] == [(1583, 5.0)]
+
+    async def test_a_forget_during_the_poll_claims_nothing(self, monkeypatch):
+        """The install that forgot it ended the app: its report is no #669."""
+        reader, _ = self._reader(
+            monkeypatch, [(100, "QuernProbeScene", None), (37, "SpringBoard", False)])
+
+        async def forgets_then_finds(udid, since, app):
+            reader.forget_front(PHONE)
+            return [(100, self.REPORT_669)]
+        reader.crash_reports = forgets_then_finds
+
+        await reader.describe_all(PHONE)
+        await reader.describe_all(PHONE)                     # no raise
+
     async def test_a_forget_during_the_poll_stands(self, monkeypatch):
         """quern ended an app while this read looked for a report: the
         questions it had kept are dropped with it (review)."""
@@ -1117,8 +1167,10 @@ class TestACrashAfterTheRead:
 
         await reader.describe_all(PHONE)
         task = asyncio.create_task(reader.describe_all(PHONE))
-        await started.wait()
-        task.cancel()
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+        finally:
+            task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
@@ -1312,7 +1364,9 @@ class TestThePhonesCrashReports:
         reports = await ctrl._crash_reports_since(
             PHONE, datetime(2026, 11, 15, 10, 6, 15).timestamp(), "QuernProbeScene")
 
-        assert pulled == ["QuernProbeScene-2026-11-15-100617.ips"]   # its own alone
+        # Its own first, then the newest others in the slots left.
+        assert pulled[0] == "QuernProbeScene-2026-11-15-100617.ips"
+        assert len(pulled) == ctrl._NEWEST_REPORTS
         assert reports[0][0] == 100
 
     async def test_newest_by_the_phones_clock_whatever_the_zone(self, monkeypatch):

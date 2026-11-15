@@ -886,7 +886,13 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
             # -- and "could not ask" is not taken as dead, as above.
             logger.info("[coredevice] tree of %s answered at the %gs deadline",
                         uuid[:8], timeout)
-            return _refuse_bare(held["latest"].elements, uuid)
+            latest = held["latest"]
+            if seen is not None and "pid" not in seen:
+                # Still remembered as the app this read saw, so a crash it
+                # causes is looked for at the next read (CodeRabbit on #701).
+                seen["pid"] = latest.app_pid
+                seen["app"] = latest.elements[0]["AXLabel"] if latest.elements else ""
+            return _refuse_bare(latest.elements, uuid)
         if deadline.expired():
             raise DeviceError(
                 f"{uuid[:8]} sent no complete accessibility tree within {timeout:g}s",
@@ -1011,10 +1017,17 @@ class CoreDeviceAxReader:
         # Committed only now: a check cancelled midway (the caller left)
         # leaves the question for the next read. An app noted meanwhile, by
         # a launch check, is kept.
+        # By identity, not pid: a launch check may have noted again a pid
+        # this read started with, and that newer record is the one to keep
+        # (CodeRabbit on #701).
         noted = [e for e in self._front.get(udid, [])
-                 if e.pid not in {r.pid for r in remembered} and e.pid != pid]
+                 if not any(e is r for r in remembered) and e.pid != pid]
+        still_open = [e for e in still_open if e.pid not in {n.pid for n in noted}]
         if self._forgotten.get(udid, 0) != generation:
-            still_open = []      # quern ended an app meanwhile: no earlier question stands
+            # quern ended an app meanwhile: no earlier question stands, and
+            # no crash found for one is claimed (CodeRabbit on #701).
+            still_open = []
+            crashed = None
         self._front[udid] = [_InFront(pid, app, started), *noted, *still_open][:REMEMBERED_APPS]
         if crashed is not None:
             raise AppExitedAfterRead(crashed.app, crashed.pid)
