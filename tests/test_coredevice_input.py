@@ -146,6 +146,7 @@ class FakeLib:
             UniversalHID=HID, IndigoHID=Indigo,
             CONTACT=CONTACT, RELEASE=RELEASE, BUTTON_DOWN=DOWN, BUTTON_UP=UP,
             KEYS={"a": (0x04, False), "A": (0x04, True), " ": (0x2C, False)}, SHIFT=0xE1,
+            COMMAND=0xE3, KEY_A=0x04, BACKSPACE=0x2A,
         )
 
     def __call__(self):
@@ -173,7 +174,8 @@ def lib(monkeypatch):
 @pytest.fixture
 def wda():
     return SimpleNamespace(TOOL_NAME="wda", tap=AsyncMock(), swipe=AsyncMock(),
-                           press_button=AsyncMock(), type_text=AsyncMock())
+                           press_button=AsyncMock(), type_text=AsyncMock(),
+                           select_all_and_delete=AsyncMock())
 
 
 class TestTyping:
@@ -233,6 +235,31 @@ class TestTyping:
 
         wda.type_text.assert_not_called()
         assert "keyboard" in lib.closed
+
+    async def test_clearing_taps_the_field_then_selects_all_and_deletes(self, lib, wda):
+        """Keystrokes, so the app sees the edit (#664): Command on its own
+        first, as Shift is."""
+        hid = CoreDeviceInput(wda)
+
+        assert await hid.select_all_and_delete(PHONE, 207, 260) == "coredevice"
+
+        touches = lib.touches()
+        assert [t[1] for t in touches] == [CONTACT, RELEASE]
+        assert lib.keystrokes() == [(0xE3,), (0xE3, 0x04), (), (0x2A,), ()]
+        assert lib.sent.index(("keys", (0xE3,))) > lib.sent.index(touches[-1])
+        assert "keyboard" in lib.closed and "hid" not in lib.closed
+        wda.select_all_and_delete.assert_not_called()
+
+    async def test_clearing_that_cannot_start_goes_through_wda(self, lib, wda):
+        lib.display = _display(orientation="rot90")      # a screen HID can't map
+        hid = CoreDeviceInput(wda)
+
+        assert await hid.select_all_and_delete(PHONE, 207, 260, element_type="TextField",
+                                               identifier="email") == "wda"
+
+        wda.select_all_and_delete.assert_awaited_once_with(
+            PHONE, x=207, y=260, element_type="TextField", identifier="email")
+        assert lib.keystrokes() == []
 
     def test_what_us_keys_type(self, lib):
         assert coredevice_input.types_on_us_keys("aA a")

@@ -18,11 +18,12 @@ import pytest
 from server.device.controller import DeviceController
 from server.device.controller_ui import _keyboard_correction
 from server.device.ios import coredevice_ax
-from server.device.ios.coredevice_ax import parse_tree, set_value, set_value_request
+from server.device.ios.coredevice_ax import front_app, parse_tree, set_value, set_value_request
 from server.models import DeviceError, DeviceType, UIElement
 from tests.test_coredevice_ax import (  # noqa: F401  (phone_address is a fixture)
     SAFARI,
     SETTINGS,
+    _as,
     _fake_lib,
     phone_address,
 )
@@ -259,6 +260,37 @@ class TestTheReadsTheyMake:
         assert ctrl.get_ui_elements.await_args.kwargs["whole_screen"] is True
 
 
+class TestClearing:
+    """clear_text over CoreDevice (#664): found in the push, cleared with
+    keystrokes over HID."""
+
+    def _ctrl(self, monkeypatch):
+        ctrl, _ = _phone(monkeypatch, before="", reads=[])
+        field = _field("hello")
+        ctrl.get_ui_elements = AsyncMock(return_value=([field], PHONE))
+        ctrl.coredevice_input.select_all_and_delete = AsyncMock(return_value="coredevice")
+        ctrl.wda_client.select_all_and_delete = AsyncMock()
+        return ctrl
+
+    async def test_it_reads_the_push_and_clears_over_hid(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch)
+
+        await ctrl.clear_text(udid=PHONE, identifier="field_default")
+
+        assert ctrl.get_ui_elements.await_args.kwargs["whole_screen"] is True
+        ctrl.coredevice_input.select_all_and_delete.assert_awaited_once()
+        ctrl.wda_client.select_all_and_delete.assert_not_called()
+
+    async def test_a_wda_depth_stays_with_wda(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch)
+
+        await ctrl.clear_text(udid=PHONE, identifier="field_default", snapshot_depth=12)
+
+        assert ctrl.get_ui_elements.await_args.kwargs["whole_screen"] is False
+        ctrl.wda_client.select_all_and_delete.assert_awaited_once()
+        ctrl.coredevice_input.select_all_and_delete.assert_not_called()
+
+
 class TestTheCorrection:
     @pytest.mark.parametrize(("before", "after", "keys", "text", "expected"), [
         # The keyboard's doing: set.
@@ -362,6 +394,7 @@ class TestSettingAValue:
 
     async def test_an_app_that_changed_under_the_read_is_refused(self, monkeypatch):
         lib, state = _fake_lib([])
+        state.processes = [711, 99]          # switched, not killed by the read
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
         tree = parse_tree(SETTINGS)
         first = coredevice_ax.Tree("InitialDump", tree.elements, 711, tree.refs)
@@ -435,3 +468,187 @@ class TestPasswordFieldsFromThePush:
             await ctrl.type_text("pass12", udid=PHONE, identifier="field_secure")
 
         setter.assert_not_called()
+class TestLaunching:
+    """launch_app over CoreDevice (#664): devicectl, confirmed from the push."""
+
+    def _ctrl(self, monkeypatch, fronts):
+        ctrl, _ = _phone(monkeypatch, before="", reads=[])
+        ctrl.devicectl.launch_app = AsyncMock(return_value=1583)
+        ctrl.wda_client.launch_app = AsyncMock()
+        ctrl.wda_client.app_state = AsyncMock()
+        monkeypatch.setattr("server.device.ios.coredevice_ax.front_app",
+                            AsyncMock(side_effect=fronts))
+        monkeypatch.setattr("server.device.controller.asyncio.sleep", AsyncMock())
+        return ctrl
+
+    async def test_it_launches_with_devicectl_and_confirms_the_pid(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert info == {}
+        ctrl.devicectl.launch_app.assert_awaited_once_with(
+            PHONE, "com.quern.probe.scene", env={"QUERN_AUTOMATION": "YES"},
+            terminate_existing=False)
+        ctrl.wda_client.launch_app.assert_not_called()
+        ctrl.wda_client.app_state.assert_not_called()
+
+    async def test_env_restarts_the_app_so_it_applies(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE,
+                                        env={"MODE": "test"})
+
+        kwargs = ctrl.devicectl.launch_app.await_args.kwargs
+        assert kwargs == {"env": {"QUERN_AUTOMATION": "YES", "MODE": "test"},
+                          "terminate_existing": True}
+        # devicectl does not say whether one was running.
+        assert info == {"env_applied": True, "restarted": None}
+
+    async def test_it_waits_for_the_app_to_come_to_the_front(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [(1, " "), (1583, "QuernProbeScene")])
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+        assert info == {}
+
+    async def test_an_app_that_never_comes_up_is_an_error(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [(1, " ")] * 50)
+        monkeypatch.setattr(ctrl, "_PUSH_FRONT_GRACE_S", 0)
+
+        with pytest.raises(DeviceError, match="not in the foreground: the home screen"):
+            await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+    async def test_an_unreadable_screen_is_no_verdict(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [DeviceError("no tunnel", tool="coredevice")] * 50)
+        monkeypatch.setattr(ctrl, "_PUSH_FRONT_GRACE_S", 0)
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert info["launch_confirmed"] is None and "no tunnel" in info["launch_check_error"]
+
+    async def test_no_pid_is_no_verdict(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [])
+        ctrl.devicectl.launch_app.return_value = 0
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert info["launch_confirmed"] is None
+
+    async def test_a_phone_not_on_the_push_launches_through_wda(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [])
+        monkeypatch.setattr("server.device.controller_ui.get_device_ui_reader", lambda: "wda")
+        ctrl.wda_client.app_state = AsyncMock(return_value=4)
+        ctrl.wda_client.activate_app = AsyncMock()
+
+        await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        ctrl.devicectl.launch_app.assert_not_called()
+        ctrl.wda_client.activate_app.assert_awaited_once()
+
+
+class TestDevicectlLaunch:
+    async def test_env_and_restart_reach_the_command(self):
+        from server.device.ios.devicectl import DevicectlBackend
+        backend = DevicectlBackend()
+        backend._run_devicectl = AsyncMock(
+            return_value=('{"result": {"process": {"processIdentifier": 1583}}}', ""))
+
+        pid = await backend.launch_app(PHONE, "com.x", env={"A": "1"}, terminate_existing=True)
+
+        assert pid == 1583
+        args = backend._run_devicectl.await_args.args
+        assert args[args.index("--environment-variables") + 1] == '{"A": "1"}'
+        assert "--terminate-existing" in args and args[-1] == "com.x"
+
+    async def test_no_options_by_default(self):
+        from server.device.ios.devicectl import DevicectlBackend
+        backend = DevicectlBackend()
+        backend._run_devicectl = AsyncMock(return_value=("{}", ""))
+        await backend.launch_app(PHONE, "com.x")
+        args = backend._run_devicectl.await_args.args
+        assert "--environment-variables" not in args and "--terminate-existing" not in args
+
+
+@pytest.mark.usefixtures("phone_address")
+class TestTheAppInFront:
+    async def test_its_pid_and_name(self, monkeypatch):
+        lib, state = _fake_lib([SETTINGS])
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        assert await front_app(PHONE, timeout=5) == (617, "Settings")
+        assert state.provider_closed and state.rsd_closed
+
+    async def test_an_app_the_read_killed_is_said(self, monkeypatch):
+        """As read_tree says it (#669), so the caller stops reading the push."""
+        lib, state = _fake_lib([_as("InitialDump", SETTINGS), SETTINGS,
+                                _as("InitialDump", SAFARI), SAFARI])
+        state.processes = [618]                       # Settings is gone
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        with pytest.raises(coredevice_ax.AppExitedDuringRead):
+            await front_app(PHONE, timeout=5)
+
+    async def test_a_set_that_times_out_says_it_may_have_happened(self, monkeypatch):
+        lib, _ = _fake_lib([])                        # no tree ever comes
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        with pytest.raises(DeviceError, match="may or may not have been set"):
+            await set_value(PHONE, lambda e: True, "x", timeout=0.3)
+
+
+class TestTheLaunchCheck:
+    """#689 review: the check follows #669's crash rule, is no verdict when its
+    newest look failed, and is bounded by its grace."""
+
+    def _ctrl(self, monkeypatch, fronts):
+        ctrl, _ = _phone(monkeypatch, before="", reads=[])
+        ctrl.devicectl.launch_app = AsyncMock(return_value=1583)
+        self.front = AsyncMock(side_effect=fronts)
+        monkeypatch.setattr("server.device.ios.coredevice_ax.front_app", self.front)
+        monkeypatch.setattr("server.device.controller.asyncio.sleep", AsyncMock())
+        return ctrl
+
+    async def test_a_device_the_push_crashed_an_app_on_is_not_read(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [])
+        ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert info["launch_confirmed"] is None and "#669" in info["launch_check_error"]
+        self.front.assert_not_called()
+
+    async def test_a_check_that_crashed_the_app_is_recorded(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch,
+                          [coredevice_ax.AppExitedDuringRead("QuernProbeScene", 1583)])
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert info["launch_confirmed"] is None
+        assert "QuernProbeScene" in ctrl._push_crashed_apps[PHONE]
+
+    async def test_a_stale_mismatch_then_a_failed_read_is_no_verdict(self, monkeypatch):
+        """The home screen at the first look, then a stalled read (#684): the
+        app may have come up since, so it is not called failed."""
+        ctrl = self._ctrl(monkeypatch, [(1, " "), DeviceError("timed out", tool="coredevice")])
+        monkeypatch.setattr("server.device.controller.time.monotonic",
+                            _clock([0.0, 0.0, 3.0, 3.0, 10.0]))
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert info["launch_confirmed"] is None and "timed out" in info["launch_check_error"]
+
+    async def test_each_read_is_bounded_by_what_is_left(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])
+        monkeypatch.setattr("server.device.controller.time.monotonic", _clock([100.0]))
+
+        await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert self.front.await_args.kwargs["timeout"] == pytest.approx(ctrl._PUSH_FRONT_GRACE_S)
+
+
+def _clock(times: list[float]):
+    """A monotonic clock that reads `times` in turn, then holds the last."""
+    left = list(times)
+
+    def now() -> float:
+        return left.pop(0) if len(left) > 1 else left[0]
+    return now

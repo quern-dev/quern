@@ -5621,7 +5621,11 @@ class DeviceControllerUI:
         resolved = await self.resolve_udid(udid)
         await self._warn_if_input_is_suppressed(resolved)
 
-        elements, _ = await self.get_ui_elements(udid=resolved, snapshot_depth=snapshot_depth)
+        # Over CoreDevice (#664): the field is found in the push and cleared
+        # with keystrokes over HID, unless a WDA depth was asked for.
+        coredevice = self._coredevice_serves(resolved) and snapshot_depth is None
+        elements, _ = await self.get_ui_elements(
+            udid=resolved, snapshot_depth=snapshot_depth, whole_screen=coredevice)
         text_fields = [
             e for e in elements
             if e.type.lower() in self._TEXT_FIELD_TYPES and e.frame
@@ -5654,7 +5658,7 @@ class DeviceControllerUI:
 
         cx = target.frame["x"] + target.frame["width"] / 2
         cy = target.frame["y"] + target.frame["height"] / 2
-        backend = self._ui_backend(resolved)
+        backend = self._input_backend(resolved) if coredevice else self._ui_backend(resolved)
 
         # The triple-tap selects the whole value in a native text view --
         # measured at 60 characters to 0 in one call -- and is all that is

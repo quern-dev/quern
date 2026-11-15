@@ -1528,7 +1528,8 @@ class DeviceController(DeviceControllerUI):
         delivered. Without `env` a running app is brought forward as before.
 
         A physical iPhone launches through WDA (XCUIApplication), which
-        takes an environment; a simulator through `simctl launch`. Both get
+        takes an environment -- or through `devicectl` when it is driven over
+        CoreDevice (#664); a simulator through `simctl launch`. Both get
         QUERN_AUTOMATION=YES whenever quern starts the process. Android apps
         take no environment variables, so there `env` is reported as not
         applied rather than dropped silently.
@@ -1542,6 +1543,8 @@ class DeviceController(DeviceControllerUI):
                         "warning": "Android apps do not receive environment variables, so "
                                    "env was not applied. Pass values the app reads from its "
                                    "launch intent or settings instead."}
+        elif self._is_physical(resolved) and self._coredevice_serves(resolved):
+            info = await self._launch_over_coredevice(resolved, bundle_id, env)
         elif self._is_physical(resolved):
             info = await self._launch_on_device(resolved, bundle_id, env)
         else:
@@ -1571,6 +1574,83 @@ class DeviceController(DeviceControllerUI):
     #: there; this covers a momentary background state on the way.
     _LAUNCH_FRONT_GRACE_S = 2.0
     _LAUNCH_FRONT_INTERVAL_S = 0.25
+
+    async def _launch_over_coredevice(
+        self, udid: str, bundle_id: str, env: dict[str, str] | None,
+    ) -> dict:
+        """Launch on a physical iPhone driven over CoreDevice, with no WDA (#664).
+
+        Through `devicectl`, which brings a running app forward with the same
+        pid and gives QUERN_AUTOMATION=YES to one that starts, as WDA's route
+        does. With `env` the running instance is terminated first, so the
+        variables apply; whether there was one, `devicectl` does not say, so
+        `restarted` is null. Confirmed from the tree push: the app is up when
+        its pid is the one in front.
+        """
+        launch_env = {"QUERN_AUTOMATION": "YES", **(env or {})}
+        pid = await self.devicectl.launch_app(
+            udid, bundle_id, env=launch_env, terminate_existing=bool(env))
+        confirmed = await self._confirm_in_front_over_coredevice(udid, bundle_id, pid)
+        if env:
+            return {"env_applied": True, "restarted": None, **confirmed}
+        return confirmed
+
+    #: How long a launched app has to come to the front of the tree push. A
+    #: push read is ~2 s, so this allows two or three.
+    _PUSH_FRONT_GRACE_S = 6.0
+    #: The least a confirming read is given, even with the grace spent: a push
+    #: read takes ~2.5 s, and a shorter bound would fail every one.
+    _PUSH_READ_MIN_S = 4.0
+
+    async def _confirm_in_front_over_coredevice(
+        self, udid: str, bundle_id: str, pid: int,
+    ) -> dict:
+        """Fail a launch devicectl accepted when its pid never reaches the
+        front of the push. Reads that fail are not a verdict: the launch
+        stands, and the answer says the check could not be made."""
+        from server.device.ios import coredevice_ax
+
+        if not pid:
+            return {"launch_confirmed": None,
+                    "launch_check_error": "devicectl reported no pid to look for"}
+        if self._push_crashed_apps.get(udid):
+            # Not read again: a push read crashed an app here (#669), and the
+            # launched app may be the one (#689 review).
+            return {"launch_confirmed": None,
+                    "launch_check_error": "not checked: a screen read crashed an app on "
+                                          "this device (#669)"}
+        deadline = time.monotonic() + self._PUSH_FRONT_GRACE_S
+        front: tuple[int | None, str] | None = None
+        error = ""
+        while True:
+            try:
+                # Bounded by what is left of the grace, so a stalled read
+                # (#684) does not run on for its own 20 s (#689 review).
+                front = await coredevice_ax.front_app(
+                    udid, timeout=max(deadline - time.monotonic(), self._PUSH_READ_MIN_S))
+                error = ""
+            except coredevice_ax.AppExitedDuringRead as exc:
+                self._push_crashed_apps.setdefault(udid, set()).add(exc.app)
+                return {"launch_confirmed": None,
+                        "launch_check_error": f"the check itself crashed the app: {exc}"}
+            except DeviceError as exc:
+                error = str(exc)
+            else:
+                if front[0] == pid:
+                    return {}
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(self._LAUNCH_FRONT_INTERVAL_S)
+        if front is None or error:
+            # The newest look failed: an older one showing another app is not
+            # a verdict, since the app may have come up since (#689 review).
+            return {"launch_confirmed": None,
+                    "launch_check_error": f"could not read the screen: {error}"}
+        raise DeviceError(
+            f"{bundle_id} was launched (pid {pid}) and is not in the foreground: "
+            f"{front[1].strip() or 'the home screen'} is (pid {front[0]})",
+            tool="devicectl",
+        )
 
     async def _launch_on_device(
         self, udid: str, bundle_id: str, env: dict[str, str] | None,
