@@ -20,8 +20,9 @@ How far a type is widened depends on what else pins the element down (ADR 2):
 - neither: exact, as before.
 
 Every entry is measured, never inferred: all twelve QuernProbe screens read on
-both backends on an iOS 18.6 simulator (spec §1). A pair is added the same way
-or not at all -- the first assumption made during this work, that WDA sends an
+both backends on an iOS 18.6 simulator (spec §1), and since then each addition
+read on the readers it joins, its measurement beside it. A pair is added the
+same way or not at all -- the first assumption made during this work, that WDA sends an
 `XCUIElementType` prefix, was wrong on contact.
 """
 
@@ -59,10 +60,14 @@ FAMILIES: dict[str, tuple[str, ...]] = {
         "CollectionView",
     ),
     # Three rows differing only in their accessory came back Button,
-    # StaticText, Button; XCUITest called all three Cell. A UICollectionView
-    # list row with no traits is a Group in a physical iPhone's tree push
-    # (#664): the probe's lazy_row_0 read Group there, Cell through WDA and
-    # StaticText on a simulator (iPhone 11 and iPhone 18 Pro, iOS 27.2).
+    # StaticText, Button; XCUITest called all three Cell. Group joins them for
+    # a physical iPhone's tree push (#664), whose parser types an element with
+    # no trait it knows as Group: the probe's UICollectionView list row
+    # lazy_row_0 read Group there, Cell through WDA and StaticText on a
+    # simulator (iPhone 11 and iPhone 18 Pro, iOS 27.2; the push is
+    # tests/fixtures/coredevice_ax/probe_lazy.bin). On a simulator a Group is a
+    # container, so a container and a row sharing one identifier now meet --
+    # none of the knowledge bases or fixtures here has one.
     "rows": ("Button", "StaticText", "Cell", "Group"),
     "indicators": (
         "GenericElement", "ProgressIndicator", "ActivityIndicator", "ColorWell",
