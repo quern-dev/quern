@@ -3034,6 +3034,129 @@ async def test_a_mirror_app_that_cannot_build_does_not_stop_the_server(monkeypat
     assert "swiftc not found" in caplog.text
 
 
+async def test_the_server_checks_quern_media_at_start_even_when_the_mirror_app_fails(
+    monkeypatch, caplog,
+):
+    """The Screen Mirror app run without a server starts the quern-media beside
+    it as it finds it, so a checkout moved by `git pull` needs this checked at
+    start too -- and the mirror app failing to build must not skip it."""
+    from server.config import ServerConfig
+    from server.device.media import media_engine, preview
+    from server.lifecycle import network_monitor, update_check
+    from server.main import create_app, lifespan
+
+    async def _never(*a, **k):
+        return None
+
+    def boom():
+        raise RuntimeError("swiftc not found")
+
+    def media_boom():
+        raise RuntimeError("swift build failed")
+
+    monkeypatch.setattr(network_monitor, "update_network_state", lambda *a: None)
+    monkeypatch.setattr(network_monitor, "network_monitor_loop", _never)
+    monkeypatch.setattr(update_check, "periodic_update_check", _never)
+    monkeypatch.setattr(preview, "refresh_at_server_start", boom)
+    monkeypatch.setattr(media_engine, "refresh_at_server_start", media_boom)
+    app = create_app(config=ServerConfig(api_key="k"),
+                     enable_oslog=False, enable_crash=False, enable_proxy=False)
+    async with lifespan(app):
+        await asyncio.wait_for(app.state._mirror_task, 5)
+
+    assert "swiftc not found" in caplog.text
+    assert "Could not bring quern-media up to date: swift build failed" in caplog.text
+
+
+async def test_the_engine_is_checked_before_the_app_that_starts_it(monkeypatch):
+    """The app's refresh reopens it, and a reopened app starts the engine: the
+    other order let it start the old one (review)."""
+    from server.config import ServerConfig
+    from server.device.media import media_engine, preview
+    from server.lifecycle import network_monitor, update_check
+    from server.main import create_app, lifespan
+
+    async def _never(*a, **k):
+        return None
+
+    order: list = []
+    monkeypatch.setattr(network_monitor, "update_network_state", lambda *a: None)
+    monkeypatch.setattr(network_monitor, "network_monitor_loop", _never)
+    monkeypatch.setattr(update_check, "periodic_update_check", _never)
+    monkeypatch.setattr(preview, "refresh_at_server_start", lambda: order.append("app"))
+    monkeypatch.setattr(media_engine, "refresh_at_server_start",
+                        lambda: order.append("engine"))
+    app = create_app(config=ServerConfig(api_key="k"),
+                     enable_oslog=False, enable_crash=False, enable_proxy=False)
+    async with lifespan(app):
+        await asyncio.wait_for(app.state._mirror_task, 5)
+
+    assert order == ["engine", "app"]
+
+
+class TestTheStartUpBuildThread:
+    """A cold build at start-up must not hold `quern stop`: to_thread's pool is
+    joined at exit even after the task is cancelled (review)."""
+
+    async def test_it_returns_the_result(self):
+        from server.main import _in_daemon_thread
+
+        assert await asyncio.wait_for(_in_daemon_thread(lambda: 42), 5) == 42
+
+    async def test_it_raises_what_the_work_raised(self):
+        from server.main import _in_daemon_thread
+
+        def boom():
+            raise RuntimeError("swift build failed")
+
+        with pytest.raises(RuntimeError, match="swift build failed"):
+            await asyncio.wait_for(_in_daemon_thread(boom), 5)
+
+    async def test_the_thread_is_a_daemon(self):
+        import threading
+
+        from server.main import _in_daemon_thread
+
+        seen = {}
+
+        def work():
+            seen["daemon"] = threading.current_thread().daemon
+            return None
+
+        await asyncio.wait_for(_in_daemon_thread(work), 5)
+        assert seen["daemon"] is True
+
+    def test_a_loop_closed_under_it_is_not_an_error(self):
+        """Shutdown while it runs: the loop is gone when the work finishes."""
+        import threading
+
+        from server.main import _in_daemon_thread
+
+        release = threading.Event()
+        finished = threading.Event()
+
+        def work():
+            release.wait(5)
+            finished.set()
+            return "late"
+
+        loop = asyncio.new_event_loop()
+        task = loop.create_task(_in_daemon_thread(work))
+        loop.run_until_complete(asyncio.sleep(0.01))
+        task.cancel()
+        loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+        loop.close()
+        errors = []
+        threading.excepthook, old = (lambda a: errors.append(a)), threading.excepthook
+        try:
+            release.set()
+            assert finished.wait(5)
+            threading.Event().wait(0.1)
+        finally:
+            threading.excepthook = old
+        assert errors == []
+
+
 class TestTheServerStartRefreshStaysInItsCheckout:
     """A worktree started for a live test without its own QUERN_STATE_DIR
     shares ~/.quern/bin: refreshing there rebuilt the person's Screen Mirror

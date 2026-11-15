@@ -818,7 +818,10 @@ def build_simulator_preview_engine() -> CheckResult:
     # Said before, not after: the report prints only at the end, and a cold
     # release build can take minutes on a slow machine. Silence that long
     # reads as a hang, and a Ctrl-C there ends setup before the steps after it.
-    print("    Building quern-media (simulator preview engine)...", flush=True)
+    print("    Checking quern-media (simulator preview engine)...", flush=True)
+    # The file replaced, not the stamp: a binary deleted under its stamp
+    # rebuilds to the same digest.
+    before = media_engine.file_identity(media_engine.binary_path())
     try:
         media_engine.build_media_engine_sync()
     except (RuntimeError, OSError) as e:
@@ -834,7 +837,10 @@ def build_simulator_preview_engine() -> CheckResult:
     return CheckResult(
         name=name,
         status=CheckStatus.OK,
-        message="Built (simulator preview and recorded video)",
+        message=("Up to date"
+                 if before == media_engine.file_identity(media_engine.binary_path())
+                 else "Built")
+        + " (simulator preview and recorded video)",
     )
 
 
