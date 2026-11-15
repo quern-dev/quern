@@ -10,6 +10,7 @@ keyboard: "Hello abc #@" arrived as "Helloあbc＃＠", and the set put it right
 from __future__ import annotations
 
 import plistlib
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -28,6 +29,8 @@ from tests.test_coredevice_ax import (  # noqa: F401  (phone_address is a fixtur
 )
 
 PHONE = "B34C4EE9-AF48-53C6-BD13-2BFA66E7EE91"
+PROBE_FIELDS = (Path(__file__).resolve().parent / "fixtures" / "coredevice_ax"
+                / "probe_text_fields.bin").read_bytes()
 FRAME = {"x": 20.0, "y": 120.0, "width": 374.0, "height": 40.0}
 
 
@@ -413,6 +416,58 @@ class TestSettingAValue:
             await set_value(PHONE, lambda e: True, "x", timeout=5)
 
 
+class TestPasswordFieldsFromThePush:
+    """The push types a password field as a plain TextField; a trait bit is
+    what marks it, on a field only. Unmarked, its dots read as the keyboard's change and the
+    password was set through accessibility (found live on an iPhone 11)."""
+
+    @pytest.mark.parametrize(("etype", "traits", "expected"), [
+        # The iPhone 11's password field, empty and then filled.
+        ("TextField", 0x2201040000, "AXSecureTextField"),
+        ("TextField", 0x2201240000, "AXSecureTextField"),
+        # Its ordinary text fields.
+        ("TextField", 0x2200040000, ""),
+        # The bit on anything but a field marks nothing.
+        ("StaticText", 0x2201040000, ""),
+        ("TextField", coredevice_ax.TRAIT_SEARCH_FIELD, "AXSearchField"),
+    ])
+    def test_the_subrole(self, etype, traits, expected):
+        assert coredevice_ax._role_description(etype, traits) == expected
+
+    def test_a_real_push_marks_its_password_field_and_nothing_else(self):
+        """The probe app's text tab, captured on an iPhone 11, fields empty."""
+        _, elements = coredevice_ax.parse_push(PROBE_FIELDS)
+        secure = [e["AXUniqueId"] for e in elements
+                  if e["role_description"] == "AXSecureTextField"]
+        assert secure == ["field_secure"]
+
+    @pytest.mark.parametrize("push", [SAFARI, SETTINGS])
+    def test_page_text_and_settings_are_never_password_fields(self, push):
+        """Safari's page text carries attribute 28, which once looked like the
+        marker (#690 review)."""
+        _, elements = coredevice_ax.parse_push(push)
+        assert not [e for e in elements if e["role_description"] == "AXSecureTextField"]
+
+    async def test_a_marked_password_field_is_checked_by_length_and_never_set(
+            self, monkeypatch):
+        ctrl, setter = _phone(monkeypatch, before="", reads=["•" * 6])
+        ctrl._find_text_field.return_value = UIElement(
+            type="TextField", role_description="AXSecureTextField", label="",
+            identifier="field_secure", value="", frame=FRAME)
+
+        result = await ctrl.type_text("pass12", udid=PHONE, identifier="field_secure")
+
+        assert result["verified"] is True and "value" not in result
+        setter.assert_not_called()
+
+    async def test_dots_are_never_a_keyboard_change(self, monkeypatch):
+        """Even on a field the push did not mark."""
+        ctrl, setter = _phone(monkeypatch, before="field_secure", reads=["•" * 6])
+
+        with pytest.raises(DeviceError):
+            await ctrl.type_text("pass12", udid=PHONE, identifier="field_secure")
+
+        setter.assert_not_called()
 class TestLaunching:
     """launch_app over CoreDevice (#664): devicectl, confirmed from the push."""
 
