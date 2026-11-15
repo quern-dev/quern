@@ -1223,6 +1223,9 @@ class TestASilentSubscription:
 
         assert len(elements) == 14 and len(made) == 2
         assert _unsubscribed(made[1])                   # the spare is closed
+        # The first was kept open for its late push, and closed once, at the end.
+        calls = made[0].dtx._ctrl_channel.calls
+        assert calls.count(("clientNeedsAccessibility:", (False,))) == 1
 
     async def test_a_spare_that_cannot_connect_leaves_the_first(self, monkeypatch):
         monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 0.2)
