@@ -1198,6 +1198,10 @@ class TestThePushedContainerNote:
 
         note = pushed_container_note(result)
         assert "s (Group table, TabBar Tab Bar)" in note
+        # The knowledge base is the thing out of date, so the note asks for it
+        # to be updated, and says how to confirm the update took.
+        assert "update it" in note and "load_landmarks again" in note
+        assert "quern://app-knowledge-guide/landmarks-sync" in note
 
     def test_not_when_anything_else_missed(self):
         from server.knowledge.landmarks import pushed_container_note

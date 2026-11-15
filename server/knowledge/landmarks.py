@@ -538,8 +538,12 @@ def pushed_container_note(result: dict) -> str | None:
         "containers: a landmark on a Table, TabBar, NavigationBar, Toolbar or "
         "CollectionView does not match it, nor one on a Group or Other that is a "
         f"container. Missed only on such landmarks: {'; '.join(missed)}. "
-        "Name an element inside the container instead (a button, a heading, a row), "
-        "or pass snapshot_depth to identify through WDA.")
+        "The knowledge base is out of step with how this device is read, so update "
+        "it: in each screen's landmarks, replace these with an element inside the "
+        "container that every reader sees -- a button, the heading, a row's "
+        "identifier -- then load_landmarks again and identify to confirm "
+        "(quern://app-knowledge-guide/landmarks-sync). Until then, snapshot_depth "
+        "identifies through WDA.")
 
 
 # ---------------------------------------------------------------------------
