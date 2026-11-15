@@ -606,6 +606,11 @@ async def _with_settled_tree(uuid: str, timeout: float, what: str,
                 await provider.dtx._ctrl_channel.invoke(
                     "clientNeedsAccessibility:", True, expects_reply=False)
                 tree, first, newest = await _newest_tree(queue, {})
+                if (first.app_pid is not None and newest.app_pid != first.app_pid
+                        and await _app_alive(rsd, lib, first.app_pid) is False):
+                    # The read killed the app (#669): said, as read_tree says
+                    # it, so the caller can stop reading this device's push.
+                    raise AppExitedDuringRead(first.elements[0]["AXLabel"], first.app_pid)
                 return await use(provider, tree, first, newest)
             finally:
                 await _close(provider, rsd)

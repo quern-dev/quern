@@ -17,9 +17,15 @@ import pytest
 from server.device.controller import DeviceController
 from server.device.controller_ui import _keyboard_correction
 from server.device.ios import coredevice_ax
-from server.device.ios.coredevice_ax import parse_tree, set_value, set_value_request
+from server.device.ios.coredevice_ax import front_app, parse_tree, set_value, set_value_request
 from server.models import DeviceError, DeviceType, UIElement
-from tests.test_coredevice_ax import SETTINGS, _fake_lib, phone_address  # noqa: F401  (a fixture)
+from tests.test_coredevice_ax import (  # noqa: F401  (phone_address is a fixture)
+    SAFARI,
+    SETTINGS,
+    _as,
+    _fake_lib,
+    phone_address,
+)
 
 PHONE = "B34C4EE9-AF48-53C6-BD13-2BFA66E7EE91"
 FRAME = {"x": 20.0, "y": 120.0, "width": 374.0, "height": 40.0}
@@ -385,6 +391,7 @@ class TestSettingAValue:
 
     async def test_an_app_that_changed_under_the_read_is_refused(self, monkeypatch):
         lib, state = _fake_lib([])
+        state.processes = [711, 99]          # switched, not killed by the read
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
         tree = parse_tree(SETTINGS)
         first = coredevice_ax.Tree("InitialDump", tree.elements, 711, tree.refs)
@@ -504,3 +511,89 @@ class TestDevicectlLaunch:
         await backend.launch_app(PHONE, "com.x")
         args = backend._run_devicectl.await_args.args
         assert "--environment-variables" not in args and "--terminate-existing" not in args
+
+
+@pytest.mark.usefixtures("phone_address")
+class TestTheAppInFront:
+    async def test_its_pid_and_name(self, monkeypatch):
+        lib, state = _fake_lib([SETTINGS])
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        assert await front_app(PHONE, timeout=5) == (617, "Settings")
+        assert state.provider_closed and state.rsd_closed
+
+    async def test_an_app_the_read_killed_is_said(self, monkeypatch):
+        """As read_tree says it (#669), so the caller stops reading the push."""
+        lib, state = _fake_lib([_as("InitialDump", SETTINGS), SETTINGS,
+                                _as("InitialDump", SAFARI), SAFARI])
+        state.processes = [618]                       # Settings is gone
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        with pytest.raises(coredevice_ax.AppExitedDuringRead):
+            await front_app(PHONE, timeout=5)
+
+    async def test_a_set_that_times_out_says_it_may_have_happened(self, monkeypatch):
+        lib, _ = _fake_lib([])                        # no tree ever comes
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        with pytest.raises(DeviceError, match="may or may not have been set"):
+            await set_value(PHONE, lambda e: True, "x", timeout=0.3)
+
+
+class TestTheLaunchCheck:
+    """#689 review: the check follows #669's crash rule, is no verdict when its
+    newest look failed, and is bounded by its grace."""
+
+    def _ctrl(self, monkeypatch, fronts):
+        ctrl, _ = _phone(monkeypatch, before="", reads=[])
+        ctrl.devicectl.launch_app = AsyncMock(return_value=1583)
+        self.front = AsyncMock(side_effect=fronts)
+        monkeypatch.setattr("server.device.ios.coredevice_ax.front_app", self.front)
+        monkeypatch.setattr("server.device.controller.asyncio.sleep", AsyncMock())
+        return ctrl
+
+    async def test_a_device_the_push_crashed_an_app_on_is_not_read(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [])
+        ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert info["launch_confirmed"] is None and "#669" in info["launch_check_error"]
+        self.front.assert_not_called()
+
+    async def test_a_check_that_crashed_the_app_is_recorded(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch,
+                          [coredevice_ax.AppExitedDuringRead("QuernProbeScene", 1583)])
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert info["launch_confirmed"] is None
+        assert "QuernProbeScene" in ctrl._push_crashed_apps[PHONE]
+
+    async def test_a_stale_mismatch_then_a_failed_read_is_no_verdict(self, monkeypatch):
+        """The home screen at the first look, then a stalled read (#684): the
+        app may have come up since, so it is not called failed."""
+        ctrl = self._ctrl(monkeypatch, [(1, " "), DeviceError("timed out", tool="coredevice")])
+        monkeypatch.setattr("server.device.controller.time.monotonic",
+                            _clock([0.0, 0.0, 3.0, 3.0, 10.0]))
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert info["launch_confirmed"] is None and "timed out" in info["launch_check_error"]
+
+    async def test_each_read_is_bounded_by_what_is_left(self, monkeypatch):
+        ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])
+        monkeypatch.setattr("server.device.controller.time.monotonic", _clock([100.0]))
+
+        await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert self.front.await_args.kwargs["timeout"] == pytest.approx(ctrl._PUSH_FRONT_GRACE_S)
+
+
+def _clock(times: list[float]):
+    """A monotonic clock that reads `times` in turn, then holds the last."""
+    left = list(times)
+
+    def now() -> float:
+        return left.pop(0) if len(left) > 1 else left[0]
+    return now

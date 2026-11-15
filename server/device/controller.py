@@ -1598,6 +1598,9 @@ class DeviceController(DeviceControllerUI):
     #: How long a launched app has to come to the front of the tree push. A
     #: push read is ~2 s, so this allows two or three.
     _PUSH_FRONT_GRACE_S = 6.0
+    #: The least a confirming read is given, even with the grace spent: a push
+    #: read takes ~2.5 s, and a shorter bound would fail every one.
+    _PUSH_READ_MIN_S = 4.0
 
     async def _confirm_in_front_over_coredevice(
         self, udid: str, bundle_id: str, pid: int,
@@ -1610,12 +1613,26 @@ class DeviceController(DeviceControllerUI):
         if not pid:
             return {"launch_confirmed": None,
                     "launch_check_error": "devicectl reported no pid to look for"}
+        if self._push_crashed_apps.get(udid):
+            # Not read again: a push read crashed an app here (#669), and the
+            # launched app may be the one (#689 review).
+            return {"launch_confirmed": None,
+                    "launch_check_error": "not checked: a screen read crashed an app on "
+                                          "this device (#669)"}
         deadline = time.monotonic() + self._PUSH_FRONT_GRACE_S
         front: tuple[int | None, str] | None = None
         error = ""
         while True:
             try:
-                front = await coredevice_ax.front_app(udid)
+                # Bounded by what is left of the grace, so a stalled read
+                # (#684) does not run on for its own 20 s (#689 review).
+                front = await coredevice_ax.front_app(
+                    udid, timeout=max(deadline - time.monotonic(), self._PUSH_READ_MIN_S))
+                error = ""
+            except coredevice_ax.AppExitedDuringRead as exc:
+                self._push_crashed_apps.setdefault(udid, set()).add(exc.app)
+                return {"launch_confirmed": None,
+                        "launch_check_error": f"the check itself crashed the app: {exc}"}
             except DeviceError as exc:
                 error = str(exc)
             else:
@@ -1624,7 +1641,9 @@ class DeviceController(DeviceControllerUI):
             if time.monotonic() >= deadline:
                 break
             await asyncio.sleep(self._LAUNCH_FRONT_INTERVAL_S)
-        if front is None:
+        if front is None or error:
+            # The newest look failed: an older one showing another app is not
+            # a verdict, since the app may have come up since (#689 review).
             return {"launch_confirmed": None,
                     "launch_check_error": f"could not read the screen: {error}"}
         raise DeviceError(
