@@ -9,6 +9,7 @@ The knowledge base is a living artifact, not a one-time setup. App teams ship UI
 - `identify_screen` (or `get_screen_summary?identify=true`) returns `confidence: "none"` for a screen you expect to match. Inspect `partial_matches` — if the screen you're on is sitting at 0/N or 1/N matched, the landmarks for it are stale.
 - An agent's automation suddenly starts failing on screens that used to work — often surfacing as `tap_element` not_found errors with the legacy identifier.
 - `validate_landmarks` reports collisions where there were none before — a sibling screen got redesigned and now overlaps with this one.
+- On a physical iPhone read through its tree push (`backend: coredevice`), the identify answer has a `note` naming screens that missed only on container landmarks (`Table`, `TabBar`, a `Group` that is a container). The app has not changed; the knowledge base was recorded through a reader that sees containers. Fix it the same way: swap each for an element inside the container that every reader sees.
 
 **How to fix drift:**
 

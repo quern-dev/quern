@@ -34,6 +34,8 @@ from server.models import DeviceError, DeviceType, WdaNotSetUpError
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "coredevice_ax"
 SETTINGS = (FIXTURES / "settings_root.bin").read_bytes()
 SAFARI = (FIXTURES / "safari_example.bin").read_bytes()
+#: The probe app's Text tab, with its tab bar.
+PROBE_TEXT = (FIXTURES / "probe_text_fields.bin").read_bytes()
 
 PHONE = "B34C4EE9-AF48-53C6-BD13-2BFA66E7EE91"
 
@@ -172,6 +174,40 @@ class TestTypes:
 
     def test_the_root_is_the_application_whatever_its_traits(self):
         assert _element_type(1 << 0, is_root=True) == "Application"
+
+
+class TestTheSelectedTab:
+    """A tab-bar item's value is a number in the push: 1 in front, 0 for the
+    others. Read as text only, it was dropped, so every landmark with
+    `selected: true` -- every tab landmark -- missed (#664)."""
+
+    def test_the_tab_in_front_and_only_it(self):
+        _, elements = parse_push(PROBE_TEXT)
+        tabs = {e["AXUniqueId"]: e["AXValue"] for e in elements
+                if (e["AXUniqueId"] or "").startswith("tab_")}
+        assert tabs == {"tab_text": "1", "tab_controls": "0",
+                        "tab_scroll": "0", "tab_links": "0"}
+
+    @pytest.mark.parametrize(("value", "expected"), [
+        (1, "1"), (0, "0"), (True, "1"), (False, "0"), (42, "42"),
+        ("40%", "40%"), (None, None),
+        (50.0, None),           # a slider's: WDA says "50%", so not guessed at
+    ])
+    def test_numbers_read_as_text(self, value, expected):
+        assert coredevice_ax._value(value) == expected
+
+    def test_a_tab_landmark_matches_the_pushed_tree(self):
+        """The probe knowledge base's own tab landmark, recorded through WDA."""
+        from server.device.ui_elements import parse_elements
+        from server.knowledge.landmarks import match_landmark
+        from server.models import Landmark
+
+        _, raw = parse_push(PROBE_TEXT)
+        elements = parse_elements(raw)
+        assert match_landmark(elements, Landmark(
+            element="RadioButton", identifier="tab_text", selected=True))
+        assert not match_landmark(elements, Landmark(
+            element="RadioButton", identifier="tab_links", selected=True))
 
 
 class TestBadPushes:
@@ -1202,6 +1238,264 @@ class TestReadsThroughTheController:
 
         assert [e.label for e in elements] == ["from WDA"]
         ctrl.coredevice_ax.describe_all.assert_not_called()
+
+
+class TestIdentifyingTheScreen:
+    """POST /landmarks/identify reads the screen as get_screen_summary does:
+    through the push on a phone opted in (#664). It read through WDA, so on a
+    phone with no WDA running, identifying a screen started it."""
+
+    def _client(self, ctrl):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from server.api import device_ui, landmarks
+        from server.knowledge.landmarks import LandmarkRegistry
+
+        app = FastAPI()
+        app.include_router(landmarks.router)
+        app.include_router(device_ui.router)
+        app.state.landmark_registry = LandmarkRegistry()
+        app.state.device_controller = ctrl
+        client = TestClient(app)
+        client.post("/api/v1/landmarks/load", json={"app": "settings", "landmarks": {
+            "root": {"landmarks": [
+                {"element": "Button", "identifier": "com.apple.settings.general"}]},
+        }}).raise_for_status()
+        return client
+
+    def test_it_reads_the_push(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+
+        resp = self._client(ctrl).post("/api/v1/landmarks/identify",
+                                       json={"app": "settings", "udid": PHONE})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["matched"] == "root"
+        ctrl.coredevice_ax.describe_all.assert_awaited()
+        ctrl.wda_client.describe_all.assert_not_called()
+
+    def test_a_depth_asks_for_wdas_read(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+
+        self._client(ctrl).post("/api/v1/landmarks/identify",
+                                json={"app": "settings", "udid": PHONE, "snapshot_depth": 12})
+
+        ctrl.wda_client.describe_all.assert_awaited()
+        ctrl.coredevice_ax.describe_all.assert_not_called()
+
+    #: Settings' root as WDA records it: the table is a container, which the
+    #: push does not carry.
+    TABLE_SCREEN = {"tabled": {"landmarks": [
+        {"element": "Button", "identifier": "com.apple.settings.general"},
+        {"element": "Table", "identifier": "settings_table"}]}}
+
+    def test_a_container_landmark_missed_on_the_push_is_named(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        client = self._client(ctrl)
+        client.post("/api/v1/landmarks/load",
+                    json={"app": "tabled", "landmarks": self.TABLE_SCREEN}).raise_for_status()
+
+        result = client.post("/api/v1/landmarks/identify",
+                             json={"app": "tabled", "udid": PHONE}).json()
+
+        assert result["matched"] is None
+        assert "no containers" in result["note"]
+        assert "tabled (Table settings_table)" in result["note"]
+
+    def test_and_said_on_the_summary_too(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        client = self._client(ctrl)
+        client.delete("/api/v1/landmarks/", params={"app": "settings"}).raise_for_status()
+        client.post("/api/v1/landmarks/load",
+                    json={"app": "tabled", "landmarks": self.TABLE_SCREEN}).raise_for_status()
+
+        summary = client.get("/api/v1/device/screen-summary",
+                             params={"udid": PHONE, "identify": True}).json()
+
+        assert summary["identified_as"] is None
+        assert "tabled (Table settings_table)" in summary["identify_note"]
+
+    def test_not_on_a_read_through_wda(self, monkeypatch):
+        """WDA has the containers: a miss there is a real one."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        # The same screen as the push serves, so only the reader differs.
+        ctrl.wda_client.describe_all = AsyncMock(return_value=parse_push(SETTINGS)[1])
+        client = self._client(ctrl)
+        client.post("/api/v1/landmarks/load",
+                    json={"app": "tabled", "landmarks": self.TABLE_SCREEN}).raise_for_status()
+
+        result = client.post("/api/v1/landmarks/identify", json={
+            "app": "tabled", "udid": PHONE, "snapshot_depth": 12}).json()
+        # The summary identifies against every set: the matching one goes.
+        client.delete("/api/v1/landmarks/", params={"app": "settings"}).raise_for_status()
+        summary = client.get("/api/v1/device/screen-summary", params={
+            "udid": PHONE, "identify": True, "snapshot_depth": 12}).json()
+        assert summary["identified_as"] is None
+        assert "identify_note" not in summary
+
+        ctrl.coredevice_ax.describe_all.assert_not_called()
+        assert result["partial_matches"][0]["matched"] == 1   # only the Table missed
+        assert "note" not in result
+
+
+class TestIdentifyingAfterAPushCrash:
+    """identify reads the push now, which can crash the app (#669): the answer
+    says so, and which reader made it, as get_ui_tree does."""
+
+    def test_the_crash_is_on_the_answer(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = AsyncMock(
+            side_effect=coredevice_ax.AppExitedDuringRead("QuernProbeScene", 711))
+
+        result = TestIdentifyingTheScreen()._client(ctrl).post(
+            "/api/v1/landmarks/identify", json={"app": "settings", "udid": PHONE}).json()
+
+        assert "QuernProbeScene" in result["warning"]
+        assert result["backend"] == ctrl.wda_client.TOOL_NAME
+
+    def test_a_clean_push_read_names_its_reader(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+
+        result = TestIdentifyingTheScreen()._client(ctrl).post(
+            "/api/v1/landmarks/identify", json={"app": "settings", "udid": PHONE}).json()
+
+        assert result["backend"] == CoreDeviceAxReader.TOOL_NAME
+        assert "warning" not in result
+
+
+class TestTheOtherIdentifyReads:
+    """The navigation check and an action's screen context identify too, and
+    read through WDA on a phone meant to run without it (#664 review)."""
+
+    async def test_the_navigation_check_reads_the_push(self, monkeypatch):
+        from server.api.device_ui import _identify_now
+        from server.knowledge.landmarks import LandmarkRegistry
+
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+
+        await _identify_now(ctrl, PHONE, LandmarkRegistry(), use_cache=False)
+
+        ctrl.coredevice_ax.describe_all.assert_awaited()
+        ctrl.wda_client.describe_all.assert_not_called()
+
+    async def test_after_a_crash_it_keeps_the_action_depth(self, monkeypatch):
+        """WDA with no depth is the full walk, 34.5 s of a long list."""
+        from server.api.device_ui import _identify_now
+        from server.knowledge.landmarks import LandmarkRegistry
+
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+
+        await _identify_now(ctrl, PHONE, LandmarkRegistry(), use_cache=False)
+
+        ctrl.coredevice_ax.describe_all.assert_not_called()
+        assert ctrl.wda_client.describe_all.await_args.kwargs.get("snapshot_depth") == 12
+
+    async def test_a_crash_in_the_context_read_is_on_the_context(self, monkeypatch):
+        from server.api.device import _capture_screen_context
+
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = AsyncMock(
+            side_effect=coredevice_ax.AppExitedDuringRead("QuernProbeScene", 711))
+
+        context = await _capture_screen_context(ctrl, PHONE)
+
+        assert "QuernProbeScene" in context["warning"]
+
+    async def test_an_actions_screen_context_reads_the_push(self, monkeypatch):
+        from server.api.device import _capture_screen_context
+
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+
+        context = await _capture_screen_context(ctrl, PHONE)
+
+        assert context["backend"] == CoreDeviceAxReader.TOOL_NAME
+        ctrl.wda_client.describe_all.assert_not_called()
+
+
+class TestANavigationCheckThatCrashesTheApp:
+    """The navigation check reads the push, which can crash the app (#669),
+    and its fallback reads SpringBoard: a tap by label there taps an icon
+    (review). Before the tap that is a refusal; after it, a warning."""
+
+    PUSHED_TEXT = [
+        {"type": "Application", "AXLabel": "QuernProbeScene", "AXUniqueId": None,
+         "frame": {"x": 0, "y": 0, "width": 414, "height": 896}},
+        {"type": "Heading", "AXLabel": "Text", "AXUniqueId": None,
+         "frame": {"x": 150, "y": 60, "width": 100, "height": 20}},
+        {"type": "Button", "AXLabel": "More", "AXUniqueId": None, "enabled": True,
+         "frame": {"x": 330, "y": 820, "width": 60, "height": 50}},
+    ]
+    SPRINGBOARD = [
+        {"type": "Application", "AXLabel": "SpringBoard", "AXUniqueId": None,
+         "frame": {"x": 0, "y": 0, "width": 414, "height": 896}},
+        {"type": "Button", "AXLabel": "More", "AXUniqueId": "More", "enabled": True,
+         "frame": {"x": 20, "y": 100, "width": 60, "height": 60}},
+    ]
+
+    async def _tap(self, ctrl):
+        from httpx import ASGITransport, AsyncClient
+
+        from server.config import ServerConfig
+        from server.main import create_app
+        from server.models import Landmark, NavEdge, ScreenLandmarks
+
+        app = create_app(config=ServerConfig(api_key="k"), enable_oslog=False,
+                         enable_crash=False, enable_proxy=False)
+        ctrl.resolve_udid = AsyncMock(return_value=PHONE)
+        ctrl.wda_client.describe_all = AsyncMock(return_value=self.SPRINGBOARD)
+        ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=self.SPRINGBOARD[1:])
+        ctrl.wda_client._set_snapshot_depth = AsyncMock()
+        ctrl.wda_client._ensure_session = AsyncMock(return_value="s")
+        ctrl.wda_client.tap = AsyncMock()
+        app.state.device_controller = ctrl
+        app.state.landmark_registry.load("probe", [
+            ScreenLandmarks(screen="text", landmarks=[Landmark(element="Heading", label="Text")],
+                            leads_to=[NavEdge(target="more", label="More", element_type="Button")]),
+            ScreenLandmarks(screen="more", landmarks=[Landmark(element="Heading", label="More")]),
+        ])
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            return await c.post(
+                "/api/v1/device/ui/tap-element",
+                json={"label": "More", "udid": PHONE, "verify_navigation": True,
+                      "navigation_timeout": 1},
+                headers={"Authorization": "Bearer k"})
+
+    async def test_before_the_tap_it_taps_nothing(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = AsyncMock(
+            side_effect=coredevice_ax.AppExitedDuringRead("QuernProbeScene", 711))
+        ctrl.coredevice_input.tap = AsyncMock()
+
+        resp = await self._tap(ctrl)
+
+        assert resp.status_code >= 400, resp.text
+        assert "Nothing was tapped" in resp.text and "QuernProbeScene" in resp.text
+        ctrl.coredevice_input.tap.assert_not_called()
+        ctrl.wda_client.tap.assert_not_called()
+
+    async def test_after_the_tap_it_says_so(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        tapped = []
+
+        async def read(*args, **kwargs):
+            if tapped:
+                raise coredevice_ax.AppExitedDuringRead("QuernProbeScene", 711)
+            return self.PUSHED_TEXT
+        ctrl.coredevice_ax.describe_all = AsyncMock(side_effect=read)
+
+        async def tap(*args, **kwargs):
+            tapped.append(args)
+            return "coredevice"
+        ctrl.coredevice_input.tap = AsyncMock(side_effect=tap)
+
+        resp = await self._tap(ctrl)
+
+        assert resp.status_code == 200, resp.text
+        assert tapped, "the tap went ahead"
+        assert "after the tap" in resp.json()["warning"]
+        assert "QuernProbeScene" in resp.json()["warning"]
 
 
 class TestReadsInsideActionsStayOnWda:

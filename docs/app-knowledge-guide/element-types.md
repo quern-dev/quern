@@ -13,6 +13,7 @@ What you'll see from the accessibility tree — the default on a simulator — a
 - **Buttons**: `button`, `link` (for hyperlink-style buttons)
 - **Text**: `staticText`, `textField`, `secureTextField`, `textView`
 - **Containers**: `scrollView`, `table`, `collectionView`, `cell`
+  - On a physical iPhone read through its tree push (`"device_ui_reader": "coredevice"`, `backend: coredevice`), there are no containers at all: no `Table`, `TabBar`, `NavigationBar`, `Toolbar` or `CollectionView`, and a `Group` or `Other` only when it is not one. A landmark on a container does not match there, and when that is all a screen missed, `identify_screen` says so in its `note` (`identify_note` on `get_screen_summary`). Update the screen file when you see it: replace the container landmark with an element inside it that every reader sees -- a button, the heading, a row's identifier -- so the knowledge base matches on the push and through WDA alike.
 - **Toggles**: `switch`, `segmentedControl`
 - **Indicators**: `activityIndicator`, `progressIndicator`, `image`
 

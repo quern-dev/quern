@@ -850,6 +850,10 @@ class DeviceControllerUI:
         """What this request's read had to report about itself, if anything."""
         return _READ_NOTE.get()
 
+    def read_by(self) -> str | None:
+        """Which reader made this request's last read, if one was made."""
+        return _READ_BY.get()
+
     #: Backend name per device, written by `get_ui_elements` when it selects
     #: one. Read by the error paths that follow a read, so the label names the
     #: backend that did the work rather than whatever is selected a moment
