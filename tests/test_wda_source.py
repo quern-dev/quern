@@ -190,18 +190,30 @@ class TestQuernsPatch:
     """WDA's runner turned the phone's auto-correction and predictive text off
     at every start, and nothing turned them back on (2026-11-14)."""
 
-    async def test_the_keyboard_preferences_call_is_taken_out(self, tmp_path):
+    async def test_the_keyboard_preferences_call_is_kept_for_simulators_only(self, tmp_path):
         data = _tgz(PROJECT)
         dest = tmp_path / "WebDriverAgent"
         async with _client(data, []) as client:
             await fetch(dest, _pin(data), client=client)
         setup = (dest / "WebDriverAgentRunner" / "UITestingUITests.m").read_text()
-        assert "configureDefaultKeyboardPreferences" not in setup
+        # Guarded, not deleted: a simulator still needs the keyboard tutorials
+        # it also dismisses (#687 review).
+        assert ("#if TARGET_OS_SIMULATOR\n"
+                "  [FBConfiguration.sharedInstance configureDefaultKeyboardPreferences];\n"
+                "#endif") in setup
+        assert setup.count("configureDefaultKeyboardPreferences") == 1
         # Only that line: the rest of setUp is untouched.
         assert "disableRemoteQueryEvaluation" in setup
         assert "disableApplicationUIInterruptionsHandling" in setup
 
-    @pytest.mark.parametrize("runner", [None, b"+ (void)setUp\n{\n}\n"])
+    @pytest.mark.parametrize("runner", [
+        None,                                           # no runner at all
+        b"+ (void)setUp\n{\n}\n",                       # the call gone
+        b"+ (void)setUp\n{\n"                           # the call twice
+        b"  [FBConfiguration.sharedInstance configureDefaultKeyboardPreferences];\n"
+        b"  [FBConfiguration.sharedInstance configureDefaultKeyboardPreferences];\n}\n",
+        b"\xa9 not utf-8\n",                            # unreadable as text
+    ])
     async def test_a_source_the_patch_cannot_be_made_on_is_refused(self, tmp_path, runner):
         """A moved pin that changed the line is caught, not built without it;
         the source already there stays."""
