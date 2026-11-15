@@ -5295,7 +5295,7 @@ class DeviceControllerUI:
             # What the field holds now, so a caller can compare for itself.
             # Never for a secure field, which reports dots.
             result["value"] = after
-        if crashed and self._coredevice_serves(resolved):
+        if crashed and self._coredevice_serves(resolved) and snapshot_depth is None:
             # Said on the answer: this phone's typing was over CoreDevice, and
             # a caller sees `input` disappear with nothing else to say why.
             result["note"] = (
@@ -5334,8 +5334,14 @@ class DeviceControllerUI:
             return result
 
         crashed_before = frozenset(self._push_crashed_apps.get(udid, ()))
-        target = await self._find_text_field(udid, label=label, identifier=identifier,
-                                             whole_screen=True)
+        try:
+            target = await self._find_text_field(udid, label=label, identifier=identifier,
+                                                 whole_screen=True)
+        except DeviceError as e:
+            # Most often the crash left no such field -- SpringBoard, or the
+            # app relaunched -- and "no text field matching" would hide it.
+            self._refuse_after_a_crash(udid, crashed_before, "typed", cause=e)
+            raise
         self._refuse_after_a_crash(udid, crashed_before, "typed")
         before = target.value or ""
         secure = self._is_secure_field(target)
@@ -5382,6 +5388,17 @@ class DeviceControllerUI:
             try:
                 await coredevice_ax.set_value(udid, same_field, correction)
             except DeviceError as e:
+                if isinstance(e, AppExitedDuringRead):
+                    # The set's read is a push read: recorded, as every other
+                    # read's crash is, so the next one goes through WDA (#669).
+                    self._push_crashed_apps.setdefault(udid, set()).add(e.app)
+                    raise DeviceError(
+                        f"typed {len(keys)} characters into '{label or identifier}', "
+                        f"which the phone's keyboard changed: the field held {after!r}. "
+                        f"Setting it to the text crashed the app instead: {e}. This "
+                        "device's screens will be read through WDA until the server "
+                        "restarts; read the screen again before acting.",
+                        tool=e.tool) from e
                 raise DeviceError(
                     f"typed {len(keys)} characters into '{label or identifier}', which "
                     f"the phone's keyboard changed: the field holds {after!r}. Setting "
@@ -5407,16 +5424,19 @@ class DeviceControllerUI:
                                            label or identifier, secure)
             crashed = self._push_crashed_apps.get(udid, set()) - crashed_before
             if crashed:
-                # Not the keyboard's doing, as the failure may read: the read-back
-                # crashed the app, and nothing could be corrected (#669).
-                message += (f". Reading the field back crashed {', '.join(sorted(crashed))} "
-                            "(#669), so it was read through WDA and not corrected")
+                # Not the keyboard's doing, as the failure may read: the app
+                # crashed after the keystrokes, reading the field back (#669).
+                message = (f"{message.rstrip('.')}. Reading the field back crashed "
+                           f"{', '.join(sorted(crashed))} (#669), after the keystrokes: "
+                           "what was typed is likely gone with it, and nothing was "
+                           "corrected. Read the screen again before acting.")
             raise DeviceError(message, tool=via)
         if not secure:
             result["value"] = after
         return result
 
-    def _refuse_after_a_crash(self, udid: str, before: frozenset, what: str) -> None:
+    def _refuse_after_a_crash(self, udid: str, before: frozenset, what: str, *,
+                              cause: DeviceError | None = None) -> None:
         """Refuse an action whose own read of the screen crashed an app (#669).
 
         The read fell back to WDA and found the field on the screen the crash
@@ -5429,7 +5449,7 @@ class DeviceControllerUI:
                 f"Reading the screen crashed {', '.join(sorted(crashed))} (#669). Nothing "
                 f"was {what}: the screen the field was on is gone. This device's screens "
                 "will be read through WDA until the server restarts; read the screen "
-                "again before acting.", tool=self.coredevice_ax.TOOL_NAME)
+                "again before acting.", tool=self.coredevice_ax.TOOL_NAME) from cause
 
     @staticmethod
     def _is_secure_field(target: UIElement) -> bool:

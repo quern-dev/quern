@@ -257,10 +257,59 @@ class TestWhatIsNotSet:
             return "あ"
         ctrl._read_field_value = AsyncMock(side_effect=crashing)
 
-        with pytest.raises(DeviceError, match="Reading the field back crashed QuernProbeScene"):
+        with pytest.raises(DeviceError,
+                           match="Reading the field back crashed QuernProbeScene") as err:
             await ctrl.type_text("a", udid=PHONE, identifier="field_default")
 
         setter.assert_not_called()
+        assert ".." not in str(err.value)
+
+    async def test_a_crash_that_leaves_no_such_field_says_it_crashed(self, monkeypatch):
+        """The likelier case: the read fell back to WDA on SpringBoard, where
+        no field matches -- "no text field" alone would hide the crash (#698
+        review)."""
+        ctrl, _ = _phone(monkeypatch, before="", reads=["a"])
+
+        async def crashing(*args, **kwargs):
+            ctrl._push_crashed_apps.setdefault(PHONE, set()).add("QuernProbeScene")
+            raise DeviceError("No element found: no text field matching 'field_default'",
+                              tool="wda")
+        ctrl._find_text_field = AsyncMock(side_effect=crashing)
+
+        with pytest.raises(DeviceError, match="crashed QuernProbeScene.*Nothing was typed"):
+            await ctrl.type_text("a", udid=PHONE, identifier="field_default")
+
+        ctrl.coredevice_input.tap.assert_not_called()
+
+    async def test_a_field_that_is_not_there_is_still_not_there(self, monkeypatch):
+        """With no crash, the lookup's own error stands."""
+        ctrl, _ = _phone(monkeypatch, before="", reads=["a"])
+        ctrl._find_text_field = AsyncMock(side_effect=DeviceError(
+            "No element found: no text field matching 'field_default'", tool="wda"))
+
+        with pytest.raises(DeviceError, match="no text field matching"):
+            await ctrl.type_text("a", udid=PHONE, identifier="field_default")
+
+    async def test_a_crash_in_the_set_is_recorded(self, monkeypatch):
+        """The set reads the push too: its crash puts the device on WDA, as
+        every other read's does (#698 review)."""
+        ctrl, setter = _phone(monkeypatch, before="", reads=["あ"])
+        setter.side_effect = coredevice_ax.AppExitedDuringRead("QuernProbeScene", 123)
+
+        with pytest.raises(DeviceError, match="crashed the app"):
+            await ctrl.type_text("a", udid=PHONE, identifier="field_default")
+
+        assert ctrl._push_crashed_apps[PHONE] == {"QuernProbeScene"}
+
+    async def test_no_crash_note_when_a_depth_chose_wda(self, monkeypatch):
+        ctrl, _ = _phone(monkeypatch, before="", reads=["a"])
+        ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+        ctrl.wda_client.tap = AsyncMock()
+
+        result = await ctrl.type_text("a", udid=PHONE, identifier="field_default",
+                                      snapshot_depth=30)
+
+        assert "note" not in result
 
     async def test_a_failed_set_says_what_the_field_holds(self, monkeypatch):
         ctrl, setter = _phone(monkeypatch, before="", reads=["Helloあ"])
