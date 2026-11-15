@@ -59,8 +59,11 @@ FAMILIES: dict[str, tuple[str, ...]] = {
         "CollectionView",
     ),
     # Three rows differing only in their accessory came back Button,
-    # StaticText, Button; XCUITest called all three Cell.
-    "rows": ("Button", "StaticText", "Cell"),
+    # StaticText, Button; XCUITest called all three Cell. A UICollectionView
+    # list row with no traits is a Group in a physical iPhone's tree push
+    # (#664): the probe's lazy_row_0 read Group there, Cell through WDA and
+    # StaticText on a simulator (iPhone 11 and iPhone 18 Pro, iOS 27.2).
+    "rows": ("Button", "StaticText", "Cell", "Group"),
     "indicators": (
         "GenericElement", "ProgressIndicator", "ActivityIndicator", "ColorWell",
         "StaticText",

@@ -79,7 +79,7 @@ So `element` is matched across the two, as far as the landmark's other fields ma
 
 **Safe pairs** — `RadioButton`↔`Button`, `Heading`↔`StaticText`, `TextField`↔`SecureTextField`, `CheckBox`↔`Switch`, `TabGroup`↔`SegmentedControl`, `TextArea`↔`TextView`, `Slider`↔`PageIndicator`.
 
-**Families** — containers (`Group`, `Other`, `TabBar`, `NavigationBar`, `Toolbar`, `Table`, `CollectionView`); rows (`Button`, `StaticText`, `Cell`); indicators (`GenericElement`, `ProgressIndicator`, `ActivityIndicator`, `ColorWell`, `StaticText`); headers (`Heading`, `Other`, `StaticText`).
+**Families** — containers (`Group`, `Other`, `TabBar`, `NavigationBar`, `Toolbar`, `Table`, `CollectionView`); rows (`Button`, `StaticText`, `Cell`, `Group`); indicators (`GenericElement`, `ProgressIndicator`, `ActivityIndicator`, `ColorWell`, `StaticText`); headers (`Heading`, `Other`, `StaticText`).
 
 Families need an identifier because the accessibility tree's generic types stand for many specific ones — `Group` was the tab bar, the navigation bar, the toolbar, the table and the collection view on one probe app. And `Button`↔`StaticText` is never equated by label: a list row is one `Button` to the accessibility tree and a `Cell` holding a `StaticText` to XCUITest, so the label lands on the text *inside* the row.
 
