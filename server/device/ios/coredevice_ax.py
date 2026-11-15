@@ -71,10 +71,9 @@ ATTR_TRAITS = 77
 #: The push types a password field as a plain TextField. Measured on an
 #: iPhone 11 across a screen of 42 elements, five of them text fields: this
 #: trait bit is on the password field, empty or filled, and on nothing else.
-#: Attribute 28 is True on it too, but only once it holds text, so it is the
-#: backup, never the test.
+#: Not attribute 28, which looked like a marker on that screen and is True on
+#: Safari's page text and links too (#690 review).
 TRAIT_SECURE_TEXT = 0x1000000
-ATTR_SECURE = 28
 
 #: UIAccessibilityTraits bits. The public ones are UIKit's; the two private
 #: ones are inferred from where they appeared: `TOGGLE` only on Settings'
@@ -378,7 +377,7 @@ def parse_tree(data: bytes) -> Tree:
         elements.append({
             "type": etype,
             "role": f"AX{etype}",
-            "role_description": _role_description(bundle, traits),
+            "role_description": _role_description(etype, traits),
             "AXLabel": _text(bundle.get(ATTR_LABEL)) or "",
             "AXUniqueId": _text(bundle.get(ATTR_IDENTIFIER)),
             "AXValue": _text(bundle.get(ATTR_VALUE)),
@@ -393,10 +392,10 @@ def parse_tree(data: bytes) -> Tree:
     return Tree(dump_type, elements, app_pid, refs)
 
 
-def _role_description(bundle: dict, traits: int) -> str:
+def _role_description(etype: str, traits: int) -> str:
     """A search field's or a password field's subrole, as the simulator's
     tree reports them -- which is where quern's own rules look for them."""
-    if traits & TRAIT_SECURE_TEXT or bundle.get(ATTR_SECURE) is True:
+    if etype == "TextField" and traits & TRAIT_SECURE_TEXT:
         # Unmarked, a password field's dots read as a rewrite of the typed
         # text, and as the keyboard's doing, so its value got set (#664).
         return "AXSecureTextField"

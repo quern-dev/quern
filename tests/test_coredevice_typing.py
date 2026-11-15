@@ -10,6 +10,7 @@ keyboard: "Hello abc #@" arrived as "Helloあbc＃＠", and the set put it right
 from __future__ import annotations
 
 import plistlib
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -19,9 +20,16 @@ from server.device.controller_ui import _keyboard_correction
 from server.device.ios import coredevice_ax
 from server.device.ios.coredevice_ax import parse_tree, set_value, set_value_request
 from server.models import DeviceError, DeviceType, UIElement
-from tests.test_coredevice_ax import SETTINGS, _fake_lib, phone_address  # noqa: F401  (a fixture)
+from tests.test_coredevice_ax import (  # noqa: F401  (phone_address is a fixture)
+    SAFARI,
+    SETTINGS,
+    _fake_lib,
+    phone_address,
+)
 
 PHONE = "B34C4EE9-AF48-53C6-BD13-2BFA66E7EE91"
+PROBE_FIELDS = (Path(__file__).resolve().parent / "fixtures" / "coredevice_ax"
+                / "probe_text_fields.bin").read_bytes()
 FRAME = {"x": 20.0, "y": 120.0, "width": 374.0, "height": 40.0}
 
 
@@ -377,22 +385,35 @@ class TestSettingAValue:
 
 class TestPasswordFieldsFromThePush:
     """The push types a password field as a plain TextField; a trait bit is
-    what marks it. Unmarked, its dots read as the keyboard's change and the
+    what marks it, on a field only. Unmarked, its dots read as the keyboard's change and the
     password was set through accessibility (found live on an iPhone 11)."""
 
-    @pytest.mark.parametrize(("bundle", "traits", "expected"), [
+    @pytest.mark.parametrize(("etype", "traits", "expected"), [
         # The iPhone 11's password field, empty and then filled.
-        ({coredevice_ax.ATTR_SECURE: False}, 0x2201040000, "AXSecureTextField"),
-        ({coredevice_ax.ATTR_SECURE: True}, 0x2201240000, "AXSecureTextField"),
+        ("TextField", 0x2201040000, "AXSecureTextField"),
+        ("TextField", 0x2201240000, "AXSecureTextField"),
         # Its ordinary text fields.
-        ({coredevice_ax.ATTR_SECURE: False}, 0x2200040000, ""),
-        ({coredevice_ax.ATTR_SECURE: True}, 0, "AXSecureTextField"),
-        ({}, coredevice_ax.TRAIT_SEARCH_FIELD, "AXSearchField"),
-        ({coredevice_ax.ATTR_SECURE: True}, coredevice_ax.TRAIT_SEARCH_FIELD,
-         "AXSecureTextField"),
+        ("TextField", 0x2200040000, ""),
+        # The bit on anything but a field marks nothing.
+        ("StaticText", 0x2201040000, ""),
+        ("TextField", coredevice_ax.TRAIT_SEARCH_FIELD, "AXSearchField"),
     ])
-    def test_the_subrole(self, bundle, traits, expected):
-        assert coredevice_ax._role_description(bundle, traits) == expected
+    def test_the_subrole(self, etype, traits, expected):
+        assert coredevice_ax._role_description(etype, traits) == expected
+
+    def test_a_real_push_marks_its_password_field_and_nothing_else(self):
+        """The probe app's text tab, captured on an iPhone 11, fields empty."""
+        _, elements = coredevice_ax.parse_push(PROBE_FIELDS)
+        secure = [e["AXUniqueId"] for e in elements
+                  if e["role_description"] == "AXSecureTextField"]
+        assert secure == ["field_secure"]
+
+    @pytest.mark.parametrize("push", [SAFARI, SETTINGS])
+    def test_page_text_and_settings_are_never_password_fields(self, push):
+        """Safari's page text carries attribute 28, which once looked like the
+        marker (#690 review)."""
+        _, elements = coredevice_ax.parse_push(push)
+        assert not [e for e in elements if e["role_description"] == "AXSecureTextField"]
 
     async def test_a_marked_password_field_is_checked_by_length_and_never_set(
             self, monkeypatch):
