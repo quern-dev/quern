@@ -387,6 +387,8 @@ class TestSettingAValue:
         async def newest(queue, held=None):
             return bare, bare, bare
         monkeypatch.setattr(coredevice_ax, "_newest_tree", newest)
+        # No pushes reach the queue here: not a silence to resubscribe over.
+        monkeypatch.setattr(coredevice_ax, "_first_push", AsyncMock(return_value=True))
 
         with pytest.raises(coredevice_ax.BareAppTree):
             await set_value(PHONE, lambda e: True, "x", timeout=5)
@@ -403,6 +405,8 @@ class TestSettingAValue:
         async def newest(queue, held=None):
             return newest_tree, first, newest_tree
         monkeypatch.setattr(coredevice_ax, "_newest_tree", newest)
+        # No pushes reach the queue here: not a silence to resubscribe over.
+        monkeypatch.setattr(coredevice_ax, "_first_push", AsyncMock(return_value=True))
 
         with pytest.raises(DeviceError, match="changed"):
             await set_value(PHONE, lambda e: e["AXUniqueId"] == "com.apple.settings.general",
@@ -636,8 +640,20 @@ class TestTheLaunchCheck:
 
         assert info["launch_confirmed"] is None and "timed out" in info["launch_check_error"]
 
+    async def test_a_read_with_the_grace_nearly_spent_still_gets_the_floor(
+            self, monkeypatch):
+        """Room for a silent subscription's fresh one to deliver (#684)."""
+        ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])
+        monkeypatch.setattr("server.device.controller.time.monotonic",
+                            _clock([0.0, 5.9]))
+
+        await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert self.front.await_args.kwargs["timeout"] == pytest.approx(ctrl._PUSH_READ_MIN_S)
+
     async def test_each_read_is_bounded_by_what_is_left(self, monkeypatch):
         ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])
+        monkeypatch.setattr(ctrl, "_PUSH_READ_MIN_S", 1.0)    # the floor below the grace
         monkeypatch.setattr("server.device.controller.time.monotonic", _clock([100.0]))
 
         await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
@@ -652,3 +668,11 @@ def _clock(times: list[float]):
     def now() -> float:
         return left.pop(0) if len(left) > 1 else left[0]
     return now
+
+
+
+def test_a_launch_read_has_room_for_a_fresh_subscription():
+    """At 4 s, a launch whose first subscription stalled was cut off just
+    before the fresh connection's tree came (#684, live on an iPhone 11)."""
+    from server.device.controller import DeviceController
+    assert DeviceController._PUSH_READ_MIN_S >= coredevice_ax.FIRST_PUSH_S + 2.0

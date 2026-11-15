@@ -131,6 +131,15 @@ SETTLE_HARD_S = 4.0
 #: read straight after a launch already carried the app's name, 10 of 10.
 BARE_CONFIRM_S = 1.0
 
+#: How long a subscription waits for its first push of any kind before it is
+#: made again on a fresh connection, once (#684). Measured on an iPhone 11: a
+#: subscription made the moment an app was relaunched got nothing for 20 s,
+#: in 2 of 3 tries; asking again on the same connection got nothing either,
+#: and a fresh connection had the tree 1.6 s later. A healthy first push
+#: comes at about 1.0-1.3 s, every time it was measured; a needless fresh
+#: connection costs only itself.
+FIRST_PUSH_S = 3.0
+
 #: Each cleanup step's bound: unsubscribing and closing must not hold a read
 #: up, or change its outcome.
 CLOSE_S = 2.0
@@ -576,6 +585,70 @@ async def _app_alive(rsd: Any, lib: SimpleNamespace, pid: int) -> bool | None:
     return any(p.get("processIdentifier") == pid for p in processes if isinstance(p, dict))
 
 
+async def _subscribe(lib: SimpleNamespace, address: Any, conn: SimpleNamespace) -> asyncio.Queue:
+    """Connect and subscribe to the tree push, filling `conn.rsd` and
+    `conn.provider` as each opens, so the caller's cleanup closes whatever
+    did."""
+    conn.rsd = lib.RemoteServiceDiscoveryService(address)
+    await conn.rsd.connect()
+    conn.provider = lib.RemoteAX(conn.rsd)
+    await conn.provider.connect()
+    queue: asyncio.Queue = asyncio.Queue()
+    conn.provider.dtx.ctx["control_dispatch_queue"] = queue
+    await conn.provider.dtx._ctrl_channel.invoke(
+        "clientNeedsAccessibility:", True, expects_reply=False)
+    return queue
+
+
+async def _first_push(queue: asyncio.Queue, within: float) -> bool:
+    """Whether anything arrives on `queue` within `within` s, without taking it."""
+    end = asyncio.get_running_loop().time() + within
+    while queue.empty():
+        if asyncio.get_running_loop().time() >= end:
+            return False
+        await asyncio.sleep(0.05)
+    return True
+
+
+async def _subscribed(uuid: str, lib: SimpleNamespace, address: Any,
+                      conn: SimpleNamespace) -> asyncio.Queue:
+    """A subscription that has pushed something (#684).
+
+    When the first stays silent for FIRST_PUSH_S, a second is opened on a
+    fresh connection beside it, and whichever pushes first is kept; the other
+    is closed. The first is not closed to make room: a heavy screen whose
+    first push is merely late still wins, rather than being thrown away for a
+    read that starts over (#692 review). Neither wait is bounded here: the
+    caller's deadline ends both, and `conn` -- which the caller closes -- holds
+    the first until the second has won, the spare is closed on any way out.
+    """
+    queue = await _subscribe(lib, address, conn)
+    if await _first_push(queue, FIRST_PUSH_S):
+        return queue
+    logger.info("[coredevice] no push from %s in %gs: subscribing on a fresh "
+                "connection beside it (#684)", uuid[:8], FIRST_PUSH_S)
+    spare = SimpleNamespace(rsd=None, provider=None)
+    try:
+        try:
+            spare_queue = await _subscribe(lib, address, spare)
+        except Exception as e:  # noqa: BLE001 - the first may still answer
+            logger.info("[coredevice] the fresh connection to %s failed (%r); "
+                        "waiting on the first", uuid[:8], e)
+            await _close(spare.provider, spare.rsd)
+            return queue
+        while queue.empty() and spare_queue.empty():
+            await asyncio.sleep(0.05)
+    except BaseException:
+        await asyncio.shield(_close(spare.provider, spare.rsd))
+        raise
+    if not queue.empty():
+        await _close(spare.provider, spare.rsd)
+        return queue
+    await _close(conn.provider, conn.rsd)
+    conn.rsd, conn.provider = spare.rsd, spare.provider
+    return spare_queue
+
+
 async def _close(provider: Any, rsd: Any) -> None:
     """Unsubscribe and close, each step bounded and its failure swallowed.
 
@@ -608,28 +681,21 @@ async def _with_settled_tree(uuid: str, timeout: float, what: str,
     from server.device.performance import _device_address
 
     lib = _pmd3()
-    rsd = provider = None
+    conn = SimpleNamespace(rsd=None, provider=None)
     try:
         async with asyncio.timeout(timeout):
             try:
                 address = await _device_address(uuid)
-                rsd = lib.RemoteServiceDiscoveryService(address)
-                await rsd.connect()
-                provider = lib.RemoteAX(rsd)
-                await provider.connect()
-                queue: asyncio.Queue = asyncio.Queue()
-                provider.dtx.ctx["control_dispatch_queue"] = queue
-                await provider.dtx._ctrl_channel.invoke(
-                    "clientNeedsAccessibility:", True, expects_reply=False)
+                queue = await _subscribed(uuid, lib, address, conn)
                 tree, first, newest = await _newest_tree(queue, {})
                 if (first.app_pid is not None and newest.app_pid != first.app_pid
-                        and await _app_alive(rsd, lib, first.app_pid) is False):
+                        and await _app_alive(conn.rsd, lib, first.app_pid) is False):
                     # The read killed the app (#669): said, as read_tree says
                     # it, so the caller can stop reading this device's push.
                     raise AppExitedDuringRead(first.elements[0]["AXLabel"], first.app_pid)
-                return await use(provider, tree, first, newest)
+                return await use(conn.provider, tree, first, newest)
             finally:
-                await _close(provider, rsd)
+                await _close(conn.provider, conn.rsd)
     except DeviceError:
         raise
     except TimeoutError as e:
@@ -699,7 +765,7 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
 
     lib = _pmd3()
     started = time.monotonic()
-    rsd = provider = None
+    conn = SimpleNamespace(rsd=None, provider=None)
     held: dict = {}
     deadline = asyncio.timeout(timeout)
     try:
@@ -708,24 +774,17 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
             # asks devicectl, and a read must not outlast the time it was given.
             async with deadline:
                 address = await _device_address(uuid)
-                rsd = lib.RemoteServiceDiscoveryService(address)
-                await rsd.connect()
-                provider = lib.RemoteAX(rsd)
-                await provider.connect()
-                queue: asyncio.Queue = asyncio.Queue()
-                provider.dtx.ctx["control_dispatch_queue"] = queue
-                await provider.dtx._ctrl_channel.invoke(
-                    "clientNeedsAccessibility:", True, expects_reply=False)
+                queue = await _subscribed(uuid, lib, address, conn)
                 tree, first, newest = await _newest_tree(queue, held)
                 elements = tree.elements
                 # The app changed under the read: switched, or killed by it.
                 # Only the process list can tell those apart. "Could not ask"
                 # is not taken as dead: the read stands, as it would have.
                 if (first.app_pid is not None and newest.app_pid != first.app_pid
-                        and await _app_alive(rsd, lib, first.app_pid) is False):
+                        and await _app_alive(conn.rsd, lib, first.app_pid) is False):
                     raise AppExitedDuringRead(first.elements[0]["AXLabel"], first.app_pid)
         finally:
-            await _close(provider, rsd)
+            await _close(conn.provider, conn.rsd)
     except TimeoutError as e:
         if deadline.expired() and held.get("latest") is not None:
             # The caller's deadline (a short `source_timeout`) ended a wait for
