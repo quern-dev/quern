@@ -1103,7 +1103,8 @@ class TestWdaDirectQuery:
         # the caller's find_element applies the real rule afterwards.
         assert (
             "type IN {'XCUIElementTypeButton', 'XCUIElementTypeCell', "
-            "'XCUIElementTypeRadioButton', 'XCUIElementTypeStaticText'}"
+            "'XCUIElementTypeGroup', 'XCUIElementTypeRadioButton', "
+            "'XCUIElementTypeStaticText'}"
         ) in call[0][2]
 
     async def test_an_identifier_and_type_query_keeps_the_identifier(self):
