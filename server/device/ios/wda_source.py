@@ -12,7 +12,9 @@ holds, so a pin that moved is fetched again; the *build* the old version made
 is what stays usable until a new one works (wda.py's build_wda).
 
 To move the pin: `scripts/wda-pin.py --bump [VERSION]`, then a live test on a
-simulator and a phone.
+simulator and a phone. That test is also what checks quern's patch still
+applies (`_patch`): the script does not download the source, and a source the
+patch cannot be made on is refused at fetch.
 """
 
 from __future__ import annotations
@@ -35,6 +37,24 @@ REGISTRY = "https://registry.npmjs.org"
 FETCH_TIMEOUT = 120.0
 #: Marks a source directory as complete, and says which version it holds.
 MARKER = ".quern-source"
+
+#: How many of quern's own changes the unpacked source carries. It is part of
+#: the version quern records and pins, so adding one makes every source and
+#: build made without it out of date -- the path a pin bump takes.
+PATCH_LEVEL = 1
+
+#: The one line of the runner's setUp that turns auto-correction and predictive
+#: text off, system-wide, every time WDA starts -- and nothing ever turns them
+#: back on. On a phone those are its owner's settings, so the call is kept for
+#: simulators only. It also marks the keyboard tutorials as seen, which a fresh
+#: simulator needs and a phone in use has done long since (#687 review). On a
+#: phone, WDA's typing then meets the owner's auto-correction: type_text reads
+#: the field back and reports a rewrite as an error, which is the trade chosen
+#: over changing their settings.
+_KEYBOARD_PREFERENCES = "  [FBConfiguration.sharedInstance configureDefaultKeyboardPreferences];\n"
+_SIMULATOR_ONLY = ("#if TARGET_OS_SIMULATOR\n" + _KEYBOARD_PREFERENCES
+                   + "#endif  // quern: a phone's keyboard settings are its owner's\n")
+_RUNNER_SETUP = Path("WebDriverAgentRunner") / "UITestingUITests.m"
 
 
 class SourceError(RuntimeError):
@@ -68,6 +88,29 @@ def _check_integrity(data: bytes, integrity: str) -> None:
                           "refusing to build it")
 
 
+def source_version(pin: Pin) -> str:
+    """The version quern's patched source of `pin` is recorded as."""
+    return f"{pin.version}+quern{PATCH_LEVEL}"
+
+
+def _patch(root: Path) -> None:
+    """quern's changes to the unpacked source: SourceError if one cannot be
+    made, so a moved pin that changed the line is caught rather than built
+    without it."""
+    runner = root / _RUNNER_SETUP
+    try:
+        text = runner.read_text()
+    except (OSError, UnicodeError) as e:
+        # UnicodeError too: it is a ValueError, which nothing above this turns
+        # into a source that could not be had (#687 review).
+        raise SourceError(f"WebDriverAgent's {_RUNNER_SETUP} could not be read: {e}") from None
+    if text.count(_KEYBOARD_PREFERENCES) != 1:
+        raise SourceError(
+            f"{_RUNNER_SETUP} no longer calls configureDefaultKeyboardPreferences once, "
+            "as quern's patch expects: check the patch against this WebDriverAgent")
+    runner.write_text(text.replace(_KEYBOARD_PREFERENCES, _SIMULATOR_ONLY))
+
+
 def fetched_version(dest: Path) -> str | None:
     """The version of the source in `dest`, or None: an old git clone, a
     partial unpack, or nothing at all."""
@@ -83,7 +126,7 @@ async def fetch(dest: Path, pin: Pin | None = None, *,
     already: True if it was fetched now. SourceError, saying why, if it cannot
     be had -- and then `dest` is as it was."""
     pin = pin or pinned()
-    if fetched_version(dest) == pin.version:
+    if fetched_version(dest) == source_version(pin):
         return False
     logger.info("Fetching WebDriverAgent %s from %s", pin.version, pin.tarball)
     own = client is None
@@ -101,7 +144,7 @@ async def fetch(dest: Path, pin: Pin | None = None, *,
     _check_integrity(data, pin.integrity)
     import asyncio
 
-    await asyncio.to_thread(_unpack, data, dest, pin.version)
+    await asyncio.to_thread(_unpack, data, dest, source_version(pin))
     return True
 
 
@@ -133,6 +176,7 @@ def _unpack(data: bytes, dest: Path, version: str) -> None:
         if not (scratch / "WebDriverAgent.xcodeproj" / "project.pbxproj").is_file():
             raise SourceError(f"WebDriverAgent {version}'s package holds no "
                               "WebDriverAgent.xcodeproj")
+        _patch(scratch)
         (scratch / MARKER).write_text(version + "\n")
         # Swapped, not deleted then renamed: there is no moment with no source,
         # and a rename that fails puts the old one back (review).

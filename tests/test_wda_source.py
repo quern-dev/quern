@@ -37,7 +37,16 @@ PROJECT = {"WebDriverAgent.xcodeproj": None,
            "WebDriverAgent.xcodeproj/project.pbxproj": b"// pbxproj",
            "WebDriverAgentLib": None,
            "WebDriverAgentLib/FBAlert.m": b"// alert",
+           "WebDriverAgentRunner": None,
+           "WebDriverAgentRunner/UITestingUITests.m": (
+               b"+ (void)setUp\n{\n"
+               b"  [FBConfiguration.sharedInstance disableRemoteQueryEvaluation];\n"
+               b"  [FBConfiguration.sharedInstance configureDefaultKeyboardPreferences];\n"
+               b"  [FBConfiguration.sharedInstance disableApplicationUIInterruptionsHandling];\n"
+               b"}\n"),
            "package.json": b'{"version": "9.9.9"}'}
+#: The version the patched source of a 9.9.9 pin records.
+RECORDED = f"9.9.9+quern{wda_source.PATCH_LEVEL}"
 
 
 def _integrity(data: bytes) -> str:
@@ -65,8 +74,8 @@ async def test_the_pinned_tarball_is_fetched_checked_and_unpacked(tmp_path):
                     "appium-webdriveragent-9.9.9.tgz"]
     assert (dest / "WebDriverAgent.xcodeproj" / "project.pbxproj").read_bytes() == b"// pbxproj"
     assert not (dest / "package").exists(), "npm's package/ prefix is stripped"
-    assert (dest / MARKER).read_text().strip() == "9.9.9"
-    assert wda_source.fetched_version(dest) == "9.9.9"
+    assert (dest / MARKER).read_text().strip() == RECORDED
+    assert wda_source.fetched_version(dest) == RECORDED
 
 
 async def test_the_version_already_there_is_not_fetched_again(tmp_path):
@@ -89,7 +98,7 @@ async def test_an_old_git_clone_is_replaced_by_the_pinned_version(tmp_path):
     async with _client(data, []) as client:
         assert await fetch(dest, _pin(data), client=client) is True
     assert not (dest / ".git").exists() and not (dest / "old-file").exists()
-    assert wda_source.fetched_version(dest) == "9.9.9"
+    assert wda_source.fetched_version(dest) == RECORDED
 
 
 async def test_a_moved_pin_fetches_the_new_version(tmp_path):
@@ -100,7 +109,7 @@ async def test_a_moved_pin_fetches_the_new_version(tmp_path):
     new = _tgz({**PROJECT, "package.json": b'{"version": "9.9.9"}', "NEW": b"x"})
     async with _client(new, []) as client:
         assert await fetch(dest, _pin(new, "9.9.9"), client=client) is True
-    assert (dest / "NEW").exists() and wda_source.fetched_version(dest) == "9.9.9"
+    assert (dest / "NEW").exists() and wda_source.fetched_version(dest) == RECORDED
 
 
 async def test_a_download_that_does_not_match_the_pin_is_refused_and_changes_nothing(tmp_path):
@@ -174,3 +183,68 @@ async def test_a_hard_link_in_the_package_is_unpacked(tmp_path):
     async with _client(data, []) as client:
         await fetch(dest, _pin(data), client=client)
     assert (dest / "WebDriverAgentLib" / "FBAlert-link.m").read_bytes() == b"// alert"
+
+
+
+class TestQuernsPatch:
+    """WDA's runner turned the phone's auto-correction and predictive text off
+    at every start, and nothing turned them back on (2026-11-14)."""
+
+    async def test_the_keyboard_preferences_call_is_kept_for_simulators_only(self, tmp_path):
+        data = _tgz(PROJECT)
+        dest = tmp_path / "WebDriverAgent"
+        async with _client(data, []) as client:
+            await fetch(dest, _pin(data), client=client)
+        setup = (dest / "WebDriverAgentRunner" / "UITestingUITests.m").read_text()
+        # Guarded, not deleted: a simulator still needs the keyboard tutorials
+        # it also dismisses (#687 review).
+        assert ("#if TARGET_OS_SIMULATOR\n"
+                "  [FBConfiguration.sharedInstance configureDefaultKeyboardPreferences];\n"
+                "#endif") in setup
+        assert setup.count("configureDefaultKeyboardPreferences") == 1
+        # Only that line: the rest of setUp is untouched.
+        assert "disableRemoteQueryEvaluation" in setup
+        assert "disableApplicationUIInterruptionsHandling" in setup
+
+    @pytest.mark.parametrize("runner", [
+        None,                                           # no runner at all
+        b"+ (void)setUp\n{\n}\n",                       # the call gone
+        b"+ (void)setUp\n{\n"                           # the call twice
+        b"  [FBConfiguration.sharedInstance configureDefaultKeyboardPreferences];\n"
+        b"  [FBConfiguration.sharedInstance configureDefaultKeyboardPreferences];\n}\n",
+        b"\xa9 not utf-8\n",                            # unreadable as text
+    ])
+    async def test_a_source_the_patch_cannot_be_made_on_is_refused(self, tmp_path, runner):
+        """A moved pin that changed the line is caught, not built without it;
+        the source already there stays."""
+        project = {k: v for k, v in PROJECT.items()
+                   if k != "WebDriverAgentRunner/UITestingUITests.m"}
+        if runner is not None:
+            project["WebDriverAgentRunner/UITestingUITests.m"] = runner
+        data = _tgz(project)
+        dest = tmp_path / "WebDriverAgent"
+        dest.mkdir()
+        (dest / "OLD").write_text("kept")
+        async with _client(data, []) as client:
+            with pytest.raises(SourceError, match="UITestingUITests"):
+                await fetch(dest, _pin(data), client=client)
+        assert (dest / "OLD").read_text() == "kept"
+        assert not (tmp_path / ".WebDriverAgent.partial").exists()
+
+    async def test_a_source_from_before_the_patch_is_fetched_again(self, tmp_path):
+        data = _tgz(PROJECT)
+        dest = tmp_path / "WebDriverAgent"
+        dest.mkdir()
+        (dest / MARKER).write_text("9.9.9\n")          # unpatched, same pin
+        seen: list = []
+        async with _client(data, seen) as client:
+            assert await fetch(dest, _pin(data), client=client) is True
+        assert seen and wda_source.fetched_version(dest) == RECORDED
+
+    def test_builds_made_without_the_patch_are_out_of_date(self):
+        """What wda.py pins includes the patch level, so a build recorded as
+        the bare version is rebuilt -- the path a pin bump takes."""
+        from server.device.ios.wda import pinned_wda_version
+        bare = wda_source.pinned().version
+        assert pinned_wda_version() == f"{bare}+quern{wda_source.PATCH_LEVEL}"
+        assert pinned_wda_version() != bare
