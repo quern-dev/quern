@@ -1811,17 +1811,20 @@ class DeviceController(DeviceControllerUI):
 
     #: How many of a phone's newest crash reports the check after a push read
     #: pulls (#669), about 0.5 s each. The crash it looks for has just happened.
-    _NEWEST_REPORTS = 6
+    _NEWEST_REPORTS = 4
+    _OWN_REPORTS = 2
 
     async def _crash_reports_since(
         self, udid: str, since: float, app: str = "",
     ) -> list[tuple[int | None, str]] | None:
-        """A phone's newest crash reports, each as (pid, text), the ones named
-        for `app` first; None when the phone cannot be asked at all.
+        """A phone's newest crash reports, each as (pid, text): the ones
+        named for `app` when there are any, else the newest; None when the
+        phone cannot be asked at all.
 
-        A report is named for its process, which is usually the app's name:
-        taking those first keeps a burst of others (Jetsam, faults) from
-        crowding out the one looked for.
+        A report is named for its process, which is the app's name for many
+        apps (not Apple's: Settings is Preferences): taking those alone keeps
+        a burst of others (Jetsam, faults) from crowding out the one looked
+        for. Either way only a pid match claims anything.
 
         For the push reader's check for a crash after a read (#669). Newest by
         the time in each report's name, which is the phone's local time, so
@@ -1847,8 +1850,10 @@ class DeviceController(DeviceControllerUI):
              if (t := ios_crash.report_time(n)) is not None and t >= cutoff),
             reverse=True)
         named = f"{app}-" if app.strip() else None
-        dated.sort(key=lambda tn: not (named and tn[1].startswith(named)))  # stable
-        names = [n for _, n in dated[:self._NEWEST_REPORTS]]
+        own = [n for _, n in dated if named and n.startswith(named)]
+        # The app's own reports alone when it has any, else the newest few:
+        # each costs a pull, and the poll needs time for a second look.
+        names = own[:self._OWN_REPORTS] or [n for _, n in dated[:self._NEWEST_REPORTS]]
         if not names:
             return []
         with tempfile.TemporaryDirectory() as out:
