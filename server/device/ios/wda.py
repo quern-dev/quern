@@ -316,7 +316,7 @@ def pinned_wda_version() -> str:
     """The WebDriverAgent version this quern builds (wda-pin.json)."""
     from server.device.ios import wda_source
 
-    return wda_source.pinned().version
+    return wda_source.source_version(wda_source.pinned())
 
 
 # ---------------------------------------------------------------------------
