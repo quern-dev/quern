@@ -32,8 +32,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from server.device.controller_ui import DeviceControllerUI
-from server.models import UIElement
+from server.device.controller_ui import _READ_BY, DeviceControllerUI
+from server.models import DeviceError, UIElement
 
 SCREEN = {"width": 393, "height": 852}
 ROW = 44.0
@@ -1014,3 +1014,117 @@ async def test_a_settle_never_outlives_the_deadline():
     assert timeouts[-1] < 2.5, (
         f"the last settle was given its full timeout past the deadline: {timeouts}"
     )
+
+
+# -- over CoreDevice: HID swipes, pushed reads (#678) -------------------------
+
+
+class PushedListScreen(ListScreen):
+    """The same list, swept as a phone with no WDA is: the HID backend names
+    its own drag speed and hold, and every read is asked of the push."""
+
+    def __init__(self, *, merged: str = "", fails_at: int | None = None, **kw):
+        super().__init__(**kw)
+        self.durations: list[float] = []
+        self.reads: list[dict] = []
+        self.merged = merged            # appended to each row's label: ", Detail"
+        self.fails_at = fails_at        # this read (1-based) falls back to WDA
+
+    coredevice_ax = type("Ax", (), {"TOOL_NAME": "coredevice"})()
+
+    def read_note(self):
+        return "QuernProbeScene (pid 711) exited while its screen was read"
+
+    @property
+    def coredevice_input(self):
+        backend = self._ui_backend("SIM")
+        backend.sweep_drag_pt_s = 250.0
+        backend.sweep_hold_s = 0.5
+        swipe = backend.swipe.side_effect
+
+        async def timed(*a, **k):
+            self.durations.append(a[5])
+            return await swipe(*a, **k)
+
+        backend.swipe = AsyncMock(side_effect=timed)
+        return backend
+
+    async def get_ui_elements(self, *a, **k):
+        self.reads.append(k)
+        els, udid = await super().get_ui_elements(*a, **k)
+        # Who served it: the push, unless this read is the one that fell back.
+        failed = self.fails_at is not None and len(self.reads) == self.fails_at
+        _READ_BY.set("wda" if failed else "coredevice")
+        if self.merged:
+            els = [e.model_copy(update={"label": e.label + self.merged})
+                   if e.label.startswith("Row ") else e for e in els]
+        return els, udid
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_sweep_drags_at_the_hid_backend_s_speed():
+    screen = PushedListScreen()
+    found = await _sweep(screen, "row_150", pushed=True)
+
+    assert found is not None and found.identifier == "row_150"
+    assert screen.durations and all(
+        # `drags` are fractions of the screen's height.
+        d == pytest.approx(drag * SCREEN["height"] / 250.0)
+        for d, drag in zip(screen.durations, screen.drags)
+    ), (screen.durations, screen.drags)
+    assert screen.holds and all(h == 0.5 for h in screen.holds)
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_sweep_reads_the_push_once_per_swipe():
+    """A push read answers a settled screen, so no second read confirms it."""
+    screen = PushedListScreen()
+    await _sweep(screen, "row_150", pushed=True)
+
+    full = [r for r in screen.reads if not (r.get("filter_label") or r.get("filter_identifier")
+                                            or r.get("filter_type"))]
+    assert full and all(r.get("whole_screen") is True for r in full), full
+    for group in screen.after_each_swipe():
+        # One full read; the push has no container probing to skip.
+        assert len(group) == 1 and group[0].endswith(":full"), group
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_sweep_asks_the_push_for_the_viewport_and_the_target():
+    screen = PushedListScreen()
+    await _sweep(screen, "row_150", pushed=True)
+
+    viewport = next(r for r in screen.reads if r.get("filter_type") == "Application")
+    assert viewport.get("lookup") is True
+    lookups = [r for r in screen.reads if r.get("filter_identifier")]
+    assert lookups and all(r.get("lookup") is True for r in lookups)
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_sweep_finds_a_row_by_its_title():
+    """The push merges a row's texts into one label: the sweep matches the
+    title, as a pushed lookup does (#672)."""
+    screen = PushedListScreen(merged=", Detail", ids=False)
+    found = await screen._ios_scroll_to_element("SIM", "Row 150", None, max_swipes=10,
+                                                pushed=True)
+    assert found is not None and found.label == "Row 150, Detail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails_at", [1, 2, 5])
+async def test_a_pushed_sweep_stops_on_a_read_that_was_not_the_push(fails_at):
+    """After a crash the fallback reads SpringBoard, where a match is an icon
+    (#685 review): the sweep stops instead of finishing on another reader."""
+    screen = PushedListScreen(fails_at=fails_at)
+    with pytest.raises(DeviceError, match="sweep stopped.*exited") as caught:
+        await _sweep(screen, "row_150", pushed=True)
+    assert "Nothing was tapped" in str(caught.value)
+    assert len(screen.reads) == fails_at          # nothing read after it
+
+
+def test_the_hid_sweep_speed_is_the_measured_one():
+    """250 pt/s: faster, a 672 pt drag carried an iPhone 11's list ~1,500 pt;
+    at this speed it moved 647-660 pt, six of six (#678)."""
+    from server.device.ios.coredevice_input import CoreDeviceInput
+    assert CoreDeviceInput.sweep_drag_pt_s == 250.0
+    assert CoreDeviceInput.sweep_hold_s == 0.5
