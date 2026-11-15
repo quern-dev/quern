@@ -875,6 +875,16 @@ class TestACrashAfterTheRead:
 
         assert seen == {"pid": 618, "app": "Safari", "previous_alive": False}
 
+    async def test_a_previous_app_still_running_says_so(self, monkeypatch, phone_address):
+        lib, state = _fake_lib([_as("InitialDump", SAFARI), SAFARI])
+        state.processes = [617, 618]                  # switched away, not gone
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        seen: dict = {}
+
+        await asyncio.wait_for(read_tree(PHONE, timeout=5, previous_pid=617, seen=seen), 10)
+
+        assert seen["previous_alive"] is True
+
     async def test_the_same_app_asks_nothing(self, monkeypatch, phone_address):
         lib, state = _fake_lib([_as("InitialDump", SAFARI), SAFARI])
         state.processes = None                        # a process query would raise
