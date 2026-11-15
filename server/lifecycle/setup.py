@@ -741,9 +741,9 @@ def build_preview_app() -> CheckResult:
         return result
 
     try:
-        from server.device.media.preview import build_preview_bundle
+        from server.device.media.preview import refresh_preview_app
 
-        build_preview_bundle()
+        refreshed = refresh_preview_app()
     except (RuntimeError, OSError) as e:
         # OSError as well as RuntimeError, per the error-path convention in
         # CONTRIBUTING: catch the base class, not the subclasses seen so far.
@@ -758,10 +758,26 @@ def build_preview_app() -> CheckResult:
             detail=str(e),
         )
 
+    if refreshed.left_running:
+        return CheckResult(
+            name=name,
+            status=CheckStatus.WARNING,
+            message="Built, but an older Quern Preview is still running",
+            detail="It would not quit: quit it and reopen Screen Mirror from the menu bar.",
+        )
+    if refreshed.relaunched and not refreshed.reopened:
+        return CheckResult(
+            name=name,
+            status=CheckStatus.WARNING,
+            message="Rebuilt, and quit the old window, but could not reopen it",
+            detail="Open Screen Mirror from the menu bar.",
+        )
+    reopened = " -- reopened the running window" if refreshed.relaunched else ""
     return CheckResult(
         name=name,
         status=CheckStatus.OK,
-        message="Built (available from the menu bar)",
+        message=("Rebuilt" if refreshed.rebuilt else "Up to date")
+        + f" (available from the menu bar){reopened}",
     )
 
 
