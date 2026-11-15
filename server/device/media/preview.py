@@ -216,15 +216,26 @@ def write_app_bundle(bundle: Path, digest: str) -> None:
     logger.info("Created app bundle: %s", bundle)
 
 
-#: The flags the compile is given, which go into the digest: a binary built
-#: with different frameworks is a different binary.
+#: The flags the local compile is given.
 _COMPILE_FLAGS = ("-framework", "AVFoundation", "-framework", "CoreMediaIO",
                   "-framework", "AppKit")
+
+#: Goes into the digest in place of the compile flags. Bump it when a change
+#: to how the app is built -- not to its sources -- must rebuild every copy.
+#: The flags themselves stay out: a release build of the same sources, signed
+#: and with its own target flags (#662), is the same app, and hashing the
+#: local flags would make it never match and be compiled over on any Mac with
+#: Xcode.
+_DIGEST_RECIPE = "ios-preview build 1"
 
 
 def source_digest(sources: list[Path]) -> str:
     """What the binary is built from, as a hash: each file's name and
-    contents, in order, and the compile flags.
+    contents, in order, and the build recipe.
+
+    The one function that stamps a bundle: a pre-built release copy (#662)
+    stamps itself with `expected_digest()` from the same sources, so a Mac
+    that installs it treats it as current.
 
     Content, not modification times. The times said nothing reliable: a
     release tarball stamps every file with its commit's time, so a binary
@@ -239,8 +250,15 @@ def source_digest(sources: list[Path]) -> str:
         h.update(p.name.encode() + b"\0")
         h.update(p.read_bytes())
         h.update(b"\0")
-    h.update(" ".join(_COMPILE_FLAGS).encode())
+    h.update(_DIGEST_RECIPE.encode())
     return h.hexdigest()
+
+
+def is_sealed(bundle: Path) -> bool:
+    """Whether the bundle carries a signature over its contents -- a signed
+    release copy (#662) does, a local build does not. A sealed bundle's
+    Info.plist is part of what is signed, so it is never rewritten."""
+    return (bundle / "Contents" / "_CodeSignature").exists()
 
 
 @dataclass(frozen=True)
@@ -309,7 +327,10 @@ def build_preview_bundle() -> Path:
     bundle, binary = bundle_paths()
     stamp = read_stamp(bundle)
     if binary.exists() and stamp.digest == digest:
-        if stamp.version != get_version():
+        # A signed copy keeps the version it was built with: rewriting its
+        # Info.plist would break the signature, and under the hardened
+        # runtime the camera is then refused without a prompt -- no devices.
+        if stamp.version != get_version() and not is_sealed(bundle):
             write_app_bundle(bundle, digest)
         return binary
 
@@ -379,6 +400,10 @@ def build_preview_bundle() -> Path:
             ) from exc
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+    # A signed copy's seal describes the binary just replaced: left, macOS
+    # can refuse the app as damaged. A local build is unsealed, as every
+    # local build has been.
+    shutil.rmtree(bundle / "Contents" / "_CodeSignature", ignore_errors=True)
     # Stamped last: a compile that fails before here leaves the old stamp, or
     # none, so the next check builds again rather than calling it current.
     write_app_bundle(bundle, digest)

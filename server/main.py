@@ -2215,6 +2215,8 @@ def _report_screen_mirror(fix: bool = False) -> tuple[bool, bool | None]:
     current = stamp.digest == expected
     if current and stamp.version == get_version():
         print(f"  \u2713 {built}, current")
+    elif current and preview.is_sealed(bundle):
+        print(f"  \u2713 {built}, current (a signed build keeps its own version)")
     elif current:
         print(f"  \u2713 {built}: the build is current; its version is "
               f"rewritten to {get_version()} at the next start")

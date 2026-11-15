@@ -378,3 +378,19 @@ class TestTheScreenMirrorSection:
         assert report(True) == (True, None)
         assert calls == []
         assert "the build is current" in capsys.readouterr().out
+
+    def test_a_current_signed_build_is_current_whatever_its_version(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        """A signed release copy keeps the version it was built with (#662):
+        not out of date, and nothing to rewrite."""
+        from server.device.media import preview
+        from server.device.media.preview import BundleStamp
+
+        report, calls = self._section(monkeypatch, tmp_path,
+                                      stamp=BundleStamp("0.26.0", "b" * 64))
+        monkeypatch.setattr(preview, "is_sealed", lambda b: True)
+
+        assert report(True) == (True, None)
+        assert calls == []
+        assert "a signed build keeps its own version" in capsys.readouterr().out

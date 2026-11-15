@@ -850,6 +850,57 @@ class TestTheStamp:
         assert compiled == []
         assert preview.read_stamp(bundle).version == "0.26.0"
 
+    def test_the_digest_is_the_sources_not_the_local_compile_flags(self, tmp_path, monkeypatch):
+        """A signed release copy (#662) is built with its own target flags
+        from the same sources: it must match, or every Mac with Xcode would
+        compile over it. A recipe change still rebuilds every copy."""
+        from server.device.media import preview
+
+        _stage(tmp_path, monkeypatch)
+        before = preview.expected_digest()
+        monkeypatch.setattr(preview, "_COMPILE_FLAGS", ("-target", "arm64-apple-macos14"))
+        assert preview.expected_digest() == before
+        monkeypatch.setattr(preview, "_DIGEST_RECIPE", "ios-preview build 2")
+        assert preview.expected_digest() != before
+
+    def test_a_signed_copy_is_never_restamped(self, tmp_path, monkeypatch):
+        """Its Info.plist is under its signature: rewriting it breaks the
+        signature, and the hardened runtime then refuses the camera with no
+        prompt -- no devices (#662)."""
+        from server.device.media import preview
+
+        bundle, binary, compiled = _stage(tmp_path, monkeypatch)
+        monkeypatch.setattr(preview, "get_version", lambda: "0.26.0")
+        preview.build_preview_bundle()
+        (bundle / "Contents" / "_CodeSignature").mkdir()
+        plist = (bundle / "Contents" / "Info.plist").read_bytes()
+        compiled.clear()
+        monkeypatch.setattr(preview, "get_version", lambda: "0.27.0")
+
+        preview.build_preview_bundle()
+
+        assert compiled == []
+        assert (bundle / "Contents" / "Info.plist").read_bytes() == plist
+
+    def test_a_local_rebuild_over_a_signed_copy_drops_its_seal(self, tmp_path, monkeypatch):
+        """A git checkout whose sources moved past the release's rebuilds
+        locally, the fallback #662 keeps. The old seal describes the binary
+        just replaced; left, macOS can call the app damaged."""
+        from server.device.media import preview
+
+        bundle, binary, compiled = _stage(tmp_path, monkeypatch)
+        preview.build_preview_bundle()
+        (bundle / "Contents" / "_CodeSignature").mkdir()
+        (bundle / "Contents" / "_CodeSignature" / "CodeResources").write_text("seal")
+        compiled.clear()
+        (tmp_path / "main.swift").write_text("// source, moved on")
+
+        preview.build_preview_bundle()
+
+        assert compiled
+        assert not preview.is_sealed(bundle)
+        assert preview.read_stamp(bundle).digest == preview.expected_digest()
+
     def test_an_unreadable_plist_reads_as_unstamped(self, tmp_path):
         from server.device.media import preview
 
