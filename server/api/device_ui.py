@@ -22,7 +22,7 @@ from server.api.device import (
 from server.device import frames
 from server.device.controller import DeviceController
 from server.knowledge import navigation
-from server.knowledge.landmarks import LandmarkRegistry, needs_page_urls
+from server.knowledge.landmarks import LandmarkRegistry, needs_page_urls, pushed_container_note
 from server.knowledge.session_landmarks import SessionLandmarks
 from server.models import (
     ClearTextRequest,
@@ -642,6 +642,10 @@ async def get_screen_summary(
             result = registry.identify(elements, page_urls=page_urls)
             summary["identified_as"] = result["matched"]
             summary["confidence"] = result["confidence"]
+            if controller.read_by() == controller.coredevice_ax.TOOL_NAME:
+                note = pushed_container_note(result)
+                if note:
+                    summary["identify_note"] = note
             # "Could not identify" and "identified nothing" read alike from
             # the two fields above; the reason, and the way forward, say which.
             if result.get("error"):

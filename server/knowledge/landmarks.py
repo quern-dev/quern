@@ -13,6 +13,7 @@ import yaml
 from pydantic import ValidationError
 
 from server.device.element_types import (
+    FAMILIES,
     element_rule,
     equivalence,
     portability_finding,
@@ -503,6 +504,37 @@ def identify_screen(
             "matched_landmarks": [],
             "partial_matches": partial_matches,
         }
+
+
+def pushed_container_note(result: dict) -> str | None:
+    """Why a screen missed on a read from the tree push, when only landmarks on
+    containers missed (#664).
+
+    The push carries no containers -- no Group, Table, TabBar or NavigationBar
+    -- so a landmark on one, recorded through WDA or a simulator, can never
+    match it, and the screen reads as not this one with nothing to say why.
+    None when no screen missed that way.
+    """
+    containers = {t.lower() for t in FAMILIES["containers"]}
+    missed = []
+    for partial in result.get("partial_matches") or []:
+        unmatched = [r["landmark"] for r in partial.get("landmarks") or []
+                     if not r.get("matched")]
+        if unmatched and all(
+                not lm.get("absent") and (lm.get("element") or "").lower() in containers
+                for lm in unmatched):
+            names = ", ".join(
+                f"{lm['element']} {lm.get('identifier') or lm.get('label') or ''}".strip()
+                for lm in unmatched)
+            missed.append(f"{partial['screen']} ({names})")
+    if not missed:
+        return None
+    return (
+        "Read from the tree the device pushes (backend coredevice), which has no "
+        "containers -- no Group, Table, TabBar or NavigationBar -- so a landmark on "
+        f"one cannot match it. Missed only on such landmarks: {'; '.join(missed)}. "
+        "Name an element inside the container instead (a button, a heading, a row), "
+        "or pass snapshot_depth to identify through WDA.")
 
 
 # ---------------------------------------------------------------------------

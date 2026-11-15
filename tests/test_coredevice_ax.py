@@ -915,11 +915,12 @@ class TestIdentifyingTheScreen:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
-        from server.api.landmarks import router
+        from server.api import device_ui, landmarks
         from server.knowledge.landmarks import LandmarkRegistry
 
         app = FastAPI()
-        app.include_router(router)
+        app.include_router(landmarks.router)
+        app.include_router(device_ui.router)
         app.state.landmark_registry = LandmarkRegistry()
         app.state.device_controller = ctrl
         client = TestClient(app)
@@ -948,6 +949,50 @@ class TestIdentifyingTheScreen:
 
         ctrl.wda_client.describe_all.assert_awaited()
         ctrl.coredevice_ax.describe_all.assert_not_called()
+
+    #: Settings' root as WDA records it: the table is a container, which the
+    #: push does not carry.
+    TABLE_SCREEN = {"tabled": {"landmarks": [
+        {"element": "Button", "identifier": "com.apple.settings.general"},
+        {"element": "Table", "identifier": "settings_table"}]}}
+
+    def test_a_container_landmark_missed_on_the_push_is_named(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        client = self._client(ctrl)
+        client.post("/api/v1/landmarks/load",
+                    json={"app": "tabled", "landmarks": self.TABLE_SCREEN}).raise_for_status()
+
+        result = client.post("/api/v1/landmarks/identify",
+                             json={"app": "tabled", "udid": PHONE}).json()
+
+        assert result["matched"] is None
+        assert "no containers" in result["note"]
+        assert "tabled (Table settings_table)" in result["note"]
+
+    def test_and_said_on_the_summary_too(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        client = self._client(ctrl)
+        client.delete("/api/v1/landmarks/", params={"app": "settings"}).raise_for_status()
+        client.post("/api/v1/landmarks/load",
+                    json={"app": "tabled", "landmarks": self.TABLE_SCREEN}).raise_for_status()
+
+        summary = client.get("/api/v1/device/screen-summary",
+                             params={"udid": PHONE, "identify": True}).json()
+
+        assert summary["identified_as"] is None
+        assert "tabled (Table settings_table)" in summary["identify_note"]
+
+    def test_not_on_a_read_through_wda(self, monkeypatch):
+        """WDA has the containers: a miss there is a real one."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        client = self._client(ctrl)
+        client.post("/api/v1/landmarks/load",
+                    json={"app": "tabled", "landmarks": self.TABLE_SCREEN}).raise_for_status()
+
+        result = client.post("/api/v1/landmarks/identify", json={
+            "app": "tabled", "udid": PHONE, "snapshot_depth": 12}).json()
+
+        assert "note" not in result
 
 
 class TestReadsInsideActionsStayOnWda:

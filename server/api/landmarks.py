@@ -21,6 +21,7 @@ from server.knowledge.landmarks import (
     check_conventions,
     conventions_report,
     needs_page_urls,
+    pushed_container_note,
     resolve_targets,
     scan_knowledge_base,
 )
@@ -364,7 +365,12 @@ async def identify_screen(request: Request, body: IdentifyRequest):
         await controller.web_page_urls(resolved)
         if needs_page_urls(registry.all_screens(body.app)) else None
     )
-    return registry.identify(elements, app=body.app, page_urls=page_urls)
+    result = registry.identify(elements, app=body.app, page_urls=page_urls)
+    if controller.read_by() == controller.coredevice_ax.TOOL_NAME:
+        note = pushed_container_note(result)
+        if note:
+            result["note"] = note
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -1171,3 +1171,55 @@ def test_an_empty_listing_is_evidence_but_no_listing_is_not():
     elements = [_ui("Button", "Done")]
     assert identify_screen(elements, screens, [])["matched"] == "not-settings"
     assert identify_screen(elements, screens, None)["matched"] is None
+
+
+# ---------------------------------------------------------------------------
+# pushed_container_note (#664)
+# ---------------------------------------------------------------------------
+
+
+class TestThePushedContainerNote:
+    """The tree push carries no containers, so a screen that missed only on
+    landmarks on them is named, with why."""
+
+    @staticmethod
+    def _identify(*landmarks: Landmark, elements: list[UIElement] | None = None) -> dict:
+        from server.knowledge.landmarks import identify_screen as identify
+
+        return identify(elements or [_el("Button", "OK", "ok")],
+                        [ScreenLandmarks(screen="s", landmarks=list(landmarks))])
+
+    def test_a_miss_only_on_containers_is_named(self):
+        from server.knowledge.landmarks import pushed_container_note
+
+        result = self._identify(Landmark(element="Button", identifier="ok"),
+                                Landmark(element="Group", identifier="table"),
+                                Landmark(element="TabBar", label="Tab Bar"))
+
+        note = pushed_container_note(result)
+        assert "s (Group table, TabBar Tab Bar)" in note
+
+    def test_not_when_anything_else_missed(self):
+        from server.knowledge.landmarks import pushed_container_note
+
+        result = self._identify(Landmark(element="Button", identifier="gone"),
+                                Landmark(element="Group", identifier="table"))
+
+        assert pushed_container_note(result) is None
+
+    def test_not_for_an_absent_container(self):
+        """A container that must be absent and is there was not missed for
+        want of containers."""
+        from server.knowledge.landmarks import pushed_container_note
+
+        result = self._identify(Landmark(element="Button", identifier="ok"),
+                                Landmark(element="Group", identifier="x", absent=True),
+                                elements=[_el("Button", "OK", "ok"), _el("Group", "", "x")])
+
+        assert pushed_container_note(result) is None
+
+    def test_not_when_the_screen_matched(self):
+        from server.knowledge.landmarks import pushed_container_note
+
+        assert pushed_container_note(
+            self._identify(Landmark(element="Button", identifier="ok"))) is None
