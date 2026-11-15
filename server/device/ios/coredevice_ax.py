@@ -68,6 +68,12 @@ ATTR_FRAME = 21
 ATTR_IDENTIFIER = 25  # only in the AdditionalData push
 ATTR_VALUE = 53
 ATTR_TRAITS = 77
+#: The push types a password field as a plain TextField. Measured on an
+#: iPhone 11 across a screen of 42 elements, five of them text fields: this
+#: trait bit is on the password field, empty or filled, and on nothing else.
+#: Not attribute 28, which looked like a marker on that screen and is True on
+#: Safari's page text and links too (#690 review).
+TRAIT_SECURE_TEXT = 0x1000000
 
 #: UIAccessibilityTraits bits. The public ones are UIKit's; the two private
 #: ones are inferred from where they appeared: `TOGGLE` only on Settings'
@@ -380,7 +386,7 @@ def parse_tree(data: bytes) -> Tree:
         elements.append({
             "type": etype,
             "role": f"AX{etype}",
-            "role_description": "AXSearchField" if traits & TRAIT_SEARCH_FIELD else "",
+            "role_description": _role_description(etype, traits),
             "AXLabel": _text(bundle.get(ATTR_LABEL)) or "",
             "AXUniqueId": _text(bundle.get(ATTR_IDENTIFIER)),
             "AXValue": _text(bundle.get(ATTR_VALUE)),
@@ -393,6 +399,16 @@ def parse_tree(data: bytes) -> Tree:
     if not elements:
         raise AxTreeError(f"{dump_type or 'tree dump'} holds no elements")
     return Tree(dump_type, elements, app_pid, refs)
+
+
+def _role_description(etype: str, traits: int) -> str:
+    """A search field's or a password field's subrole, as the simulator's
+    tree reports them -- which is where quern's own rules look for them."""
+    if etype == "TextField" and traits & TRAIT_SECURE_TEXT:
+        # Unmarked, a password field's dots read as a rewrite of the typed
+        # text, and as the keyboard's doing, so its value got set (#664).
+        return "AXSecureTextField"
+    return "AXSearchField" if traits & TRAIT_SEARCH_FIELD else ""
 
 
 def _ref(translation: Any) -> tuple[int, int] | None:

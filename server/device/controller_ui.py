@@ -5339,6 +5339,9 @@ class DeviceControllerUI:
         outcome = self._typing_outcome(before, after, text, secure)
         result: dict = {"udid": udid, "verified": True, "input": via}
         correction = (None if secure or after is None or outcome == "landed"
+                      # Only dots is a password field, marked or not: never
+                      # set, and its dots are not a keyboard's change.
+                      or (after and set(after) == {"\u2022"})
                       else _keyboard_correction(before, after, keys, text))
         if correction is not None and self._push_crashed_apps.get(udid):
             # The set reads the push, which has crashed an app on this device
