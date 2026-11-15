@@ -380,18 +380,30 @@ class TestANewSession:
             events.append(("sleep", s))
         monkeypatch.setattr(coredevice_input, "_sleep", sleep)
         lib.sent = _Recording(lib.sent, events)
+        connect = lib.ns.UniversalHID.connect
+
+        async def noted_connect(self):
+            events.append(("connected",))
+            return await connect(self)
+        monkeypatch.setattr(lib.ns.UniversalHID, "connect", noted_connect)
         hid = CoreDeviceInput(wda)
 
         await hid.tap(PHONE, 5, 6)
+        # After the HID service connects, before the first report.
+        connected = events.index(("connected",))
         first_touch = next(i for i, e in enumerate(events) if e[0] == "touch")
-        assert ("sleep", 0.5) in events[:first_touch]
+        assert ("sleep", 0.5) in events[connected:first_touch], events
 
         events.clear()
         await hid.tap(PHONE, 5, 6)                   # the same session
         assert ("sleep", 0.5) not in events
 
     async def test_cancelled_while_waiting_closes_what_it_opened(self, lib, wda, monkeypatch):
-        async def never(_s):
+        monkeypatch.setattr(coredevice_input, "FIRST_REPORT_S", 0.5)
+        waited: list = []
+
+        async def never(s):
+            waited.append(s)
             await asyncio.Event().wait()
         monkeypatch.setattr(coredevice_input, "_sleep", never)
         hid = CoreDeviceInput(wda)
@@ -403,6 +415,9 @@ class TestANewSession:
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
+        # Cancelled in the first-report wait, before anything was sent -- not
+        # mid-tap, whose own cleanup would close them as well.
+        assert waited == [0.5] and lib.sent == []
         assert "hid" in lib.closed and "rsd" in lib.closed
         assert PHONE not in hid._sessions
 

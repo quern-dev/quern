@@ -57,8 +57,10 @@ CONNECT_S = 5.0
 #: How long a newly opened HID session waits before its first report. One
 #: sent sooner is dropped: measured on an iPhone 11, a tap on Settings' General
 #: row straight after opening did nothing, three of three, and after 0.5 s
-#: opened General, three of three. pymobiledevice3 found the same (0.5 s, its
-#: TOUCH_AUTH_SETTLE_SECONDS). Sessions close after IDLE_CLOSE_S, so without
+#: opened General, three of three. Only 0 s and 0.5 s were measured.
+#: pymobiledevice3 waits 0.5 s too, but after starting a media stream, which
+#: quern does not open: its TOUCH_AUTH_SETTLE_SECONDS is a related wait, not
+#: this one. Sessions close after IDLE_CLOSE_S, so without
 #: this the first tap or swipe after any minute's pause was lost -- a scroll
 #: sweep read the dropped drag as the end of the list and swept back up.
 FIRST_REPORT_S = 0.5
