@@ -351,7 +351,20 @@ class TestTapAndSwipe:
         monkeypatch.setattr(coredevice_input, "_sleep",
                             AsyncMock(side_effect=lambda s: slept.append(s)))
         await CoreDeviceInput(wda).swipe(PHONE, 10, 10, 10, 100, duration=0.1, hold=0.4)
-        assert slept[-1] == 0.4
+        # The hold's sleeps come last, and add up to it.
+        hold = slept[-24:]
+        assert hold == [pytest.approx(1 / 60)] * 24
+        assert sum(hold) == pytest.approx(0.4)
+
+    async def test_the_held_contact_is_reported_throughout(self, lib, wda, monkeypatch):
+        """Still, at the end point, then lifted (#678)."""
+        monkeypatch.setattr(coredevice_input, "_sleep", AsyncMock())
+        await CoreDeviceInput(wda).swipe(PHONE, 10, 10, 10, 100, duration=0.1, hold=0.4)
+        touches = lib.touches()
+        end = touches[-1][2:]
+        held = touches[-25:-1]
+        assert held == [("touch", CONTACT, *end)] * 24
+        assert touches[-1][1] == RELEASE
 
 
 class TestNeverReSent:

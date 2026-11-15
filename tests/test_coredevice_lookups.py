@@ -342,7 +342,6 @@ class TestTapElement:
         assert result["matched_via"] == "merged_label"
         ctrl.coredevice_input.tap.assert_awaited_once()
         ctrl.wda_client.is_hittable.assert_not_called()      # the push is the reachable set
-        ctrl.wda_client.tap.assert_not_called()
         # One read: the push reader answers a settled screen, so there is no
         # second read to see whether the row moved.
         ctrl.coredevice_ax.describe_all.assert_awaited_once()
@@ -383,12 +382,10 @@ class TestTapElement:
 
         assert result["status"] == "not_found"
         ctrl.coredevice_ax.describe_all.assert_not_called()
-        ctrl.wda_client.tap.assert_not_called()
 
-    async def test_a_pushed_miss_leaves_the_sweeps_opening_lookup(self, monkeypatch):
-        """The push holds what VoiceOver reaches; its miss proves nothing about
-        WDA's tree, so the sweep still makes its first lookup -- the one read
-        that looks deeper (CodeRabbit on #672)."""
+    async def test_a_pushed_miss_sweeps_through_the_push(self, monkeypatch):
+        """The sweep reads and swipes over CoreDevice too (#678), so the pushed
+        miss is its own kind of read and is not taken again."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         _wda_depth_spies(ctrl)
         ctrl._identify_for_miss = AsyncMock(return_value={})
@@ -396,11 +393,14 @@ class TestTapElement:
 
         await ctrl.tap_element(label="Nowhere", udid=PHONE, scroll_to_find=True)
 
-        assert ctrl._ios_scroll_to_element.await_args.kwargs["target_known_absent"] is False
+        kwargs = ctrl._ios_scroll_to_element.await_args.kwargs
+        assert kwargs["pushed"] is True
+        assert kwargs["target_known_absent"] is True
 
-    async def test_after_the_wda_sweep_the_stability_check_runs(self, monkeypatch):
-        """The sweep finds the target through WDA after a swipe, while the list
-        may still be moving: the push's 'settled' reason no longer holds."""
+    async def test_after_a_pushed_sweep_nothing_asks_wda(self, monkeypatch):
+        """The sweep read through the push too (#678): what it found is the
+        push's settled read, so no WDA re-check or reachability query follows
+        -- on a phone with no WDA either would fail or start one."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         _wda_depth_spies(ctrl)
         ctrl._identify_for_miss = AsyncMock(return_value={})
@@ -413,10 +413,77 @@ class TestTapElement:
         result = await ctrl.tap_element(label="Far", udid=PHONE, scroll_to_find=True)
 
         assert result["status"] == "ok", result
-        # The re-check: a WDA read of the target by its label. (The other
-        # direct query here is the reachability check's, for the viewport.)
-        assert any(c.kwargs.get("label") == "Far"
-                   for c in ctrl._wda_direct_query.await_args_list)
+        ctrl._wda_direct_query.assert_not_called()
+        ctrl.coredevice_input.tap.assert_awaited_once()
+
+
+class TestPushedSweeps:
+    """#678 and its review: what decides a sweep is pushed, and what it keeps."""
+
+    async def test_a_row_the_sweep_found_by_its_title_is_tapped(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        _wda_depth_spies(ctrl)
+        ctrl._identify_for_miss = AsyncMock(return_value={})
+        ctrl.coredevice_input.tap = AsyncMock(return_value="coredevice")
+        row = UIElement(type="Button", label="Far, Detail", identifier=None,
+                        frame={"x": 20, "y": 400, "width": 374, "height": 52})
+        ctrl._ios_scroll_to_element = AsyncMock(return_value=row)
+
+        result = await ctrl.tap_element(label="Far", udid=PHONE, scroll_to_find=True)
+
+        assert result["status"] == "ok", result
+        assert "merged_label" in result.get("matched_via", "")
+
+    @pytest.mark.parametrize(("depth", "pushed"), [(None, True), (12, False)])
+    async def test_scroll_to_element_sweeps_the_push_unless_given_a_depth(
+            self, monkeypatch, depth, pushed):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        _wda_depth_spies(ctrl)
+        ctrl._ios_scroll_to_element = AsyncMock(return_value=None)
+
+        result = await ctrl.scroll_to_element(udid=PHONE, label="Far", snapshot_depth=depth)
+
+        assert ctrl._ios_scroll_to_element.await_args.kwargs["pushed"] is pushed
+        if pushed:
+            # Not "read through WDA at snapshot_depth": the sweep read the push.
+            assert "tree the device pushes" in result["detail"]
+            assert "snapshot_depth" not in result
+
+    async def test_a_device_the_push_crashed_an_app_on_sweeps_through_wda(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        _wda_depth_spies(ctrl)
+        ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
+        ctrl._ios_scroll_to_element = AsyncMock(return_value=None)
+
+        await ctrl.scroll_to_element(udid=PHONE, label="Far")
+
+        assert ctrl._ios_scroll_to_element.await_args.kwargs["pushed"] is False
+
+    async def test_scroll_into_view_swipes_over_hid_and_looks_up_in_the_push(
+            self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        low = UIElement(type="Button", label="Far, Detail", identifier=None,
+                        frame={"x": 20, "y": 860, "width": 374, "height": 52})
+        high = low.model_copy(update={"frame": {**low.frame, "y": 700}})
+        reads = []
+
+        async def get_ui_elements(*a, **k):
+            reads.append(k)
+            return ([low] if len(reads) == 1 else [high]), PHONE
+        ctrl.get_ui_elements = get_ui_elements
+        ctrl.coredevice_input.swipe = AsyncMock(return_value="coredevice")
+        ctrl.wda_client.swipe = AsyncMock()
+
+        found = await ctrl._scroll_element_into_view(
+            PHONE, "Far", None, None, None, None, 896, 414, pushed=True)
+
+        assert found is not None and found.frame["y"] == 700
+        ctrl.coredevice_input.swipe.assert_awaited_once()
+        ctrl.wda_client.swipe.assert_not_called()
+        assert all(r.get("lookup") is True for r in reads)
+        # 100 pt at the HID sweep speed, held at the end.
+        args, kwargs = ctrl.coredevice_input.swipe.await_args
+        assert args[5] == pytest.approx(100 / 250) and kwargs["hold"] == 0.5
 
 
 class TestOtherReadsStayOnWda:
