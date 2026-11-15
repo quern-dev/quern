@@ -165,6 +165,7 @@ def lib(monkeypatch):
     monkeypatch.setattr("server.device.performance._device_address",
                         AsyncMock(return_value=("fd00::1", 51000)))
     monkeypatch.setattr(coredevice_input, "TAP_HOLD_S", 0)
+    monkeypatch.setattr(coredevice_input, "FIRST_REPORT_S", 0)
     monkeypatch.setattr(coredevice_input, "KEY_HOLD_S", 0)
     return fake
 
@@ -365,6 +366,57 @@ class TestTapAndSwipe:
         held = touches[-25:-1]
         assert held == [("touch", CONTACT, *end)] * 24
         assert touches[-1][1] == RELEASE
+
+
+class TestANewSession:
+    """Its first report waits: sent at once, the iPhone 11 dropped it, three of
+    three (a tap on Settings' General row did nothing)."""
+
+    async def test_the_first_report_waits_and_later_ones_do_not(self, lib, wda, monkeypatch):
+        monkeypatch.setattr(coredevice_input, "FIRST_REPORT_S", 0.5)
+        events: list = []
+
+        async def sleep(s):
+            events.append(("sleep", s))
+        monkeypatch.setattr(coredevice_input, "_sleep", sleep)
+        lib.sent = _Recording(lib.sent, events)
+        hid = CoreDeviceInput(wda)
+
+        await hid.tap(PHONE, 5, 6)
+        first_touch = next(i for i, e in enumerate(events) if e[0] == "touch")
+        assert ("sleep", 0.5) in events[:first_touch]
+
+        events.clear()
+        await hid.tap(PHONE, 5, 6)                   # the same session
+        assert ("sleep", 0.5) not in events
+
+    async def test_cancelled_while_waiting_closes_what_it_opened(self, lib, wda, monkeypatch):
+        async def never(_s):
+            await asyncio.Event().wait()
+        monkeypatch.setattr(coredevice_input, "_sleep", never)
+        hid = CoreDeviceInput(wda)
+
+        task = asyncio.ensure_future(hid.tap(PHONE, 5, 6))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        assert "hid" in lib.closed and "rsd" in lib.closed
+        assert PHONE not in hid._sessions
+
+
+class _Recording(list):
+    """`lib.sent`, also noting each report in a shared event list."""
+
+    def __init__(self, sent, events):
+        super().__init__(sent)
+        self._events = events
+
+    def append(self, item):
+        self._events.append(item)
+        super().append(item)
 
 
 class TestNeverReSent:
