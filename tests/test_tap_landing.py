@@ -152,6 +152,19 @@ async def test_an_element_that_is_there_is_tapped():
     backend.tap.assert_awaited_once()
 
 
+async def test_a_simulator_childs_own_text_is_still_the_element():
+    """A simulator's hit-test answers with the element, not its deepest text,
+    so the phone's label rule (#664) is not applied there: a child inside the
+    target is the target, whatever it says."""
+    row = element("Sound", 36, 53, 321, 28, "Button", "sound_row")
+    ctrl, backend = _controller(target=row,
+                                describe=lambda *a: hit("Haptics", 60, 58, 120, 18, "StaticText"))
+    result = await _tap(ctrl, identifier="sound_row")
+
+    assert result["status"] == "ok", result
+    backend.tap.assert_awaited_once()
+
+
 async def test_an_element_off_screen_is_not_tapped():
     """Rows below the screen were tapped at a point outside it, and "ok"."""
     below = element("Passcode", 16, 900, 361, 52)
