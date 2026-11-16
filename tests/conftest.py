@@ -238,6 +238,19 @@ def _reset_active_device_sidecar():
 
 
 @pytest.fixture(autouse=True)
+def _wda_available_by_default(monkeypatch):
+    """Answer "WDA can run" without asking the Mac (#664): the real check
+    runs `xcodebuild -version` and looks for a build, and a test must not.
+    Tests of the no-WDA paths set it to a reason; tests of the check itself
+    call `server.tooling.wda_availability._check`."""
+    from server.tooling import wda_availability
+
+    async def available():
+        return None
+    monkeypatch.setattr(wda_availability, "wda_unavailable_reason", available)
+
+
+@pytest.fixture(autouse=True)
 def _default_xcode_available(monkeypatch):
     """Default xcode_available() to True so existing iOS-backend tests work
     regardless of whether the CI runner has Xcode installed. Each consumer

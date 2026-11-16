@@ -585,6 +585,18 @@ class WdaBackend:
             )
 
         _refuse_if_held(udid, "start")
+        # Not started where it cannot run: with no Xcode, or none built, the
+        # attempt is a failure that names neither (#664).
+        from server.tooling.wda_availability import wda_unavailable_reason
+
+        reason = await wda_unavailable_reason()
+        if reason:
+            from server.models import WdaNotSetUpError
+
+            raise WdaNotSetUpError(
+                f"This needs WebDriverAgent on {udid[:8]}, and there is none to start: "
+                f"{reason}. An iPhone on iOS 27 or later is driven without it; "
+                "otherwise install Xcode and run the setup_wda tool.", tool="wda")
         logger.info("WDA not reachable on %s, auto-starting driver...", udid[:8])
         from server.device.ios.wda import start_driver
 

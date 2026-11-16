@@ -936,9 +936,49 @@ class DeviceControllerUI:
         # the app would put the next read straight back on the push and crash
         # it again (CodeRabbit on #668). Telling the app in front first would
         # cost a WDA call per read; until the server restarts, WDA reads it.
-        if self._push_crashed_apps.get(udid):
+        if self._crash_latched(udid):
             return None
         return self.coredevice_ax
+
+    def _crash_latched(self, udid: str) -> set[str]:
+        """The apps a push read crashed on this device (#669), when that sends
+        its reads to WDA: not when there is no WDA to send them to, where they
+        stay on the push and each crash is said as it happens (#664)."""
+        if self._wda_missing:
+            return set()
+        return self._push_crashed_apps.get(udid, set())
+
+    async def _no_wda_fallback(self, udid: str) -> str | None:
+        """Why a physical device has no WDA to fall back on, or None when it
+        has one. Remembered, so the routing that asks it synchronously
+        (`_crash_latched`) follows."""
+        if self._device_type(udid) != DeviceType.DEVICE:
+            return None
+        from server.tooling.wda_availability import wda_unavailable_reason
+
+        self._wda_missing = await wda_unavailable_reason()
+        return self._wda_missing
+
+    async def _push_after_a_crash(self, reader, udid: str, crash: DeviceError, no_wda: str,
+                                  source_timeout: float | None, probe: bool):
+        """The push's read of what a crash left, where there is no WDA to read
+        it instead (#664). Recorded as a crash all the same, so an action
+        whose own read it was still refuses (#698)."""
+        self._push_crashed_apps.setdefault(udid, set()).add(getattr(crash, "app", ""))
+        try:
+            raw = await reader.describe_all(udid, snapshot_depth=None,
+                                            source_timeout=source_timeout, probe=probe)
+        except DeviceError as again:
+            raise DeviceError(
+                f"{crash}. There is no WebDriverAgent to read it through instead "
+                f"({no_wda}), and the push could not read what the crash left "
+                f"either: {again}", tool=self.coredevice_ax.TOOL_NAME) from again
+        _READ_NOTE.set(
+            f"{crash}. There is no WebDriverAgent to read it through instead "
+            f"({no_wda}), so this is the push's read of what the crash left; this "
+            "device stays on the push, and a read of that screen may crash the app "
+            "again.")
+        return raw
 
     def _input_backend(self, udid: str):
         """Who delivers a tap, swipe or button press to this device.
@@ -3247,15 +3287,35 @@ class DeviceControllerUI:
         bare: BareAppTree | None = None
         if reader is not None:
             self._last_read_backend[resolved] = reader.TOOL_NAME
+            failed: DeviceError | None = None
             try:
                 pushed_raw = await reader.describe_all(
                     resolved, snapshot_depth=None,
                     source_timeout=source_timeout, probe=probe_containers,
                 )
-            except DeviceError as e:
-                # The reader is new and opt-in; a read it cannot make is made
-                # the way it was before, and `backend` on the answer says
-                # which one served it.
+            except DeviceError as caught:
+                failed = caught
+            # A read the push cannot make is made through WDA, and `backend`
+            # on the answer says which one served it -- where there is a WDA.
+            # Where there is none (no Xcode, or none built), the answer says so
+            # instead, and the device stays on the push (#664).
+            no_wda = await self._no_wda_fallback(resolved) if failed is not None else None
+            if failed is not None and no_wda is not None:
+                if isinstance(failed, AppExitedDuringRead) and not lookup:
+                    pushed_raw = await self._push_after_a_crash(
+                        reader, resolved, failed, no_wda, source_timeout, probe_containers)
+                else:
+                    if isinstance(failed, AppExitedDuringRead):
+                        self._push_crashed_apps.setdefault(resolved, set()).add(failed.app)
+                    raise DeviceError(
+                        f"{failed}. " + ("Nothing was looked up: the screen this lookup "
+                                         "was for is gone. "
+                                         if isinstance(failed, AppExitedDuringRead) else "")
+                        + "There is no WebDriverAgent to read it through instead: "
+                        f"{no_wda}. This device stays on the accessibility push; "
+                        "read the screen again.", tool=self.coredevice_ax.TOOL_NAME) from failed
+            elif failed is not None:
+                e = failed
                 logger.warning("[coredevice] read of %s failed, using WDA: %s",
                                resolved[:8], e)
                 if isinstance(e, AppExitedDuringRead):
@@ -5415,7 +5475,7 @@ class DeviceControllerUI:
         # keystrokes over HID with no push to read the field back -- and no
         # correction -- arrived as kana on a Japanese keyboard and were only
         # reported (phase 4 run). Untargeted typing reads nothing, so it stays.
-        crashed = self._push_crashed_apps.get(resolved)
+        crashed = self._crash_latched(resolved)
         if (self._coredevice_serves(resolved) and snapshot_depth is None
                 and not (crashed and (label or identifier))):
             return await self._type_over_coredevice(resolved, text, label, identifier)

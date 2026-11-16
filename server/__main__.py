@@ -644,6 +644,48 @@ def _cmd_grant_full_perms() -> int:
     return 0
 
 
+def _cmd_set_device_reader(args: list[str]) -> int:
+    """Read or set how quern drives a physical iPhone.
+
+    Usage:
+        quern set-device-reader no-wda|wda
+        quern set-device-reader          # print the current setting
+
+    `no-wda`, the default (#664), reads the screen from the accessibility
+    tree the phone pushes and taps and types over its HID service, on iOS 27
+    and later: no Xcode, no signing. `wda` drives it through WebDriverAgent,
+    which has to be built with Xcode. Says which, and whether WDA can run
+    here, since a WDA setting on a Mac without Xcode cannot work.
+    """
+    import asyncio
+
+    from server.config import get_device_ui_reader, set_device_ui_reader
+    from server.tooling.wda_availability import wda_unavailable_reason
+
+    names = {"coredevice": "no-wda", "wda": "wda"}
+    if args:
+        wanted = {"no-wda": "coredevice", "nowda": "coredevice", "coredevice": "coredevice",
+                  "wda": "wda"}.get(args[0].lower())
+        if wanted is None:
+            print(f"Unknown value {args[0]!r}. Use 'no-wda' or 'wda'.", file=sys.stderr)
+            return 2
+        set_device_ui_reader(wanted)
+    reader = get_device_ui_reader()
+    print(f"iPhone control: {names[reader]}")
+    reason = asyncio.run(wda_unavailable_reason())
+    if reader == "coredevice":
+        print("Phones on iOS 27 and later are driven without WebDriverAgent.")
+        if reason:
+            print(f"Older phones need WebDriverAgent, which cannot run here: {reason}.")
+    elif reason:
+        print(f"WebDriverAgent cannot run here: {reason}. Phones on iOS 27 and later "
+              "are driven without it until it can; `quern set-device-reader no-wda` "
+              "makes that the setting.")
+    else:
+        print("Phones are driven through WebDriverAgent.")
+    return 0
+
+
 def _cmd_set_auto_install_cert(args: list[str]) -> int:
     """Read or set the automatic CA-install policy.
 
@@ -1257,6 +1299,10 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "set-auto-install-cert":
         sys.exit(_cmd_set_auto_install_cert(
             _check_args("set-auto-install-cert", sys.argv[2:], operands=1)))
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "set-device-reader":
+        sys.exit(_cmd_set_device_reader(
+            _check_args("set-device-reader", sys.argv[2:], operands=1)))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "set-update-check":
         sys.exit(_cmd_set_update_check(

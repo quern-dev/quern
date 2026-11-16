@@ -2143,6 +2143,34 @@ def _report_disk() -> None:
         print(f"  {line}")
 
 
+def _report_iphone_control() -> None:
+    """How a physical iPhone is driven, and whether WebDriverAgent can run
+    here (#664). Diagnostic only: no WDA is a supported setup."""
+    import asyncio
+
+    from server.config import get_device_ui_reader
+    from server.tooling.wda_availability import wda_unavailable_reason
+
+    reader = get_device_ui_reader()
+    try:
+        reason = asyncio.run(wda_unavailable_reason())
+    except Exception as e:  # noqa: BLE001 -- a check that could not run is said
+        print("iPhone control:")
+        print(f"  ? WebDriverAgent not checked — {e}")
+        return
+    print("iPhone control:")
+    print("  ✓ " + ("without WebDriverAgent (iOS 27 and later)" if reader == "coredevice"
+                    else "through WebDriverAgent"))
+    if reason:
+        mark = "✗" if reader == "wda" else "·"
+        print(f"  {mark} WebDriverAgent cannot run here: {reason}")
+        if reader == "wda":
+            print("    Phones on iOS 27 and later are driven without it until it can: "
+                  "`quern set-device-reader no-wda`.")
+    else:
+        print("  ✓ WebDriverAgent can run here")
+
+
 def _cmd_doctor(args: argparse.Namespace) -> None:
     """Diagnostics: device tools, venv, tool versions, service health. Read-only,
     except that it records the MCP client finding the Quern app shows.
@@ -2180,6 +2208,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
             print(f"  {'✓' if ok else '✗'} {name}")
 
     _report_held_sessions()
+    _report_iphone_control()
     _report_disk()
     _report_bind()
     repaired = _report_python_deps(fix)
@@ -2861,6 +2890,8 @@ def cli() -> None:
             "  set-auto-install-cert [on|off]\n"
             "                                Show or set automatic capture-certificate install\n"
             "  set-update-check [on|off]     Show or set the automatic update check\n"
+            "  set-device-reader [no-wda|wda]\n"
+            "                                Show or set how a physical iPhone is driven\n"
             "  install-precommit-hook        Install the pre-commit checklist hook\n"
             "  menubar [status|open|install] Show, start, or install the Quern app (menu bar)\n"
             "  tunneld <cmd>                 Manage the tunneld LaunchDaemon\n"

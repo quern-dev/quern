@@ -58,6 +58,9 @@ quern remote forget NAME     # Forget one
 quern set-update-check [on|off]
                              # Show or set the automatic daily update check
                              #   (default: on). check-updates works either way.
+quern set-device-reader [no-wda|wda]
+                             # Show or set how a physical iPhone is driven: without
+                             #   WebDriverAgent (iOS 27+, the default) or through it
 quern set-auto-install-cert [on|off]
                              # Show or set whether the capture certificate is installed
                              #   automatically, or Quern asks first (default: ask)

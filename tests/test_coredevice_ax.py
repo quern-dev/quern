@@ -2182,11 +2182,13 @@ class TestTheSetting:
     @pytest.mark.parametrize(("raw", "expected"), [
         ({"device_ui_reader": "coredevice"}, "coredevice"),
         ({"device_ui_reader": "wda"}, "wda"),
-        ({"device_ui_reader": "CoreDevice"}, "wda"),   # a typo is not consent
-        ({"device_ui_reader": True}, "wda"),
-        ({}, "wda"),
+        # No WDA is the default (#664): only the literal chooses WDA, so a
+        # typo, or never having chosen, works on a Mac without Xcode.
+        ({"device_ui_reader": "WDA"}, "coredevice"),
+        ({"device_ui_reader": True}, "coredevice"),
+        ({}, "coredevice"),
     ])
-    def test_only_the_literal_opts_in(self, monkeypatch, raw, expected):
+    def test_only_the_literal_chooses_wda(self, monkeypatch, raw, expected):
         from server import config
 
         monkeypatch.setattr(config, "read_user_config", lambda **kw: raw)

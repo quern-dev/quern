@@ -692,15 +692,26 @@ def get_auto_install_cert() -> bool:
 
 
 def get_device_ui_reader() -> str:
-    """How quern reads a physical iPhone's screen: ``"wda"`` or ``"coredevice"``.
+    """How quern drives a physical iPhone: ``"coredevice"`` or ``"wda"``.
 
-    ``"coredevice"`` reads the accessibility tree the device pushes over its
-    tunnel (#664) instead of asking WebDriverAgent, on iOS 27 and later; taps
-    and every other action still go through WDA. It is opt-in while the
-    reader is new. Anything but that literal string reads as ``"wda"``, so a
-    typo leaves the default in place rather than enabling something unasked.
+    ``"coredevice"`` -- the default since #664 -- reads the accessibility tree
+    the device pushes over its tunnel, and taps and types over its HID
+    service, on iOS 27 and later, with no WebDriverAgent: no Xcode, no
+    signing. ``"wda"`` drives it through WDA, as before. Only the literal
+    ``"wda"`` chooses WDA: unset, or anything else, is the default, so an
+    install that never chose keeps working on a Mac without Xcode.
     """
-    return "coredevice" if read_user_config().get("device_ui_reader") == "coredevice" else "wda"
+    return "wda" if read_user_config().get("device_ui_reader") == "wda" else "coredevice"
+
+
+def set_device_ui_reader(reader: str) -> None:
+    """Persist how quern drives a physical iPhone: ``"coredevice"`` or ``"wda"``.
+
+    Surfaced in the menu-bar app's Settings pane, and by `quern doctor`.
+    """
+    if reader not in ("coredevice", "wda"):
+        raise ValueError(f"unknown device UI reader {reader!r}")
+    update_user_config(lambda c: c.__setitem__("device_ui_reader", reader))
 
 
 def auto_install_cert_choice() -> bool | None:

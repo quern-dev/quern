@@ -197,6 +197,9 @@ class DeviceController(DeviceControllerUI):
         #: Apps a tree-push read crashed, per device, and the app each device
         #: last showed (#669): together they keep the push off a known crasher.
         self._push_crashed_apps: dict[str, set[str]] = {}
+        #: Why there is no WebDriverAgent to fall back on, as last asked (#664):
+        #: None when there is one, or before anything asked.
+        self._wda_missing: str | None = None
         self._last_app: dict[str, str] = {}
         # When each device's screen was last changed by an action here (tap,
         # swipe, type, launch...), for tap_element's settle-before-tapping.
@@ -1620,7 +1623,7 @@ class DeviceController(DeviceControllerUI):
         if not pid:
             return {"launch_confirmed": None,
                     "launch_check_error": "devicectl reported no pid to look for"}
-        if self._push_crashed_apps.get(udid):
+        if self._crash_latched(udid):
             # Not read again: a push read crashed an app here (#669), and the
             # launched app may be the one (#689 review).
             return {"launch_confirmed": None,
