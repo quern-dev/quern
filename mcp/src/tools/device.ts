@@ -900,7 +900,7 @@ Examples:
 - Settings: "App-prefs:WIFI" (iOS) — Android uses action-based intents via adb
 - Deep link: "myapp://path/to/screen"
 
-Deep links open the way a tapped link does, on every platform: through the system's own routing, so an https link reaches the app only if the domain says it may -- apple-app-site-association on iOS (simctl openurl on a simulator, whichever UI backend is reading it; WDA's /url on a physical iPhone, iOS 16.4+), assetlinks.json App Links on Android (a VIEW intent with no package, carrying the BROWSABLE category a browser tap does for an http(s) link; other schemes go without it, as before). That is the route that tests what a user gets.
+Deep links open the way a tapped link does, on every platform -- except an iPhone where WebDriverAgent cannot run, above: through the system's own routing, so an https link reaches the app only if the domain says it may -- apple-app-site-association on iOS (simctl openurl on a simulator, whichever UI backend is reading it; WDA's /url on a physical iPhone, iOS 16.4+), assetlinks.json App Links on Android (a VIEW intent with no package, carrying the BROWSABLE category a browser tap does for an http(s) link; other schemes go without it, as before). That is the route that tests what a user gets.
 
 direct=true (Android only) delivers the intent to bundle_id instead, bypassing App Links verification the way the app's Espresso tests do. Use it for staging and other debug builds, whose links are not verified App Links and would otherwise open in the browser. iOS refuses direct: it has no route that keeps universal-link routing.
 

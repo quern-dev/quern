@@ -102,8 +102,8 @@ class CoreDeviceApps(DevicectlBackend):
         except TimeoutError as e:
             raise DeviceError(
                 f"{what} on {uuid[:8]} took over {timeout:.0f} s"
-                + (": it was sent, and may have happened on the phone all the same; "
-                   "check before doing it again" if write else ""),
+                + (": it may have been sent, and may have happened on the phone all the "
+                   "same; check before doing it again" if write else ""),
                 tool=TOOL) from e
         except Exception as e:  # noqa: BLE001 -- pymobiledevice3 raises its own kinds
             raise DeviceError(f"{what} on {uuid[:8]} failed: {e}", tool=TOOL) from e
