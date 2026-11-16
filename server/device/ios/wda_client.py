@@ -595,9 +595,9 @@ class WdaBackend:
 
             raise WdaNotSetUpError(
                 f"This needs WebDriverAgent on {udid[:8]}, and there is none to start: "
-                f"{reason}. " + ("Install Xcode, then run the setup_wda tool for WDA."
-                                 if reason == NO_XCODE else
-                                 "An iPhone on iOS 27 or later is driven without it."),
+                f"{reason}. An iPhone on iOS 27 or later is driven without it"
+                + ("; an earlier one needs Xcode installed, then the setup_wda tool."
+                   if reason == NO_XCODE else "."),
                 tool="wda")
         logger.info("WDA not reachable on %s, auto-starting driver...", udid[:8])
         from server.device.ios.wda import start_driver

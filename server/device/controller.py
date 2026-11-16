@@ -15,6 +15,7 @@ from server.device.android.adb import AdbBackend
 from server.device.android.u2_client import U2Backend
 from server.device.controller_ui import DeviceControllerUI
 from server.device.ios import sim_settings
+from server.device.ios.coredevice_apps import CoreDeviceApps
 from server.device.ios.coredevice_ax import CoreDeviceAxReader
 from server.device.ios.coredevice_input import CoreDeviceInput
 from server.device.ios.devicectl import DevicectlBackend, canonical_device_id, spellings_of
@@ -122,6 +123,9 @@ class DeviceController(DeviceControllerUI):
         self.simctl = SimctlBackend()
         self.idb = IdbBackend()
         self.devicectl = DevicectlBackend()
+        #: Its app methods over the CoreDevice app service, for a Mac with no
+        #: devicectl: one without Xcode (#706).
+        self.coredevice_apps = CoreDeviceApps()
         self.pmd3 = Pmd3Backend()
         self.usbmux = UsbmuxBackend()
         self.wda_client = WdaBackend()
@@ -982,7 +986,11 @@ class DeviceController(DeviceControllerUI):
             failed("devicectl", e)
             physical_devices = []
         try:
-            usbmux_devices = await self.usbmux.list_devices()
+            # Every version where devicectl cannot list the phones on iOS 17
+            # and later: a Mac without Xcode, where they were not listed at
+            # all (#706).
+            usbmux_devices = await self.usbmux.list_devices(
+                every_version=not await self.devicectl.is_available())
         except (DeviceError, OSError) as e:
             failed("usbmux", e)
             usbmux_devices = []
@@ -1072,6 +1080,12 @@ class DeviceController(DeviceControllerUI):
 
         return sim_devices + physical_devices + usbmux_devices + android_devices
 
+    async def _apps(self) -> DevicectlBackend:
+        """Who installs, launches, stops and lists apps on a phone: devicectl,
+        or where there is none -- a Mac without Xcode -- the CoreDevice app
+        service it talks to, over the device's tunnel (#706)."""
+        return self.devicectl if await self.devicectl.is_available() else self.coredevice_apps
+
     async def get_libimobiledevice_udid(self, coredevice_udid: str) -> str | None:
         """Look up the libimobiledevice UDID for a CoreDevice UUID.
 
@@ -1113,6 +1127,12 @@ class DeviceController(DeviceControllerUI):
         device_type = self._device_type_cache.get(coredevice_udid)
         if device_type == DeviceType.DEVICE:
             if len(coredevice_udid) == 40 and all(c in "0123456789abcdef" for c in coredevice_udid):
+                return coredevice_udid
+            # A phone listed by usbmux under its own UDID, in the newer
+            # 00008030-... spelling: every phone, on a Mac without Xcode, where
+            # there is no devicectl to map a CoreDevice UUID (#706).
+            usb = await self.usbmux.get_usb_devices()
+            if usb and coredevice_udid in {u for u, _ in usb}:
                 return coredevice_udid
 
         return None
@@ -1506,7 +1526,7 @@ class DeviceController(DeviceControllerUI):
             if self._is_pre_ios17_udid(resolved):
                 await self._install_app_legacy(resolved, app_path)
             else:
-                await self.devicectl.install_app(resolved, app_path)
+                await (await self._apps()).install_app(resolved, app_path)
             # An install over the running app ends it: quern's doing (#669).
             self.coredevice_ax.forget_front(resolved)
         else:
@@ -1596,7 +1616,7 @@ class DeviceController(DeviceControllerUI):
         its pid is the one in front.
         """
         launch_env = {"QUERN_AUTOMATION": "YES", **(env or {})}
-        pid = await self.devicectl.launch_app(
+        pid = await (await self._apps()).launch_app(
             udid, bundle_id, env=launch_env, terminate_existing=bool(env))
         confirmed = await self._confirm_in_front_over_coredevice(udid, bundle_id, pid)
         if env:
@@ -1895,7 +1915,7 @@ class DeviceController(DeviceControllerUI):
             was_running = None
         elif self._is_physical(resolved) and self._coredevice_serves(resolved):
             # Over CoreDevice, no WDA (#664): found by its running process.
-            was_running = await self.devicectl.terminate_app(resolved, bundle_id)
+            was_running = await (await self._apps()).terminate_app(resolved, bundle_id)
             if was_running:
                 # Its pid gone at the next read is quern's doing, not a crash.
                 # (It may have been in the background, and another app's
@@ -1903,7 +1923,7 @@ class DeviceController(DeviceControllerUI):
                 self.coredevice_ax.forget_front(resolved)
         elif self._is_physical(resolved):
             was_running = await self.wda_client.terminate_app(resolved, bundle_id)
-            if was_running is False and not await self.devicectl.is_installed(
+            if was_running is False and not await (await self._apps()).is_installed(
                     resolved, bundle_id):
                 raise InvalidDeviceRequestError(
                     f"{bundle_id} is not installed on {resolved[:8]}", tool="devicectl",
@@ -1926,7 +1946,7 @@ class DeviceController(DeviceControllerUI):
         if self._is_android(resolved):
             await self.adb.uninstall_app(resolved, bundle_id)
         elif self._is_physical(resolved):
-            await self.devicectl.uninstall_app(resolved, bundle_id)
+            await (await self._apps()).uninstall_app(resolved, bundle_id)
             self.coredevice_ax.forget_front(resolved)   # as install_app
         else:
             await self.simctl.uninstall_app(resolved, bundle_id)
@@ -1940,7 +1960,7 @@ class DeviceController(DeviceControllerUI):
         if self._is_android(resolved):
             apps = await self.adb.list_apps(resolved)
         elif self._is_physical(resolved):
-            apps = await self.devicectl.list_apps(resolved)
+            apps = await (await self._apps()).list_apps(resolved)
         else:
             apps = await self.simctl.list_apps(resolved)
         return apps, resolved
@@ -2125,6 +2145,10 @@ class DeviceController(DeviceControllerUI):
     #: Bound on the reads taken before the open. They are side checks: a
     #: device slow to answer one must cost the check, never the open.
     _OPEN_URL_PREREAD_TIMEOUT_S = 3.0
+    #: Both, on a phone read over CoreDevice with no WDA (#706): its front is
+    #: a push read (about 2.8 s on an iPhone 11) and two app-service listings,
+    #: which timed out inside the 3 s left of the 5 s above.
+    _OPEN_URL_PUSH_TIMEOUT_S = 10.0
 
     async def open_url(
         self, url: str, udid: str | None = None, bundle_id: str | None = None,
@@ -2183,6 +2207,7 @@ class DeviceController(DeviceControllerUI):
                 tool="adb",
             )
         kind = "android" if android else "device" if physical else "simulator"
+        via_push = physical and await self._without_wda(resolved)
         # Everything the check needs is read before the open: afterwards the
         # app in front may be the one leaving, and a crash window has to
         # start before the crash. None of it may stop the open itself.
@@ -2211,7 +2236,8 @@ class DeviceController(DeviceControllerUI):
                 try:
                     before, _ = await asyncio.wait_for(
                         self._foreground_app(resolved, kind, expected),
-                        self._OPEN_URL_PREREAD_TIMEOUT_S)
+                        self._OPEN_URL_PUSH_TIMEOUT_S if via_push
+                        else self._OPEN_URL_PREREAD_TIMEOUT_S)
                 except Exception:  # noqa: BLE001 - unknown just means "not known to be there"
                     before = None
             if android:
@@ -2224,6 +2250,9 @@ class DeviceController(DeviceControllerUI):
             await self.adb.open_url(resolved, url, package=bundle_id if direct else None,
                                     browsable=web and not direct)
             via = "adb"
+        elif physical and await self._without_wda(resolved):
+            await self._open_url_without_wda(resolved, url, bundle_id)
+            via = "coredevice"
         elif physical:
             await self.wda_client.open_url(resolved, url)
             via = "wda"
@@ -2232,6 +2261,14 @@ class DeviceController(DeviceControllerUI):
             via = "simctl"
         self._invalidate_ui_cache(resolved)
         outcome: dict = {"via": via, "route": "direct" if direct else "system"}
+        if via == "coredevice":
+            # Handed to the app named, not routed by the system (#706).
+            outcome["route"] = "app" if bundle_id else "safari"
+            if not bundle_id:
+                outcome["note"] = (
+                    "Opened in Safari: with no WebDriverAgent here, a URL goes to a named "
+                    "app, and a universal link is not handed on to its app from Safari "
+                    "this way. Pass bundle_id to open it in the app.")
         if unknown:
             outcome.update(unknown)
         elif expected:
@@ -2288,7 +2325,10 @@ class DeviceController(DeviceControllerUI):
         ask -- and on Android `foreground_activity` names the component too.
         """
         start = time.monotonic()
-        deadline = start + max(self._OPEN_URL_FRONTMOST_TIMEOUT_S, self._OPEN_URL_SETTLE_S)
+        window = (self._OPEN_URL_PUSH_TIMEOUT_S
+                  if kind == "device" and await self._without_wda(udid)
+                  else self._OPEN_URL_FRONTMOST_TIMEOUT_S)
+        deadline = start + max(window, self._OPEN_URL_SETTLE_S)
         await asyncio.sleep(self._OPEN_URL_SETTLE_S)
         seen: dict | None = None
         error = "no read was taken after the hand-over"
@@ -2332,6 +2372,8 @@ class DeviceController(DeviceControllerUI):
             resumed = await self.adb.resumed_activity(udid)
             return resumed if resumed else (None, None)
         if kind == "device":
+            if await self._without_wda(udid):
+                return await self._front_bundle_over_coredevice(udid, expected), None
             return await self.wda_client.active_app(udid), None
         elements, _ = await self.get_ui_elements(
             udid, use_cache=False, filter_type="Application", probe_containers=False,
@@ -2340,6 +2382,39 @@ class DeviceController(DeviceControllerUI):
         if expected is not None and expected in labels:
             return expected, None
         return (labels[0] if labels else None), None
+
+    async def _without_wda(self, udid: str) -> bool:
+        """Whether this phone is driven over CoreDevice where no WDA can run,
+        so a call that would go through WDA goes over CoreDevice instead
+        (#706)."""
+        from server.tooling.wda_availability import wda_unavailable_reason
+
+        return self._coredevice_serves(udid) and bool(await wda_unavailable_reason())
+
+    async def _open_url_without_wda(self, udid: str, url: str, bundle_id: str | None) -> None:
+        """`open_url` over the CoreDevice app service: to `bundle_id`, or a
+        web URL to Safari. Anything else has nowhere to go without the
+        system's routing, which only WDA reaches."""
+        if bundle_id is None and not url.lower().startswith(("http://", "https://")):
+            raise DeviceOperationUnsupportedError(
+                f"A {url.split(':', 1)[0]}: link on {udid[:8]} needs bundle_id here: "
+                "with no WebDriverAgent, a URL is handed to a named app rather than "
+                "routed by the system. Pass the app that should open it.",
+                tool="coredevice")
+        await self.coredevice_apps.open_url(udid, url, bundle_id or "com.apple.mobilesafari")
+
+    async def _front_bundle_over_coredevice(self, udid: str, expected: str | None) -> str | None:
+        """The app in front, from the tree push: `expected` when its pid is
+        one of that app's, else the name the push gives it."""
+        from server.device.ios.coredevice_ax import front_app
+
+        pid, name = await front_app(udid)
+        if expected is not None and pid is not None:
+            apps = self.coredevice_apps
+            path = await apps.app_url(udid, expected)
+            if path is not None and pid in await apps.running_pids(udid, path):
+                return expected
+        return name.strip() or None
 
     @staticmethod
     def _landed_elsewhere(bundle_id: str, kind: str, direct: bool, outcome: dict) -> str:

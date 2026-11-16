@@ -67,7 +67,7 @@ final class SettingsModel: ObservableObject {
         switch (reader, xcodeInstalled) {
         case (_, false?):
             return "Xcode is not installed, so WebDriverAgent cannot be used. iPhones "
-                + "before iOS 27 need it, and every iPhone needs Xcode's devicectl."
+                + "before iOS 27 need it; later ones are driven without it."
         case ("wda", _):
             return "Every iPhone is driven through WebDriverAgent, which the "
                 + "setup_wda tool builds with Xcode."

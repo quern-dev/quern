@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import tempfile
+import time
 from pathlib import Path
 
 from server.device._subprocess import communicate
@@ -119,6 +120,9 @@ class DevicectlBackend:
         # Track launched PIDs: (uuid, bundle_id) -> PID
         self._orientation_supported: bool | None = None
         self._standby_supported: bool | None = None
+        #: (when asked, the answer) for `is_available`, which device listing
+        #: asks every time it runs (#706).
+        self._available: tuple[float, bool] | None = None
 
     async def _run_devicectl(
         self, *args: str, json_output: bool = False,
@@ -180,9 +184,14 @@ class DevicectlBackend:
         """
         if not xcode_available():
             return False
-        return await probe_command(
-            "xcrun", "devicectl", "list", "devices", "--help", tool="devicectl",
-        )
+        # Kept a minute, since listing asks every run, and Xcode can be
+        # installed or moved while the server runs.
+        now = time.monotonic()
+        if self._available is None or now - self._available[0] >= 60:
+            self._available = (now, await probe_command(
+                "xcrun", "devicectl", "list", "devices", "--help", tool="devicectl",
+            ))
+        return self._available[1]
 
     async def can_set_orientation(self) -> bool:
         """Whether this devicectl has `device orientation set`, which turns a
@@ -517,12 +526,10 @@ class DevicectlBackend:
         TERMINATE_WAIT_S has passed (fewer as soon as all are gone)."""
         for pid in pids:
             try:
-                await self._run_devicectl(
-                    "device", "process", "terminate", "--device", uuid, "--pid", str(pid),
-                    *(("--kill",) if kill else ()))
+                await self._signal(uuid, pid, kill)
             except DeviceError as e:
                 # Gone already, most likely; the list below says either way.
-                logger.info("devicectl terminate of pid %s on %s: %s", pid, uuid[:8], e)
+                logger.info("terminate of pid %s on %s: %s", pid, uuid[:8], e)
         loop = asyncio.get_running_loop()
         end = loop.time() + self.TERMINATE_WAIT_S
         while True:
@@ -530,6 +537,12 @@ class DevicectlBackend:
             if not left or loop.time() >= end:
                 return left
             await asyncio.sleep(self.TERMINATE_POLL_S)
+
+    async def _signal(self, uuid: str, pid: int, kill: bool) -> None:
+        """SIGTERM, or SIGKILL, one process."""
+        await self._run_devicectl(
+            "device", "process", "terminate", "--device", uuid, "--pid", str(pid),
+            *(("--kill",) if kill else ()))
 
     async def uninstall_app(self, uuid: str, bundle_id: str) -> None:
         """Uninstall an app from a physical device."""

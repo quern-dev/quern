@@ -892,6 +892,8 @@ Use this to build visual test reports — every action becomes a timestamped ste
 
 Note: tel: and mailto: are unavailable on iOS simulators (no Phone or Mail app).
 
+On a physical iPhone on iOS 27+ where WebDriverAgent cannot run (no Xcode, or none built), the URL is handed to an app rather than routed by the system: to bundle_id when given (route "app", and opened_in_app says whether it stayed there), else an http(s) URL to Safari (route "safari", where a universal link is not passed on to its app). Any other scheme then needs bundle_id.
+
 Examples:
 - Web: "https://example.com"
 - Maps: "geo:48.8584,2.2945?z=15" (Android) or "maps://?ll=48.8584,2.2945&z=15" (iOS)
