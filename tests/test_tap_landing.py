@@ -36,6 +36,9 @@ FIELD = element("", 20, 300, 353, 40, "TextField", "field_secure")
 
 def test_the_element_itself_is_not_covering():
     assert _covering_element(ROW, hit("Sound", 36, 53, 321, 28, "CheckBox")) is None
+    # Only a leaf hit-test (the phone's, #664) is judged by its label: a
+    # simulator's hit-test answers with the element, and a child stays a child.
+    assert _covering_element(ROW, hit("Elsewhere", 36, 53, 100, 28, "StaticText")) is None
 
 
 def test_a_child_inside_the_target_is_not_covering():

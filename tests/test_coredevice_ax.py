@@ -838,6 +838,9 @@ def _phone_controller(os_version: str | None = "iOS 27.2.1", *, reader: str = "c
         "frame": {"x": 0, "y": 0, "width": 414, "height": 896}}])
     ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[])
     ctrl._mark_on_screen = AsyncMock()
+    # The phone's hit-test before a pushed tap (#664): by default it cannot
+    # tell, which taps as before.
+    ctrl.coredevice_ax.describe_point = AsyncMock(return_value=None)
     return ctrl
 
 

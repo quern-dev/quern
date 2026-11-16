@@ -346,6 +346,57 @@ class TestTapElement:
         # second read to see whether the row moved.
         ctrl.coredevice_ax.describe_all.assert_awaited_once()
 
+    @staticmethod
+    def _hit(label, x, y, w, h, kind="StaticText", identifier=None):
+        return {"type": kind, "AXLabel": label, "AXUniqueId": identifier,
+                "frame": {"x": x, "y": y, "width": w, "height": h}}
+
+    def _covered(self, monkeypatch, hit):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_input.tap = AsyncMock(return_value="coredevice")
+        ctrl.wda_client.tap = AsyncMock()
+        ctrl.coredevice_ax.describe_point = AsyncMock(return_value=hit)
+        return ctrl
+
+    async def test_a_covered_row_is_refused_with_what_covers_it(self, monkeypatch):
+        """The phone's hit-test answers with the deepest element: an overlay's
+        title, inside the target's frame, is not the target (#664)."""
+        wifi = next(e for e in parse_push(SETTINGS)[1]
+                    if e["AXUniqueId"] == "com.apple.settings.wifi")
+        f = wifi["frame"]
+        ctrl = self._covered(monkeypatch, self._hit(
+            "Overlay", f["x"] + 40, f["y"] + 4, 60, f["height"] - 8))
+
+        result = await ctrl.tap_element(label="Wi-Fi", udid=PHONE, scroll_to_find=False)
+
+        assert result["status"] == "obstructed", result
+        assert result["covered_by"]["label"] == "Overlay"
+        ctrl.coredevice_input.tap.assert_not_called()
+        ctrl.wda_client.tap.assert_not_called()
+
+    async def test_its_own_text_or_detail_is_the_target(self, monkeypatch):
+        """A pushed row's label is all its texts: its title and its detail
+        both say part of it."""
+        wifi = next(e for e in parse_push(SETTINGS)[1]
+                    if e["AXUniqueId"] == "com.apple.settings.wifi")
+        f = wifi["frame"]
+        for text in ("Wi-Fi", wifi["AXLabel"].split(", ")[-1]):
+            ctrl = self._covered(monkeypatch, self._hit(
+                text, f["x"] + 40, f["y"] + 4, 60, f["height"] - 8))
+
+            result = await ctrl.tap_element(label="Wi-Fi", udid=PHONE, scroll_to_find=False)
+
+            assert result["status"] == "ok", (text, result)
+            ctrl.coredevice_input.tap.assert_awaited_once()
+
+    async def test_a_hit_test_that_cannot_tell_taps(self, monkeypatch):
+        ctrl = self._covered(monkeypatch, None)
+
+        result = await ctrl.tap_element(label="Wi-Fi", udid=PHONE, scroll_to_find=False)
+
+        assert result["status"] == "ok", result
+        ctrl.coredevice_ax.describe_point.assert_awaited_once()
+
     async def test_a_miss_is_the_pushs(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl._identify_for_miss = AsyncMock(return_value={})
