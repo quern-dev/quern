@@ -10,6 +10,7 @@ keyboard: "Hello abc #@" arrived as "Helloあbc＃＠", and the set put it right
 from __future__ import annotations
 
 import plistlib
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -602,6 +603,18 @@ class TestLaunching:
             terminate_existing=False)
         ctrl.wda_client.launch_app.assert_not_called()
         ctrl.wda_client.app_state.assert_not_called()
+
+    async def test_the_check_is_remembered_as_a_read(self, monkeypatch):
+        """A push read like any other: a crash it causes after it answers is
+        looked for at the next read (#669 review)."""
+        ctrl = self._ctrl(monkeypatch, [(37, " "), (1583, "QuernProbeScene")])
+
+        await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        first = ctrl.coredevice_ax._front[PHONE][0]
+        assert (first.pid, first.app) == (1583, "QuernProbeScene")
+        # Dated from when its read began, so a crash under it is in the window.
+        assert first.when <= time.time() and time.time() - first.when < 5
 
     async def test_env_restarts_the_app_so_it_applies(self, monkeypatch):
         ctrl = self._ctrl(monkeypatch, [(1583, "QuernProbeScene")])

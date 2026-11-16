@@ -126,6 +126,8 @@ class DeviceController(DeviceControllerUI):
         self.usbmux = UsbmuxBackend()
         self.wda_client = WdaBackend()
         self.coredevice_ax = CoreDeviceAxReader()
+        # Its check for a crash after a read (#669) needs the phone's reports.
+        self.coredevice_ax.crash_reports = self._crash_reports_since
         self.coredevice_input = CoreDeviceInput(self.wda_client)
         self.adb = AdbBackend()
         self.u2 = U2Backend()
@@ -1501,6 +1503,8 @@ class DeviceController(DeviceControllerUI):
                 await self._install_app_legacy(resolved, app_path)
             else:
                 await self.devicectl.install_app(resolved, app_path)
+            # An install over the running app ends it: quern's doing (#669).
+            self.coredevice_ax.forget_front(resolved)
         else:
             await self.simctl.install_app(resolved, app_path)
         return resolved
@@ -1629,9 +1633,13 @@ class DeviceController(DeviceControllerUI):
             try:
                 # Bounded by what is left of the grace, so a stalled read
                 # (#684) does not run on for its own 20 s (#689 review).
+                read_at = time.time()
                 front = await coredevice_ax.front_app(
                     udid, timeout=max(deadline - time.monotonic(), self._PUSH_READ_MIN_S))
                 error = ""
+                # A push read like any other, so a crash it causes after it
+                # answers is looked for at the next read (#669 review).
+                self.coredevice_ax.note_front(udid, front[0], front[1], read_at)
             except coredevice_ax.AppExitedDuringRead as exc:
                 self._push_crashed_apps.setdefault(udid, set()).add(exc.app)
                 return {"launch_confirmed": None,
@@ -1801,6 +1809,65 @@ class DeviceController(DeviceControllerUI):
             return False
         return any((e.label or "") == name for e in elements)
 
+    #: How many of a phone's newest crash reports the check after a push read
+    #: pulls (#669), about 0.5 s each. The crash it looks for has just happened.
+    _NEWEST_REPORTS = 4
+    _OWN_REPORTS = 2
+
+    async def _crash_reports_since(
+        self, udid: str, since: float, app: str = "",
+    ) -> list[tuple[int | None, str]] | None:
+        """A phone's newest crash reports, each as (pid, text): the ones
+        named for `app` first, then the newest others; None when the phone
+        cannot be asked at all.
+
+        A report is named for its process, which is the app's name for many
+        apps (not Apple's: Settings is Preferences): taking those first keeps
+        a burst of others (Jetsam, faults) from crowding out the one looked
+        for. Either way only a pid match claims anything.
+
+        For the push reader's check for a crash after a read (#669). Newest by
+        the time in each report's name, which is the phone's local time, so
+        the order holds whatever zone the phone and the Mac are in; `since`
+        bounds them only loosely, a day back, as `select_recent` does. Read
+        over USB, so a phone quern reaches only over the network has none.
+        A pull that copies some reports and not others gives the ones it
+        copied.
+        """
+        import tempfile
+        from datetime import datetime, timedelta
+        from pathlib import Path
+
+        from server.sources import ios_crash
+
+        lib_udid = await self.get_libimobiledevice_udid(udid)
+        cmd = ios_crash.command()
+        if not lib_udid or not cmd:
+            return None
+        cutoff = datetime.fromtimestamp(since) - timedelta(days=1)
+        dated = sorted(
+            ((t, n) for n in await ios_crash.list_reports(cmd, lib_udid)
+             if (t := ios_crash.report_time(n)) is not None and t >= cutoff),
+            reverse=True)
+        named = f"{app}-" if app.strip() else None
+        own = [n for _, n in dated if named and n.startswith(named)][:self._OWN_REPORTS]
+        # The app's own reports first, then the newest others in the slots
+        # left: a display name can differ from the process a report is named
+        # for (CodeRabbit on #701). Each costs a pull, and the poll needs
+        # time for a second look, so the slots stay few.
+        others = [n for _, n in dated if n not in own]
+        names = own + others[:max(self._NEWEST_REPORTS - len(own), 0)]
+        if not names:
+            return []
+        with tempfile.TemporaryDirectory() as out:
+            try:
+                pulled = await ios_crash.pull_reports(cmd, lib_udid, names, Path(out))
+            except ios_crash.IosCrashError as e:
+                # One still being written (empty) is no reason to drop the rest.
+                pulled = e.copied
+            texts = [(Path(out) / name).read_text(errors="replace") for name in pulled]
+        return [(ios_crash.report_pid(text), text) for text in texts]
+
     async def terminate_app(
         self, bundle_id: str, udid: str | None = None,
     ) -> tuple[str, bool | None]:
@@ -1825,6 +1892,11 @@ class DeviceController(DeviceControllerUI):
         elif self._is_physical(resolved) and self._coredevice_serves(resolved):
             # Over CoreDevice, no WDA (#664): found by its running process.
             was_running = await self.devicectl.terminate_app(resolved, bundle_id)
+            if was_running:
+                # Its pid gone at the next read is quern's doing, not a crash.
+                # (It may have been in the background, and another app's
+                # crash then goes unlooked-for: a terminate is rare there.)
+                self.coredevice_ax.forget_front(resolved)
         elif self._is_physical(resolved):
             was_running = await self.wda_client.terminate_app(resolved, bundle_id)
             if was_running is False and not await self.devicectl.is_installed(
@@ -1851,6 +1923,7 @@ class DeviceController(DeviceControllerUI):
             await self.adb.uninstall_app(resolved, bundle_id)
         elif self._is_physical(resolved):
             await self.devicectl.uninstall_app(resolved, bundle_id)
+            self.coredevice_ax.forget_front(resolved)   # as install_app
         else:
             await self.simctl.uninstall_app(resolved, bundle_id)
         return resolved

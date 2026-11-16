@@ -38,7 +38,7 @@ import logging
 import plistlib
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -89,6 +89,20 @@ TRAIT_ADJUSTABLE = 1 << 12
 TRAIT_HEADER = 1 << 16
 TRAIT_TEXT_ENTRY = 1 << 18
 TRAIT_TOGGLE = 1 << 53
+
+#: How long a crash report takes to appear after its crash, at most, and how
+#: often to look. ReportCrash writes it once the process has gone.
+CRASH_REPORT_WAIT_S = 6.0
+CRASH_REPORT_POLL_S = 1.5
+#: How far before the read that saw the app a report may be dated: a report's
+#: time is to the second, in the phone's local time.
+CRASH_REPORT_SLACK_S = 2.0
+#: How many apps a device's reads remember, and how many reads in a row may
+#: fail to say whether one is still running before it is let go.
+REMEMBERED_APPS = 3
+UNKNOWN_READS = 3
+#: The frame every report of #669's crash has: UIKit inserting nil there.
+CRASH_669_FRAME = "_accessibilityWindowSections"
 
 #: How long a read may take. AXe stops at 20 s too, which it measured as about
 #: 330 elements; the screens measured here took 1.8-2.5 s.
@@ -169,6 +183,28 @@ class AppExitedDuringRead(DeviceError):
             f"{app or 'the app'} (pid {pid}) exited while its screen was read through "
             "the accessibility service: an iOS 27 bug in UIKit's accessibility code "
             "crashes some apps under this read (#669)",
+            tool="coredevice")
+        self.app = app
+        self.pid = pid
+
+
+class AppExitedAfterRead(AppExitedDuringRead):
+    """The app a read saw crashed after the read had answered (#669).
+
+    The crash can land after the tree has arrived and the read has settled --
+    measured on an iPhone 11: the probe's whole Widgets tree at 4.0 s, the app
+    gone at 4.3 s -- so the read that caused it saw nothing wrong, and every
+    read after it showed SpringBoard as if that were the screen. The next read
+    tells, from the process list and the phone's crash report for that pid.
+    A subclass, so every guard against a read's crash covers it.
+    """
+
+    def __init__(self, app: str, pid: int) -> None:
+        DeviceError.__init__(
+            self,
+            f"{app or 'the app'} (pid {pid}) crashed after a read of its screen through "
+            "the accessibility service, so the screen it was on is gone: an iOS 27 bug "
+            "in UIKit's accessibility code crashes some apps under this read (#669)",
             tool="coredevice")
         self.app = app
         self.pid = pid
@@ -594,13 +630,34 @@ async def _newest_tree(queue: asyncio.Queue,
 
 async def _app_alive(rsd: Any, lib: SimpleNamespace, pid: int) -> bool | None:
     """Whether a process is still running: True, False, or None when the
-    device could not be asked."""
+    device could not be asked.
+
+    The in-read crash check's: only the listing is bounded, and the
+    service's connect has what is left of the read's own deadline. Bounding
+    the connect too hid a crash under a read behind a slow connect (review).
+    """
     try:
         async with lib.AppService(rsd) as apps:
             processes = await asyncio.wait_for(apps.list_processes(), CLOSE_S)
     except Exception:
         return None
     return any(p.get("processIdentifier") == pid for p in processes if isinstance(p, dict))
+
+
+async def _alive(rsd: Any, lib: SimpleNamespace, pids: list[int]) -> dict[int, bool | None]:
+    """Whether each process is still running, from one process listing: None
+    for every one when the device could not be asked. Bounded as a whole --
+    the service's connect too: it asks about earlier reads' apps, and a hang
+    there would hold every read to its deadline. A None is asked again."""
+    async def listing() -> list:
+        async with lib.AppService(rsd) as apps:
+            return await apps.list_processes()
+    try:
+        processes = await asyncio.wait_for(listing(), CLOSE_S)
+    except Exception:
+        return dict.fromkeys(pids)
+    running = {p.get("processIdentifier") for p in processes if isinstance(p, dict)}
+    return {pid: pid in running for pid in pids}
 
 
 async def _subscribe(lib: SimpleNamespace, address: Any, conn: SimpleNamespace) -> asyncio.Queue:
@@ -776,9 +833,16 @@ async def front_app(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> tuple[int 
     return await _with_settled_tree(uuid, timeout, "reading the app on screen", use)
 
 
-async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]:
+async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
+                    previous_pids: tuple[int, ...] = (),
+                    seen: dict | None = None) -> list[dict]:
     """The on-screen accessibility tree of a physical iPhone, as `describe_all`
-    returns it. Raises DeviceError when it cannot be read."""
+    returns it. Raises DeviceError when it cannot be read.
+
+    `seen`, when given, is filled with the app in front (`pid`, `app`), and
+    with whether each of `previous_pids` other than it is still running
+    (`alive`: pid -> True, False, or None when the phone could not be asked),
+    asked on this read's own connection."""
     from server.device.performance import _device_address
 
     lib = _pmd3()
@@ -798,9 +862,19 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
                 # The app changed under the read: switched, or killed by it.
                 # Only the process list can tell those apart. "Could not ask"
                 # is not taken as dead: the read stands, as it would have.
-                if (first.app_pid is not None and newest.app_pid != first.app_pid
-                        and await _app_alive(conn.rsd, lib, first.app_pid) is False):
-                    raise AppExitedDuringRead(first.elements[0]["AXLabel"], first.app_pid)
+                if first.app_pid is not None and newest.app_pid != first.app_pid:
+                    first_alive = await _app_alive(conn.rsd, lib, first.app_pid)
+                    if first_alive is False:
+                        raise AppExitedDuringRead(first.elements[0]["AXLabel"], first.app_pid)
+                    if first_alive is None and seen is not None:
+                        # Could not tell: remembered, so the next read asks.
+                        seen["unasked"] = (first.app_pid, first.elements[0]["AXLabel"])
+                if seen is not None:
+                    seen["pid"] = newest.app_pid
+                    seen["app"] = newest.elements[0]["AXLabel"]
+                    others = [p for p in previous_pids if p != newest.app_pid]
+                    if others:
+                        seen["alive"] = await _alive(conn.rsd, lib, others)
         finally:
             await _close(conn.provider, conn.rsd)
     except TimeoutError as e:
@@ -812,7 +886,13 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
             # -- and "could not ask" is not taken as dead, as above.
             logger.info("[coredevice] tree of %s answered at the %gs deadline",
                         uuid[:8], timeout)
-            return _refuse_bare(held["latest"].elements, uuid)
+            latest = held["latest"]
+            if seen is not None and "pid" not in seen:
+                # Still remembered as the app this read saw, so a crash it
+                # causes is looked for at the next read (CodeRabbit on #701).
+                seen["pid"] = latest.app_pid
+                seen["app"] = latest.elements[0]["AXLabel"] if latest.elements else ""
+            return _refuse_bare(latest.elements, uuid)
         if deadline.expired():
             raise DeviceError(
                 f"{uuid[:8]} sent no complete accessibility tree within {timeout:g}s",
@@ -829,6 +909,24 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> list[dict]
     return _refuse_bare(elements, uuid)
 
 
+#: `(udid, since, app) -> [(pid, report text)]`, as
+#: `CoreDeviceAxReader.crash_reports`: the phone's newest reports, `app`'s
+#: first, or None when the phone cannot be asked at all.
+CrashReports = Callable[[str, float, str], Awaitable[list[tuple[int | None, str]] | None]]
+
+
+@dataclass
+class _InFront:
+    """An app a read saw in front, still to be accounted for."""
+
+    pid: int
+    app: str
+    #: When the read that saw it began (time.time()).
+    when: float
+    #: Reads since that could not tell whether it is still running.
+    unknown: int = 0
+
+
 class CoreDeviceAxReader:
     """`describe_all` for a physical iPhone, from the tree push.
 
@@ -839,14 +937,133 @@ class CoreDeviceAxReader:
 
     TOOL_NAME = "coredevice"
 
+    def __init__(self) -> None:
+        #: The apps each device's reads saw in front, newest first: the last
+        #: one, and any earlier one not yet known to be running or gone.
+        self._front: dict[str, list[_InFront]] = {}
+        #: Bumped by forget_front, so a read in flight does not put back what
+        #: quern has just ended.
+        self._forgotten: dict[str, int] = {}
+        #: The phone's newest crash reports (`CrashReports`). Set by the
+        #: controller, which knows the phone's hardware UDID; None reads none,
+        #: and no crash after a read is ever claimed.
+        self.crash_reports: CrashReports | None = None
+
+    def forget_front(self, udid: str) -> None:
+        """quern ended or replaced an app itself (terminate, install,
+        uninstall): a pid gone at the next read is no crash."""
+        self._front.pop(udid, None)
+        self._forgotten[udid] = self._forgotten.get(udid, 0) + 1
+
+    def note_front(self, udid: str, pid: int | None, app: str, when: float) -> None:
+        """A push read made elsewhere saw this app in front -- launch_app's
+        check -- so a crash that read causes is looked for too. Added to what
+        is remembered, never over it: an earlier app's crash may still be
+        unasked (review)."""
+        if isinstance(pid, int):
+            others = [e for e in self._front.get(udid, []) if e.pid != pid]
+            self._front[udid] = [_InFront(pid, app, when), *others][:REMEMBERED_APPS]
+
     async def describe_all(self, udid: str, *, snapshot_depth: int | None = None,
                            source_timeout: float | None = None,
                            probe: bool = True) -> list[dict]:
         # snapshot_depth and probe are WDA's and sim-bridge's knobs; the push
         # is the whole on-screen tree, so there is nothing for them to change.
         timeout = source_timeout or READ_TIMEOUT_S
+        remembered = list(self._front.get(udid, []))
+        generation = self._forgotten.get(udid, 0)
+        seen: dict = {}
+        kwargs = {"previous_pids": tuple(e.pid for e in remembered), "seen": seen}
+        # The window a report may be dated in starts when the read did: a
+        # crash during its close or its process query predates the return.
+        started = time.time()
         try:
-            return await read_tree(udid, timeout=timeout)
+            elements = await read_tree(udid, timeout=timeout, **kwargs)
         except BareAppTree:
             await asyncio.sleep(BARE_CONFIRM_S)
-            return await read_tree(udid, timeout=timeout)
+            # The rejected attempt's app is not the one the retry answers
+            # with; what it could not tell about (`unasked`) still stands
+            # (CodeRabbit on #701).
+            seen.pop("pid", None)
+            seen.pop("app", None)
+            elements = await read_tree(udid, timeout=timeout, **kwargs)
+        pid, app = seen.get("pid"), seen.get("app") or ""
+        if not isinstance(pid, int):
+            return elements
+        alive = seen.get("alive") or {}
+        still_open: list[_InFront] = []
+        gone: list[_InFront] = []
+        for e in remembered:
+            if e.pid == pid:
+                continue
+            state = alive.get(e.pid)
+            if state is None:
+                # Not known to be running or gone -- the phone could not be
+                # asked, or the deadline came first -- so asked again next
+                # read, a few times, rather than the question being lost.
+                if e.unknown + 1 < UNKNOWN_READS:
+                    still_open.append(_InFront(e.pid, e.app, e.when, e.unknown + 1))
+            elif state is False and e.app != app:
+                # Another app in front, and this one gone: a crash after the
+                # read that saw it, if the phone's report says so (#669). The
+                # same app under a new pid was relaunched, which is not the
+                # case asked about -- a crash and a relaunch before the next
+                # read are not told apart.
+                gone.append(e)
+        unasked = seen.get("unasked")
+        if unasked and unasked[0] != pid and all(e.pid != unasked[0] for e in still_open):
+            # The app that changed under this read, not known to be gone.
+            still_open.insert(0, _InFront(unasked[0], unasked[1] or "", started, 1))
+        crashed = None
+        for e in gone:
+            if await self._crashed_under_a_read(udid, e):
+                crashed = e
+                break
+        # Committed only now: a check cancelled midway (the caller left)
+        # leaves the question for the next read. An app noted meanwhile, by
+        # a launch check, is kept.
+        # By identity, not pid: a launch check may have noted again a pid
+        # this read started with, and that newer record is the one to keep
+        # (CodeRabbit on #701).
+        noted = [e for e in self._front.get(udid, [])
+                 if not any(e is r for r in remembered) and e.pid != pid]
+        still_open = [e for e in still_open if e.pid not in {n.pid for n in noted}]
+        if self._forgotten.get(udid, 0) != generation:
+            # quern ended an app meanwhile: no earlier question stands, and
+            # no crash found for one is claimed (CodeRabbit on #701).
+            still_open = []
+            crashed = None
+        self._front[udid] = [_InFront(pid, app, started), *noted, *still_open][:REMEMBERED_APPS]
+        if crashed is not None:
+            raise AppExitedAfterRead(crashed.app, crashed.pid)
+        return elements
+
+    async def _crashed_under_a_read(self, udid: str, previous: _InFront) -> bool:
+        """Whether the phone has a report of #669's crash for that pid.
+
+        Waits a few seconds for it: ReportCrash writes the report after the
+        process has gone. Anything else -- no report, another crash, a report
+        that cannot be read -- is not claimed as #669.
+        """
+        if self.crash_reports is None:
+            return False
+        pid, when = previous.pid, previous.when
+        # The whole wait is bounded, a slow listing or pull included.
+        deadline = time.monotonic() + CRASH_REPORT_WAIT_S
+        while True:
+            left = deadline - time.monotonic()
+            try:
+                reports = await asyncio.wait_for(
+                    self.crash_reports(udid, when - CRASH_REPORT_SLACK_S, previous.app),
+                    max(left, 0.1))
+            except Exception as e:  # noqa: BLE001 -- not this time: try again in the time left
+                logger.info("[coredevice] crash reports of %s unread: %s", udid[:8], e)
+                reports = []
+            if reports is None:
+                return False      # the phone cannot be asked (no USB): never will be
+            for report_pid, text in reports:
+                if report_pid == pid:
+                    return CRASH_669_FRAME in text
+            if time.monotonic() + CRASH_REPORT_POLL_S >= deadline:
+                return False
+            await asyncio.sleep(CRASH_REPORT_POLL_S)
