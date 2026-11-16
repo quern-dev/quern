@@ -43,11 +43,15 @@ def lazy(request: pytest.FixtureRequest, quern: QuernClient) -> Iterator:
         # by the screen's own Top button: one tap, where a sweep back can
         # fail, and a failure here is reported as this, not as the next
         # setup's (review).
-        probe.tap("lazy_to_top", skip_stability_check=True)
-        if started:
-            # Back to sim-bridge, so the rest of the session reads the way it
-            # would have without this module.
-            quern.post("/api/v1/device/wda/stop", json={"udid": probe.udid}, timeout=120.0)
+        try:
+            probe.tap("lazy_to_top", skip_stability_check=True)
+        finally:
+            if started:
+                # Back to sim-bridge, so the rest of the session reads the way
+                # it would have without this module -- a failed tap above
+                # included (CodeRabbit on #703).
+                quern.post("/api/v1/device/wda/stop", json={"udid": probe.udid},
+                           timeout=120.0)
 
 
 def _row(index: int) -> str:
