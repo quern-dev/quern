@@ -386,6 +386,11 @@ class TestWaitingForTheTree:
         queue.put_nowait((PUSH_SELECTOR, [_as("InitialDump", SAFARI)]))
 
         async def later():
+            # From when the reader has taken both, which is when its windows
+            # start: a reader slow to start would otherwise spend the margin
+            # (CodeRabbit on #704).
+            while not queue.empty():
+                await asyncio.sleep(0.005)
             await asyncio.sleep(delay)
             queue.put_nowait((PUSH_SELECTOR, [SAFARI]))
 

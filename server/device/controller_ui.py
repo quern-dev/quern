@@ -1990,7 +1990,10 @@ class DeviceControllerUI:
             # The whole screen: a push lookup reads all of it anyway, and the
             # header it shows decides where an upward swipe may start.
             screen_els, _ = await self.get_ui_elements(
-                resolved, use_cache=False, whole_screen=True)
+                resolved, use_cache=False, whole_screen=True,
+                # A lookup's fallback: should the push fail, WDA reads at the
+                # action depth, not the full walk (CodeRabbit on #704).
+                lookup=True)
             app_els = [e for e in screen_els if e.type == "Application"]
         else:
             screen_els = []
@@ -2417,6 +2420,7 @@ class DeviceControllerUI:
         sweep_trace: list[str] = []
         sweep_started = time.perf_counter()
         swipes = 0
+        down_swipes = 0
         if report is not None:
             # Seeded now, not on the way out: every exit from the sweep -- found,
             # gave up, deadline, exception -- has to leave the caller able to say
@@ -2509,7 +2513,7 @@ class DeviceControllerUI:
             return y_near, y_near + distance
 
         async def _sweep() -> UIElement | None:
-            nonlocal swipes
+            nonlocal swipes, down_swipes
             # tap_element has just run the identical filtered query and found
             # nothing, so repeating it here spends a lookup re-learning what
             # the caller already knows. scroll_to_element calls in cold with no
@@ -2636,13 +2640,18 @@ class DeviceControllerUI:
                     # away from a row it had seen above it.
                     last_cy = None
                     stalls = 0
-                    if going_down and swipes >= down_budget:
+                    if going_down and down_swipes >= down_budget:
                         going_down = False
                         _note("  downward budget spent; sweeping up")
                     y1, y2 = (y_far, y_near) if going_down else (y_near, y_far)
                     kind = "blind"
 
                 swipes += 1
+                if y1 > y2:
+                    # Downward travel on its own count: after an upward start
+                    # that turned back at the top, the way down still gets its
+                    # whole budget (CodeRabbit on #704).
+                    down_swipes += 1
                 _note(
                     f"swipe {swipes}/{total_budget} {kind} "
                     f"({'down' if y1 > y2 else 'up'}) {y1:.0f}->{y2:.0f}"

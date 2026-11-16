@@ -1225,3 +1225,27 @@ def test_the_numbering_is_read_only_when_it_says_something():
     assert _index_direction("row_3", seen("item_140", "item_152")) is None   # other prefix
     assert _index_direction("settings", seen("row_140", "row_152")) is None  # no number
     assert _index_direction("row_3", (0, 0, 10, 10)) is None                 # a WDA frame
+
+
+@pytest.mark.asyncio
+async def test_after_an_upward_start_the_way_down_keeps_its_whole_budget(monkeypatch):
+    """Up swipes counted against the downward budget cut the way down short
+    (CodeRabbit on #704): a misleading hint, then a long way down."""
+    monkeypatch.setattr("server.device.controller_ui._index_direction", lambda *a: False)
+    # Three swipes from the top, row 150 twelve below it: four swipes up
+    # (three and one that does not move), then twelve down. With 7, the way
+    # down has 14 -- but 10 if the four up are charged to it.
+    screen = ListScreen(offset=3 * (Y_FAR - Y_NEAR) * TRAVEL)
+    found = await _sweep(screen, "row_150", max_swipes=7)
+
+    assert found is not None, screen.swipes()
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_sweeps_first_read_is_a_lookup():
+    """So a failed push read falls back to WDA at the action depth."""
+    screen = PushedListScreen()
+    await _sweep(screen, "row_150", pushed=True)
+
+    assert screen.reads[0].get("whole_screen") is True
+    assert screen.reads[0].get("lookup") is True
