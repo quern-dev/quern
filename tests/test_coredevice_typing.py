@@ -237,7 +237,7 @@ class TestWhatIsNotSet:
         target = ctrl._find_text_field.return_value
 
         async def crashing(*args, **kwargs):
-            ctrl._push_crashed_apps.setdefault(PHONE, set()).add("QuernProbeScene")
+            ctrl._record_push_crash(PHONE, "QuernProbeScene")
             return target
         ctrl._find_text_field = AsyncMock(side_effect=crashing)
 
@@ -254,7 +254,7 @@ class TestWhatIsNotSet:
         ctrl, setter = _phone(monkeypatch, before="", reads=[])
 
         async def crashing(*args, **kwargs):
-            ctrl._push_crashed_apps.setdefault(PHONE, set()).add("QuernProbeScene")
+            ctrl._record_push_crash(PHONE, "QuernProbeScene")
             return "あ"
         ctrl._read_field_value = AsyncMock(side_effect=crashing)
 
@@ -272,7 +272,7 @@ class TestWhatIsNotSet:
         ctrl, _ = _phone(monkeypatch, before="", reads=["a"])
 
         async def crashing(*args, **kwargs):
-            ctrl._push_crashed_apps.setdefault(PHONE, set()).add("QuernProbeScene")
+            ctrl._record_push_crash(PHONE, "QuernProbeScene")
             raise DeviceError("No element found: no text field matching 'field_default'",
                               tool="wda")
         ctrl._find_text_field = AsyncMock(side_effect=crashing)
@@ -378,7 +378,7 @@ class TestClearing:
         found = ctrl.get_ui_elements.return_value
 
         async def crashing(*args, **kwargs):
-            ctrl._push_crashed_apps.setdefault(PHONE, set()).add("QuernProbeScene")
+            ctrl._record_push_crash(PHONE, "QuernProbeScene")
             return found
         ctrl.get_ui_elements = AsyncMock(side_effect=crashing)
 
