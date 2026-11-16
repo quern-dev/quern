@@ -71,7 +71,7 @@ handing that back gets `Invalid device` from simctl.
 | `QUERN_API_KEY` | Override the key. Default: `~/.quern/api-key` |
 | `QUERN_CONFORMANCE_PHYSICAL` | Enable physical-device tests |
 | `QUERN_CONFORMANCE_DESTRUCTIVE` | Enable host-mutating tests |
-| `QUERN_CONFORMANCE_NO_WDA` | Read without passing a WDA depth, so a phone opted into CoreDevice (`"device_ui_reader": "coredevice"`) is read through the tree push. Without it every read asks for depth 12, and the suite starts WDA itself (#664). It also installs the probe built with `--hosted` (`com.quern.probe.hosted`): the same screens in a SwiftUI TabView, because a push read crashes the UIKit tab bar's More screens (#669) and not SwiftUI's |
+| `QUERN_CONFORMANCE_NO_WDA` | Read without passing a WDA depth, so a phone on CoreDevice (the default on iOS 27+) is read through the tree push. Without it every read asks for depth 12, and the suite starts WDA itself (#664). It also installs the probe built with `--hosted` (`com.quern.probe.hosted`): the same screens in a SwiftUI TabView, because a push read crashes the UIKit tab bar's More screens (#669) and not SwiftUI's |
 | `QUERN_CONFORMANCE_DEVICES` | Comma-separated UDIDs or unambiguous prefixes; the run uses only these. Set it on a machine other sessions share -- unpinned, the suite takes the first booted device of each kind, which may be someone else's |
 
 Resolution is read from the **real** home directory on purpose. The root

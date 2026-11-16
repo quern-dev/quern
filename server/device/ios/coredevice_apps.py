@@ -28,40 +28,51 @@ TOOL = "coredevice"
 #: How long one call to the app service may take, connect included. A launch
 #: took 1.1 s and a listing about as long (measured, iPhone 11).
 CALL_TIMEOUT_S = 20.0
+#: An install uploads the whole bundle first: the probe app took 7 s over USB,
+#: and an app hundreds of MB over Wi-Fi takes minutes.
+INSTALL_TIMEOUT_S = 600.0
 
 
 class CoreDeviceApps(DevicectlBackend):
     """`DevicectlBackend`'s app methods, over the CoreDevice app service."""
 
     @contextlib.asynccontextmanager
-    async def _apps(self, uuid: str) -> AsyncIterator[Any]:
-        """The device's app service, on a connection of its own."""
+    async def _rsd(self, uuid: str) -> AsyncIterator[Any]:
+        """A connection to the device over its tunnel, USB or Wi-Fi."""
         from server.device.ios.coredevice_ax import _pmd3
         from server.device.performance import _device_address
 
-        lib = _pmd3()
-        rsd = lib.RemoteServiceDiscoveryService(await _device_address(uuid))
+        rsd = _pmd3().RemoteServiceDiscoveryService(await _device_address(uuid))
         try:
             await rsd.connect()
-            async with lib.AppService(rsd) as apps:
-                yield apps
+            yield rsd
         finally:
             with contextlib.suppress(Exception):
                 await rsd.close()
 
-    async def _call(self, uuid: str, what: str, op) -> Any:
-        """`op(apps)` on the device's app service, its failures as DeviceError."""
+    @contextlib.asynccontextmanager
+    async def _apps(self, uuid: str) -> AsyncIterator[Any]:
+        """The device's app service, on a connection of its own."""
+        from server.device.ios.coredevice_ax import _pmd3
+
+        async with self._rsd(uuid) as rsd, _pmd3().AppService(rsd) as apps:
+            yield apps
+
+    async def _call(self, uuid: str, what: str, op, *,
+                    timeout: float = CALL_TIMEOUT_S, service=None) -> Any:
+        """`op(apps)` on the device's app service -- or on what `service`
+        opens instead -- with its failures as DeviceError."""
         import asyncio
 
         async def run():
-            async with self._apps(uuid) as apps:
+            async with (service or self._apps)(uuid) as apps:
                 return await op(apps)
         try:
-            return await asyncio.wait_for(run(), CALL_TIMEOUT_S)
+            return await asyncio.wait_for(run(), timeout)
         except DeviceError:
             raise
         except TimeoutError as e:
-            raise DeviceError(f"{what} on {uuid[:8]} took over {CALL_TIMEOUT_S:.0f} s",
+            raise DeviceError(f"{what} on {uuid[:8]} took over {timeout:.0f} s",
                               tool=TOOL) from e
         except Exception as e:  # noqa: BLE001 -- pymobiledevice3 raises its own kinds
             raise DeviceError(f"{what} on {uuid[:8]} failed: {e}", tool=TOOL) from e
@@ -164,6 +175,24 @@ class CoreDeviceApps(DevicectlBackend):
                          lambda a: a.uninstall_app(bundle_id))
 
     async def install_app(self, uuid: str, app_path: str) -> None:
-        raise DeviceError(
-            "Installing an app on a phone needs Xcode, which is not installed: there is "
-            "nothing built to install without it.", tool=TOOL)
+        """Install a built, signed `.app` or `.ipa` through the installation
+        proxy, over the tunnel as the app service is. Measured on an iPhone 11
+        with Xcode hidden: the probe app installed in 7 s. Signing is the
+        build's: a bundle not signed for this phone is refused by the phone,
+        and that refusal is the error."""
+        from pathlib import Path
+
+        path = Path(app_path)
+        if not path.exists():
+            raise InvalidDeviceRequestError(f"{app_path} does not exist", tool=TOOL)
+
+        @contextlib.asynccontextmanager
+        async def installer(udid: str) -> AsyncIterator[Any]:
+            from pymobiledevice3.services.installation_proxy import InstallationProxyService
+
+            async with self._rsd(udid) as rsd:
+                yield InstallationProxyService(lockdown=rsd)
+
+        await self._call(uuid, f"installing {path.name}",
+                         lambda proxy: proxy.install_from_local(path),
+                         timeout=INSTALL_TIMEOUT_S, service=installer)

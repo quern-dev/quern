@@ -189,9 +189,53 @@ class TestApps:
             ("com.apple.Preferences", "Settings", "System"),
             ("com.quern.probe", "Probe", "User")]
 
-    async def test_install_says_it_needs_xcode(self):
-        with pytest.raises(DeviceError, match="needs Xcode"):
-            await _apps(FakeAppService([], [])).install_app(PHONE, "/tmp/App.app")
+    async def test_install_goes_through_the_installation_proxy(self, monkeypatch, tmp_path):
+        app = tmp_path / "Probe.app"
+        app.mkdir()
+        installed = []
+
+        class Proxy:
+            def __init__(self, lockdown):
+                self.lockdown = lockdown
+
+            async def install_from_local(self, path):
+                installed.append((self.lockdown, path))
+        monkeypatch.setattr(
+            "pymobiledevice3.services.installation_proxy.InstallationProxyService", Proxy)
+        backend = CoreDeviceApps()
+
+        @contextlib.asynccontextmanager
+        async def tunnel(uuid):
+            yield "rsd"
+        backend._rsd = tunnel
+
+        await backend.install_app(PHONE, str(app))
+        assert installed == [("rsd", app)]
+
+    async def test_an_install_the_phone_refuses_says_why(self, monkeypatch, tmp_path):
+        class Proxy:
+            def __init__(self, lockdown):
+                pass
+
+            async def install_from_local(self, path):
+                raise RuntimeError("ApplicationVerificationFailed")
+        monkeypatch.setattr(
+            "pymobiledevice3.services.installation_proxy.InstallationProxyService", Proxy)
+        backend = CoreDeviceApps()
+
+        @contextlib.asynccontextmanager
+        async def tunnel(uuid):
+            yield "rsd"
+        backend._rsd = tunnel
+        (tmp_path / "Probe.app").mkdir()
+
+        with pytest.raises(DeviceError, match="installing Probe.app on 00008030 failed: "
+                                              "ApplicationVerificationFailed"):
+            await backend.install_app(PHONE, str(tmp_path / "Probe.app"))
+
+    async def test_a_path_that_is_not_there_is_refused_before_connecting(self):
+        with pytest.raises(InvalidDeviceRequestError, match="does not exist"):
+            await CoreDeviceApps().install_app(PHONE, "/nowhere/App.app")
 
     async def test_a_url_is_the_launch_request_s_payload(self):
         service = FakeAppService([SETTINGS], [])
