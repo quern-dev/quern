@@ -542,19 +542,39 @@ def ios_probe(quern: client_mod.QuernClient, any_ios: Device):
     # builds rather than fail afterwards. Below 27 the app-delegate build stays
     # the one under test: it is the older shape, and it is covered nowhere else.
     scene = probe_mod.scene_lifecycle_required(any_ios.os_version)
+    # A run with no WDA reads the tree push, which crashes the UIKit tab bar's
+    # More screens (#669): the same screens hosted in SwiftUI are read whole.
+    hosted = probe_mod.no_wda()
+    if hosted and not physical:
+        # The push is a physical iPhone's: on a simulator the switch would
+        # install the hosted bundle and measure nothing it is for (review).
+        pytest.fail("QUERN_CONFORMANCE_NO_WDA needs a physical iPhone: "
+                    "set QUERN_CONFORMANCE_DEVICES to its udid")
     try:
         bundle = probe_mod.build_ios(
-            scene=scene,
+            scene=scene, hosted=hosted,
             device_udid=probe_mod.hardware_udid(any_ios.udid) if physical else None,
         )
     except probe_mod.ProbeUnavailable as exc:
         pytest.skip(f"iOS probe app unavailable: {exc}")
 
-    return _install_and_launch(
+    driver = _install_and_launch(
         quern, any_ios.udid, bundle, probe_mod.IOS,
-        probe_mod.SCENE_BUNDLE_ID if scene else probe_mod.BUNDLE_ID,
+        probe_mod.HOSTED_BUNDLE_ID if hosted
+        else probe_mod.SCENE_BUNDLE_ID if scene else probe_mod.BUNDLE_ID,
         physical=physical,
     )
+    if hosted:
+        # Checked, not assumed: a phone not opted into the push, or one whose
+        # reads #669 has sent to WDA until the server restarts, reads through
+        # WDA and passes the same tests for the wrong reason (review).
+        backend = (driver.ui_tree() or {}).get("backend")
+        if backend != "coredevice":
+            pytest.fail(
+                f"QUERN_CONFORMANCE_NO_WDA is set, but the probe was read through "
+                f"{backend!r}, not the tree push: opt the phone in "
+                '("device_ui_reader": "coredevice") and restart the server')
+    return driver
 
 
 @pytest.fixture(scope="session")
