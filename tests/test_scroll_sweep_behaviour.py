@@ -318,13 +318,15 @@ async def test_a_found_row_is_returned_with_its_resting_frame():
 
 
 @pytest.mark.asyncio
-async def test_a_row_above_turns_the_sweep_around_at_the_bottom():
+async def test_a_row_above_turns_the_sweep_around_at_the_bottom(monkeypatch):
     """M25.
 
     The trace behind this: from the bottom of a Settings list, a sweep for a
     row above spent its whole downward budget -- ten swipes, ~60s on an
-    iPhone 11 -- swiping at an end that could not move.
+    iPhone 11 -- swiping at an end that could not move. Blind, as a list
+    whose rows carry no numbered identifiers is swept.
     """
+    monkeypatch.setattr("server.device.controller_ui._index_direction", lambda *a: None)
     screen = ListScreen().at_bottom()
     found = await _sweep(screen, "row_3")
 
@@ -667,12 +669,13 @@ async def test_tall_rows_are_brought_into_view(row):
 
 
 @pytest.mark.asyncio
-async def test_a_label_changing_in_place_does_not_hide_the_bottom():
+async def test_a_label_changing_in_place_does_not_hide_the_bottom(monkeypatch):
     """M34 — a running clock must not read as the list moving.
 
     Counted as movement it stopped end detection outright: from the bottom, a
-    search for a row above swiped down 20 times first.
+    search for a row above swiped down 20 times first. Blind, as M25.
     """
+    monkeypatch.setattr("server.device.controller_ui._index_direction", lambda *a: None)
     screen = ListScreen(ticking=True).at_bottom()
     found = await _sweep(screen, "row_3")
 
@@ -1023,8 +1026,10 @@ class PushedListScreen(ListScreen):
     """The same list, swept as a phone with no WDA is: the HID backend names
     its own drag speed and hold, and every read is asked of the push."""
 
-    def __init__(self, *, merged: str = "", fails_at: int | None = None, **kw):
+    def __init__(self, *, merged: str = "", fails_at: int | None = None,
+                 header: list[UIElement] | None = None, **kw):
         super().__init__(**kw)
+        self.header = header or []      # the bar's controls, as the push lists them
         self.durations: list[float] = []
         self.reads: list[dict] = []
         self.merged = merged            # appended to each row's label: ", Detail"
@@ -1058,6 +1063,10 @@ class PushedListScreen(ListScreen):
         if self.merged:
             els = [e.model_copy(update={"label": e.label + self.merged})
                    if e.label.startswith("Row ") else e for e in els]
+        if k.get("whole_screen"):
+            # A pushed tree's first element is the Application, the screen.
+            els = [UIElement(type="Application", identifier="", label="App",
+                             frame={"x": 0, "y": 0, **SCREEN}), *self.header, *els]
         return els, udid
 
 
@@ -1094,10 +1103,48 @@ async def test_a_pushed_sweep_asks_the_push_for_the_viewport_and_the_target():
     screen = PushedListScreen()
     await _sweep(screen, "row_150", pushed=True)
 
-    viewport = next(r for r in screen.reads if r.get("filter_type") == "Application")
-    assert viewport.get("lookup") is True
+    # The viewport from a whole-screen read: a push lookup reads all of it
+    # anyway, and its header places the upward swipes.
+    assert screen.reads[0].get("whole_screen") is True
+    assert not screen.reads[0].get("filter_type")
     lookups = [r for r in screen.reads if r.get("filter_identifier")]
     assert lookups and all(r.get("lookup") is True for r in lookups)
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_sweep_starts_its_upward_swipes_below_a_tall_header():
+    """Two bars over a list, as the probe's SwiftUI-hosted More screens have
+    (#664): the list from y=156, and every upward swipe from the usual 140
+    began on the bar and moved nothing, which read as the top of the list."""
+    tall = [UIElement(type="Button", identifier="lazy_to_top", label="Top",
+                      frame={"x": 16, "y": 106, "width": 44, "height": 48})]
+    screen = PushedListScreen(header=tall, chrome=160).at_bottom()
+
+    found = await _sweep(screen, "row_3", max_swipes=40, pushed=True)
+
+    assert found is not None
+    assert "swipe:up" in screen.swipes()
+
+
+@pytest.mark.asyncio
+async def test_a_usual_header_leaves_the_swipes_where_they_were():
+    from server.device.controller_ui import _header_bottom
+
+    bar = [UIElement(type="Button", identifier="back", label="Back",
+                     frame={"x": 8, "y": 52, "width": 60, "height": 36})]
+    assert _header_bottom(bar, 140, SCREEN["height"]) == 0.0
+    # A container is no header, whatever it spans.
+    table = [UIElement(type="Group", identifier="table", label="",
+                       frame={"x": 0, "y": 90, "width": 400, "height": 700})]
+    assert _header_bottom(table, 140, SCREEN["height"]) == 0.0
+    # Nor a row scrolled up under the bar (#664: it moved the start to 213).
+    row = [UIElement(type="Group", identifier="lazy_row_9", label="Lazy row 9",
+                     frame={"x": 0, "y": 139, "width": 414, "height": 50})]
+    assert _header_bottom(row, 140, SCREEN["height"]) == 0.0
+    # And a header is held to the upper part of the screen.
+    huge = [UIElement(type="Button", identifier="b", label="",
+                      frame={"x": 0, "y": 130, "width": 40, "height": SCREEN["height"] * 0.14})]
+    assert _header_bottom(huge, 140, SCREEN["height"]) <= SCREEN["height"] * 0.4
 
 
 @pytest.mark.asyncio
@@ -1128,3 +1175,77 @@ def test_the_hid_sweep_speed_is_the_measured_one():
     from server.device.ios.coredevice_input import CoreDeviceInput
     assert CoreDeviceInput.sweep_drag_pt_s == 250.0
     assert CoreDeviceInput.sweep_hold_s == 0.5
+
+
+# -- direction from the rows' numbering (#664) ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_numbered_row_above_is_swept_up_first():
+    """From row ~190, row 3: the blind sweep's trip to the bottom cost five
+    swipes on a phone read through the push, and the deadline with them."""
+    screen = ListScreen().at_bottom()
+    found = await _sweep(screen, "row_3", max_swipes=40)
+
+    assert found is not None
+    assert set(screen.swipes()) == {"swipe:up"}, screen.swipes()
+
+
+@pytest.mark.asyncio
+async def test_a_numbered_row_below_is_swept_down_first():
+    screen = ListScreen()
+    found = await _sweep(screen, "row_150", max_swipes=40)
+
+    assert found is not None
+    assert set(screen.swipes()) == {"swipe:down"}, screen.swipes()
+
+
+@pytest.mark.asyncio
+async def test_a_numbering_that_misleads_turns_back_at_the_top(monkeypatch):
+    """An app's numbering need not run down the list: up first, then the rest."""
+    monkeypatch.setattr("server.device.controller_ui._index_direction", lambda *a: False)
+    screen = ListScreen()                      # at the top already
+    found = await _sweep(screen, "row_150", max_swipes=40)
+
+    assert found is not None
+    swipes = screen.swipes()
+    assert swipes[0] == "swipe:up" and "swipe:down" in swipes, swipes
+
+
+def test_the_numbering_is_read_only_when_it_says_something():
+    from server.device.controller_ui import _index_direction
+
+    def seen(*ids):
+        return {("Cell", i, ""): [(0, 0)] for i in ids}
+
+    assert _index_direction("row_3", seen("row_140", "row_152")) is False
+    assert _index_direction("row_160", seen("row_140", "row_152")) is True
+    assert _index_direction("row_145", seen("row_140", "row_152")) is None   # in range
+    assert _index_direction("row_3", seen("row_140")) is None                # one to go on
+    assert _index_direction("row_3", seen("item_140", "item_152")) is None   # other prefix
+    assert _index_direction("settings", seen("row_140", "row_152")) is None  # no number
+    assert _index_direction("row_3", (0, 0, 10, 10)) is None                 # a WDA frame
+
+
+@pytest.mark.asyncio
+async def test_after_an_upward_start_the_way_down_keeps_its_whole_budget(monkeypatch):
+    """Up swipes counted against the downward budget cut the way down short
+    (CodeRabbit on #704): a misleading hint, then a long way down."""
+    monkeypatch.setattr("server.device.controller_ui._index_direction", lambda *a: False)
+    # Three swipes from the top, row 150 twelve below it: four swipes up
+    # (three and one that does not move), then twelve down. With 7, the way
+    # down has 14 -- but 10 if the four up are charged to it.
+    screen = ListScreen(offset=3 * (Y_FAR - Y_NEAR) * TRAVEL)
+    found = await _sweep(screen, "row_150", max_swipes=7)
+
+    assert found is not None, screen.swipes()
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_sweeps_first_read_is_a_lookup():
+    """So a failed push read falls back to WDA at the action depth."""
+    screen = PushedListScreen()
+    await _sweep(screen, "row_150", pushed=True)
+
+    assert screen.reads[0].get("whole_screen") is True
+    assert screen.reads[0].get("lookup") is True
