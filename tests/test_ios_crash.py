@@ -273,3 +273,16 @@ class TestRun:
         with pytest.raises(IosCrashError) as e:
             await ios_crash._run(["/bin/pmd3", "crash", "pull"], "crash pull", 5)
         assert str(e.value) == "pymobiledevice3 crash pull exited 2: No such option: --bogus"
+
+
+class TestReportPid:
+    def test_an_ips_body(self):
+        assert ios_crash.report_pid('{"app_name":"X"}\n{"pid": 1933, "procName": "X"}') == 1933
+
+    def test_a_crash_file(self):
+        text = "Incident Identifier: A\nProcess:             QuernProbe [1933]\nPath: /x\n"
+        assert ios_crash.report_pid(text) == 1933
+
+    def test_none_said(self):
+        assert ios_crash.report_pid('{"bug_type":"298"}\n{"incident":"x"}') is None
+        assert ios_crash.report_pid("") is None
