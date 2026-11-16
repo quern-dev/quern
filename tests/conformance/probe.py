@@ -33,6 +33,13 @@ BUNDLE_ID = "com.quern.probe"
 #: A second bundle the iOS app builds for scene-lifecycle coverage.
 SCENE_BUNDLE_ID = "com.quern.probe.scene"
 
+def no_wda() -> bool:
+    """Whether QUERN_CONFORMANCE_NO_WDA is set, read as the other gates are:
+    1, true, yes or on, so "0" or "false" leaves it off."""
+    return os.environ.get("QUERN_CONFORMANCE_NO_WDA", "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
 #: The same screens in a SwiftUI TabView (`build.sh --hosted`), for a phone read
 #: with no WDA: under a UIKit tab bar, the read crashes every screen behind More
 #: (#669); under SwiftUI's it does not.
@@ -249,7 +256,7 @@ IOS = ProbeContract(
         "location": "location_auth", "web": "web_heading_native",
         "diag": "diag_crash_uncaught", "state": "state_counter",
         "widgets": "widget_nav_done", "lists": "lists_row_0",
-        "lazy": "lazy_row_0", "taps": "taps_heading",
+        "lazy": "lazy_to_top", "taps": "taps_heading",
     },
     row_identifier_template="row_{index}",
     row_label_template="Row {index}",
@@ -310,9 +317,9 @@ IOS = ProbeContract(
         # shape #475 was about. Scrolls, unlike the other More screens.
         "lazy": {"scrollable": True, "landmarks": [
             {"element": "Heading", "label": "Lazy"},
-            # Its first row, not the list: a push read has no containers, and
-            # the row is a Cell, a Group or a StaticText by reader (#664).
-            {"element": "Cell", "identifier": "lazy_row_0"},
+            # Its Top button, not the list: a push read has no containers, and
+            # a row is gone once the list scrolls (#664).
+            {"element": "Button", "identifier": "lazy_to_top"},
         ]},
         # Every button counts its own taps (#511). The heading is a label of
         # its own, beside the navigation title, so both platforms share it.
@@ -600,7 +607,7 @@ class ProbeDriver:
     #: opted into CoreDevice is read through the tree push rather than WDA:
     #: a depth is the request for WDA's read (#664). Without it the suite
     #: started WDA itself on every phone and measured WDA, not the push.
-    READ = ({"source_timeout": 30} if os.environ.get("QUERN_CONFORMANCE_NO_WDA")
+    READ = ({"source_timeout": 30} if no_wda()
             else {"source_timeout": 30, "snapshot_depth": 12})
 
     def __init__(

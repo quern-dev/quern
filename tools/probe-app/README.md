@@ -146,7 +146,7 @@ conformance contract's landmarks and `leads_to` edges, and the tabs declared
 once in `app.md`'s `global_leads_to` (#503). `tap_element` checks those edges, so it is the fixture for #491's
 navigation check. `tests/test_navigation_check.py` keeps the landmarks in step
 with `tests/conformance/probe.py`. Load it with
-`load_landmarks(path=<this folder>/knowledge, app="com.quern.probe")`.
+`load_landmarks(path=<this folder>/knowledge, app="com.quern.probe")` (or `com.quern.probe.scene`, or `com.quern.probe.hosted`, for whichever bundle runs).
 
 ## The hosted bundle (`--hosted`)
 

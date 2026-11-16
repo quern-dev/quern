@@ -17,6 +17,7 @@ import UIKit
 
 final class LazyListViewController: UIViewController, UICollectionViewDataSource {
     static let rowCount = 200
+    private var list: UICollectionView?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -29,6 +30,19 @@ final class LazyListViewController: UIViewController, UICollectionViewDataSource
         list.dataSource = self
         list.register(UICollectionViewListCell.self, forCellWithReuseIdentifier: "row")
         view.addSubview(list)
+        self.list = list
+        // In the navigation bar, as the Scroll tab's are: there whatever row
+        // the list is on, so the screen is known when it is scrolled -- its
+        // rows come and go, and a read of the tree push has no list (#664).
+        let top = UIBarButtonItem(title: "Top", style: .plain, target: self,
+                                  action: #selector(scrollToTop))
+        top.accessibilityIdentifier = "lazy_to_top"
+        navigationItem.leftBarButtonItem = top
+    }
+
+    /// Back to row 0, without animation, as the Scroll tab's Top.
+    @objc private func scrollToTop() {
+        list?.scrollToItem(at: IndexPath(item: 0, section: 0), at: .top, animated: false)
     }
 
     func collectionView(_ collectionView: UICollectionView,
