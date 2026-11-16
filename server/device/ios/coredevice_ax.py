@@ -56,6 +56,15 @@ COREDEVICE_MIN_IOS = 27
 #: The selector every tree push arrives under.
 PUSH_SELECTOR = "processDataFromRemoteDevice:"
 
+#: How many times a read subscribes again, on a fresh connection, when the
+#: device stops pushing before a complete tree (#684); and how long after
+#: its newest InitialDump that is taken to have happened: this many of the
+#: pair's own budget (`_pair_budget`), and never less than STALL_MIN_S. A
+#: false start costs a fresh subscription, about 2 s.
+RESUBSCRIBES = 2
+STALL_PAIRS = 2.0
+STALL_MIN_S = 2.5
+
 #: `associatedRequestType` of the response that carries one element's
 #: attributes, keyed by attribute number.
 ELEMENT_BUNDLE = 5
@@ -186,6 +195,17 @@ class AppExitedDuringRead(DeviceError):
             tool="coredevice")
         self.app = app
         self.pid = pid
+
+
+class PushStalled(DeviceError):
+    """The device stopped pushing before a complete tree (#684).
+
+    Measured on an iPhone 11 after a scroll sweep's swipe, 3 to 6 reads in
+    50: an InitialDump, a second about 1.1 s later, then nothing -- the
+    channel open and its reader running at 8 s. The read waited out its
+    deadline, 20 s, and the fallback started WDA. A subscription on a fresh
+    connection answered in about 2 s, three times in three.
+    """
 
 
 class AppExitedAfterRead(AppExitedDuringRead):
@@ -580,9 +600,17 @@ async def _newest_tree(queue: asyncio.Queue,
     settle_by = 0.0
     pair_by = 0.0  # when a pair under way is given up on
     hard_by = 0.0
+    stall_by = None  # before a complete tree: when a pair under way is given up on
     while True:
-        if latest is None:
+        if latest is None and stall_by is None:
             selector, args = await queue.get()
+        elif latest is None:
+            try:
+                selector, args = await asyncio.wait_for(
+                    queue.get(), max(stall_by - loop.time(), 0.0))
+            except TimeoutError:
+                raise PushStalled("the device stopped pushing before a complete tree",
+                                  tool="coredevice") from None
         else:
             deadline = min(pair_by, hard_by) if changing else settle_by
             remaining = deadline - loop.time()
@@ -621,6 +649,10 @@ async def _newest_tree(queue: asyncio.Queue,
             latest, changing = tree, False
             if held is not None:
                 held["latest"] = latest
+        elif latest is None:
+            # An InitialDump with no complete tree yet: its pair, or the
+            # newest one's, is waited for -- not for ever (#684).
+            stall_by = loop.time() + max(STALL_PAIRS * _pair_budget(tree), STALL_MIN_S)
         elif latest is not None:
             changing = True
             # Its pair gets the time a tree this size takes to build, and
@@ -724,6 +756,37 @@ async def _subscribed(uuid: str, lib: SimpleNamespace, address: Any,
     return spare_queue
 
 
+async def _settled(uuid: str, lib: SimpleNamespace, address: Any, conn: SimpleNamespace,
+                   held: dict) -> tuple[Tree, Tree, Tree]:
+    """Subscribe and take the settled tree, subscribing again on a fresh
+    connection when the device stops pushing first (#684). `conn` holds
+    whichever connection is open, for the caller to close; the caller's
+    deadline bounds every attempt.
+
+    The first tree is the first attempt's: a caller compares it with the
+    newest to see the app change under the read (#669), and an app that
+    stalled one attempt and died before the next must not drop out of that
+    comparison (CodeRabbit on #702)."""
+    first_seen: Tree | None = None
+    for attempt in range(RESUBSCRIBES + 1):
+        queue = await _subscribed(uuid, lib, address, conn)
+        try:
+            tree, first, newest = await _newest_tree(queue, held)
+            if first_seen is not None:
+                first = first_seen
+                held["first"] = first_seen
+            return tree, first, newest
+        except PushStalled:
+            first_seen = first_seen or held.get("first")
+            if attempt == RESUBSCRIBES:
+                raise
+            logger.info("[coredevice] %s stopped pushing before a complete tree: "
+                        "subscribing again on a fresh connection (#684)", uuid[:8])
+            await _close(conn.provider, conn.rsd)
+            conn.rsd = conn.provider = None
+    raise AssertionError("unreachable")
+
+
 async def _close(provider: Any, rsd: Any) -> None:
     """Unsubscribe and close, each step bounded and its failure swallowed.
 
@@ -761,8 +824,7 @@ async def _with_settled_tree(uuid: str, timeout: float, what: str,
         async with asyncio.timeout(timeout):
             try:
                 address = await _device_address(uuid)
-                queue = await _subscribed(uuid, lib, address, conn)
-                tree, first, newest = await _newest_tree(queue, {})
+                tree, first, newest = await _settled(uuid, lib, address, conn, {})
                 if (first.app_pid is not None and newest.app_pid != first.app_pid
                         and await _app_alive(conn.rsd, lib, first.app_pid) is False):
                     # The read killed the app (#669): said, as read_tree says
@@ -856,8 +918,7 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
             # asks devicectl, and a read must not outlast the time it was given.
             async with deadline:
                 address = await _device_address(uuid)
-                queue = await _subscribed(uuid, lib, address, conn)
-                tree, first, newest = await _newest_tree(queue, held)
+                tree, first, newest = await _settled(uuid, lib, address, conn, held)
                 elements = tree.elements
                 # The app changed under the read: switched, or killed by it.
                 # Only the process list can tell those apart. "Could not ask"
