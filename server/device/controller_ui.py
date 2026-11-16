@@ -587,8 +587,29 @@ def _note_collapsed(result: dict, folded: list[UIElement]) -> None:
         ]
 
 
+def _hit_owner(screen: list[UIElement], frame: dict[str, float]) -> UIElement | None:
+    """The smallest element on `screen` whose frame holds `frame`, the
+    application aside; None when none does."""
+    owners = []
+    for e in screen:
+        if e.type == "Application" or not e.frame:
+            continue
+        try:
+            ef = {k: float(e.frame[k]) for k in ("x", "y", "width", "height")}
+        except (KeyError, TypeError, ValueError):
+            continue
+        if _contains(ef, frame):
+            owners.append((ef["width"] * ef["height"], e))
+    return min(owners, key=lambda o: o[0])[1] if owners else None
+
+
+def _same_element(a: UIElement, b: UIElement) -> bool:
+    return (a.type, a.identifier, a.label, a.frame) == (b.type, b.identifier, b.label, b.frame)
+
+
 def _covering_element(target: UIElement, hit: dict | None, *,
-                      leaf: bool = False) -> dict | None:
+                      leaf: bool = False,
+                      screen: list[UIElement] | None = None) -> dict | None:
     """What a tap at the target's point would land on instead, or None.
 
     `hit` is the hit-test at that point. It is the target when its frame lies
@@ -607,9 +628,14 @@ def _covering_element(target: UIElement, hit: dict | None, *,
     `leaf` is a hit-test that answers with the deepest element there: the
     phone's own (#664), which answered with a button's title text, not the
     button. So an overlay's title, small enough to sit inside the target's
-    frame, read as the target's child. There the label decides: a child of the
-    target says part of what the target says -- the pushed label of a row is
-    all its texts -- and a label of its own is something else on top.
+    frame, read as the target's child. There the screen decides, when there is
+    one: the hit belongs to the smallest element on it whose frame holds the
+    hit's -- the overlay's title to the overlay (140x44) over the button it
+    covers (160x44) -- and is the target's only if that is the target. Without
+    a screen, the label decides: a child of the target says part of what the
+    target says. That alone refused a button whose label is not its title
+    ("Submit order" titled "Buy"), which the screen does not (CodeRabbit on
+    #705).
     """
     if not hit or not target.frame:
         return None
@@ -629,9 +655,11 @@ def _covering_element(target: UIElement, hit: dict | None, *,
         return None
     if label.strip().lower() in _OVERLAY_LABELS:
         return covering
-    if leaf and inside and not around and label.strip():
-        own = (target.label or "").lower()
-        if label.strip().lower() not in own:
+    if leaf and inside and not around:
+        owner = _hit_owner(screen, frame) if screen else None
+        if owner is not None:
+            return None if _same_element(owner, target) else covering
+        if label.strip() and label.strip().lower() not in (target.label or "").lower():
             return covering
         return None
     if inside or around:
@@ -1484,7 +1512,11 @@ class DeviceControllerUI:
             logger.debug("hit-test before tap failed", exc_info=True)
             return None
         try:
-            covering = _covering_element(target, hit, leaf=pushed)
+            # The pushed screen the lookup cached, to tell whose the hit is.
+            cached = self._ui_cache.get(udid) if pushed else None
+            screen = (cached[0] if cached and self._ui_cache_backend.get(udid)
+                      == self.coredevice_ax.TOOL_NAME else None)
+            covering = _covering_element(target, hit, leaf=pushed, screen=screen)
         except Exception:
             # A shape the comparison did not expect is a check that could not
             # run, and that must not refuse a tap any more than a failed ask.

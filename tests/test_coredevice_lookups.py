@@ -366,6 +366,15 @@ class TestTapElement:
         f = wifi["frame"]
         ctrl = self._covered(monkeypatch, self._hit(
             "Overlay", f["x"] + 40, f["y"] + 4, 60, f["height"] - 8))
+        # The overlay is on the pushed screen too, smaller than the row, as the
+        # probe's is: its title is the overlay's, not the row's.
+        overlay = {"type": "Button", "AXLabel": "Overlay", "AXUniqueId": "overlay",
+                   "AXValue": None, "enabled": True, "role": "AXButton",
+                   "role_description": "", "help": None, "custom_actions": [],
+                   "frame": {"x": f["x"] + 30, "y": f["y"] + 2,
+                             "width": f["width"] - 60, "height": f["height"] - 4}}
+        ctrl.coredevice_ax.describe_all = AsyncMock(
+            return_value=[*parse_push(SETTINGS)[1], overlay])
 
         result = await ctrl.tap_element(label="Wi-Fi", udid=PHONE, scroll_to_find=False)
 
@@ -388,6 +397,21 @@ class TestTapElement:
 
             assert result["status"] == "ok", (text, result)
             ctrl.coredevice_input.tap.assert_awaited_once()
+
+    async def test_a_text_of_the_rows_own_that_its_label_lacks_still_taps(self, monkeypatch):
+        """Whose a hit is comes from the pushed screen the lookup cached: a
+        title the label does not carry is still the row's own (CodeRabbit on
+        #705)."""
+        wifi = next(e for e in parse_push(SETTINGS)[1]
+                    if e["AXUniqueId"] == "com.apple.settings.wifi")
+        f = wifi["frame"]
+        ctrl = self._covered(monkeypatch, self._hit(
+            "Networks", f["x"] + 40, f["y"] + 4, 60, f["height"] - 8))
+
+        result = await ctrl.tap_element(label="Wi-Fi", udid=PHONE, scroll_to_find=False)
+
+        assert result["status"] == "ok", result
+        ctrl.coredevice_input.tap.assert_awaited_once()
 
     async def test_a_hit_test_that_cannot_tell_taps(self, monkeypatch):
         ctrl = self._covered(monkeypatch, None)

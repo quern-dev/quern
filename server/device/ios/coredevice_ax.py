@@ -626,28 +626,30 @@ async def element_at(uuid: str, x: float, y: float, *,
     conn = SimpleNamespace(rsd=None, provider=None)
     try:
         async with asyncio.timeout(timeout):
-            try:
-                queue = await _subscribe(lib, await _device_address(uuid), conn)
-                hit = await _answer(conn.provider, queue,
-                                    _request(REQUEST_HIT_TEST, 0, 0, point=(x, y)),
-                                    REQUEST_HIT_TEST)
-                found = hit.get("resultData") if hit and not hit.get("error") else None
-                if not (isinstance(found, dict) and isinstance(found.get("pid"), int)
-                        and isinstance(found.get("objectID"), int)):
-                    return None
-                values: dict[int, Any] = {}
-                for attribute in (ATTR_LABEL, ATTR_IDENTIFIER, ATTR_FRAME, ATTR_TRAITS):
-                    answer = await _answer(
-                        conn.provider, queue,
-                        _request(REQUEST_ATTRIBUTE, found["pid"], found["objectID"],
-                                 attribute=attribute),
-                        REQUEST_ATTRIBUTE, attribute)
-                    values[attribute] = answer.get("resultData") if answer else None
-            finally:
-                await _close(conn.provider, conn.rsd)
+            queue = await _subscribe(lib, await _device_address(uuid), conn)
+            hit = await _answer(conn.provider, queue,
+                                _request(REQUEST_HIT_TEST, 0, 0, point=(x, y)),
+                                REQUEST_HIT_TEST)
+            found = hit.get("resultData") if hit and not hit.get("error") else None
+            if not (isinstance(found, dict) and isinstance(found.get("pid"), int)
+                    and isinstance(found.get("objectID"), int)):
+                return None
+            values: dict[int, Any] = {}
+            for attribute in (ATTR_LABEL, ATTR_IDENTIFIER, ATTR_FRAME, ATTR_TRAITS):
+                answer = await _answer(
+                    conn.provider, queue,
+                    _request(REQUEST_ATTRIBUTE, found["pid"], found["objectID"],
+                             attribute=attribute),
+                    REQUEST_ATTRIBUTE, attribute)
+                values[attribute] = answer.get("resultData") if answer else None
     except Exception as e:  # noqa: BLE001 -- could not tell is no obstruction
         logger.info("[coredevice] hit-test at (%g, %g) on %s: %r", x, y, uuid[:8], e)
         return None
+    finally:
+        # Outside the deadline, as every close is: cancelled inside it, the
+        # close stopped part-way and left the connection open (CodeRabbit on
+        # #705). `_close` bounds each step itself.
+        await _close(conn.provider, conn.rsd)
     traits = values[ATTR_TRAITS] if isinstance(values[ATTR_TRAITS], int) else 0
     return {"type": _element_type(traits, is_root=False),
             "AXLabel": _text(values[ATTR_LABEL]) or "",
