@@ -415,12 +415,13 @@ class TestWaitingForTheTree:
 
     async def test_the_pairs_budget_grows_with_its_tree(self, short_windows, monkeypatch):
         """Safari's InitialDump carries 13 elements: at 30 ms each its pair
-        has 0.49 s, past the 0.45 s it takes; with none, 0.1 s, short of it."""
+        has 0.49 s, past the 0.35 s it takes; with none, 0.1 s, short of it.
+        (0.45 s left 40 ms, and a loaded CI runner missed it.)"""
         monkeypatch.setattr(coredevice_ax, "PAIR_BASE_S", 0.1)
         monkeypatch.setattr(coredevice_ax, "PAIR_PER_ELEMENT_S", 0.03)
-        assert await self._pair_completing_at(0.45) == "Safari"
+        assert await self._pair_completing_at(0.35) == "Safari"
         monkeypatch.setattr(coredevice_ax, "PAIR_PER_ELEMENT_S", 0.0)
-        assert await self._pair_completing_at(0.45) == "Settings"
+        assert await self._pair_completing_at(0.35) == "Settings"
 
     async def test_a_small_pair_keeps_the_settle_windows_time(self, monkeypatch):
         """A pair budget shorter than the settle window left does not cut the
