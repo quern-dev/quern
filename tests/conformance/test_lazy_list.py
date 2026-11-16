@@ -10,7 +10,9 @@ The Scroll tab cannot catch that, because a UITableView of static rows is in
 the tree whole. These tests run each case twice on iOS: on the backend the
 device already uses, and through WDA. On a simulator the WDA case starts the
 driver for itself and stops it afterwards. On a physical iPhone, WDA is the
-backend already, so both cases are the same path.
+backend already, so both cases are the same path -- unless
+QUERN_CONFORMANCE_NO_WDA is set, when both read the tree push and pass no
+depth (#664), and neither measures WDA.
 """
 
 from __future__ import annotations
@@ -37,10 +39,19 @@ def lazy(request: pytest.FixtureRequest, quern: QuernClient) -> Iterator:
         probe.goto("lazy")
         yield probe
     finally:
-        if started:
-            # Back to sim-bridge, so the rest of the session reads the way it
-            # would have without this module.
-            quern.post("/api/v1/device/wda/stop", json={"udid": probe.udid}, timeout=120.0)
+        # Left at the top for the next visit -- this fixture's other param --
+        # by the screen's own Top button: one tap, where a sweep back can
+        # fail, and a failure here is reported as this, not as the next
+        # setup's (review).
+        try:
+            probe.tap("lazy_to_top", skip_stability_check=True)
+        finally:
+            if started:
+                # Back to sim-bridge, so the rest of the session reads the way
+                # it would have without this module -- a failed tap above
+                # included (CodeRabbit on #703).
+                quern.post("/api/v1/device/wda/stop", json={"udid": probe.udid},
+                           timeout=120.0)
 
 
 def _row(index: int) -> str:

@@ -5,6 +5,7 @@
 #   ./build.sh                            simulator build
 #   ./build.sh --install [udid]           build and install (default: booted)
 #   ./build.sh --scene                    the scene-lifecycle bundle
+#   ./build.sh --hosted                   the screens in a SwiftUI TabView (no-WDA phones, #669)
 #   ./build.sh --device <device-udid>     build for a real iPhone, signed
 #   ./build.sh --device <udid> --install  and install it over USB or the network
 #
@@ -20,12 +21,18 @@ cd "$(dirname "$0")"
 # calls, so the two lifecycles cannot both be exercised by one running binary.
 # Two Info.plists over one source tree keeps the view controllers and the
 # self-test shared.
+#
+# --hosted builds the same view controllers into a SwiftUI TabView instead
+# (Sources/Hosted), for a phone read with no WDA: there the UIKit tab bar's More
+# screens crash under the read (#669), and the SwiftUI one's do not.
 SCENE=""
+HOSTED=""
 DEVICE_UDID=""
 ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --scene) SCENE=1 ;;
+    --hosted) HOSTED=1 ;;
     --device)
       shift
       DEVICE_UDID="${1:-}"
@@ -52,7 +59,17 @@ else
   TARGET="${ARCH}-apple-ios16.0-simulator"
 fi
 
-if [ -n "$SCENE" ]; then
+SOURCES=(Sources/*.swift)
+if [ -n "$HOSTED" ]; then
+  NAME="QuernProbeHosted"; PLIST="Info-Hosted.plist"; BUNDLE="com.quern.probe.hosted"
+  FLAGS=()
+  # Its own entry point replaces the app delegate and the scene delegate.
+  SOURCES=()
+  for f in Sources/*.swift; do
+    case "$(basename "$f")" in main.swift|SceneDelegate.swift) ;; *) SOURCES+=("$f") ;; esac
+  done
+  SOURCES+=(Sources/Hosted/*.swift)
+elif [ -n "$SCENE" ]; then
   NAME="QuernProbeScene"; PLIST="Info-Scene.plist"; BUNDLE="com.quern.probe.scene"
   # A compile-time flag, because implementing configurationForConnecting is
   # itself enough to switch the lifecycle — the manifest is not the only
@@ -79,7 +96,7 @@ swiftc -parse-as-library \
        -sdk "$SDK" \
        -target "$TARGET" \
        ${FLAGS[@]+"${FLAGS[@]}"} \
-       Sources/*.swift \
+       "${SOURCES[@]}" \
        -o "$OUT/$NAME"
 cp "$PLIST" "$OUT/Info.plist"
 

@@ -5,7 +5,7 @@ landmark_conventions: 2
 scrollable: true
 landmarks:
   - { element: "RadioButton", identifier: "tab_scroll", selected: true }
-  - { element: "Group", identifier: "scroll_table" }
+  - { element: "Button", identifier: "scroll_to_top" }
 leads_to:
   - screen: "[[screens/more]]"
     action: 'tap_element label="More" element_type="RadioButton"'

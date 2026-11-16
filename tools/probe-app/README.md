@@ -21,6 +21,7 @@ isolated the HID shift-drop bug (see `fix/sim-bridge-keyboard-modifier-drop`).
 ./build.sh --install          # build + install on the booted simulator
 ./build.sh --install <udid>   # build + install on a specific simulator
 ./build.sh --scene            # the scene-lifecycle bundle (see below)
+./build.sh --hosted           # the same screens in a SwiftUI TabView, for no-WDA phones
 ```
 
 Bundle id: `com.quern.probe`.
@@ -145,4 +146,8 @@ conformance contract's landmarks and `leads_to` edges, and the tabs declared
 once in `app.md`'s `global_leads_to` (#503). `tap_element` checks those edges, so it is the fixture for #491's
 navigation check. `tests/test_navigation_check.py` keeps the landmarks in step
 with `tests/conformance/probe.py`. Load it with
-`load_landmarks(path=<this folder>/knowledge, app="com.quern.probe")`.
+`load_landmarks(path=<this folder>/knowledge, app="com.quern.probe")` (or `com.quern.probe.scene`, or `com.quern.probe.hosted`, for whichever bundle runs).
+
+## The hosted bundle (`--hosted`)
+
+`./build.sh --hosted` builds `QuernProbeHosted` (`com.quern.probe.hosted`): the same view controllers, each in a `UINavigationController`, inside a SwiftUI `TabView` (`Sources/Hosted/HostedApp.swift`, which replaces `main.swift` and `SceneDelegate.swift`). It exists for a physical iPhone read with no WDA (#664). On iOS 27 that read crashes a UIKit app on a tab rooted in a navigation controller and reached through a `UITabBarController`'s More list (#669), which is every More screen of the other two bundles. Under SwiftUI's tab bar the same screens are read without a crash: all nine on an iPhone 11, iOS 27.2.1. The tab items get the same `tab_<title>` identifiers, set on the tab bar SwiftUI builds, since SwiftUI drops `.accessibilityIdentifier` on a tab. Deep links arrive through `onOpenURL` and `onContinueUserActivity`, recorded as `swiftui:…`. The conformance suite installs it when `QUERN_CONFORMANCE_NO_WDA` is set.

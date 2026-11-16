@@ -21,6 +21,7 @@ when one side moves.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -31,6 +32,18 @@ BUNDLE_ID = "com.quern.probe"
 
 #: A second bundle the iOS app builds for scene-lifecycle coverage.
 SCENE_BUNDLE_ID = "com.quern.probe.scene"
+
+def no_wda() -> bool:
+    """Whether QUERN_CONFORMANCE_NO_WDA is set, read as the other gates are:
+    1, true, yes or on, so "0" or "false" leaves it off."""
+    return os.environ.get("QUERN_CONFORMANCE_NO_WDA", "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
+#: The same screens in a SwiftUI TabView (`build.sh --hosted`), for a phone read
+#: with no WDA: under a UIKit tab bar, the read crashes every screen behind More
+#: (#669); under SwiftUI's it does not.
+HOSTED_BUNDLE_ID = "com.quern.probe.hosted"
 
 #: The first iOS release that refuses to launch an app with no scene manifest.
 #: Below it, the app-delegate build is what this suite runs -- it is the older
@@ -242,8 +255,8 @@ IOS = ProbeContract(
         "scroll": "scroll_to_top", "links": "link_count", "logs": "log_start",
         "location": "location_auth", "web": "web_heading_native",
         "diag": "diag_crash_uncaught", "state": "state_counter",
-        "widgets": "widget_nav_done", "lists": "lists_table",
-        "lazy": "lazy_list", "taps": "taps_heading",
+        "widgets": "widget_nav_done", "lists": "lists_row_0",
+        "lazy": "lazy_to_top", "taps": "taps_heading",
     },
     row_identifier_template="row_{index}",
     row_label_template="Row {index}",
@@ -262,7 +275,8 @@ IOS = ProbeContract(
         # it is the one screen whose title is not a landmark.
         "scroll": {"scrollable": True, "landmarks": [
             {"element": "RadioButton", "identifier": "tab_scroll", "selected": True},
-            {"element": "Group", "identifier": "scroll_table"},
+            # Not the table: a read of the tree push has no containers (#664).
+            {"element": "Button", "identifier": "scroll_to_top"},
         ]},
         "links": {"scrollable": False, "landmarks": [
             {"element": "Heading", "label": "Links"},
@@ -295,14 +309,17 @@ IOS = ProbeContract(
         ]},
         "lists": {"landmarks": [
             {"element": "Heading", "label": "Lists"},
-            {"element": "Group", "identifier": "lists_table"},
+            # A row, not the table, which a push read does not carry (#664).
+            {"element": "Button", "identifier": "lists_row_0"},
         ]},
         # A UICollectionView list that builds cells only as they scroll into
         # view, so a read holds the ~15 on screen and never the rest -- the
         # shape #475 was about. Scrolls, unlike the other More screens.
         "lazy": {"scrollable": True, "landmarks": [
             {"element": "Heading", "label": "Lazy"},
-            {"element": "Group", "identifier": "lazy_list"},
+            # Its Top button, not the list: a push read has no containers, and
+            # a row is gone once the list scrolls (#664).
+            {"element": "Button", "identifier": "lazy_to_top"},
         ]},
         # Every button counts its own taps (#511). The heading is a label of
         # its own, beside the navigation title, so both platforms share it.
@@ -434,7 +451,8 @@ class ProbeUnavailable(RuntimeError):
 
 
 def build_ios(
-    *, scene: bool = False, device_udid: str | None = None, timeout: float = 600.0,
+    *, scene: bool = False, hosted: bool = False, device_udid: str | None = None,
+    timeout: float = 600.0,
 ) -> Path:
     """Build the iOS probe app and return the bundle path.
 
@@ -442,6 +460,9 @@ def build_ios(
     sources under two Info.plists, so which one a test runs against changes the
     lifecycle and nothing the contract names -- see `scene_lifecycle_required`
     for when the choice is forced.
+
+    `hosted` builds the SwiftUI-hosted variant (`HOSTED_BUNDLE_ID`), which has
+    a scene of its own, so it serves iOS 27 too.
 
     `device_udid` builds for that physical device, signed with a development
     profile that lists it (`find-profile.py` says what to do when none does).
@@ -460,7 +481,7 @@ def build_ios(
         result = subprocess.run(  # noqa: S603 - fixed path in this repo
             [
                 str(script),
-                *(["--scene"] if scene else []),
+                *(["--hosted"] if hosted else ["--scene"] if scene else []),
                 *(["--device", device_udid] if device_udid else []),
             ],
             cwd=str(IOS.source_dir),
@@ -474,7 +495,8 @@ def build_ios(
             f"probe-app build did not finish in {timeout:.0f}s"
         ) from exc
 
-    name = "QuernProbeScene.app" if scene else "QuernProbe.app"
+    name = ("QuernProbeHosted.app" if hosted
+            else "QuernProbeScene.app" if scene else "QuernProbe.app")
     # Device bundles are kept apart from simulator ones by build.sh.
     bundle = IOS.source_dir / "build" / ("device" if device_udid else "") / name
     if result.returncode != 0 or not bundle.exists():
@@ -581,7 +603,12 @@ class ProbeDriver:
     #: backends, so it costs nothing off WDA. The depth matches quern's own
     #: default for reads made on a caller's behalf: the full tree at 25 took
     #: 34s on an iPhone 11's Scroll tab, past even this timeout (F35).
-    READ = {"source_timeout": 30, "snapshot_depth": 12}
+    #: With QUERN_CONFORMANCE_NO_WDA set, no depth is passed, so a phone
+    #: opted into CoreDevice is read through the tree push rather than WDA:
+    #: a depth is the request for WDA's read (#664). Without it the suite
+    #: started WDA itself on every phone and measured WDA, not the push.
+    READ = ({"source_timeout": 30} if no_wda()
+            else {"source_timeout": 30, "snapshot_depth": 12})
 
     def __init__(
         self,
@@ -798,8 +825,10 @@ class ProbeDriver:
         if self.contract.platform != "ios":
             return
         elements = self.ui_tree().get("elements") or []
-        if not any(e.get("type") == "Keyboard" for e in elements):
-            return
+        # Not only when a `Keyboard` is in the tree: WDA reports one, but the
+        # tree push carries the keyboard as its keys alone, and the keyboard
+        # it missed sat over the tab bar for the rest of the run (#664).
+        # Dismissing with no keyboard up does nothing.
         if any(e.get("identifier") == "text_dismiss_keyboard" for e in elements):
             self.tap("text_dismiss_keyboard")
             time.sleep(0.8)
