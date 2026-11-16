@@ -276,6 +276,13 @@ enum QuernCLI {
             timeout: settingsWriteTimeout, completion: completion)
     }
 
+    /// "coredevice" or "wda", the values config.json holds; the command takes
+    /// "no-wda" for the first.
+    static func setDeviceReader(_ reader: String, completion: ((Int32, String) -> Void)? = nil) {
+        run(["set-device-reader", reader == "wda" ? "wda" : "no-wda"],
+            timeout: settingsWriteTimeout, completion: completion)
+    }
+
     /// How long a settings write may take before it is abandoned.
     ///
     /// Short, and for a reason beyond taste: SettingWriter serializes these, so

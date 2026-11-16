@@ -33,6 +33,49 @@ final class SettingsModel: ObservableObject {
         }
     }
 
+    /// How quern drives an iPhone: "coredevice" (without WDA, the default) or
+    /// "wda". Written through `set-device-reader`, like the controls below.
+    @Published var deviceReader: String = "coredevice" {
+        didSet {
+            guard deviceReader != oldValue else { return }
+            readerWriter.set(deviceReader, persisted: snapshot.iphone.reader)
+        }
+    }
+
+    /// Whether a full Xcode is installed: nil until asked, or when it could
+    /// not be told. Asked when the window opens, like the version, because the
+    /// answer is a subprocess.
+    @Published var xcodeInstalled: Bool?
+
+    var readXcode: (@escaping (Bool?) -> Void) -> Void = XcodeCheck.isInstalled
+
+    func refreshXcode() {
+        readXcode { [weak self] installed in self?.xcodeInstalled = installed }
+    }
+
+    /// Through WDA is offered only where Xcode is installed, or could not be
+    /// told. Where the setting already says "wda" the picker stays enabled,
+    /// so it can be moved back.
+    var wdaChoiceDisabled: Bool { xcodeInstalled == false && deviceReader != "wda" }
+
+    /// The line under the picker.
+    static func iphoneControlNote(reader: String, xcodeInstalled: Bool?) -> String {
+        switch (reader, xcodeInstalled) {
+        case ("wda", false?):
+            return "Set to WDA, but Xcode is not installed, so Quern drives iPhones "
+                + "without it. WDA is built and run with Xcode."
+        case ("wda", _):
+            return "Every iPhone is driven through WebDriverAgent, which the "
+                + "setup_wda tool builds."
+        case (_, false?):
+            return "iPhones on iOS 27 and later are driven without WebDriverAgent. "
+                + "Through WDA needs Xcode, which is not installed."
+        default:
+            return "iPhones on iOS 27 and later are driven without WebDriverAgent; "
+                + "earlier versions use it."
+        }
+    }
+
     @Published var autoInstallCert: Bool = false {
         didSet {
             guard autoInstallCert != oldValue else { return }
@@ -92,6 +135,22 @@ final class SettingsModel: ObservableObject {
         QuernCLI.setAutoInstallCert(value) { code, output in done(code, output) }
     }
 
+    var writeDeviceReader: (String, @escaping (Int32, String) -> Void) -> Void = { value, done in
+        QuernCLI.setDeviceReader(value) { code, output in done(code, output) }
+    }
+
+    lazy var readerWriter: SettingWriter<String> = {
+        let writer = SettingWriter<String>(name: "iPhone control") { [weak self] value, done in
+            self?.writeDeviceReader(value, done)
+        }
+        writer.onFailure = { [weak self] in
+            guard let self else { return }
+            self.reconcileReader(self.snapshot.iphone.reader)
+        }
+        writer.log = { [weak self] in self?.logSettings($0) }
+        return writer
+    }()
+
     lazy var channelWriter: SettingWriter<String> = {
         let writer = SettingWriter<String>(name: "the update channel") { [weak self] value, done in
             self?.writeChannel(value, done)
@@ -126,6 +185,7 @@ final class SettingsModel: ObservableObject {
     }()
 
     private func reconcileChannel(_ value: String) { channel = value }
+    private func reconcileReader(_ value: String) { deviceReader = value }
     private func reconcileCert(_ value: Bool) { autoInstallCert = value }
 
     /// Where the settings writers send their account.
@@ -283,6 +343,7 @@ final class SettingsModel: ObservableObject {
         // queue that echo as a fresh request. The next refresh reconciles.
         if let c = snap.update.channel, !channelWriter.isBusy { reconcileChannel(c) }
         if !certWriter.isBusy { reconcileCert(snap.proxy.autoInstallCert) }
+        if !readerWriter.isBusy { reconcileReader(snap.iphone.reader) }
         // Not while a write is outstanding. This runs on every refresh, and the
         // file still holds the old value until the write lands -- so assigning
         // from it mid-write pushes the checkbox back to where the user just
@@ -418,6 +479,40 @@ struct SettingsView: View {
                     ("Name", d.name ?? "—"),
                     ("UDID", d.udid ?? "—"),
                 ])
+            }
+
+            GroupBox("iPhone control") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline) {
+                        // The same label column as the Channel row below.
+                        Text("Drive")
+                            .foregroundColor(.secondary)
+                            .frame(width: 90, alignment: .leading)
+                        Picker("iPhone control", selection: $model.deviceReader) {
+                            Text("Without WDA").tag("coredevice")
+                            Text("Through WDA").tag("wda")
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        // The whole control, not the one segment: a segmented
+                        // picker has no per-segment disable. Where WDA is not
+                        // chosen and cannot be, the other segment is the one
+                        // already selected, so nothing is lost.
+                        .disabled(model.wdaChoiceDisabled)
+                        .frame(maxWidth: 240, alignment: .leading)
+                        .accessibilityLabel("iPhone control")
+                        .accessibilityValue(model.deviceReader == "wda" ? "Through WDA" : "Without WDA")
+                        Spacer()
+                    }
+                    Text(SettingsModel.iphoneControlNote(
+                        reader: model.deviceReader, xcodeInstalled: model.xcodeInstalled))
+                        .foregroundColor(model.deviceReader == "wda" && model.xcodeInstalled == false
+                                         ? .orange : .secondary)
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(Self.contentInset)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             GroupBox("Network capture") {
@@ -591,6 +686,7 @@ final class SettingsWindowController {
             window = win
         }
         model.refreshInstalledVersion()
+        model.refreshXcode()
         NSApp.activate(ignoringOtherApps: true)
         window?.center()
         window?.makeKeyAndOrderFront(nil)
