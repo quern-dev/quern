@@ -5646,9 +5646,8 @@ class DeviceControllerUI:
                     raise DeviceError(
                         f"typed {len(keys)} characters into '{label or identifier}', "
                         f"which the phone's keyboard changed: the field held {after!r}. "
-                        f"Setting it to the text crashed the app instead: {e}. This "
-                        "device's screens will be read through WDA until the server "
-                        "restarts; read the screen again before acting.",
+                        f"Setting it to the text crashed the app instead: {e}. "
+                        + self._after_a_crash(udid) + " Read the screen again before acting.",
                         tool=e.tool) from e
                 raise DeviceError(
                     f"typed {len(keys)} characters into '{label or identifier}', which "
@@ -5670,15 +5669,25 @@ class DeviceControllerUI:
                 "character has no US key, so the text was set through the "
                 "accessibility service. The app's editing callbacks "
                 "(shouldChangeCharactersIn, formatters, input masks) did not run for it.")
+        crashed = self._push_crash_log.get(udid, [])[crashed_before:]
+        if crashed and outcome == "landed":
+            # With no WDA the read back is the push's read of what the crash
+            # left, where a field of the same name can hold the same text: no
+            # evidence about this one (CodeRabbit on #707).
+            raise DeviceError(
+                f"typed {len(keys)} characters into '{label or identifier}', but reading "
+                f"the field back crashed {', '.join(sorted(set(crashed)))} (#669), so what "
+                "was read is the screen the crash left: whether the text stayed is "
+                f"unknown. {self._after_a_crash(udid)} Read the screen again before "
+                "acting.", tool=via)
         if outcome != "landed":
             message = self._typing_failure(outcome, before, after, text,
                                            label or identifier, secure)
-            crashed = self._push_crash_log.get(udid, [])[crashed_before:]
             if crashed:
                 # Not the keyboard's doing, as the failure may read: the app
                 # crashed after the keystrokes, reading the field back (#669).
                 message = (f"{message.rstrip('.')}. Reading the field back crashed "
-                           f"{', '.join(sorted(crashed))} (#669), after the keystrokes: "
+                           f"{', '.join(sorted(set(crashed)))} (#669), after the keystrokes: "
                            "what was typed is likely gone with it, and nothing was "
                            "corrected. Read the screen again before acting.")
             raise DeviceError(message, tool=via)

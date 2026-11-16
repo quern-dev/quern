@@ -42,7 +42,12 @@ enum XcodeCheck {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// `dir` may name the app itself (`/Applications/Xcode-beta.app`), as
+    /// `DEVELOPER_DIR` allows.
     static func hasXcodebuild(developerDirectory dir: String) -> Bool {
-        !dir.isEmpty && FileManager.default.isExecutableFile(atPath: dir + "/usr/bin/xcodebuild")
+        var dir = dir
+        while dir.hasSuffix("/") { dir.removeLast() }
+        if dir.hasSuffix(".app") { dir += "/Contents/Developer" }
+        return !dir.isEmpty && FileManager.default.isExecutableFile(atPath: dir + "/usr/bin/xcodebuild")
     }
 }

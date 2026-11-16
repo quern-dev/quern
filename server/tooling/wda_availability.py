@@ -100,6 +100,11 @@ def _full_xcode() -> bool:
         if result.returncode != 0:
             return False
         developer_dir = result.stdout.strip()
+    # DEVELOPER_DIR may name the app itself (/Applications/Xcode-beta.app), as
+    # xcrun allows (CodeRabbit on #707).
+    developer_dir = developer_dir.rstrip("/")
+    if developer_dir.endswith(".app"):
+        developer_dir = os.path.join(developer_dir, "Contents", "Developer")
     return bool(developer_dir) and os.access(
         os.path.join(developer_dir, "usr", "bin", "xcodebuild"), os.X_OK)
 

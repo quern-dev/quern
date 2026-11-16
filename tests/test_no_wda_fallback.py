@@ -75,6 +75,15 @@ class TestTheCheck:
         tool.chmod(0o755)
         assert wda_availability._full_xcode()
 
+    def test_developer_dir_may_name_the_app(self, monkeypatch, tmp_path):
+        app = tmp_path / "Xcode-beta.app"
+        tool = app / "Contents" / "Developer" / "usr" / "bin" / "xcodebuild"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("")
+        tool.chmod(0o755)
+        monkeypatch.setenv("DEVELOPER_DIR", f"{app}/")
+        assert wda_availability._full_xcode()
+
     async def test_a_stale_answer_is_asked_again_in_the_background(self, monkeypatch):
         """Xcode installed, or WDA built another way, while the server runs."""
         check = AsyncMock(return_value=None)

@@ -108,6 +108,17 @@ enum IphoneControlTests {
             FileManager.default.createFile(atPath: tool, contents: Data(),
                                            attributes: [.posixPermissions: 0o755])
             Harness.expect(XcodeCheck.hasXcodebuild(developerDirectory: dir.path), "Xcode not seen")
+
+            // DEVELOPER_DIR may name the app itself.
+            let app = FileManager.default.temporaryDirectory
+                .appendingPathComponent("quern-\(UUID().uuidString)/Xcode-beta.app")
+            defer { try? FileManager.default.removeItem(at: app.deletingLastPathComponent()) }
+            let appBin = app.appendingPathComponent("Contents/Developer/usr/bin")
+            try? FileManager.default.createDirectory(at: appBin, withIntermediateDirectories: true)
+            FileManager.default.createFile(atPath: appBin.appendingPathComponent("xcodebuild").path,
+                                           contents: Data(), attributes: [.posixPermissions: 0o755])
+            Harness.expect(XcodeCheck.hasXcodebuild(developerDirectory: app.path + "/"),
+                           "an Xcode named by its app not seen")
         }
     }
 }

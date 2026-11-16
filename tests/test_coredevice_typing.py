@@ -265,6 +265,22 @@ class TestWhatIsNotSet:
         setter.assert_not_called()
         assert ".." not in str(err.value)
 
+    @pytest.mark.parametrize("reads_as", ["a", "\u3042"])
+    async def test_a_crash_reading_it_back_is_never_taken_for_the_text(self, monkeypatch, reads_as):
+        """With no WDA the read back is the push's of what the crash left,
+        where a field of the same name may hold the very text (CodeRabbit
+        on #707): no verification either way."""
+        ctrl, setter = _phone(monkeypatch, before="", reads=[])
+
+        async def crashing(*args, **kwargs):
+            ctrl._record_push_crash(PHONE, "QuernProbeScene")
+            return reads_as
+        ctrl._read_field_value = AsyncMock(side_effect=crashing)
+
+        with pytest.raises(DeviceError, match="crashed QuernProbeScene"):
+            await ctrl.type_text("a", udid=PHONE, identifier="field_default")
+        setter.assert_not_called()
+
     async def test_a_crash_that_leaves_no_such_field_says_it_crashed(self, monkeypatch):
         """The likelier case: the read fell back to WDA on SpringBoard, where
         no field matches -- "no text field" alone would hide the crash (#698
