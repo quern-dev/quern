@@ -3900,9 +3900,15 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
 
     # ── Android support ──
 
-    has_android = _which("adb") is not None
+    # Where the Android backend finds it: Android Studio's SDK is usually
+    # not on PATH, and `which adb` alone called its adb not installed while
+    # quern drove the device with it.
+    from server.device.android.adb import _find_sdk_tool
+
+    adb_path = _find_sdk_tool("adb")
+    has_android = adb_path is not None
     if has_android:
-        adb_version = _get_version(["adb", "--version"])
+        adb_version = _get_version([adb_path, "--version"])
         report.add(CheckResult(
             name="Android (adb)",
             status=CheckStatus.OK,
