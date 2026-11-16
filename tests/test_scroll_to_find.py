@@ -34,6 +34,7 @@ def controller(monkeypatch):
 
     class Harness(DeviceControllerUI):
         def __init__(self):
+            self._push_crash_log: dict[str, list[str]] = {}
             self.swipes = 0
             self.settles: list[int] = []
             self.offset = 0.0

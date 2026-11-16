@@ -63,6 +63,7 @@ class ListScreen(DeviceControllerUI):
                  ids: bool = True, ticking: bool = False, lazy: bool = True,
                  pager_items: int = 0, loads_more: int = 0,
                  fling: float = FLING, chrome: float = TOP):
+        self._push_crash_log: dict[str, list[str]] = {}   # crashes the push saw (#669)
         self.chrome = chrome    # a drag starting above this begins on the chrome
         self.fling = fling
         self.lazy = lazy            # False: a laid-out scroller, all rows in the tree
@@ -1034,6 +1035,7 @@ class PushedListScreen(ListScreen):
         self.reads: list[dict] = []
         self.merged = merged            # appended to each row's label: ", Detail"
         self.fails_at = fails_at        # this read (1-based) falls back to WDA
+        self.crashes_at: int | None = None  # this read crashes the app, push answering
 
     coredevice_ax = type("Ax", (), {"TOOL_NAME": "coredevice"})()
 
@@ -1059,6 +1061,9 @@ class PushedListScreen(ListScreen):
         els, udid = await super().get_ui_elements(*a, **k)
         # Who served it: the push, unless this read is the one that fell back.
         failed = self.fails_at is not None and len(self.reads) == self.fails_at
+        if self.crashes_at is not None and len(self.reads) == self.crashes_at:
+            # No WDA to fall back on: the push reads what the crash left (#664).
+            self._push_crash_log.setdefault("SIM", []).append("QuernProbeScene")
         _READ_BY.set("wda" if failed else "coredevice")
         if self.merged:
             els = [e.model_copy(update={"label": e.label + self.merged})
@@ -1167,6 +1172,18 @@ async def test_a_pushed_sweep_stops_on_a_read_that_was_not_the_push(fails_at):
         await _sweep(screen, "row_150", pushed=True)
     assert "Nothing was tapped" in str(caught.value)
     assert len(screen.reads) == fails_at          # nothing read after it
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("crashes_at", [2, 5])
+async def test_a_pushed_sweep_stops_on_a_crash_the_push_read_past(crashes_at):
+    """With no WDA, a crash leaves a push read of SpringBoard, still the push's:
+    the sweep stops on the count, not on who read it (CodeRabbit on #707)."""
+    screen = PushedListScreen()
+    screen.crashes_at = crashes_at
+    with pytest.raises(DeviceError, match="sweep stopped.*crashed the app"):
+        await _sweep(screen, "row_150", pushed=True)
+    assert len(screen.reads) == crashes_at
 
 
 def test_the_hid_sweep_speed_is_the_measured_one():

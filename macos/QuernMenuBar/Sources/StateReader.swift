@@ -30,6 +30,12 @@ struct ProxyPolicy {
     var autoInstallCert = false
 }
 
+/// How quern drives an iPhone (#664): "coredevice", without WebDriverAgent,
+/// unless config.json says "wda" -- the server's rule in `get_device_ui_reader`.
+struct IphoneControl {
+    var reader = "coredevice"
+}
+
 struct UpdateInfo {
     var updateAvailable = false
     var currentVersion: String?
@@ -86,6 +92,7 @@ struct QuernSnapshot {
     var update = UpdateInfo()
     var device = ActiveDevice()
     var proxy = ProxyPolicy()
+    var iphone = IphoneControl()
     var mcpClients = McpClientHealth()
 }
 
@@ -147,6 +154,7 @@ final class StateReader {
         snap.update = Self.readUpdateInfo()
         snap.device = Self.readActiveDevice()
         snap.proxy = ProxyPolicy(autoInstallCert: Self.readAutoInstallCert())
+        snap.iphone = IphoneControl(reader: Self.readDeviceReader())
         snap.mcpClients = Self.readMcpClients()
         snapshot = snap
         onChange?(snap)
@@ -312,6 +320,15 @@ final class StateReader {
         // which is a worse failure than either behaviour alone.
         guard CFGetTypeID(raw as CFTypeRef) == CFBooleanGetTypeID() else { return false }
         return (raw as? Bool) == true
+    }
+
+    /// Anything but the literal "wda" is the default, as on the server: a
+    /// typo there drives the phone without WDA, so it must read that way here.
+    private static func readDeviceReader() -> String {
+        guard let d = json("config.json"), d["device_ui_reader"] as? String == "wda" else {
+            return "coredevice"
+        }
+        return "wda"
     }
 
     private static func readChannel() -> String {

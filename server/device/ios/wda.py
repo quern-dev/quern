@@ -1998,6 +1998,22 @@ async def setup_wda(
     team_id: str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
+    """Set up WDA (`_setup_wda`), then drop the cached answer to whether WDA
+    can run here (#664): a build may just have made it possible."""
+    from server.tooling.wda_availability import forget
+
+    try:
+        return await _setup_wda(udid, os_version, team_id, force)
+    finally:
+        forget()
+
+
+async def _setup_wda(
+    udid: str,
+    os_version: str,
+    team_id: str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
     """Full WDA setup orchestrator.
 
     Steps:
