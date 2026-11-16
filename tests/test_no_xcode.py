@@ -208,6 +208,7 @@ class TestApps:
         async def tunnel(uuid):
             yield "rsd"
         backend._rsd = tunnel
+        backend.terminate_app = AsyncMock(return_value=False)
 
         await backend.install_app(PHONE, str(app))
         assert installed == [("rsd", app)]
@@ -432,3 +433,68 @@ class TestDoctor:
                             errors=["could not connect: not paired"])
         assert main._report_phones() == (False, None)
         assert "? iPhone 11 (iOS 27.2.1): could not connect" in capsys.readouterr().out
+
+
+class TestInstallingOverARunningApp:
+    """The installation proxy never answered an install over a running copy
+    (iPhone 11, iOS 27.2.1), and answered in 1 s once it was stopped."""
+
+    def _app(self, tmp_path, bundle_id="com.quern.probe.hosted"):
+        import plistlib
+
+        app = tmp_path / "QuernProbeHosted.app"
+        app.mkdir()
+        (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": bundle_id}))
+        return app
+
+    def _backend(self, monkeypatch, order):
+        class Proxy:
+            def __init__(self, lockdown):
+                pass
+
+            async def install_from_local(self, path):
+                order.append("install")
+        monkeypatch.setattr(
+            "pymobiledevice3.services.installation_proxy.InstallationProxyService", Proxy)
+        backend = CoreDeviceApps()
+
+        @contextlib.asynccontextmanager
+        async def tunnel(uuid):
+            yield "rsd"
+        backend._rsd = tunnel
+        return backend
+
+    async def test_it_is_stopped_first(self, monkeypatch, tmp_path):
+        order = []
+        backend = self._backend(monkeypatch, order)
+        backend.terminate_app = AsyncMock(side_effect=lambda *a: order.append("stop") or True)
+
+        await backend.install_app(PHONE, str(self._app(tmp_path)))
+
+        backend.terminate_app.assert_awaited_once_with(PHONE, "com.quern.probe.hosted")
+        assert order == ["stop", "install"]
+
+    async def test_a_first_install_has_nothing_to_stop(self, monkeypatch, tmp_path):
+        order = []
+        backend = self._backend(monkeypatch, order)
+        backend.terminate_app = AsyncMock(
+            side_effect=InvalidDeviceRequestError("not installed", tool="coredevice"))
+
+        await backend.install_app(PHONE, str(self._app(tmp_path)))
+        assert order == ["install"]
+
+    def test_the_bundle_id_is_read_from_an_app_or_an_ipa(self, tmp_path):
+        import plistlib
+        import zipfile
+
+        from server.device.ios.coredevice_apps import _bundle_id_of
+
+        assert _bundle_id_of(self._app(tmp_path)) == "com.quern.probe.hosted"
+        ipa = tmp_path / "Probe.ipa"
+        with zipfile.ZipFile(ipa, "w") as z:
+            z.writestr("Payload/Probe.app/Info.plist",
+                       plistlib.dumps({"CFBundleIdentifier": "com.quern.probe"}))
+            z.writestr("Payload/Probe.app/PlugIns/W.appex/Info.plist",
+                       plistlib.dumps({"CFBundleIdentifier": "com.quern.probe.widget"}))
+        assert _bundle_id_of(ipa) == "com.quern.probe"
+        assert _bundle_id_of(tmp_path / "missing.app") is None

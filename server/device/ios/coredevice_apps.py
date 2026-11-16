@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import signal
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from server.device.ios.devicectl import DevicectlBackend, _comparable_path
@@ -31,6 +32,27 @@ CALL_TIMEOUT_S = 20.0
 #: An install uploads the whole bundle first: the probe app took 7 s over USB,
 #: and an app hundreds of MB over Wi-Fi takes minutes.
 INSTALL_TIMEOUT_S = 600.0
+
+
+def _bundle_id_of(path: Path) -> str | None:
+    """The CFBundleIdentifier of an `.app` directory or an `.ipa`, or None
+    when it cannot be read: then nothing is stopped first."""
+    import plistlib
+    import zipfile
+
+    try:
+        if path.is_dir():
+            info = plistlib.loads((path / "Info.plist").read_bytes())
+        else:
+            with zipfile.ZipFile(path) as ipa:
+                name = next(n for n in ipa.namelist()
+                            if n.startswith("Payload/") and n.count("/") == 2
+                            and n.endswith(".app/Info.plist"))
+                info = plistlib.loads(ipa.read(name))
+    except (OSError, ValueError, StopIteration, zipfile.BadZipFile, plistlib.InvalidFileException):
+        return None
+    bundle_id = info.get("CFBundleIdentifier")
+    return bundle_id if isinstance(bundle_id, str) and bundle_id else None
 
 
 class CoreDeviceApps(DevicectlBackend):
@@ -180,11 +202,18 @@ class CoreDeviceApps(DevicectlBackend):
         with Xcode hidden: the probe app installed in 7 s. Signing is the
         build's: a bundle not signed for this phone is refused by the phone,
         and that refusal is the error."""
-        from pathlib import Path
-
         path = Path(app_path)
         if not path.exists():
             raise InvalidDeviceRequestError(f"{app_path} does not exist", tool=TOOL)
+        # Not over a running copy: measured on an iPhone 11 (iOS 27.2.1), the
+        # proxy took the upload and then never answered while the app ran,
+        # and answered in 1 s once it was stopped. An install ends it anyway.
+        bundle_id = _bundle_id_of(path)
+        if bundle_id:
+            try:
+                await self.terminate_app(uuid, bundle_id)
+            except InvalidDeviceRequestError:
+                pass                                        # not installed yet
 
         @contextlib.asynccontextmanager
         async def installer(udid: str) -> AsyncIterator[Any]:
