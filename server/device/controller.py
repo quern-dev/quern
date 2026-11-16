@@ -2408,7 +2408,11 @@ class DeviceController(DeviceControllerUI):
         one of that app's, else the name the push gives it."""
         from server.device.ios.coredevice_ax import front_app
 
+        read_at = time.time()
         pid, name = await front_app(udid)
+        # A push read like any other, so a crash it causes after it answers
+        # is looked for at the next read (#669), as launch_app's check does.
+        self.coredevice_ax.note_front(udid, pid, name, read_at)
         if expected is not None and pid is not None:
             apps = self.coredevice_apps
             path = await apps.app_url(udid, expected)

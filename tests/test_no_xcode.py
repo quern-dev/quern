@@ -360,8 +360,8 @@ class TestReadiness:
             async def __aexit__(self, *exc):
                 return False
 
-            async def copy_devices(self):
-                return [{"IsMounted": True, "MountPath": "/System/Developer"}]
+            async def is_image_mounted(self, image_type):
+                return image_type == "Personalized"
 
         monkeypatch.setattr(r, "_lockdown", AsyncMock(return_value=Lockdown()))
         monkeypatch.setattr(
@@ -412,7 +412,7 @@ class TestDoctor:
         assert "GitHub" in capsys.readouterr().out      # where the image would come from
 
         assert main._report_phones(fix=True) == (True, True)
-        self.mount.assert_awaited_once_with(PHONE)
+        self.mount.assert_awaited_once_with(PHONE, "27.2.1")
 
     def test_a_mount_that_fails_fails_the_fix(self, monkeypatch, capsys):
         from server.models import DeviceError
@@ -498,3 +498,135 @@ class TestInstallingOverARunningApp:
                        plistlib.dumps({"CFBundleIdentifier": "com.quern.probe.widget"}))
         assert _bundle_id_of(ipa) == "com.quern.probe"
         assert _bundle_id_of(tmp_path / "missing.app") is None
+
+
+
+class TestReviewFixes:
+    """CodeRabbit on #710."""
+
+    async def test_a_write_that_times_out_may_have_happened(self, monkeypatch):
+        from server.device.ios import coredevice_apps
+
+        monkeypatch.setattr(coredevice_apps, "CALL_TIMEOUT_S", 0.01)
+        import asyncio
+
+        class Slow(FakeAppService):
+            async def launch_application(self, bundle_id, **kw):
+                await asyncio.sleep(1)
+        backend = _apps(Slow([SETTINGS], []))
+        with pytest.raises(DeviceError, match="may have happened on the phone"):
+            await backend._call(PHONE, "launching x", lambda a: a.launch_application("x"),
+                                timeout=0.01, write=True)
+        with pytest.raises(DeviceError) as read:
+            await backend._call(PHONE, "listing", lambda a: a.launch_application("x"),
+                                timeout=0.01)
+        assert "may have happened" not in str(read.value)
+
+    def test_an_unreadable_bundle_stops_nothing(self, tmp_path):
+        from server.device.ios.coredevice_apps import _bundle_id_of
+
+        bad = tmp_path / "Bad.app"
+        bad.mkdir()
+        (bad / "Info.plist").write_text("<plist><dict><key>broken")
+        assert _bundle_id_of(bad) is None
+        import plistlib
+        listy = tmp_path / "List.app"
+        listy.mkdir()
+        (listy / "Info.plist").write_bytes(plistlib.dumps(["not", "a", "dict"]))
+        assert _bundle_id_of(listy) is None
+
+    async def test_doctor_never_pairs(self, monkeypatch):
+        from server.device.ios import phone_readiness as r
+
+        seen = {}
+
+        async def connect(**kw):
+            seen.update(kw)
+            raise OSError("not paired")
+        monkeypatch.setattr("pymobiledevice3.lockdown.create_using_usbmux", connect)
+        state = await r.readiness(PHONE)
+        assert seen["autopair"] is False
+        assert "tap Trust" in state.errors[0]
+
+    @pytest.mark.parametrize(("version", "mode_asked", "image_type"), [
+        ("15.8.3", False, "Developer"), ("16.7", True, "Developer"),
+        ("27.2.1", True, "Personalized")])
+    async def test_what_is_asked_follows_the_version(self, monkeypatch, version,
+                                                     mode_asked, image_type):
+        from server.device.ios import phone_readiness as r
+
+        asked = []
+
+        class Lockdown:
+            all_values = {"DeviceName": "Phone"}
+            product_version = version
+
+            async def get_developer_mode_status(self):
+                asked.append("mode")
+                return True
+
+        class Mounter:
+            def __init__(self, lockdown):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def is_image_mounted(self, kind):
+                asked.append(kind)
+                return True
+        monkeypatch.setattr(r, "_lockdown", AsyncMock(return_value=Lockdown()))
+        monkeypatch.setattr(
+            "pymobiledevice3.services.mobile_image_mounter.MobileImageMounterService", Mounter)
+
+        state = await r.readiness(PHONE)
+
+        assert ("mode" in asked) is mode_asked
+        assert state.developer_mode is (True if mode_asked else None)
+        assert image_type in asked and state.errors == []
+
+    @pytest.mark.parametrize(("version", "tunnel"), [("16.7", False), ("27.2.1", True)])
+    async def test_the_mount_goes_over_the_tunnel_only_from_ios_17(self, monkeypatch,
+                                                                  version, tunnel):
+        from server.device.ios import phone_readiness as r
+
+        mounted = []
+        monkeypatch.setattr("pymobiledevice3.services.mobile_image_mounter.auto_mount",
+                            AsyncMock(side_effect=lambda provider: mounted.append(provider)))
+        monkeypatch.setattr(r, "_lockdown", AsyncMock(return_value="lockdown"))
+        address = AsyncMock(return_value=("fd00::1", 58783))
+        monkeypatch.setattr("server.device.performance._device_address", address)
+
+        class Rsd:
+            def __init__(self, addr):
+                pass
+
+            async def connect(self):
+                pass
+
+            async def close(self):
+                pass
+        monkeypatch.setattr(
+            "pymobiledevice3.remote.remote_service_discovery.RemoteServiceDiscoveryService", Rsd)
+
+        await r.mount_image(PHONE, version)
+
+        assert address.await_count == (1 if tunnel else 0)
+        assert isinstance(mounted[0], Rsd) if tunnel else mounted == ["lockdown"]
+
+
+async def test_the_url_check_s_read_is_remembered_for_a_late_crash(monkeypatch):
+    ctrl = DeviceController()
+    monkeypatch.setattr("server.device.ios.coredevice_ax.front_app",
+                        AsyncMock(return_value=(711, "Probe")))
+    ctrl.coredevice_apps.app_url = AsyncMock(return_value=PROBE["path"])
+    ctrl.coredevice_apps.running_pids = AsyncMock(return_value=[711])
+    noted = []
+    ctrl.coredevice_ax.note_front = lambda *a: noted.append(a[:3])
+
+    await ctrl._front_bundle_over_coredevice(PHONE, "com.quern.probe")
+
+    assert noted == [(PHONE, 711, "Probe")]

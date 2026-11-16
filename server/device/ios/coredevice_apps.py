@@ -15,9 +15,11 @@ is running, SIGTERM then SIGKILL, confirming from the process list -- is
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import signal
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +51,9 @@ def _bundle_id_of(path: Path) -> str | None:
                             if n.startswith("Payload/") and n.count("/") == 2
                             and n.endswith(".app/Info.plist"))
                 info = plistlib.loads(ipa.read(name))
-    except (OSError, ValueError, StopIteration, zipfile.BadZipFile, plistlib.InvalidFileException):
+    except Exception:  # noqa: BLE001 -- any unreadable bundle stops nothing first
+        return None
+    if not isinstance(info, dict):
         return None
     bundle_id = info.get("CFBundleIdentifier")
     return bundle_id if isinstance(bundle_id, str) and bundle_id else None
@@ -80,13 +84,15 @@ class CoreDeviceApps(DevicectlBackend):
         async with self._rsd(uuid) as rsd, _pmd3().AppService(rsd) as apps:
             yield apps
 
-    async def _call(self, uuid: str, what: str, op, *,
-                    timeout: float = CALL_TIMEOUT_S, service=None) -> Any:
+    async def _call(
+        self, uuid: str, what: str, op: Callable[[Any], Awaitable[Any]], *,
+        timeout: float = CALL_TIMEOUT_S, write: bool = False,
+        service: Callable[[str], AbstractAsyncContextManager[Any]] | None = None,
+    ) -> Any:
         """`op(apps)` on the device's app service -- or on what `service`
-        opens instead -- with its failures as DeviceError."""
-        import asyncio
-
-        async def run():
+        opens instead -- with its failures as DeviceError. A `write` that
+        times out may still have happened on the phone, and says so."""
+        async def run() -> Any:
             async with (service or self._apps)(uuid) as apps:
                 return await op(apps)
         try:
@@ -94,8 +100,11 @@ class CoreDeviceApps(DevicectlBackend):
         except DeviceError:
             raise
         except TimeoutError as e:
-            raise DeviceError(f"{what} on {uuid[:8]} took over {timeout:.0f} s",
-                              tool=TOOL) from e
+            raise DeviceError(
+                f"{what} on {uuid[:8]} took over {timeout:.0f} s"
+                + (": it was sent, and may have happened on the phone all the same; "
+                   "check before doing it again" if write else ""),
+                tool=TOOL) from e
         except Exception as e:  # noqa: BLE001 -- pymobiledevice3 raises its own kinds
             raise DeviceError(f"{what} on {uuid[:8]} failed: {e}", tool=TOOL) from e
 
@@ -114,10 +123,11 @@ class CoreDeviceApps(DevicectlBackend):
             "platformSpecificOptions": plistlib.dumps({}),
         }
         try:
-            await self._call(uuid, f"opening {url} in {bundle_id}", lambda a: a.invoke(
-                "com.apple.coredevice.feature.launchapplication",
-                {"applicationSpecifier": {"bundleIdentifier": {"_0": bundle_id}},
-                 "options": options, "standardIOIdentifiers": {}}))
+            await self._call(
+                uuid, f"opening {url} in {bundle_id}", write=True, op=lambda a: a.invoke(
+                    "com.apple.coredevice.feature.launchapplication",
+                    {"applicationSpecifier": {"bundleIdentifier": {"_0": bundle_id}},
+                     "options": options, "standardIOIdentifiers": {}}))
         except DeviceError as e:
             if not await self.is_installed(uuid, bundle_id):
                 raise InvalidDeviceRequestError(
@@ -136,7 +146,7 @@ class CoreDeviceApps(DevicectlBackend):
         which the service reports only as "failed to launch"."""
         try:
             reply = await self._call(
-                uuid, f"launching {bundle_id}", lambda a: a.launch_application(
+                uuid, f"launching {bundle_id}", write=True, op=lambda a: a.launch_application(
                     bundle_id, arguments=arguments or [], kill_existing=terminate_existing,
                     environment=env or {}))
         except DeviceError as e:
@@ -180,8 +190,8 @@ class CoreDeviceApps(DevicectlBackend):
 
     async def _signal(self, uuid: str, pid: int, kill: bool) -> None:
         sig = signal.SIGKILL if kill else signal.SIGTERM
-        await self._call(uuid, f"signalling pid {pid}",
-                         lambda a: a.send_signal_to_process(pid, int(sig)))
+        await self._call(uuid, f"signalling pid {pid}", write=True,
+                         op=lambda a: a.send_signal_to_process(pid, int(sig)))
 
     async def is_installed(self, uuid: str, bundle_id: str) -> bool:
         return any(a.get("bundleIdentifier") == bundle_id
@@ -193,8 +203,8 @@ class CoreDeviceApps(DevicectlBackend):
                 for a in await self._installed(uuid)]
 
     async def uninstall_app(self, uuid: str, bundle_id: str) -> None:
-        await self._call(uuid, f"uninstalling {bundle_id}",
-                         lambda a: a.uninstall_app(bundle_id))
+        await self._call(uuid, f"uninstalling {bundle_id}", write=True,
+                         op=lambda a: a.uninstall_app(bundle_id))
 
     async def install_app(self, uuid: str, app_path: str) -> None:
         """Install a built, signed `.app` or `.ipa` through the installation
@@ -224,4 +234,4 @@ class CoreDeviceApps(DevicectlBackend):
 
         await self._call(uuid, f"installing {path.name}",
                          lambda proxy: proxy.install_from_local(path),
-                         timeout=INSTALL_TIMEOUT_S, service=installer)
+                         timeout=INSTALL_TIMEOUT_S, write=True, service=installer)

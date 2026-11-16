@@ -36,6 +36,8 @@ def _no_slow_sections(monkeypatch):
     # Asks the running server for its disk report (#581), likewise.
     monkeypatch.setattr("server.main._report_disk", lambda: None)
     monkeypatch.setattr("server.main._report_bind", lambda: None)
+    # Connects to every iPhone on USB, and --fix mounts disk images (#706).
+    monkeypatch.setattr("server.main._report_phones", lambda fix=False: (True, None))
     monkeypatch.setattr("server.main._report_node", lambda: True)
     monkeypatch.setattr("server.main._report_mcp_registrations", lambda: True)
     monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (True, None))

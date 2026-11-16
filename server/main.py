@@ -2220,12 +2220,14 @@ def _report_phones(fix: bool = False) -> tuple[bool, bool | None]:
                   f"{phone_readiness.IMAGE_SOURCE}.")
             if fix:
                 try:
-                    asyncio.run(phone_readiness.mount_image(udid))
+                    asyncio.run(phone_readiness.mount_image(udid, state.os_version))
                     print(f"    ✓ mounted ({phone_readiness.IMAGE_SOURCE})")
                     repaired = repaired is not False
                 except Exception as e:  # noqa: BLE001 -- the repair's outcome is said
-                    print(f"    ✗ not mounted — {e}. The phone's tunnel comes from quern's "
-                          "server: start it, then run this again.")
+                    print(f"    ✗ not mounted — {e}."
+                          + (" On iOS 17 and later the phone's tunnel comes from quern's "
+                             "server: start it, then run this again."
+                             if phone_readiness._major(state.os_version) >= 17 else ""))
                     repaired = False
         elif state.image_mounted:
             print(f"  ✓ {label}: developer disk image mounted")

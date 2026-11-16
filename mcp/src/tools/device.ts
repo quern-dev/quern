@@ -904,7 +904,7 @@ Deep links open the way a tapped link does, on every platform: through the syste
 
 direct=true (Android only) delivers the intent to bundle_id instead, bypassing App Links verification the way the app's Espresso tests do. Use it for staging and other debug builds, whose links are not verified App Links and would otherwise open in the browser. iOS refuses direct: it has no route that keeps universal-link routing.
 
-bundle_id names the app the link should open in, and quern reports whether it did: opened_in_app true/false with foreground_app (a bundle id or package on a device, the display name on a simulator) and on Android foreground_activity, plus a warning when it went elsewhere -- the browser, or Android's app chooser (more than one activity claims the URL). On Android, crashed says whether the app crashed after the open, read from the crash buffer, because a crash can leave the app's own previous screen in front and look like success. opened_in_app and crashed are null, with opened_in_app_error or crash_check_error, when quern could not tell. A sighting counts only 2s after the open, so a confirmed open takes at least that long. 'via' names the transport (simctl, wda, adb) and 'route' the routing (system, direct).`,
+bundle_id names the app the link should open in, and quern reports whether it did: opened_in_app true/false with foreground_app (a bundle id or package on a device, the display name on a simulator) and on Android foreground_activity, plus a warning when it went elsewhere -- the browser, or Android's app chooser (more than one activity claims the URL). On Android, crashed says whether the app crashed after the open, read from the crash buffer, because a crash can leave the app's own previous screen in front and look like success. opened_in_app and crashed are null, with opened_in_app_error or crash_check_error, when quern could not tell. A sighting counts only 2s after the open, so a confirmed open takes at least that long. 'via' names the transport (simctl, wda, adb, or coredevice on an iPhone without WDA) and 'route' the routing (system, direct, or without WDA app or safari).`,
     inputSchema: strictParams({
       url: z.string().describe(
         "URL or URI to open (e.g. https://example.com, geo:48.8,2.3?z=15, maps://?ll=48.8,2.3)"
@@ -916,7 +916,7 @@ bundle_id names the app the link should open in, and quern reports whether it di
       bundle_id: z
         .string()
         .optional()
-        .describe("The app the link should open in. quern waits up to 5s for it to come to the front and reports opened_in_app. It does not change how the URL is delivered unless direct=true."),
+        .describe("The app the link should open in. quern waits up to 5s for it to come to the front (10s on an iPhone without WDA) and reports opened_in_app. It does not change how the URL is delivered unless direct=true -- except on an iPhone on iOS 27+ where WDA cannot run, where the URL is handed to this app, and without it an http(s) URL goes to Safari and any other scheme is refused."),
       direct: z
         .boolean()
         .optional()

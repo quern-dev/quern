@@ -54,9 +54,19 @@ async def phones() -> list[tuple[str, str, str]]:
 
 
 async def _lockdown(udid: str):
+    """A lockdown client over USB that never pairs: a doctor check must not
+    wait on, or create, a Trust prompt. An unpaired phone raises, and is
+    reported as such (CodeRabbit on #710)."""
     from pymobiledevice3.lockdown import create_using_usbmux
 
-    return await create_using_usbmux(serial=udid)
+    return await create_using_usbmux(serial=udid, autopair=False)
+
+
+def _major(version: str) -> int:
+    try:
+        return int(version.split(".")[0])
+    except (ValueError, IndexError):
+        return 0
 
 
 async def readiness(udid: str) -> Readiness:
@@ -68,43 +78,57 @@ async def readiness(udid: str) -> Readiness:
     try:
         lockdown = await _lockdown(udid)
     except Exception as e:  # noqa: BLE001 -- said, not raised
-        return Readiness(udid, "", "", errors=[f"could not connect: {e}"])
+        return Readiness(udid, "", "", errors=[
+            f"could not connect ({e}); if the phone has not trusted this Mac, unlock it "
+            "and tap Trust when it asks"])
     state = Readiness(udid, lockdown.all_values.get("DeviceName", ""),
                       lockdown.product_version, errors=errors)
-    try:
-        state.developer_mode = await lockdown.get_developer_mode_status()
-    except Exception as e:  # noqa: BLE001
-        errors.append(f"Developer Mode could not be read: {e}")
+    major = _major(state.os_version)
+    # Developer Mode came with iOS 16: before it there is nothing to turn on,
+    # which is neither on nor off.
+    if major >= 16:
+        try:
+            state.developer_mode = await lockdown.get_developer_mode_status()
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"Developer Mode could not be read: {e}")
+    # LookupImage, which every version answers (CopyDevices is not on old ones),
+    # for the kind of image this version takes.
     try:
         async with MobileImageMounterService(lockdown=lockdown) as mounter:
-            images = await mounter.copy_devices()
-        state.image_mounted = any(i.get("IsMounted") for i in images if isinstance(i, dict))
+            state.image_mounted = await mounter.is_image_mounted(
+                "Personalized" if major >= 17 else "Developer")
     except Exception as e:  # noqa: BLE001
         errors.append(f"the developer disk image could not be checked: {e}")
     return state
 
 
-async def mount_image(udid: str) -> None:
+async def mount_image(udid: str, os_version: str) -> None:
     """Mount the developer disk image with pymobiledevice3's auto-mount
-    (`IMAGE_SOURCE`), over the phone's tunnel, which iOS 17 and later need
-    for it. Raises DeviceError when it cannot."""
+    (`IMAGE_SOURCE`): over the phone's tunnel on iOS 17 and later, which
+    need it for the image, and over USB lockdown before that, where there is
+    no tunnel. Raises DeviceError when it cannot."""
     from pymobiledevice3.remote.remote_service_discovery import RemoteServiceDiscoveryService
     from pymobiledevice3.services.mobile_image_mounter import auto_mount
 
     from server.device.performance import _device_address
     from server.models import DeviceError
 
-    rsd = RemoteServiceDiscoveryService(await _device_address(udid))
+    rsd = None
     try:
-        await rsd.connect()
-        await auto_mount(rsd)
+        if _major(os_version) >= 17:
+            rsd = RemoteServiceDiscoveryService(await _device_address(udid))
+            await rsd.connect()
+            await auto_mount(rsd)
+        else:
+            await auto_mount(await _lockdown(udid))
     except DeviceError:
         raise
     except Exception as e:  # noqa: BLE001 -- pymobiledevice3 raises its own kinds
         raise DeviceError(f"mounting the developer disk image on {udid[:8]} failed: {e}",
                           tool="pymobiledevice3") from e
     finally:
-        try:
-            await rsd.close()
-        except Exception:  # noqa: BLE001
-            pass
+        if rsd is not None:
+            try:
+                await rsd.close()
+            except Exception:  # noqa: BLE001
+                pass
