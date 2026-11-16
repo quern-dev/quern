@@ -982,7 +982,9 @@ class TestSetupsCompanionStep:
 
         from server.lifecycle import setup as s
 
-        source = inspect.getsource(s.run_setup)
+        # In `_setup_ios` since #664 phase 5, which `run_setup` calls.
+        assert "_setup_ios(report)" in inspect.getsource(s.run_setup)
+        source = inspect.getsource(s._setup_ios)
         assert "report.add(_setup_idb_companion(sim_bridge=True))" in source
         assert "report.add(_setup_idb_companion(sim_bridge=False))" in source
 
