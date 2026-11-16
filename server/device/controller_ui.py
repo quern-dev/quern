@@ -587,7 +587,29 @@ def _note_collapsed(result: dict, folded: list[UIElement]) -> None:
         ]
 
 
-def _covering_element(target: UIElement, hit: dict | None) -> dict | None:
+def _hit_owner(screen: list[UIElement], frame: dict[str, float]) -> UIElement | None:
+    """The smallest element on `screen` whose frame holds `frame`, the
+    application aside; None when none does."""
+    owners = []
+    for e in screen:
+        if e.type == "Application" or not e.frame:
+            continue
+        try:
+            ef = {k: float(e.frame[k]) for k in ("x", "y", "width", "height")}
+        except (KeyError, TypeError, ValueError):
+            continue
+        if _contains(ef, frame):
+            owners.append((ef["width"] * ef["height"], e))
+    return min(owners, key=lambda o: o[0])[1] if owners else None
+
+
+def _same_element(a: UIElement, b: UIElement) -> bool:
+    return (a.type, a.identifier, a.label, a.frame) == (b.type, b.identifier, b.label, b.frame)
+
+
+def _covering_element(target: UIElement, hit: dict | None, *,
+                      leaf: bool = False,
+                      screen: list[UIElement] | None = None) -> dict | None:
     """What a tap at the target's point would land on instead, or None.
 
     `hit` is the hit-test at that point. It is the target when its frame lies
@@ -602,6 +624,18 @@ def _covering_element(target: UIElement, hit: dict | None) -> dict | None:
 
     A pass is not proof. Something on top that fits entirely inside a large
     target -- a floating button over the middle of a card -- reads as a child.
+
+    `leaf` is a hit-test that answers with the deepest element there: the
+    phone's own (#664), which answered with a button's title text, not the
+    button. So an overlay's title, small enough to sit inside the target's
+    frame, read as the target's child. There the screen decides, when there is
+    one: the hit belongs to the smallest element on it whose frame holds the
+    hit's -- the overlay's title to the overlay (140x44) over the button it
+    covers (160x44) -- and is the target's only if that is the target. Without
+    a screen, the label decides: a child of the target says part of what the
+    target says. That alone refused a button whose label is not its title
+    ("Submit order" titled "Buy"), which the screen does not (CodeRabbit on
+    #705).
     """
     if not hit or not target.frame:
         return None
@@ -621,6 +655,13 @@ def _covering_element(target: UIElement, hit: dict | None) -> dict | None:
         return None
     if label.strip().lower() in _OVERLAY_LABELS:
         return covering
+    if leaf and inside and not around:
+        owner = _hit_owner(screen, frame) if screen else None
+        if owner is not None:
+            return None if _same_element(owner, target) else covering
+        if label.strip() and label.strip().lower() not in (target.label or "").lower():
+            return covering
+        return None
     if inside or around:
         return None
     return covering
@@ -1444,9 +1485,10 @@ class DeviceControllerUI:
             await asyncio.sleep(0.25)
 
     async def _obstruction(self, udid: str, target: UIElement,
-                           x: float, y: float) -> dict | None:
+                           x: float, y: float, *, pushed: bool = False) -> dict | None:
         """Why a tap at (x, y) would not reach `target`, or None if nothing
-        says it would not."""
+        says it would not. `pushed`: the target was found in a phone's tree
+        push, and the phone's own hit-test is asked (#664)."""
         name = target.label or target.identifier or target.type
         bounds = self._screen_bounds.get(udid)
         if bounds:
@@ -1463,13 +1505,18 @@ class DeviceControllerUI:
                                "and tap again."),
                 }
         try:
-            hit = await self._ui_backend(udid).describe_point(udid, x, y)
+            reader = self.coredevice_ax if pushed else self._ui_backend(udid)
+            hit = await reader.describe_point(udid, x, y)
         except Exception:
             # Could not ask is not "something is there": tap as before.
             logger.debug("hit-test before tap failed", exc_info=True)
             return None
         try:
-            covering = _covering_element(target, hit)
+            # The pushed screen the lookup cached, to tell whose the hit is.
+            cached = self._ui_cache.get(udid) if pushed else None
+            screen = (cached[0] if cached and self._ui_cache_backend.get(udid)
+                      == self.coredevice_ax.TOOL_NAME else None)
+            covering = _covering_element(target, hit, leaf=pushed, screen=screen)
         except Exception:
             # A shape the comparison did not expect is a check that could not
             # run, and that must not refuse a tap any more than a failed ask.
@@ -4612,10 +4659,13 @@ class DeviceControllerUI:
                         cx, cy = get_tap_point(el)
 
             settled_ms = None
-            if self._checks_landing(resolved):
-                if not skip_stability_check:
+            # A phone read through its tree push can ask the phone what is at
+            # the point too (#664): a tap there answered ok for an overlay's.
+            # Not the settle wait, which would read through WDA.
+            if self._checks_landing(resolved) or pushed:
+                if not skip_stability_check and not pushed:
                     settled_ms = await self._settle_if_just_changed(resolved)
-                obstruction = await self._obstruction(resolved, el, cx, cy)
+                obstruction = await self._obstruction(resolved, el, cx, cy, pushed=pushed)
                 if obstruction is not None:
                     # Not tapped: what is there would take the tap. Reported
                     # rather than tapped through -- that answered "ok" for a

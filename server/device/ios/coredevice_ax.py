@@ -498,6 +498,13 @@ def _ref(translation: Any) -> tuple[int, int] | None:
 #: AXPTranslatorRequest's type for setting an attribute, and the client it
 #: speaks as -- what Apple's own translator sends (#664, measured).
 REQUEST_SET_ATTRIBUTE = 8
+#: An attribute's value, and the element at a point: request types measured
+#: on an iPhone 11 (#664), the hit-test's shape from macOS's own translator.
+REQUEST_ATTRIBUTE = 2
+REQUEST_HIT_TEST = 6
+#: How long a hit-test may take, whole: connect, subscribe, ask, and read the
+#: element's attributes. Measured at about 0.2 s; a slow answer is no answer.
+POINT_TIMEOUT_S = 3.0
 CLIENT_TYPE = 2
 
 
@@ -531,6 +538,123 @@ def set_value_request(pid: int, object_id: int, value: str) -> bytes:
     return plistlib.dumps({"$archiver": "NSKeyedArchiver", "$objects": objects,
                            "$top": {"root": uid(1)}, "$version": 100000},
                           fmt=plistlib.FMT_BINARY)
+
+
+def _request(request_type: int, pid: int, object_id: int, *, attribute: int = 0,
+             point: tuple[float, float] | None = None) -> bytes:
+    """A keyed archive of an AXPTranslatorRequest: an attribute read of one
+    element, or -- with `point` -- the hit-test at that point.
+
+    The hit-test is addressed to pid 0, as macOS's translator addresses it:
+    addressed to the app, the phone answered error 7 (#664).
+    """
+    uid = plistlib.UID
+    objects: list = ["$null", None]
+
+    def add(obj: Any) -> plistlib.UID:
+        objects.append(obj)
+        return uid(len(objects) - 1)
+
+    params = uid(0)
+    if point is not None:
+        nsvalue = add({"$class": None, "NS.pointval": None, "NS.special": 1})
+        objects[nsvalue.data]["NS.pointval"] = add(f"{{{point[0]:g}, {point[1]:g}}}")
+        objects[nsvalue.data]["$class"] = add({"$classes": ["NSValue", "NSObject"],
+                                               "$classname": "NSValue"})
+        params = add({"$class": add({"$classes": ["NSDictionary", "NSObject"],
+                                     "$classname": "NSDictionary"}),
+                      "NS.keys": [add("point"), add("displayId")],
+                      "NS.objects": [nsvalue, add(1)]})
+    translation = add({"$class": add({"$classes": ["AXPTranslationObject", "NSObject"],
+                                      "$classname": "AXPTranslationObject"}),
+                       "bridgeDelegateToken": uid(0), "didPopuldateAppInfo": True,
+                       "isApplicationElement": point is not None,
+                       "objectID": add(object_id), "pid": pid, "rawElementData": uid(0)})
+    objects[1] = {"$class": add({"$classes": ["AXPTranslatorRequest", "NSObject"],
+                                 "$classname": "AXPTranslatorRequest"}),
+                  "actionType": 0, "attributeType": attribute, "clientType": CLIENT_TYPE,
+                  "parameters": params, "requestType": request_type,
+                  "translation": translation}
+    return plistlib.dumps({"$archiver": "NSKeyedArchiver", "$objects": objects,
+                           "$top": {"root": uid(1)}, "$version": 100000},
+                          fmt=plistlib.FMT_BINARY)
+
+
+def _frame_text(value: Any) -> dict[str, float] | None:
+    """A frame from an attribute read's "{{x, y}, {w, h}}"."""
+    m = re.fullmatch(r"\{\{([-\d.e]+), ([-\d.e]+)\}, \{([-\d.e]+), ([-\d.e]+)\}\}",
+                     value.strip()) if isinstance(value, str) else None
+    if not m:
+        return None
+    x, y, w, h = (float(g) for g in m.groups())
+    return {"x": x, "y": y, "width": w, "height": h}
+
+
+async def _answer(provider: Any, queue: asyncio.Queue, payload: bytes,
+                  request_type: int, attribute: int = 0) -> dict | None:
+    """Send one request and take its answer from the pushes: the one carrying
+    this request type and attribute. Tree pushes in between are passed over."""
+    await provider.dtx._ctrl_channel.invoke("processDataFromHost:", payload,
+                                            expects_reply=True)
+    while True:
+        selector, args = await queue.get()
+        if selector != PUSH_SELECTOR or not args or not isinstance(args[0], bytes):
+            continue
+        try:
+            answer = _unarchive(args[0])
+        except Exception:  # noqa: BLE001 -- not an answer this request can use
+            continue
+        if (isinstance(answer, dict) and answer.get("associatedRequestType") == request_type
+                and (answer.get("attribute") or 0) == attribute):
+            return answer
+
+
+async def element_at(uuid: str, x: float, y: float, *,
+                     timeout: float = POINT_TIMEOUT_S) -> dict | None:
+    """The element a touch at (x, y) would reach, from the phone's own
+    hit-test (#664): `describe_point`'s shape, or None when it cannot be told.
+
+    It answers with the deepest element there -- a button's title text, not
+    the button. Measured on an iPhone 11: an overlay over the middle of a
+    button answered "Overlay", the button's own centre "Arm overlay"; the
+    whole ask took about 0.2 s. It needs a subscription, though no tree: on
+    an unsubscribed connection nothing answered.
+    """
+    from server.device.performance import _device_address
+
+    lib = _pmd3()
+    conn = SimpleNamespace(rsd=None, provider=None)
+    try:
+        async with asyncio.timeout(timeout):
+            queue = await _subscribe(lib, await _device_address(uuid), conn)
+            hit = await _answer(conn.provider, queue,
+                                _request(REQUEST_HIT_TEST, 0, 0, point=(x, y)),
+                                REQUEST_HIT_TEST)
+            found = hit.get("resultData") if hit and not hit.get("error") else None
+            if not (isinstance(found, dict) and isinstance(found.get("pid"), int)
+                    and isinstance(found.get("objectID"), int)):
+                return None
+            values: dict[int, Any] = {}
+            for attribute in (ATTR_LABEL, ATTR_IDENTIFIER, ATTR_FRAME, ATTR_TRAITS):
+                answer = await _answer(
+                    conn.provider, queue,
+                    _request(REQUEST_ATTRIBUTE, found["pid"], found["objectID"],
+                             attribute=attribute),
+                    REQUEST_ATTRIBUTE, attribute)
+                values[attribute] = answer.get("resultData") if answer else None
+    except Exception as e:  # noqa: BLE001 -- could not tell is no obstruction
+        logger.info("[coredevice] hit-test at (%g, %g) on %s: %r", x, y, uuid[:8], e)
+        return None
+    finally:
+        # Outside the deadline, as every close is: cancelled inside it, the
+        # close stopped part-way and left the connection open (CodeRabbit on
+        # #705). `_close` bounds each step itself.
+        await _close(conn.provider, conn.rsd)
+    traits = values[ATTR_TRAITS] if isinstance(values[ATTR_TRAITS], int) else 0
+    return {"type": _element_type(traits, is_root=False),
+            "AXLabel": _text(values[ATTR_LABEL]) or "",
+            "AXUniqueId": _text(values[ATTR_IDENTIFIER]),
+            "frame": _frame_text(values[ATTR_FRAME])}
 
 
 def _pmd3() -> SimpleNamespace:
@@ -997,6 +1121,10 @@ class CoreDeviceAxReader:
     """
 
     TOOL_NAME = "coredevice"
+
+    async def describe_point(self, udid: str, x: float, y: float) -> dict | None:
+        """The element a touch at (x, y) would reach (`element_at`)."""
+        return await element_at(udid, x, y)
 
     def __init__(self) -> None:
         #: The apps each device's reads saw in front, newest first: the last

@@ -36,6 +36,9 @@ FIELD = element("", 20, 300, 353, 40, "TextField", "field_secure")
 
 def test_the_element_itself_is_not_covering():
     assert _covering_element(ROW, hit("Sound", 36, 53, 321, 28, "CheckBox")) is None
+    # Only a leaf hit-test (the phone's, #664) is judged by its label: a
+    # simulator's hit-test answers with the element, and a child stays a child.
+    assert _covering_element(ROW, hit("Elsewhere", 36, 53, 100, 28, "StaticText")) is None
 
 
 def test_a_child_inside_the_target_is_not_covering():
@@ -146,6 +149,19 @@ async def test_an_element_that_is_there_is_tapped():
     result = await _tap(ctrl, identifier="field_secure")
 
     assert result["status"] == "ok"
+    backend.tap.assert_awaited_once()
+
+
+async def test_a_simulator_childs_own_text_is_still_the_element():
+    """A simulator's hit-test answers with the element, not its deepest text,
+    so the phone's label rule (#664) is not applied there: a child inside the
+    target is the target, whatever it says."""
+    row = element("Sound", 36, 53, 321, 28, "Button", "sound_row")
+    ctrl, backend = _controller(target=row,
+                                describe=lambda *a: hit("Haptics", 60, 58, 120, 18, "StaticText"))
+    result = await _tap(ctrl, identifier="sound_row")
+
+    assert result["status"] == "ok", result
     backend.tap.assert_awaited_once()
 
 
@@ -590,3 +606,35 @@ async def test_a_moving_target_gone_off_screen_keeps_its_off_screen_reason():
     assert result["reason"] == "off_screen" and result["target_moving"] is True
     assert "off screen" in result["detail"]
     backend.tap.assert_not_called()
+
+
+
+# -- the phone's hit-test answers with the deepest element (#664) ---------------
+
+
+COVERED = element("Covered", 16, 520, 160, 44, "Button", "tap_overlay_target")
+OVERLAY = element("Overlay", 48, 528, 140, 44, "Button", "tap_overlay")
+
+
+def test_a_leaf_hit_belongs_to_the_smallest_element_that_holds_it():
+    """Measured on the probe: the overlay's title, inside both, is the
+    overlay's -- the smaller of the two."""
+    title = hit("Overlay", 89, 539.5, 58, 20.5, "StaticText")
+    covering = _covering_element(COVERED, title, leaf=True, screen=[COVERED, OVERLAY])
+    assert covering is not None and covering["label"] == "Overlay"
+
+
+def test_a_title_that_is_not_the_label_is_still_the_buttons():
+    """A button labelled "Submit order", titled "Buy": the phone answers with
+    the title, and the label rule alone refused it (CodeRabbit on #705)."""
+    buy = element("Submit order", 16, 520, 160, 44, "Button", "buy")
+    title = hit("Buy", 70, 532, 40, 20, "StaticText")
+    assert _covering_element(buy, title, leaf=True, screen=[buy]) is None
+    assert _covering_element(buy, title, leaf=True) is not None     # without the screen
+
+
+def test_without_a_screen_the_label_decides():
+    assert _covering_element(COVERED, hit("Covered", 60, 532, 70, 20, "StaticText"),
+                             leaf=True) is None
+    assert _covering_element(COVERED, hit("Overlay", 89, 539.5, 58, 20.5, "StaticText"),
+                             leaf=True) is not None
