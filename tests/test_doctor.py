@@ -36,6 +36,8 @@ def _no_slow_sections(monkeypatch):
     # Asks the running server for its disk report (#581), likewise.
     monkeypatch.setattr("server.main._report_disk", lambda: None)
     monkeypatch.setattr("server.main._report_bind", lambda: None)
+    # Connects to every iPhone on USB, and --fix mounts disk images (#706).
+    monkeypatch.setattr("server.main._report_phones", lambda fix=False: (True, None))
     monkeypatch.setattr("server.main._report_node", lambda: True)
     monkeypatch.setattr("server.main._report_mcp_registrations", lambda: True)
     monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (True, None))
@@ -245,6 +247,21 @@ class TestDoctorExitContract:
 
         monkeypatch.setattr("server.main._report_media_engine", lambda fix=False: (True, False))
         assert _run(args_fix=True) != 0, "a failed quern-media rebuild must fail --fix"
+
+    def test_the_iphones_section_reaches_both_exit_codes(self, monkeypatch, capsys):
+        """#706: a phone that could not be checked is not clean, and a disk
+        image that could not be mounted fails --fix (CodeRabbit on #710)."""
+        self._server(monkeypatch, {"adb": True})
+        monkeypatch.setattr("server.main._report_python_deps", lambda fix: True)
+        monkeypatch.setattr("server.main._report_external_tools", lambda fix: None)
+        monkeypatch.setattr("server.main._report_service_health", lambda fix: True)
+        assert _run() == 0, "the baseline must pass, or the two below prove nothing"
+
+        monkeypatch.setattr("server.main._report_phones", lambda fix=False: (False, None))
+        assert _run() != 0, "a phone that could not be checked must not read as clean"
+
+        monkeypatch.setattr("server.main._report_phones", lambda fix=False: (True, False))
+        assert _run(args_fix=True) != 0, "a failed disk-image mount must fail --fix"
 
     def test_a_failed_repair_does_fail_fix(self, monkeypatch, capsys):
         monkeypatch.setattr("server.main._report_python_deps", lambda fix: True)

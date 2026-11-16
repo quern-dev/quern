@@ -74,8 +74,10 @@ class UsbmuxBackend:
             logger.warning("Failed to parse usbmux list JSON output")
             return None
 
-    async def list_devices(self) -> list[DeviceInfo]:
-        """List USB-connected devices with iOS < 17.
+    async def list_devices(self, *, every_version: bool = False) -> list[DeviceInfo]:
+        """List USB-connected devices with iOS < 17, which devicectl does not
+        list -- or every one, where there is no devicectl to list the rest
+        (a Mac without Xcode, #706).
 
         Runs ``pymobiledevice3 --no-color usbmux list --usb`` and parses JSON stdout.
         Returns an empty list on any error (graceful degradation).
@@ -83,7 +85,7 @@ class UsbmuxBackend:
         raw = await self._run_usbmux_list()
         if raw is None:
             return []
-        return self._parse_devices(raw)
+        return self._parse_devices(raw, every_version=every_version)
 
     async def get_usb_devices(self) -> list[tuple[str, str]] | None:
         """(libimobiledevice_udid, device_name) for every USB-connected device.
@@ -108,8 +110,8 @@ class UsbmuxBackend:
         ]
 
     @staticmethod
-    def _parse_devices(raw: list[dict]) -> list[DeviceInfo]:
-        """Parse usbmux device list, filtering to iOS < 17 only."""
+    def _parse_devices(raw: list[dict], *, every_version: bool = False) -> list[DeviceInfo]:
+        """Parse usbmux device list, filtering to iOS < 17 unless `every_version`."""
         devices: list[DeviceInfo] = []
 
         for entry in raw:
@@ -123,7 +125,7 @@ class UsbmuxBackend:
             except (ValueError, IndexError):
                 continue
 
-            if major >= 17:
+            if major >= 17 and not every_version:
                 continue
 
             udid = entry.get("UniqueDeviceID", "")

@@ -3,10 +3,9 @@
 WDA is built with Xcode and launched with `xcodebuild test-without-building`,
 so with no Xcode there is no WDA to start, built or not, and every place that
 would fall back to WDA says why it cannot, rather than starting a build that
-cannot run. Phones on iOS 27 and later are driven without WDA, but not without
-Xcode: `devicectl`, which launches and stops their apps and matches them to
-their tunnels, comes with it too (measured on a Mac with only the Command Line
-Tools: "devicectl is installed by Xcode").
+cannot run. Phones on iOS 27 and later are driven without WDA, and without
+Xcode too: where there is no `devicectl` they go over the CoreDevice app
+service through pymobiledevice3 instead (#706).
 """
 
 from __future__ import annotations
@@ -15,9 +14,8 @@ import asyncio
 import os
 import time
 
-NO_XCODE = ("Xcode is not installed. WebDriverAgent, which iPhones before iOS 27 "
-            "need, is built and run with it, and devicectl, which every iPhone needs, "
-            "comes with it")
+NO_XCODE = ("Xcode is not installed, and WebDriverAgent, which iPhones before iOS 27 "
+            "need, is built and run with it")
 NOT_BUILT = "WebDriverAgent has not been built on this Mac (the setup_wda tool builds it)"
 
 #: How long an answer stands: Xcode can be installed while quern runs, and

@@ -2177,6 +2177,82 @@ def _report_iphone_control() -> None:
         print("  ✓ WebDriverAgent can run here")
 
 
+def _report_phones(fix: bool = False) -> tuple[bool, bool | None]:
+    """Each iPhone on USB: Developer Mode, and the developer disk image that
+    screenshots and app control need (#706). Xcode mounts the image when it
+    first meets a phone; with no Xcode, `--fix` mounts it with
+    pymobiledevice3, and says where the image comes from, and reveals the
+    Developer Mode switch in Settings.
+
+    Returns `(checked, repaired)` as `_report_menubar` does: `repaired` is
+    None when nothing needed it."""
+    import asyncio
+
+    from server.device.ios import phone_readiness
+
+    print("iPhones:")
+    try:
+        found = asyncio.run(phone_readiness.phones())
+    except Exception as e:  # noqa: BLE001 -- a check that could not run is said
+        print(f"  ? not checked — {e}")
+        return False, None
+    if not found:
+        print("  · none on USB")
+        return True, None
+    checked, repaired = True, None
+    for udid, name, version in found:
+        state = asyncio.run(phone_readiness.readiness(udid))
+        label = f"{state.name or name or udid[:8]} (iOS {state.os_version or version or '?'})"
+        if state.errors:
+            checked = False
+            for error in state.errors:
+                print(f"  ? {label}: {error}")
+        if state.developer_mode is False:
+            print(f"  ✗ {label}: Developer Mode is off. Turn it on in Settings > Privacy & "
+                  "Security > Developer Mode; the phone restarts to apply it.")
+            if fix:
+                repaired = _reveal_developer_mode(udid) and repaired is not False
+        elif state.developer_mode:
+            print(f"  ✓ {label}: Developer Mode on")
+        if state.image_mounted is False:
+            print(f"  ✗ {label}: no developer disk image mounted; screenshots and app "
+                  "control need one. `quern doctor --fix` mounts it: "
+                  f"{phone_readiness.IMAGE_SOURCE}.")
+            if fix:
+                try:
+                    asyncio.run(phone_readiness.mount_image(udid, state.os_version))
+                    print(f"    ✓ mounted ({phone_readiness.IMAGE_SOURCE})")
+                    repaired = repaired is not False
+                except Exception as e:  # noqa: BLE001 -- the repair's outcome is said
+                    print(f"    ✗ not mounted — {e}."
+                          + (" On iOS 17 and later the phone's tunnel comes from quern's "
+                             "server: start it, then run this again."
+                             if phone_readiness._major(state.os_version) >= 17 else ""))
+                    repaired = False
+        elif state.image_mounted:
+            print(f"  ✓ {label}: developer disk image mounted")
+    return checked, repaired
+
+
+def _reveal_developer_mode(udid: str) -> bool:
+    """Show the Developer Mode switch in the phone's Settings, which iOS
+    hides until a developer tool asks."""
+    import asyncio
+
+    async def reveal() -> None:
+        from pymobiledevice3.services.amfi import AmfiService
+
+        from server.device.ios.phone_readiness import _lockdown
+        await AmfiService(await _lockdown(udid)).reveal_developer_mode_option_in_ui()
+    try:
+        asyncio.run(reveal())
+    except Exception as e:  # noqa: BLE001
+        print(f"    ✗ could not show the Developer Mode switch — {e}")
+        return False
+    print("    ✓ the Developer Mode switch is now shown in Settings")
+    return True
+
+
 def _cmd_doctor(args: argparse.Namespace) -> None:
     """Diagnostics: device tools, venv, tool versions, service health. Read-only,
     except that it records the MCP client finding the Quern app shows.
@@ -2215,6 +2291,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
 
     _report_held_sessions()
     _report_iphone_control()
+    phones_checked, phones_repaired = _report_phones(fix)
     _report_disk()
     _report_bind()
     repaired = _report_python_deps(fix)
@@ -2233,10 +2310,11 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         # an unreadable Info.plist would have failed `doctor --fix && quern
         # start` after the venv repair succeeded.
         sys.exit(0 if repaired is not False and menubar_repaired is not False
-                 and mirror_repaired is not False and media_repaired is not False else 1)
+                 and mirror_repaired is not False and media_repaired is not False
+                 and phones_repaired is not False else 1)
     sys.exit(0 if tools is not None and services_complete and node_complete
              and registrations_complete and menubar_checked and mirror_checked
-             and media_checked else 1)
+             and media_checked and phones_checked else 1)
 
 
 def _report_menubar(fix: bool = False) -> tuple[bool, bool | None]:

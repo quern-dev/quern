@@ -156,7 +156,7 @@ async def test_wda_is_not_started_where_it_cannot_run(monkeypatch, no_wda):
     with pytest.raises(WdaNotSetUpError, match="Xcode is not installed") as caught:
         await client._get_base_url(PHONE)
     start.assert_not_called()
-    assert "driven without it" not in str(caught.value)    # devicectl needs Xcode too
+    assert "earlier one needs Xcode" in str(caught.value)
 
 
 # -- the push's fallbacks ------------------------------------------------------------
@@ -261,9 +261,9 @@ def test_the_command_says_when_wda_cannot_run(monkeypatch, capsys, no_wda):
     monkeypatch.setattr(config, "read_user_config", lambda **kw: {"device_ui_reader": "wda"})
     assert cli._cmd_set_device_reader([]) == 0
     out = capsys.readouterr().out
-    # Not "driven without it": devicectl comes with Xcode too.
-    assert "iPhone control: wda" in out and "No iPhone can be driven" in out
-    assert "driven without it" not in out
+    # A phone on iOS 27 or later needs no Xcode; an earlier one does (#706).
+    assert "iPhone control: wda" in out and "driven without it" in out
+    assert "earlier ones need Xcode" in out
 
 
 def test_the_command_says_when_wda_is_not_built(monkeypatch, capsys):
