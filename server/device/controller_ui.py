@@ -657,6 +657,41 @@ PUSHED_MISS_DETAIL = (
     "pass snapshot_depth to look through WDA instead")
 
 
+#: Below the header's last control, an upward swipe starts this far down:
+#: the bar itself, which the push does not list, ends below its controls.
+#: Measured on the hosted Lazy screen, the Top button ending at 142: swipes
+#: up from 150 and 166 moved nothing, from 170 on they scrolled the list.
+_HEADER_MARGIN = 36.0
+_HEADER_TYPES = frozenset({"Button", "Heading"})
+
+
+def _header_bottom(elements: list[UIElement], clearance: float, screen_height: float) -> float:
+    """Where the header the screen shows ends, when it reaches past the usual
+    chrome clearance; 0.0 when it does not, or nothing says.
+
+    A navigation bar's controls and title are small elements that begin above
+    the clearance: their lowest edge, with a margin, is where content can
+    begin. Measured on the probe's SwiftUI-hosted Lazy screen (#664): two bars,
+    the list from y=156, and every upward swipe from 140 moved nothing -- the
+    sweep took that for the top of a 200-row list. From 250 it moved 10 rows.
+    Only a bar's own kinds of element count, its buttons and its title: a
+    list's rows scrolled up under the bar start above the clearance too, and
+    counted as header they pushed the start to 213 on that screen. A large
+    element is not a control either, and the answer is held to the upper 40%
+    of the screen, so a drag keeps its room.
+    """
+    small = screen_height * 0.15
+    bottoms = [
+        e.frame["y"] + e.frame["height"] for e in elements
+        if e.frame and e.type in _HEADER_TYPES
+        and e.frame["y"] < clearance and e.frame["height"] < small
+    ]
+    if not bottoms:
+        return 0.0
+    edge = max(bottoms) + _HEADER_MARGIN
+    return min(edge, screen_height * 0.4) if edge > clearance else 0.0
+
+
 def _sweep_drag(backend) -> tuple[float, float] | None:
     """A backend's own sweep drag speed (pt/s) and end hold, when it names
     them (#678); None for the rest, which drag in 0.3 s. Only numbers count:
@@ -1917,14 +1952,22 @@ class DeviceControllerUI:
         # 393x852 -- so the geometry below, which is entirely derived from the
         # screen, was computed from numbers off by 9pt and 8pt on exactly the
         # devices the table claimed to know. It has been removed.
-        app_els, _ = await self.get_ui_elements(
-            resolved, use_cache=False, filter_type="Application",
-            # Nothing container probing can reveal is the root element, and
-            # probing is 92% of a simulator tree read (#196). The old table
-            # lookup cost nothing, so this query has to stay cheap to replace
-            # it.
-            probe_containers=False, lookup=pushed,
-        )
+        if pushed:
+            # The whole screen: a push lookup reads all of it anyway, and the
+            # header it shows decides where an upward swipe may start.
+            screen_els, _ = await self.get_ui_elements(
+                resolved, use_cache=False, whole_screen=True)
+            app_els = [e for e in screen_els if e.type == "Application"]
+        else:
+            screen_els = []
+            app_els, _ = await self.get_ui_elements(
+                resolved, use_cache=False, filter_type="Application",
+                # Nothing container probing can reveal is the root element, and
+                # probing is 92% of a simulator tree read (#196). The old table
+                # lookup cost nothing, so this query has to stay cheap to replace
+                # it.
+                probe_containers=False, lookup=pushed,
+            )
         app_frame = next((e.frame for e in app_els if e.frame), None)
         screen_height = app_frame["height"] if app_frame else None
         screen_width = app_frame["width"] if app_frame else None
@@ -1989,7 +2032,8 @@ class DeviceControllerUI:
             y_near = screen_height * 0.37
         # Both endpoints are kept off the chrome. A fraction alone is not
         # enough: see _TOP_CHROME_CLEARANCE.
-        y_near = max(y_near, self._TOP_CHROME_CLEARANCE)
+        y_near = max(y_near, self._TOP_CHROME_CLEARANCE,
+                     _header_bottom(screen_els, self._TOP_CHROME_CLEARANCE, screen_height))
         y_far = min(y_far, screen_height - self._BOTTOM_CHROME_CLEARANCE)
         step = y_far - y_near
         budget_scale = 1 if controlled else 3

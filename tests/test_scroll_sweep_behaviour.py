@@ -1023,8 +1023,10 @@ class PushedListScreen(ListScreen):
     """The same list, swept as a phone with no WDA is: the HID backend names
     its own drag speed and hold, and every read is asked of the push."""
 
-    def __init__(self, *, merged: str = "", fails_at: int | None = None, **kw):
+    def __init__(self, *, merged: str = "", fails_at: int | None = None,
+                 header: list[UIElement] | None = None, **kw):
         super().__init__(**kw)
+        self.header = header or []      # the bar's controls, as the push lists them
         self.durations: list[float] = []
         self.reads: list[dict] = []
         self.merged = merged            # appended to each row's label: ", Detail"
@@ -1058,6 +1060,10 @@ class PushedListScreen(ListScreen):
         if self.merged:
             els = [e.model_copy(update={"label": e.label + self.merged})
                    if e.label.startswith("Row ") else e for e in els]
+        if k.get("whole_screen"):
+            # A pushed tree's first element is the Application, the screen.
+            els = [UIElement(type="Application", identifier="", label="App",
+                             frame={"x": 0, "y": 0, **SCREEN}), *self.header, *els]
         return els, udid
 
 
@@ -1094,10 +1100,48 @@ async def test_a_pushed_sweep_asks_the_push_for_the_viewport_and_the_target():
     screen = PushedListScreen()
     await _sweep(screen, "row_150", pushed=True)
 
-    viewport = next(r for r in screen.reads if r.get("filter_type") == "Application")
-    assert viewport.get("lookup") is True
+    # The viewport from a whole-screen read: a push lookup reads all of it
+    # anyway, and its header places the upward swipes.
+    assert screen.reads[0].get("whole_screen") is True
+    assert not screen.reads[0].get("filter_type")
     lookups = [r for r in screen.reads if r.get("filter_identifier")]
     assert lookups and all(r.get("lookup") is True for r in lookups)
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_sweep_starts_its_upward_swipes_below_a_tall_header():
+    """Two bars over a list, as the probe's SwiftUI-hosted More screens have
+    (#664): the list from y=156, and every upward swipe from the usual 140
+    began on the bar and moved nothing, which read as the top of the list."""
+    tall = [UIElement(type="Button", identifier="lazy_to_top", label="Top",
+                      frame={"x": 16, "y": 106, "width": 44, "height": 48})]
+    screen = PushedListScreen(header=tall, chrome=160).at_bottom()
+
+    found = await _sweep(screen, "row_3", max_swipes=40, pushed=True)
+
+    assert found is not None
+    assert "swipe:up" in screen.swipes()
+
+
+@pytest.mark.asyncio
+async def test_a_usual_header_leaves_the_swipes_where_they_were():
+    from server.device.controller_ui import _header_bottom
+
+    bar = [UIElement(type="Button", identifier="back", label="Back",
+                     frame={"x": 8, "y": 52, "width": 60, "height": 36})]
+    assert _header_bottom(bar, 140, SCREEN["height"]) == 0.0
+    # A container is no header, whatever it spans.
+    table = [UIElement(type="Group", identifier="table", label="",
+                       frame={"x": 0, "y": 90, "width": 400, "height": 700})]
+    assert _header_bottom(table, 140, SCREEN["height"]) == 0.0
+    # Nor a row scrolled up under the bar (#664: it moved the start to 213).
+    row = [UIElement(type="Group", identifier="lazy_row_9", label="Lazy row 9",
+                     frame={"x": 0, "y": 139, "width": 414, "height": 50})]
+    assert _header_bottom(row, 140, SCREEN["height"]) == 0.0
+    # And a header is held to the upper part of the screen.
+    huge = [UIElement(type="Button", identifier="b", label="",
+                      frame={"x": 0, "y": 130, "width": 40, "height": SCREEN["height"] * 0.14})]
+    assert _header_bottom(huge, 140, SCREEN["height"]) <= SCREEN["height"] * 0.4
 
 
 @pytest.mark.asyncio
