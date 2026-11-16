@@ -349,10 +349,31 @@ class TestASecondCrashOfTheSameApp:
             await ctrl.clear_text(udid=PHONE, identifier="email")
 
 
-def test_a_wda_built_since_brings_the_latch_back(monkeypatch):
-    ctrl = _phone_controller(monkeypatch=monkeypatch)
-    ctrl._record_push_crash(PHONE, "QuernProbeScene")
-    monkeypatch.setattr(wda_availability, "_cached", (wda_availability.time.monotonic(), NO_XCODE))
-    assert ctrl._device_tree_reader(PHONE) is ctrl.coredevice_ax
-    wda_availability.forget()                                 # what setup_wda does
-    assert ctrl._device_tree_reader(PHONE) is None
+class TestAfterSetup:
+    """setup_wda marks the answer stale whatever happened (CodeRabbit on #707)."""
+
+    @pytest.fixture
+    def crashed(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl._record_push_crash(PHONE, "QuernProbeScene")
+        monkeypatch.setattr(wda_availability, "_refreshing", None)
+        monkeypatch.setattr(wda_availability, "wda_unavailable_reason", REAL_REASON)
+        monkeypatch.setattr(wda_availability, "_cached",
+                            (wda_availability.time.monotonic(), wda_availability.NOT_BUILT))
+        return ctrl
+
+    async def test_a_failed_setup_keeps_the_device_on_the_push(self, monkeypatch, crashed):
+        monkeypatch.setattr(wda_availability, "_check",
+                            AsyncMock(return_value=wda_availability.NOT_BUILT))
+        wda_availability.forget()
+        # Before the re-check answers, and after it.
+        assert crashed._device_tree_reader(PHONE) is crashed.coredevice_ax
+        await wda_availability._refreshing
+        assert crashed._device_tree_reader(PHONE) is crashed.coredevice_ax
+
+    async def test_a_wda_built_brings_the_latch_back(self, monkeypatch, crashed):
+        monkeypatch.setattr(wda_availability, "_check", AsyncMock(return_value=None))
+        wda_availability.forget()
+        crashed._device_tree_reader(PHONE)                    # asks again, in the background
+        await wda_availability._refreshing
+        assert crashed._device_tree_reader(PHONE) is None

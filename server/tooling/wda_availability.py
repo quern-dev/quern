@@ -105,6 +105,12 @@ def _full_xcode() -> bool:
 
 
 def forget() -> None:
-    """Drop the cached answer: after setup_wda builds WDA, say."""
+    """Mark the cached answer stale, after setup_wda has run.
+
+    Stale, not dropped: the next asker checks afresh, and the routing that
+    asks synchronously keeps the old answer until that check replaces it.
+    Dropped, a setup that failed read as WDA being there, and a crash latched
+    in that window sent the next read to it (CodeRabbit on #707)."""
     global _cached
-    _cached = None
+    if _cached is not None:
+        _cached = (float("-inf"), _cached[1])
