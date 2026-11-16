@@ -3780,9 +3780,10 @@ class TestSetupIos:
         setup, calls = self._stub(monkeypatch, CheckStatus.SKIPPED)
         report = setup.SetupReport()
 
-        has_simulators, pmd3 = setup._setup_ios(report)
+        ios = setup._setup_ios(report)
 
-        assert has_simulators is False and pmd3.status == CheckStatus.OK
+        assert ios.simulators is False and ios.pmd3.status == CheckStatus.OK
+        assert ios.tunneld.status == CheckStatus.OK
         assert {"check_libimobiledevice", "check_ideviceinstaller", "check_pymobiledevice3",
                 "check_tunneld", "check_iphones"} <= set(calls)
         assert "idb_companion" not in calls
@@ -3790,8 +3791,7 @@ class TestSetupIos:
 
     def test_with_xcode_both_are(self, monkeypatch, capsys):
         setup, calls = self._stub(monkeypatch, CheckStatus.OK)
-        has_simulators, _ = setup._setup_ios(setup.SetupReport())
-        assert has_simulators is True
+        assert setup._setup_ios(setup.SetupReport()).simulators is True
         assert "idb_companion" in calls and "check_iphones" in calls
 
 
@@ -3887,3 +3887,75 @@ def _async_by_udid(states):
     async def f(udid):
         return states[udid]
     return f
+
+
+
+class TestPlatformMatrix:
+    """What quern can drive, from what setup found."""
+
+    def _ios(self, *, xcode, pmd3=CheckStatus.OK, tunneld=CheckStatus.OK):
+        from server.lifecycle.setup import IosFacts
+
+        return IosFacts(xcode, CheckResult(name="pymobiledevice3", status=pmd3, message=""),
+                        CheckResult(name="tunneld", status=tunneld, message=""))
+
+    def _rows(self, ios, adb=None, emulator=None, avds=None):
+        from server.lifecycle.setup import platform_matrix
+
+        return {name: (status, how) for name, status, how in
+                platform_matrix(ios, adb, emulator, avds)}
+
+    def test_command_line_tools_only_and_no_android(self):
+        rows = self._rows(self._ios(xcode=False))
+        assert rows["iOS simulators"][0] == CheckStatus.SKIPPED
+        assert rows["iPhones, iOS 27+"][0] == CheckStatus.OK
+        assert "no Xcode" in rows["iPhones, iOS 27+"][1]
+        assert rows["iPhones before iOS 27"][0] == CheckStatus.SKIPPED
+        assert rows["Android emulators"][0] == CheckStatus.SKIPPED
+        assert rows["Android devices"][0] == CheckStatus.SKIPPED
+
+    def test_xcode_and_android_studio_with_a_virtual_device(self):
+        rows = self._rows(self._ios(xcode=True), adb="/sdk/adb",
+                          emulator="/sdk/emulator", avds=["Pixel_7"])
+        assert all(status == CheckStatus.OK for status, _ in rows.values())
+        assert "setup_wda" in rows["iPhones before iOS 27"][1]
+        assert rows["Android emulators"][1] == "1 virtual device"
+
+    def test_one_step_left_is_named(self):
+        rows = self._rows(self._ios(xcode=True, tunneld=CheckStatus.WARNING),
+                          adb="/sdk/adb", emulator="/sdk/emulator", avds=[])
+        assert rows["iPhones, iOS 27+"] == (
+            CheckStatus.WARNING, rows["iPhones, iOS 27+"][1])
+        assert "tunneld install" in rows["iPhones, iOS 27+"][1]
+        assert rows["iPhones before iOS 27"][0] == CheckStatus.WARNING
+        assert rows["Android emulators"][0] == CheckStatus.WARNING
+        assert "Device Manager" in rows["Android emulators"][1]
+
+    def test_avds_that_could_not_be_listed_are_not_none(self):
+        rows = self._rows(self._ios(xcode=False), adb="/sdk/adb", emulator="/sdk/emulator",
+                          avds=None)
+        assert rows["Android emulators"][0] == CheckStatus.WARNING
+        assert "could not list" in rows["Android emulators"][1]
+
+    def test_no_pymobiledevice3_no_iphones(self):
+        rows = self._rows(self._ios(xcode=False, pmd3=CheckStatus.WARNING,
+                                    tunneld=CheckStatus.WARNING))
+        assert rows["iPhones, iOS 27+"][0] == CheckStatus.SKIPPED
+        assert "pipx install pymobiledevice3" in rows["iPhones, iOS 27+"][1]
+
+    def test_android_studio_s_sdk_counts_off_path(self, monkeypatch, tmp_path):
+        """Android Studio puts adb and the emulator in its SDK, which is not
+        on PATH; quern's backend finds them there, so the report must too."""
+        from server.lifecycle import setup
+
+        sdk = tmp_path / "sdk"
+        for sub, name in (("platform-tools", "adb"), ("emulator", "emulator")):
+            (sdk / sub).mkdir(parents=True)
+            (sdk / sub / name).write_text("")
+        monkeypatch.setenv("ANDROID_HOME", str(sdk))
+        monkeypatch.setattr("server.device.android.adb.shutil.which", lambda name: None)
+        monkeypatch.setattr(setup, "_run", lambda cmd, **k: (0, "Pixel_7\nPixel_6\n", ""))
+
+        adb, emulator, avds = setup._android_facts()
+        assert adb == str(sdk / "platform-tools" / "adb")
+        assert avds == ["Pixel_7", "Pixel_6"]

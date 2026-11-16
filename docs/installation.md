@@ -8,6 +8,18 @@ This downloads the latest release to `~/.local/share/quern`, creates a virtualen
 
 **After this, run `quern` from anywhere** — you do not need to be in the install directory, and you do not need to know where it is. Everything below is written that way. If your shell reports `command not found: quern` in the session you installed from, run `rehash` (zsh) or open a new terminal: the shell caches where commands live and does not notice a new one appearing.
 
+### Without Xcode
+
+Setup works on a Mac with only the Command Line Tools (`xcode-select --install`). It skips what needs Xcode -- iOS simulators, and the simulator certificate -- and still sets up what a physical iPhone needs: pymobiledevice3 and its `tunneld` LaunchDaemon, which asks for your password. An iPhone on iOS 27 or later is then read, tapped, typed into, screenshotted, and has apps installed, launched and stopped, all without Xcode.
+
+For each iPhone plugged in over USB, setup then checks three things, and says what to do about each:
+
+- **Trust:** whether the phone trusts this Mac. If not, unlock it and tap **Trust** when it asks.
+- **Developer Mode** (iOS 16 and later): in Settings > Privacy & Security > Developer Mode. iOS hides the switch until a developer tool asks for it, so setup offers to show it. Turning it on restarts the phone.
+- **The developer disk image:** screenshots and app control need it. Xcode mounts it when it first meets a phone, and on iOS 27 it stays mounted across restarts. With no Xcode, setup offers to mount it with pymobiledevice3, which downloads Apple's image from its GitHub repository and has Apple's signing server personalize it for the phone.
+
+`quern doctor` reports the same three for any phone plugged in later, and `quern doctor --fix` mounts a missing image and shows the Developer Mode switch.
+
 ### Pre-commit checklist hook
 
 Setup also installs a Claude Code `PreToolUse` hook into `~/.claude/settings.json` that surfaces a short checklist whenever an agent runs `git commit` in a project that uses Quern (signaled by a `.quern/knowledge/` directory at the project root). The reminder covers KB drift, landmark verification, and other discipline that's easy to forget when committing app or KB changes. It stays silent in projects that don't use Quern.

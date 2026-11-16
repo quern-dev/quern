@@ -2864,6 +2864,89 @@ def check_tunneld() -> CheckResult:
     )
 
 
+def _android_facts() -> tuple[str | None, str | None, list[str] | None]:
+    """adb, the emulator, and its AVDs (None when they could not be
+    listed), found where quern's Android backend finds them: on PATH or in
+    an Android Studio SDK, which is usually not on PATH."""
+    from server.device.android.adb import _find_sdk_tool
+
+    adb = _find_sdk_tool("adb")
+    emulator = _find_sdk_tool("emulator", "emulator")
+    avds: list[str] | None = None
+    if emulator:
+        rc, out, _ = _run([emulator, "-list-avds"], timeout=15)
+        avds = [line.strip() for line in out.splitlines() if line.strip()] if rc == 0 else None
+    return adb, emulator, avds
+
+
+#: One row of the platform report: what, whether it works, and how or why not.
+Platform = tuple[str, CheckStatus, str]
+
+
+def platform_matrix(ios: IosFacts, adb: str | None, emulator: str | None,
+                    avds: list[str] | None) -> list[Platform]:
+    """Which kinds of device quern can drive on this Mac, from what setup
+    found. OK works, WARNING almost (one step left, named), SKIPPED not
+    without something installed (named)."""
+    ok, almost, no = CheckStatus.OK, CheckStatus.WARNING, CheckStatus.SKIPPED
+    rows: list[Platform] = []
+    rows.append(("iOS simulators", ok, "Xcode") if ios.simulators else
+                ("iOS simulators", no, "needs Xcode (App Store)"))
+
+    pmd3 = ios.pmd3.status == CheckStatus.OK
+    tunneld = ios.tunneld.status == CheckStatus.OK
+    if pmd3 and tunneld:
+        rows.append(("iPhones, iOS 27+", ok, "no Xcode needed: pymobiledevice3 and tunneld"))
+    elif pmd3:
+        rows.append(("iPhones, iOS 27+", almost,
+                     f"tunneld is not running: `{quern_cmd()} tunneld install`"))
+    else:
+        rows.append(("iPhones, iOS 27+", no, "needs pymobiledevice3: `pipx install "
+                     "pymobiledevice3`, then run setup again"))
+
+    if not ios.simulators:
+        rows.append(("iPhones before iOS 27", no,
+                     "needs Xcode: they are driven through WebDriverAgent, which Xcode builds"))
+    elif pmd3 and tunneld:
+        rows.append(("iPhones before iOS 27", ok, "through WebDriverAgent, which the "
+                     "setup_wda tool builds on first use (needs an Apple signing identity)"))
+    else:
+        rows.append(("iPhones before iOS 27", almost,
+                     "Xcode is here; pymobiledevice3 and tunneld are needed too (above)"))
+
+    if not emulator:
+        rows.append(("Android emulators", no, "needs Android Studio (its emulator)"))
+    elif avds is None:
+        rows.append(("Android emulators", almost,
+                     f"the emulator at {emulator} could not list its virtual devices"))
+    elif not avds:
+        rows.append(("Android emulators", almost, "no virtual device yet: create one in "
+                     "Android Studio's Device Manager"))
+    elif not adb:
+        rows.append(("Android emulators", almost, "the emulator is here, adb is not: "
+                     "`brew install android-platform-tools`"))
+    else:
+        rows.append(("Android emulators", ok,
+                     f"{len(avds)} virtual device{'s' if len(avds) != 1 else ''}"))
+
+    rows.append(("Android devices", ok, "adb") if adb else
+                ("Android devices", no, "needs adb: `brew install android-platform-tools` "
+                 "or Android Studio"))
+    return rows
+
+
+def print_platforms(rows: list[Platform]) -> None:
+    """The platform report, after the summary: what this Mac can drive."""
+    icons = {CheckStatus.OK: "✓", CheckStatus.WARNING: "⚠", CheckStatus.SKIPPED: "✗"}
+    print("  What quern can drive here")
+    print("─" * 50)
+    width = max(len(name) for name, _, _ in rows)
+    for name, status, how in rows:
+        print(f"  {icons[status]} {name.ljust(width)}  {how}")
+    print("─" * 50)
+    print()
+
+
 def check_iphones() -> CheckResult:
     """What each iPhone on USB needs before quern can drive it, in a
     non-developer's words: that it trusts this Mac, Developer Mode, and the
@@ -3219,10 +3302,17 @@ def _print_unasked() -> None:
 AFTER_UPDATE_ENV = "QUERN_SETUP_AFTER_UPDATE"
 
 
-def _setup_ios(report: SetupReport) -> tuple[bool, CheckResult]:
-    """iOS simulators, which need Xcode, and iPhones, which do not (#664):
-    whether simulators are set up, and the pymobiledevice3 check, which
-    says whether iPhones can be."""
+@dataclass
+class IosFacts:
+    """What `_setup_ios` found: what the platform report is built from."""
+
+    simulators: bool        # Xcode, with a working simctl
+    pmd3: CheckResult
+    tunneld: CheckResult
+
+
+def _setup_ios(report: SetupReport) -> IosFacts:
+    """iOS simulators, which need Xcode, and iPhones, which do not (#664)."""
     # ── iOS simulators (require Xcode) ──
 
     # Auto-fix developer dir if simctl is missing due to renamed Xcode or
@@ -3488,7 +3578,7 @@ def _setup_ios(report: SetupReport) -> tuple[bool, CheckResult]:
     report.add(tunneld_result)
 
     report.add(check_iphones())
-    return has_simulators, pmd3_result
+    return IosFacts(has_simulators, pmd3_result, tunneld_result)
 
 
 def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int:
@@ -3805,7 +3895,8 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
     node_result = _node_severity(node_result, mcp_blocked, after_update=after_update)
     report.add(node_result)
 
-    has_simulators, pmd3_result = _setup_ios(report)
+    ios = _setup_ios(report)
+    has_simulators, pmd3_result = ios.simulators, ios.pmd3
 
     # ── Android support ──
 
@@ -3979,6 +4070,7 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
     # ── Summary ──
 
     report.print_summary()
+    print_platforms(platform_matrix(ios, *_android_facts()))
     if mcp_blocked:
         _print_mcp_blocked(node_sites)
 
