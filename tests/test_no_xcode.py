@@ -395,8 +395,10 @@ class TestDoctor:
         self.mount = AsyncMock(side_effect=mount)
         monkeypatch.setattr(r, "mount_image", self.mount)
         self.reveal = []
-        monkeypatch.setattr(main, "_reveal_developer_mode",
-                            lambda udid: self.reveal.append(udid) or reveal)
+        async def fake_reveal(udid):
+            self.reveal.append(udid)
+            return reveal
+        monkeypatch.setattr(main, "_reveal_developer_mode", fake_reveal)
         return main
 
     def test_a_ready_phone(self, monkeypatch, capsys):

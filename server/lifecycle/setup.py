@@ -1971,14 +1971,17 @@ def check_xcode_cli_tools() -> CheckResult:
     # developer dir before invoking xcrun — otherwise we'd trigger the
     # macOS install dialog here on Android-only machines.
     if not xcode_available():
+        # Required, though neither an iPhone on iOS 27+ nor Android needs the
+        # tools themselves: Homebrew does, and setup installs Python, pipx and
+        # pymobiledevice3 with it.
         return CheckResult(
             name="Xcode CLI Tools",
             status=CheckStatus.MISSING,
             message="Not installed (no developer directory configured)",
             detail=(
-                "Install Xcode or the Command Line Tools to enable iOS support. "
-                "If you only need Android, this is safe to ignore — Quern will "
-                "skip the iOS toolchain. Install with: xcode-select --install"
+                "Needed by Homebrew, which setup installs Python and pymobiledevice3 "
+                "with. Install with: xcode-select --install, then run setup again. "
+                "iOS simulators need the full Xcode as well."
             ),
         )
     # Verify simctl works
@@ -2954,10 +2957,15 @@ def check_iphones() -> CheckResult:
     mounting the image, showing the Developer Mode switch -- and says the
     rest. No phone plugged in is not a problem: `quern doctor` checks later.
 
-    Uses `phone_readiness`, as `quern doctor` does.
+    Uses `phone_readiness`, as `quern doctor` does: one event loop for the
+    whole step, run here at the synchronous boundary.
     """
     import asyncio
 
+    return asyncio.run(_check_iphones())
+
+
+async def _check_iphones() -> CheckResult:
     try:
         from server.device.ios import phone_readiness
     except ImportError as e:  # pymobiledevice3 not importable here yet
@@ -2965,7 +2973,7 @@ def check_iphones() -> CheckResult:
             name="iPhones", status=CheckStatus.SKIPPED,
             message="not checked", detail=f"{e}. Run `{quern_cmd()} doctor` later.")
     try:
-        found = asyncio.run(phone_readiness.phones())
+        found = await phone_readiness.phones()
     except Exception as e:  # noqa: BLE001 -- said, not raised
         return CheckResult(
             name="iPhones", status=CheckStatus.SKIPPED,
@@ -2978,7 +2986,7 @@ def check_iphones() -> CheckResult:
 
     problems: list[str] = []
     for udid, name, version in found:
-        state = asyncio.run(phone_readiness.readiness(udid))
+        state = await phone_readiness.readiness(udid)
         label = state.name or name or udid[:8]
         if state.errors and state.os_version == "":
             problems.append(f"{label}: unlock it and tap Trust when it asks whether to "
@@ -2989,7 +2997,7 @@ def check_iphones() -> CheckResult:
                   "Security > Developer Mode, and the phone restarts to apply it.")
             if _prompt_yn("    Show the Developer Mode switch in the phone's Settings?"):
                 try:
-                    asyncio.run(phone_readiness.reveal_developer_mode(udid))
+                    await phone_readiness.reveal_developer_mode(udid)
                     print("    The switch is now shown in Settings.")
                 except Exception as e:  # noqa: BLE001 -- the summary still says what to do
                     print(f"    Could not show it: {e}")
@@ -3003,7 +3011,7 @@ def check_iphones() -> CheckResult:
                                 "--fix` mounts it")
             else:
                 try:
-                    asyncio.run(phone_readiness.mount_image(udid, state.os_version))
+                    await phone_readiness.mount_image(udid, state.os_version)
                     print("    Mounted.")
                 except Exception as e:  # noqa: BLE001 -- said in the summary
                     problems.append(f"{label}: the developer disk image did not mount ({e})")
