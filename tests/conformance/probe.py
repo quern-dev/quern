@@ -825,8 +825,10 @@ class ProbeDriver:
         if self.contract.platform != "ios":
             return
         elements = self.ui_tree().get("elements") or []
-        if not any(e.get("type") == "Keyboard" for e in elements):
-            return
+        # Not only when a `Keyboard` is in the tree: WDA reports one, but the
+        # tree push carries the keyboard as its keys alone, and the keyboard
+        # it missed sat over the tab bar for the rest of the run (#664).
+        # Dismissing with no keyboard up does nothing.
         if any(e.get("identifier") == "text_dismiss_keyboard" for e in elements):
             self.tap("text_dismiss_keyboard")
             time.sleep(0.8)
