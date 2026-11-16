@@ -4,7 +4,7 @@
 
 **Where these names come from matters.** On a simulator, `get_ui_tree` normally reads the **accessibility tree** (sim-bridge, or idb as a fallback). XCUITest does not classify every element the same way, so a type that is right for driving quern can be wrong in an XCUITest selector — and nothing at runtime says why it failed. The sharpest case is tab-bar items: the accessibility tree reports them as `RadioButton`, while XCUITest sees `XCUIElementTypeButton` inside a `XCUIElementTypeTabBar`, so `app.radioButtons["Home"]` finds nothing.
 
-**To see what XCUITest sees on a simulator, run `start_driver` on it.** While WebDriverAgent runs there, every read and action on that simulator goes through it, elements read from it (`get_ui_tree`, `get_element`, `wait_for_element`) carry `xcui_type` (XCUITest's own type, e.g. `XCUIElementTypeButton`), and `backend` on the response says `wda`. `stop_driver` returns the simulator to the default. Physical devices always go through WDA, so their elements always carry `xcui_type`.
+**To see what XCUITest sees on a simulator, run `start_driver` on it.** While WebDriverAgent runs there, every read and action on that simulator goes through it, elements read from it (`get_ui_tree`, `get_element`, `wait_for_element`) carry `xcui_type` (XCUITest's own type, e.g. `XCUIElementTypeButton`), and `backend` on the response says `wda`. `stop_driver` returns the simulator to the default. A physical iPhone carries `xcui_type` on elements WDA read: before iOS 27, when set to WDA, or for a call passing `snapshot_depth`. On iOS 27 and later it is read without WDA by default, and those elements have no `xcui_type`.
 
 What you'll see from the accessibility tree — the default on a simulator — and what these are for:
 

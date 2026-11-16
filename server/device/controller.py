@@ -197,9 +197,10 @@ class DeviceController(DeviceControllerUI):
         #: Apps a tree-push read crashed, per device, and the app each device
         #: last showed (#669): together they keep the push off a known crasher.
         self._push_crashed_apps: dict[str, set[str]] = {}
-        #: Why there is no WebDriverAgent to fall back on, as last asked (#664):
-        #: None when there is one, or before anything asked.
-        self._wda_missing: str | None = None
+        #: Every crash, in order, per device: an action compares its length
+        #: before and after its own read, which also sees a second crash of
+        #: an app already in the set above (CodeRabbit on #707).
+        self._push_crash_log: dict[str, list[str]] = {}
         self._last_app: dict[str, str] = {}
         # When each device's screen was last changed by an action here (tap,
         # swipe, type, launch...), for tap_element's settle-before-tapping.
@@ -1644,7 +1645,7 @@ class DeviceController(DeviceControllerUI):
                 # answers is looked for at the next read (#669 review).
                 self.coredevice_ax.note_front(udid, front[0], front[1], read_at)
             except coredevice_ax.AppExitedDuringRead as exc:
-                self._push_crashed_apps.setdefault(udid, set()).add(exc.app)
+                self._record_push_crash(udid, exc.app)
                 return {"launch_confirmed": None,
                         "launch_check_error": f"the check itself crashed the app: {exc}"}
             except DeviceError as exc:

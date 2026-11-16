@@ -951,28 +951,42 @@ class DeviceControllerUI:
     def _crash_latched(self, udid: str) -> set[str]:
         """The apps a push read crashed on this device (#669), when that sends
         its reads to WDA: not when there is no WDA to send them to, where they
-        stay on the push and each crash is said as it happens (#664)."""
-        if self._wda_missing:
+        stay on the push and each crash is said as it happens (#664).
+
+        From the server-wide answer, which the server asks at startup and
+        `setup_wda` drops, so a WDA built since is followed (CodeRabbit on #707).
+        """
+        from server.tooling.wda_availability import known_reason
+
+        if known_reason():
             return set()
         return self._push_crashed_apps.get(udid, set())
 
+    def _record_push_crash(self, udid: str, app: str) -> None:
+        """A push read crashed `app` on this device (#669)."""
+        self._push_crashed_apps.setdefault(udid, set()).add(app)
+        self._push_crash_log.setdefault(udid, []).append(app)
+
+    def _push_crashes(self, udid: str) -> int:
+        """How many push reads have crashed an app on this device: taken
+        before an action's own read, and compared after it."""
+        return len(self._push_crash_log.get(udid, ()))
+
     async def _no_wda_fallback(self, udid: str) -> str | None:
         """Why a physical device has no WDA to fall back on, or None when it
-        has one. Remembered, so the routing that asks it synchronously
-        (`_crash_latched`) follows."""
+        has one, asked afresh (the answer is cached for a minute)."""
         if self._device_type(udid) != DeviceType.DEVICE:
             return None
         from server.tooling.wda_availability import wda_unavailable_reason
 
-        self._wda_missing = await wda_unavailable_reason()
-        return self._wda_missing
+        return await wda_unavailable_reason()
 
     async def _push_after_a_crash(self, reader, udid: str, crash: DeviceError, no_wda: str,
                                   source_timeout: float | None, probe: bool):
         """The push's read of what a crash left, where there is no WDA to read
         it instead (#664). Recorded as a crash all the same, so an action
         whose own read it was still refuses (#698)."""
-        self._push_crashed_apps.setdefault(udid, set()).add(getattr(crash, "app", ""))
+        self._record_push_crash(udid, getattr(crash, "app", ""))
         try:
             raw = await reader.describe_all(udid, snapshot_depth=None,
                                             source_timeout=source_timeout, probe=probe)
@@ -2081,6 +2095,7 @@ class DeviceControllerUI:
         # 393x852 -- so the geometry below, which is entirely derived from the
         # screen, was computed from numbers off by 9pt and 8pt on exactly the
         # devices the table claimed to know. It has been removed.
+        crashes_at_start = self._push_crashes(resolved)
         if pushed:
             # The whole screen: a push lookup reads all of it anyway, and the
             # header it shows decides where an upward swipe may start.
@@ -2134,11 +2149,16 @@ class DeviceControllerUI:
             finishing, and mixing readers also breaks the at-rest and movement
             reasoning, which assume one.
             """
-            if pushed and _READ_BY.get() != self.coredevice_ax.TOOL_NAME:
+            # A crash under a read with no WDA to fall back on leaves a push
+            # read of what the crash left, still the push's: counted, so the
+            # sweep does not go on through SpringBoard (CodeRabbit on #707).
+            if pushed and (_READ_BY.get() != self.coredevice_ax.TOOL_NAME
+                           or self._push_crashes(resolved) != crashes_at_start):
                 note = self.read_note()
                 raise DeviceError(
                     f"The scroll sweep stopped: its {what} could not be read through "
-                    "the accessibility push" + (f" ({note})" if note else "")
+                    "the accessibility push, or the read crashed the app"
+                    + (f" ({note})" if note else "")
                     + ". Nothing was tapped; read the screen before acting.",
                     tool=self.coredevice_ax.TOOL_NAME)
 
@@ -3319,7 +3339,7 @@ class DeviceControllerUI:
                         reader, resolved, failed, no_wda, source_timeout, probe_containers)
                 else:
                     if isinstance(failed, AppExitedDuringRead):
-                        self._push_crashed_apps.setdefault(resolved, set()).add(failed.app)
+                        self._record_push_crash(resolved, failed.app)
                     raise DeviceError(
                         f"{failed}. " + ("Nothing was looked up: the screen this lookup "
                                          "was for is gone. "
@@ -3334,7 +3354,7 @@ class DeviceControllerUI:
                 if isinstance(e, AppExitedDuringRead):
                     # Said on the answer, not only in the log: the screen the
                     # caller sees next is the one the crash left (#669).
-                    self._push_crashed_apps.setdefault(resolved, set()).add(e.app)
+                    self._record_push_crash(resolved, e.app)
                     if lookup:
                         # Not looked up on what the crash left: on SpringBoard
                         # a tap by label tapped an icon, and not_exists passed,
@@ -5564,7 +5584,7 @@ class DeviceControllerUI:
                     "read back and corrected.")
             return result
 
-        crashed_before = frozenset(self._push_crashed_apps.get(udid, ()))
+        crashed_before = self._push_crashes(udid)
         try:
             target = await self._find_text_field(udid, label=label, identifier=identifier,
                                                  whole_screen=True)
@@ -5622,7 +5642,7 @@ class DeviceControllerUI:
                 if isinstance(e, AppExitedDuringRead):
                     # The set's read is a push read: recorded, as every other
                     # read's crash is, so the next one goes through WDA (#669).
-                    self._push_crashed_apps.setdefault(udid, set()).add(e.app)
+                    self._record_push_crash(udid, e.app)
                     raise DeviceError(
                         f"typed {len(keys)} characters into '{label or identifier}', "
                         f"which the phone's keyboard changed: the field held {after!r}. "
@@ -5653,7 +5673,7 @@ class DeviceControllerUI:
         if outcome != "landed":
             message = self._typing_failure(outcome, before, after, text,
                                            label or identifier, secure)
-            crashed = self._push_crashed_apps.get(udid, set()) - crashed_before
+            crashed = self._push_crash_log.get(udid, [])[crashed_before:]
             if crashed:
                 # Not the keyboard's doing, as the failure may read: the app
                 # crashed after the keystrokes, reading the field back (#669).
@@ -5666,7 +5686,7 @@ class DeviceControllerUI:
             result["value"] = after
         return result
 
-    def _refuse_after_a_crash(self, udid: str, before: frozenset, what: str, *,
+    def _refuse_after_a_crash(self, udid: str, before: int, what: str, *,
                               cause: DeviceError | None = None) -> None:
         """Refuse an action whose own read of the screen crashed an app (#669).
 
@@ -5674,13 +5694,20 @@ class DeviceControllerUI:
         left, so acting on it would type into, or clear, something else -- as
         lookups and sweeps refuse for the same reason.
         """
-        crashed = self._push_crashed_apps.get(udid, set()) - before
+        crashed = self._push_crash_log.get(udid, [])[before:]
         if crashed:
             raise DeviceError(
-                f"Reading the screen crashed {', '.join(sorted(crashed))} (#669). Nothing "
-                f"was {what}: the screen the field was on is gone. This device's screens "
-                "will be read through WDA until the server restarts; read the screen "
-                "again before acting.", tool=self.coredevice_ax.TOOL_NAME) from cause
+                f"Reading the screen crashed {', '.join(sorted(set(crashed)))} (#669). "
+                f"Nothing was {what}: the screen the field was on is gone. "
+                + self._after_a_crash(udid) + " Read the screen again before acting.",
+                tool=self.coredevice_ax.TOOL_NAME) from cause
+
+    def _after_a_crash(self, udid: str) -> str:
+        """Where this device's reads go now that a push read crashed an app."""
+        if self._crash_latched(udid):
+            return "This device's screens will be read through WDA until the server restarts."
+        return ("There is no WebDriverAgent to read them through instead, so this device "
+                "stays on the accessibility push.")
 
     @staticmethod
     def _is_secure_field(target: UIElement) -> bool:
@@ -5914,7 +5941,7 @@ class DeviceControllerUI:
         # Over CoreDevice (#664): the field is found in the push and cleared
         # with keystrokes over HID, unless a WDA depth was asked for.
         coredevice = self._coredevice_serves(resolved) and snapshot_depth is None
-        crashed_before = frozenset(self._push_crashed_apps.get(resolved, ()))
+        crashed_before = self._push_crashes(resolved)
         elements, _ = await self.get_ui_elements(
             udid=resolved, snapshot_depth=snapshot_depth, whole_screen=coredevice)
         self._refuse_after_a_crash(resolved, crashed_before, "cleared")

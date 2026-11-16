@@ -29,20 +29,20 @@ def no_wda(monkeypatch):
     async def missing():
         return NO_XCODE
     monkeypatch.setattr(wda_availability, "wda_unavailable_reason", missing)
+    # As the startup check leaves it, for the routing that asks synchronously.
+    monkeypatch.setattr(wda_availability, "_cached", (wda_availability.time.monotonic(), NO_XCODE))
 
 
 # -- the check ---------------------------------------------------------------------
 
 
 class TestTheCheck:
-    def _patch(self, monkeypatch, *, xcode=True, build="17A1", built=True, raises=None):
-        monkeypatch.setattr("server.device.ios._xcode.xcode_available", lambda: xcode)
-
-        async def build_id():
+    def _patch(self, monkeypatch, *, xcode=True, built=True, raises=None):
+        def full_xcode():
             if raises:
                 raise raises
-            return build
-        monkeypatch.setattr("server.device.ios.wda._xcode_build_id", build_id)
+            return xcode
+        monkeypatch.setattr(wda_availability, "_full_xcode", full_xcode)
 
         def xctestrun():
             if not built:
@@ -53,7 +53,6 @@ class TestTheCheck:
     @pytest.mark.parametrize(("kw", "expect"), [
         ({}, None),
         ({"xcode": False}, "Xcode is not installed"),
-        ({"build": None}, "Xcode is not installed"),       # the Command Line Tools only
         ({"built": False}, "has not been built"),
         ({"raises": OSError("no")}, None),                 # could not tell: no refusal
     ])
@@ -64,6 +63,36 @@ class TestTheCheck:
             assert reason is None
         else:
             assert expect in reason
+
+    def test_xcode_is_an_xcodebuild_in_the_developer_directory(self, monkeypatch, tmp_path):
+        clt = tmp_path / "CommandLineTools"
+        (clt / "usr" / "bin").mkdir(parents=True)
+        monkeypatch.setenv("DEVELOPER_DIR", str(clt))
+        assert not wda_availability._full_xcode()          # the Command Line Tools
+
+        tool = clt / "usr" / "bin" / "xcodebuild"
+        tool.write_text("")
+        tool.chmod(0o755)
+        assert wda_availability._full_xcode()
+
+    async def test_a_stale_answer_is_asked_again_in_the_background(self, monkeypatch):
+        """Xcode installed, or WDA built another way, while the server runs."""
+        check = AsyncMock(return_value=None)
+        monkeypatch.setattr(wda_availability, "_check", check)
+        monkeypatch.setattr(wda_availability, "_refreshing", None)
+        clock = [1000.0]
+        monkeypatch.setattr(wda_availability.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(wda_availability, "_cached", (clock[0], NO_XCODE))
+        # conftest stands in for the cached check; the real one is wanted here.
+        monkeypatch.setattr(wda_availability, "wda_unavailable_reason", REAL_REASON)
+
+        assert wda_availability.known_reason() == NO_XCODE
+        check.assert_not_awaited()                        # still fresh
+        clock[0] += wda_availability._TTL_S
+        assert wda_availability.known_reason() == NO_XCODE  # as it stands
+        await wda_availability._refreshing
+        assert wda_availability.known_reason() is None
+        assert check.await_count == 1
 
     async def test_the_answer_is_kept_a_while_and_forgotten_on_setup(self, monkeypatch):
         check = AsyncMock(return_value=NO_XCODE)
@@ -297,3 +326,33 @@ def test_where_wda_is_only_unbuilt_it_can_be_chosen(monkeypatch, capsys):
     monkeypatch.setattr(config, "read_user_config", lambda **kw: written)
     assert cli._cmd_set_device_reader(["wda"]) == 0
     assert written == {"device_ui_reader": "wda"}
+
+
+
+# -- crashes, counted ------------------------------------------------------------------
+
+
+class TestASecondCrashOfTheSameApp:
+    """With no WDA a device stays on the push after a crash, so the same app
+    can crash again under an action's own read; the set of crashed apps
+    does not change then, and the count does (CodeRabbit on #707)."""
+
+    async def test_clearing_refuses(self, monkeypatch, no_wda):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl._record_push_crash(PHONE, "QuernProbeScene")       # an earlier one
+        crash = coredevice_ax.AppExitedDuringRead("QuernProbeScene", 711)
+        field = [{"type": "TextField", "AXLabel": "Email", "AXUniqueId": "email",
+                  "frame": {"x": 10, "y": 100, "width": 300, "height": 40}}]
+        ctrl.coredevice_ax.describe_all = AsyncMock(side_effect=[crash, field])
+
+        with pytest.raises(DeviceError, match="Nothing was cleared.*stays on the"):
+            await ctrl.clear_text(udid=PHONE, identifier="email")
+
+
+def test_a_wda_built_since_brings_the_latch_back(monkeypatch):
+    ctrl = _phone_controller(monkeypatch=monkeypatch)
+    ctrl._record_push_crash(PHONE, "QuernProbeScene")
+    monkeypatch.setattr(wda_availability, "_cached", (wda_availability.time.monotonic(), NO_XCODE))
+    assert ctrl._device_tree_reader(PHONE) is ctrl.coredevice_ax
+    wda_availability.forget()                                 # what setup_wda does
+    assert ctrl._device_tree_reader(PHONE) is None

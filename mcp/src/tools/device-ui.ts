@@ -22,7 +22,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA accessibility tree depth (1-50, default 25). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects devices served by WDA (physical iPhones, or a simulator after start_driver)."),
+        .describe("WDA accessibility tree depth (1-50, default 25). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects devices served by WDA (a simulator after start_driver, or a physical iPhone); on an iPhone on iOS 27+, passing it sends this read through WDA instead of the accessibility push, so it needs WDA set up."),
       strategy: z
         .enum(["skeleton"])
         .optional()
@@ -113,7 +113,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth (25), even when you pass a depth below it (see deepen); a not-found answer says how deep it looked."),
+        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver; on an iPhone on iOS 27+, passing it sends the read through WDA instead of the accessibility push, so it needs WDA set up). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth (25), even when you pass a depth below it (see deepen); a not-found answer says how deep it looked."),
       deepen: z
         .boolean()
         .optional()
@@ -211,7 +211,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth (25), even when you pass a depth below it (see deepen); a not-found answer says how deep it looked."),
+        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver; on an iPhone on iOS 27+, passing it sends the read through WDA instead of the accessibility push, so it needs WDA set up). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth (25), even when you pass a depth below it (see deepen); a not-found answer says how deep it looked."),
       deepen: z
         .boolean()
         .optional()
@@ -292,7 +292,7 @@ This is the recommended first step before interacting with UI. Use this to disco
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA accessibility tree depth (1-50, default 25). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects devices served by WDA (physical iPhones, or a simulator after start_driver)."),
+        .describe("WDA accessibility tree depth (1-50, default 25). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects devices served by WDA (a simulator after start_driver, or a physical iPhone); on an iPhone on iOS 27+, passing it sends this read through WDA instead of the accessibility push, so it needs WDA set up."),
       strategy: z
         .enum(["skeleton"])
         .optional()
@@ -695,7 +695,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth (25), even when you pass a depth below it (see deepen); a not-found answer says how deep it looked."),
+        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver; on an iPhone on iOS 27+, passing it sends the read through WDA instead of the accessibility push, so it needs WDA set up). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth (25), even when you pass a depth below it (see deepen); a not-found answer says how deep it looked."),
       deepen: z
         .boolean()
         .optional()
@@ -1008,7 +1008,7 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for the sweep's reads (a physical iPhone, or a simulator after start_driver). Default 12, as for tap_element; a miss looks once more at the full depth (25), even when you pass a depth below it (see deepen); a not-found answer says how deep it looked."),
+        .describe("WDA snapshot depth for the sweep's reads (a physical iPhone, or a simulator after start_driver; on an iPhone on iOS 27+, passing it sends the sweep through WDA, so it needs WDA set up). Default 12, as for tap_element; a miss looks once more at the full depth (25), even when you pass a depth below it (see deepen); a not-found answer says how deep it looked."),
       deepen: z
         .boolean()
         .optional()
@@ -1073,7 +1073,7 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for the field lookup (a physical iPhone, or a simulator after start_driver). Default: the full depth, 25. Pass less to read faster on a long list."),
+        .describe("WDA snapshot depth for the field lookup (a physical iPhone, or a simulator after start_driver; on an iPhone on iOS 27+, passing it sends the lookup and the keystrokes through WDA, so it needs WDA set up). Default: the full depth, 25. Pass less to read faster on a long list."),
       udid: z
         .string()
         .optional()
@@ -1146,7 +1146,7 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for the field lookup (a physical iPhone, or a simulator after start_driver). Default: the full depth, 25. Pass less to read faster on a long list."),
+        .describe("WDA snapshot depth for the field lookup (a physical iPhone, or a simulator after start_driver; on an iPhone on iOS 27+, passing it sends the lookup and the keystrokes through WDA, so it needs WDA set up). Default: the full depth, 25. Pass less to read faster on a long list."),
       udid: z
         .string()
         .optional()

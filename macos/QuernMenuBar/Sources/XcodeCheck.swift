@@ -21,8 +21,13 @@ enum XcodeCheck {
         }
     }
 
-    /// nil when `xcode-select` could not be run; "" when it ran and named none.
+    /// `DEVELOPER_DIR` when set, as xcrun and the server read it (the CLI
+    /// this app runs inherits it); else `xcode-select -p`. nil when that
+    /// could not be run; "" when it ran and named none.
     private static func developerDirectory() -> String? {
+        if let dir = ProcessInfo.processInfo.environment["DEVELOPER_DIR"], !dir.isEmpty {
+            return dir
+        }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
         proc.arguments = ["-p"]
