@@ -318,13 +318,15 @@ async def test_a_found_row_is_returned_with_its_resting_frame():
 
 
 @pytest.mark.asyncio
-async def test_a_row_above_turns_the_sweep_around_at_the_bottom():
+async def test_a_row_above_turns_the_sweep_around_at_the_bottom(monkeypatch):
     """M25.
 
     The trace behind this: from the bottom of a Settings list, a sweep for a
     row above spent its whole downward budget -- ten swipes, ~60s on an
-    iPhone 11 -- swiping at an end that could not move.
+    iPhone 11 -- swiping at an end that could not move. Blind, as a list
+    whose rows carry no numbered identifiers is swept.
     """
+    monkeypatch.setattr("server.device.controller_ui._index_direction", lambda *a: None)
     screen = ListScreen().at_bottom()
     found = await _sweep(screen, "row_3")
 
@@ -667,12 +669,13 @@ async def test_tall_rows_are_brought_into_view(row):
 
 
 @pytest.mark.asyncio
-async def test_a_label_changing_in_place_does_not_hide_the_bottom():
+async def test_a_label_changing_in_place_does_not_hide_the_bottom(monkeypatch):
     """M34 — a running clock must not read as the list moving.
 
     Counted as movement it stopped end detection outright: from the bottom, a
-    search for a row above swiped down 20 times first.
+    search for a row above swiped down 20 times first. Blind, as M25.
     """
+    monkeypatch.setattr("server.device.controller_ui._index_direction", lambda *a: None)
     screen = ListScreen(ticking=True).at_bottom()
     found = await _sweep(screen, "row_3")
 
@@ -1172,3 +1175,53 @@ def test_the_hid_sweep_speed_is_the_measured_one():
     from server.device.ios.coredevice_input import CoreDeviceInput
     assert CoreDeviceInput.sweep_drag_pt_s == 250.0
     assert CoreDeviceInput.sweep_hold_s == 0.5
+
+
+# -- direction from the rows' numbering (#664) ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_numbered_row_above_is_swept_up_first():
+    """From row ~190, row 3: the blind sweep's trip to the bottom cost five
+    swipes on a phone read through the push, and the deadline with them."""
+    screen = ListScreen().at_bottom()
+    found = await _sweep(screen, "row_3", max_swipes=40)
+
+    assert found is not None
+    assert set(screen.swipes()) == {"swipe:up"}, screen.swipes()
+
+
+@pytest.mark.asyncio
+async def test_a_numbered_row_below_is_swept_down_first():
+    screen = ListScreen()
+    found = await _sweep(screen, "row_150", max_swipes=40)
+
+    assert found is not None
+    assert set(screen.swipes()) == {"swipe:down"}, screen.swipes()
+
+
+@pytest.mark.asyncio
+async def test_a_numbering_that_misleads_turns_back_at_the_top(monkeypatch):
+    """An app's numbering need not run down the list: up first, then the rest."""
+    monkeypatch.setattr("server.device.controller_ui._index_direction", lambda *a: False)
+    screen = ListScreen()                      # at the top already
+    found = await _sweep(screen, "row_150", max_swipes=40)
+
+    assert found is not None
+    swipes = screen.swipes()
+    assert swipes[0] == "swipe:up" and "swipe:down" in swipes, swipes
+
+
+def test_the_numbering_is_read_only_when_it_says_something():
+    from server.device.controller_ui import _index_direction
+
+    def seen(*ids):
+        return {("Cell", i, ""): [(0, 0)] for i in ids}
+
+    assert _index_direction("row_3", seen("row_140", "row_152")) is False
+    assert _index_direction("row_160", seen("row_140", "row_152")) is True
+    assert _index_direction("row_145", seen("row_140", "row_152")) is None   # in range
+    assert _index_direction("row_3", seen("row_140")) is None                # one to go on
+    assert _index_direction("row_3", seen("item_140", "item_152")) is None   # other prefix
+    assert _index_direction("settings", seen("row_140", "row_152")) is None  # no number
+    assert _index_direction("row_3", (0, 0, 10, 10)) is None                 # a WDA frame

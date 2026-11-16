@@ -692,6 +692,40 @@ def _header_bottom(elements: list[UIElement], clearance: float, screen_height: f
     return min(edge, screen_height * 0.4) if edge > clearance else 0.0
 
 
+_INDEXED = re.compile(r"(.*?)(\d+)")
+
+
+def _index_direction(identifier: str | None, fingerprint: object) -> bool | None:
+    """True when an indexed row lies below the numbered rows on screen, False
+    above them, None when that cannot be told.
+
+    `row_3` against `row_140`..`row_152` is above. It takes an identifier
+    ending in a number and at least two on screen with the same prefix, and
+    the target outside their range; inside it, or with nothing to compare, the
+    sweep stays blind. `fingerprint` is the sweep's, keyed (type, id, label);
+    a WDA read's is a frame, and says nothing.
+    """
+    if not identifier or not isinstance(fingerprint, dict):
+        return None
+    m = _INDEXED.fullmatch(identifier)
+    if not m:
+        return None
+    prefix, wanted = m.group(1), int(m.group(2))
+    seen = []
+    for key in fingerprint:
+        ident = key[1] if isinstance(key, tuple) and len(key) > 1 else ""
+        n = _INDEXED.fullmatch(ident or "")
+        if n and n.group(1) == prefix:
+            seen.append(int(n.group(2)))
+    if len(seen) < 2:
+        return None
+    if wanted > max(seen):
+        return True
+    if wanted < min(seen):
+        return False
+    return None
+
+
 def _sweep_drag(backend) -> tuple[float, float] | None:
     """A backend's own sweep drag speed (pt/s) and end hold, when it names
     them (#678); None for the rest, which drag in 0.3 s. Only numbers count:
@@ -2524,6 +2558,16 @@ class DeviceControllerUI:
                     return _finish(el)
 
             going_down = True
+            # Which way an indexed row lies, from the rows on screen (#664): a
+            # blind sweep goes down first, and from row 150 back to row 3 that
+            # cost five swipes to the bottom before the 16 up -- past the
+            # deadline at a pushed read's ~5.8 s a step.
+            toward = _index_direction(identifier, last_fingerprint)
+            if toward is not None:
+                going_down = toward
+                _note(f"  {identifier} is {'below' if toward else 'above'} the "
+                      f"numbered rows on screen; sweeping {'down' if toward else 'up'} first")
+            went_down = going_down
             moved_at_all = False
             last_cy: float | None = None
             stalls = 0
@@ -2658,6 +2702,13 @@ class DeviceControllerUI:
                 if going_down:
                     going_down = False
                     _note("  not in tree, and nothing moved: at the bottom; sweeping up")
+                    continue
+                if not went_down:
+                    # Up first, on the rows' numbering, and not there: an app's
+                    # numbering need not run down the list, so the rest of it
+                    # is swept too, as a blind sweep would have.
+                    going_down = went_down = True
+                    _note("  not in tree, and nothing moved: at the top; sweeping down")
                     continue
                 _give_up(
                     "reached the top without finding it" if moved_at_all
