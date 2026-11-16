@@ -2151,11 +2151,11 @@ def _report_disk() -> None:
 
 def _report_iphone_control() -> None:
     """How a physical iPhone is driven, and whether WebDriverAgent can run
-    here (#664). Diagnostic only: no WDA is a supported setup."""
+    here (#664). Diagnostic only: no WDA is the default."""
     import asyncio
 
     from server.config import get_device_ui_reader
-    from server.tooling.wda_availability import wda_unavailable_reason
+    from server.tooling.wda_availability import NO_XCODE, wda_unavailable_reason
 
     reader = get_device_ui_reader()
     try:
@@ -2170,7 +2170,7 @@ def _report_iphone_control() -> None:
     if reason:
         mark = "✗" if reader == "wda" else "·"
         print(f"  {mark} WebDriverAgent cannot run here: {reason}")
-        if reader == "wda":
+        if reader == "wda" and reason != NO_XCODE:
             print("    Phones on iOS 27 and later are driven without it until it can: "
                   "`quern set-device-reader no-wda`.")
     else:

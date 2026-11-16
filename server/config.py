@@ -696,10 +696,10 @@ def get_device_ui_reader() -> str:
 
     ``"coredevice"`` -- the default since #664 -- reads the accessibility tree
     the device pushes over its tunnel, and taps and types over its HID
-    service, on iOS 27 and later, with no WebDriverAgent: no Xcode, no
-    signing. ``"wda"`` drives it through WDA, as before. Only the literal
-    ``"wda"`` chooses WDA: unset, or anything else, is the default, so an
-    install that never chose keeps working on a Mac without Xcode.
+    service, on iOS 27 and later, with no WebDriverAgent to build or sign
+    (Xcode is still needed, for devicectl). ``"wda"`` drives it through WDA,
+    as before. Only the literal ``"wda"`` chooses WDA: unset, or anything
+    else, is the default.
     """
     return "wda" if read_user_config().get("device_ui_reader") == "wda" else "coredevice"
 

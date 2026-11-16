@@ -1,15 +1,21 @@
 """Whether WebDriverAgent can run on a physical iPhone from this Mac (#664).
 
 WDA is built with Xcode and launched with `xcodebuild test-without-building`,
-so with no Xcode there is no WDA to start, built or not. Since phones on iOS
-27 and later are driven without it, a Mac without Xcode is a supported
-setup, and every place that would fall back to WDA says why it cannot,
-rather than starting a build that cannot run.
+so with no Xcode there is no WDA to start, built or not, and every place that
+would fall back to WDA says why it cannot, rather than starting a build that
+cannot run. Phones on iOS 27 and later are driven without WDA, but not without
+Xcode: `devicectl`, which launches and stops their apps and matches them to
+their tunnels, comes with it too (measured on a Mac with only the Command Line
+Tools: "devicectl is installed by Xcode").
 """
 
 from __future__ import annotations
 
 import time
+
+NO_XCODE = ("Xcode is not installed. WebDriverAgent is built and run with it, and "
+            "so is devicectl, which an iPhone driven without WDA needs too")
+NOT_BUILT = "WebDriverAgent has not been built on this Mac (the setup_wda tool builds it)"
 
 #: How long an answer stands: Xcode can be installed while quern runs, and
 #: `xcodebuild -version` costs a process.
@@ -45,14 +51,12 @@ async def _check() -> str | None:
         # true for the Command Line Tools too, and only a full Xcode has an
         # `xcodebuild` that answers -version.
         if not xcode_available() or await _xcode_build_id() is None:
-            reason = ("Xcode is not installed, and WebDriverAgent is built and run "
-                      "with it")
+            reason = NO_XCODE
         else:
             try:
                 _find_xctestrun()
             except WdaNotSetUpError:
-                reason = ("WebDriverAgent has not been built on this Mac (the "
-                          "setup_wda tool builds it)")
+                reason = NOT_BUILT
     except Exception:  # noqa: BLE001 -- could not tell is not unavailable
         reason = None
     return reason

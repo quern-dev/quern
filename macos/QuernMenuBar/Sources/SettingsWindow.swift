@@ -62,14 +62,14 @@ final class SettingsModel: ObservableObject {
     static func iphoneControlNote(reader: String, xcodeInstalled: Bool?) -> String {
         switch (reader, xcodeInstalled) {
         case ("wda", false?):
-            return "Set to WDA, but Xcode is not installed, so Quern drives iPhones "
-                + "without it. WDA is built and run with Xcode."
+            return "Set to WDA, but Xcode is not installed. Quern needs it to drive an "
+                + "iPhone either way: WDA and devicectl both come with it."
         case ("wda", _):
             return "Every iPhone is driven through WebDriverAgent, which the "
                 + "setup_wda tool builds."
         case (_, false?):
-            return "iPhones on iOS 27 and later are driven without WebDriverAgent. "
-                + "Through WDA needs Xcode, which is not installed."
+            return "Xcode is not installed. Quern needs it to drive an iPhone, with WDA "
+                + "or without: devicectl comes with it."
         default:
             return "iPhones on iOS 27 and later are driven without WebDriverAgent; "
                 + "earlier versions use it."

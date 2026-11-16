@@ -18,7 +18,7 @@ from server.models import DeviceError, WdaNotSetUpError
 from server.tooling import wda_availability
 from tests.test_coredevice_ax import PHONE, _phone_controller
 
-NO_XCODE = "Xcode is not installed, and WebDriverAgent is built and run with it"
+NO_XCODE = wda_availability.NO_XCODE
 
 #: The real cached check, taken before conftest's fixture replaces the name.
 REAL_REASON = wda_availability.wda_unavailable_reason
@@ -115,9 +115,10 @@ async def test_wda_is_not_started_where_it_cannot_run(monkeypatch, no_wda):
     start = AsyncMock()
     monkeypatch.setattr("server.device.ios.wda.start_driver", start)
 
-    with pytest.raises(WdaNotSetUpError, match="Xcode is not installed"):
+    with pytest.raises(WdaNotSetUpError, match="Xcode is not installed") as caught:
         await client._get_base_url(PHONE)
     start.assert_not_called()
+    assert "driven without it" not in str(caught.value)    # devicectl needs Xcode too
 
 
 # -- the push's fallbacks ------------------------------------------------------------
@@ -222,7 +223,22 @@ def test_the_command_says_when_wda_cannot_run(monkeypatch, capsys, no_wda):
     monkeypatch.setattr(config, "read_user_config", lambda **kw: {"device_ui_reader": "wda"})
     assert cli._cmd_set_device_reader([]) == 0
     out = capsys.readouterr().out
-    assert "iPhone control: wda" in out and "cannot run here" in out
+    # Not "driven without it": devicectl comes with Xcode too.
+    assert "iPhone control: wda" in out and "No iPhone can be driven" in out
+    assert "driven without it" not in out
+
+
+def test_the_command_says_when_wda_is_not_built(monkeypatch, capsys):
+    from server import __main__ as cli
+    from server import config
+
+    async def not_built():
+        return wda_availability.NOT_BUILT
+    monkeypatch.setattr(wda_availability, "wda_unavailable_reason", not_built)
+    monkeypatch.setattr(config, "read_user_config", lambda **kw: {"device_ui_reader": "wda"})
+    assert cli._cmd_set_device_reader([]) == 0
+    out = capsys.readouterr().out
+    assert "cannot run here" in out and "driven without it" in out
 
 
 

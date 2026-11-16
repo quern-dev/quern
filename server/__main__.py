@@ -653,14 +653,13 @@ def _cmd_set_device_reader(args: list[str]) -> int:
 
     `no-wda`, the default (#664), reads the screen from the accessibility
     tree the phone pushes and taps and types over its HID service, on iOS 27
-    and later: no Xcode, no signing. `wda` drives it through WebDriverAgent,
-    which has to be built with Xcode. Says which, and whether WDA can run
-    here, since a WDA setting on a Mac without Xcode cannot work.
+    and later: no WebDriverAgent to build or sign. `wda` drives it through
+    WebDriverAgent. Both need Xcode. Says which, and whether WDA can run here.
     """
     import asyncio
 
     from server.config import get_device_ui_reader, set_device_ui_reader
-    from server.tooling.wda_availability import wda_unavailable_reason
+    from server.tooling.wda_availability import NO_XCODE, wda_unavailable_reason
 
     names = {"coredevice": "no-wda", "wda": "wda"}
     if args:
@@ -673,7 +672,9 @@ def _cmd_set_device_reader(args: list[str]) -> int:
     reader = get_device_ui_reader()
     print(f"iPhone control: {names[reader]}")
     reason = asyncio.run(wda_unavailable_reason())
-    if reader == "coredevice":
+    if reason == NO_XCODE:
+        print(f"{reason}. No iPhone can be driven from this Mac until Xcode is installed.")
+    elif reader == "coredevice":
         print("Phones on iOS 27 and later are driven without WebDriverAgent.")
         if reason:
             print(f"Older phones need WebDriverAgent, which cannot run here: {reason}.")

@@ -77,9 +77,9 @@ enum IphoneControlTests {
         Harness.test("the note says when WDA is set and cannot run") {
             let warned = SettingsModel.iphoneControlNote(reader: "wda", xcodeInstalled: false)
             Harness.expect(warned.contains("Xcode is not installed")
-                           && warned.contains("without it"), "no warning: \(warned)")
+                           && warned.contains("either way"), "no warning: \(warned)")
             let greyed = SettingsModel.iphoneControlNote(reader: "coredevice", xcodeInstalled: false)
-            Harness.expect(greyed.contains("needs Xcode"), "the greyed choice is not explained")
+            Harness.expect(greyed.contains("Xcode is not installed"), "the greyed choice is not explained")
             for xcode in [true, nil] as [Bool?] {
                 for reader in ["coredevice", "wda"] {
                     let note = SettingsModel.iphoneControlNote(reader: reader, xcodeInstalled: xcode)
