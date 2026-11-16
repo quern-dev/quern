@@ -981,6 +981,11 @@ class CoreDeviceAxReader:
             elements = await read_tree(udid, timeout=timeout, **kwargs)
         except BareAppTree:
             await asyncio.sleep(BARE_CONFIRM_S)
+            # The rejected attempt's app is not the one the retry answers
+            # with; what it could not tell about (`unasked`) still stands
+            # (CodeRabbit on #701).
+            seen.pop("pid", None)
+            seen.pop("app", None)
             elements = await read_tree(udid, timeout=timeout, **kwargs)
         pid, app = seen.get("pid"), seen.get("app") or ""
         if not isinstance(pid, int):

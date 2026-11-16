@@ -1051,6 +1051,25 @@ class TestACrashAfterTheRead:
 
         assert [(e.pid, e.when) for e in reader._front[PHONE]][1:] == [(1583, 5.0)]
 
+    async def test_a_bare_retry_remembers_the_app_it_answers_with(self, monkeypatch):
+        """The retry answered at its deadline without filling `seen`: the
+        rejected attempt's app must not stand in (CodeRabbit on #701)."""
+        monkeypatch.setattr(coredevice_ax, "BARE_CONFIRM_S", 0)
+        reader = CoreDeviceAxReader()
+        calls = []
+
+        async def read(udid, *, timeout, previous_pids=(), seen=None):
+            calls.append(1)
+            if len(calls) == 1:
+                seen.update(pid=100, app="Bare", unasked=(617, "Settings"))
+                raise coredevice_ax.BareAppTree(PHONE)
+            return []                                   # a deadline answer, nothing seen
+        monkeypatch.setattr(coredevice_ax, "read_tree", read)
+
+        await reader.describe_all(PHONE)
+
+        assert PHONE not in reader._front or all(e.pid != 100 for e in reader._front[PHONE])
+
     async def test_a_forget_during_the_poll_claims_nothing(self, monkeypatch):
         """The install that forgot it ended the app: its report is no #669."""
         reader, _ = self._reader(
