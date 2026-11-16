@@ -761,12 +761,23 @@ async def _settled(uuid: str, lib: SimpleNamespace, address: Any, conn: SimpleNa
     """Subscribe and take the settled tree, subscribing again on a fresh
     connection when the device stops pushing first (#684). `conn` holds
     whichever connection is open, for the caller to close; the caller's
-    deadline bounds every attempt."""
+    deadline bounds every attempt.
+
+    The first tree is the first attempt's: a caller compares it with the
+    newest to see the app change under the read (#669), and an app that
+    stalled one attempt and died before the next must not drop out of that
+    comparison (CodeRabbit on #702)."""
+    first_seen: Tree | None = None
     for attempt in range(RESUBSCRIBES + 1):
         queue = await _subscribed(uuid, lib, address, conn)
         try:
-            return await _newest_tree(queue, held)
+            tree, first, newest = await _newest_tree(queue, held)
+            if first_seen is not None:
+                first = first_seen
+                held["first"] = first_seen
+            return tree, first, newest
         except PushStalled:
+            first_seen = first_seen or held.get("first")
             if attempt == RESUBSCRIBES:
                 raise
             logger.info("[coredevice] %s stopped pushing before a complete tree: "

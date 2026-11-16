@@ -896,6 +896,24 @@ class TestAPushThatStops:
         assert closed == ["provider1"]                  # the stalled one closed first
         assert (conn.rsd, conn.provider) == (None, None)
 
+    async def test_the_first_attempts_app_is_kept_as_first(self, monkeypatch):
+        """Settings stalled, then the fresh subscription shows Safari: the read
+        must still see the app change (CodeRabbit on #702)."""
+        queues = [self._queue(_as("InitialDump", SETTINGS)),
+                  self._queue(_as("InitialDump", SAFARI), SAFARI)]
+        monkeypatch.setattr(coredevice_ax, "STALL_MIN_S", 0.2)
+        monkeypatch.setattr(coredevice_ax, "STALL_PAIRS", 0.0)
+        monkeypatch.setattr(coredevice_ax, "_subscribed",
+                            AsyncMock(side_effect=lambda *a: queues.pop(0)))
+        monkeypatch.setattr(coredevice_ax, "_close", AsyncMock())
+        held: dict = {}
+
+        tree, first, newest = await asyncio.wait_for(coredevice_ax._settled(
+            PHONE, None, None, SimpleNamespace(rsd=None, provider=None), held), 5)
+
+        assert (first.app_pid, newest.app_pid, tree.app_pid) == (617, 618, 618)
+        assert held["first"].app_pid == 617
+
     async def test_it_gives_up_after_a_few(self, monkeypatch):
         monkeypatch.setattr(coredevice_ax, "STALL_MIN_S", 0.05)
         monkeypatch.setattr(coredevice_ax, "STALL_PAIRS", 0.0)
