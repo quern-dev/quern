@@ -1888,6 +1888,22 @@ def check_ideviceinstaller() -> CheckResult:
     )
 
 
+#: Where an Xcode is looked for when xcode-select names none.
+APPLICATIONS = Path("/Applications")
+
+
+def _command_line_tools_only() -> bool:
+    """The developer directory is the Command Line Tools, and there is no
+    Xcode in /Applications to point it at instead -- as on a Mac that has
+    never had Xcode. A renamed or moved Xcode is not this: that one gets
+    `_diagnose_developer_dir`'s fix."""
+    rc, dev_dir, _ = _run(["xcode-select", "-p"])
+    if rc != 0 or "CommandLineTools" not in dev_dir:
+        return False
+    return not any((app / "Contents" / "Developer").exists()
+                   for app in APPLICATIONS.glob("Xcode*.app"))
+
+
 def _diagnose_developer_dir() -> str | None:
     """Check if xcode-select developer dir provides simctl; suggest fix if not.
 
@@ -1972,6 +1988,20 @@ def check_xcode_cli_tools() -> CheckResult:
             name="Xcode CLI Tools",
             status=CheckStatus.OK,
             message="Installed (simctl available)",
+        )
+
+    # The Command Line Tools and no Xcode: a supported setup, not a broken
+    # one. Simulators need Xcode; an iPhone on iOS 27 and later is driven
+    # without it (#664, #706), and the phone tools below are set up all the same.
+    if _command_line_tools_only():
+        return CheckResult(
+            name="Xcode CLI Tools",
+            status=CheckStatus.SKIPPED,
+            message="Command Line Tools only -- iOS simulators need Xcode",
+            detail=(
+                "iPhones on iOS 27 and later are driven without Xcode. For simulators, "
+                "or iPhones before iOS 27, install Xcode from the App Store."
+            ),
         )
 
     # simctl failed — check if it's a stale developer dir (renamed Xcode)
@@ -2834,6 +2864,74 @@ def check_tunneld() -> CheckResult:
     )
 
 
+def check_iphones() -> CheckResult:
+    """What each iPhone on USB needs before quern can drive it, in a
+    non-developer's words: that it trusts this Mac, Developer Mode, and the
+    developer disk image (#664 phase 5). Offers what can be done from here --
+    mounting the image, showing the Developer Mode switch -- and says the
+    rest. No phone plugged in is not a problem: `quern doctor` checks later.
+
+    Uses `phone_readiness`, as `quern doctor` does.
+    """
+    import asyncio
+
+    try:
+        from server.device.ios import phone_readiness
+    except ImportError as e:  # pymobiledevice3 not importable here yet
+        return CheckResult(
+            name="iPhones", status=CheckStatus.SKIPPED,
+            message="not checked", detail=f"{e}. Run `{quern_cmd()} doctor` later.")
+    try:
+        found = asyncio.run(phone_readiness.phones())
+    except Exception as e:  # noqa: BLE001 -- said, not raised
+        return CheckResult(
+            name="iPhones", status=CheckStatus.SKIPPED,
+            message="not checked", detail=f"{e}. Run `{quern_cmd()} doctor` later.")
+    if not found:
+        return CheckResult(
+            name="iPhones", status=CheckStatus.SKIPPED,
+            message="none plugged in",
+            detail=f"Plug an iPhone in over USB and run `{quern_cmd()} doctor` to check it.")
+
+    problems: list[str] = []
+    for udid, name, version in found:
+        state = asyncio.run(phone_readiness.readiness(udid))
+        label = state.name or name or udid[:8]
+        if state.errors and state.os_version == "":
+            problems.append(f"{label}: unlock it and tap Trust when it asks whether to "
+                            "trust this computer, then run setup again")
+            continue
+        if state.developer_mode is False:
+            print(f"    {label}: Developer Mode is off. It is in Settings > Privacy & "
+                  "Security > Developer Mode, and the phone restarts to apply it.")
+            if _prompt_yn("    Show the Developer Mode switch in the phone's Settings?"):
+                try:
+                    asyncio.run(phone_readiness.reveal_developer_mode(udid))
+                    print("    The switch is now shown in Settings.")
+                except Exception as e:  # noqa: BLE001 -- the summary still says what to do
+                    print(f"    Could not show it: {e}")
+            problems.append(f"{label}: turn on Developer Mode (Settings > Privacy & "
+                            "Security > Developer Mode)")
+        if state.image_mounted is False:
+            print(f"    {label}: no developer disk image. Screenshots and app control "
+                  f"need one: {phone_readiness.IMAGE_SOURCE}.")
+            if not _prompt_yn("    Download and mount it now?"):
+                problems.append(f"{label}: no developer disk image; `{quern_cmd()} doctor "
+                                "--fix` mounts it")
+            else:
+                try:
+                    asyncio.run(phone_readiness.mount_image(udid, state.os_version))
+                    print("    Mounted.")
+                except Exception as e:  # noqa: BLE001 -- said in the summary
+                    problems.append(f"{label}: the developer disk image did not mount ({e})")
+        problems.extend(f"{label}: {error}" for error in (state.errors or []))
+    if problems:
+        return CheckResult(name="iPhones", status=CheckStatus.WARNING,
+                           message="not ready yet", detail="\n".join(problems))
+    return CheckResult(name="iPhones", status=CheckStatus.OK,
+                       message=", ".join(n or u[:8] for u, n, _ in found) + " ready")
+
+
 def configure_crash_reporter_dialog() -> CheckResult:
     """Check and optionally disable the macOS crash reporter dialog.
 
@@ -3119,6 +3217,278 @@ def _print_unasked() -> None:
 #: Update" -- so a Node below the floor stays a warning there (#506). The
 #: updater passes `after_update=True` instead, being in-process.
 AFTER_UPDATE_ENV = "QUERN_SETUP_AFTER_UPDATE"
+
+
+def _setup_ios(report: SetupReport) -> tuple[bool, CheckResult]:
+    """iOS simulators, which need Xcode, and iPhones, which do not (#664):
+    whether simulators are set up, and the pymobiledevice3 check, which
+    says whether iPhones can be."""
+    # ── iOS simulators (require Xcode) ──
+
+    # Auto-fix developer dir if simctl is missing due to renamed Xcode or
+    # xcode-select pointing at CommandLineTools instead of a full Xcode.
+    dev_dir_msg = _fix_developer_dir_for_setup()
+    xcode_result = check_xcode_cli_tools()
+    has_simulators = xcode_result.status == CheckStatus.OK
+    if has_simulators and dev_dir_msg:
+        xcode_result = CheckResult(
+            name="Xcode CLI Tools",
+            status=CheckStatus.OK,
+            message="Installed (simctl available)",
+            detail=dev_dir_msg,
+        )
+    report.add(xcode_result)
+
+    if has_simulators:
+        # Simulator UI automation:
+        #   - Xcode 26+ on Apple Silicon → sim-bridge runs natively, idb not needed
+        #   - Older Xcode or Intel → fall back to the patched idb + fb-idb
+
+        if _sim_bridge_supported():
+            print(
+                "    Xcode 26+ on Apple Silicon detected — "
+                "sim-bridge handles simulator UI natively. Skipping idb."
+            )
+            report.add(_setup_idb_companion(sim_bridge=True))
+            report.add(CheckResult(
+                name="idb (fb-idb)",
+                status=CheckStatus.SKIPPED,
+                message="Not required (sim-bridge active)",
+            ))
+        else:
+            report.add(_setup_idb_companion(sim_bridge=False))
+
+            idb_result = check_idb()
+            if idb_result.status == CheckStatus.MISSING:
+                print("    idb CLI not found. This is the Python client for idb_companion.")
+                if _prompt_yn("    Install fb-idb via pip?"):
+                    if sys.prefix != sys.base_prefix:
+                        pip_cmd = str(Path(sys.prefix) / "bin" / "pip")
+                    else:
+                        pip_cmd = "pip" if _which("pip") else "pip3"
+                    print("    Installing fb-idb...")
+                    try:
+                        result = subprocess.run(
+                            [pip_cmd, "install", "fb-idb"],
+                            stdin=subprocess.DEVNULL, timeout=120,
+                        )
+                        if result.returncode == 0:
+                            _record_install("pip", "fb-idb")
+                            if _which("pyenv"):
+                                subprocess.run(
+                                    ["pyenv", "rehash"],
+                                    stdin=subprocess.DEVNULL, timeout=10,
+                                )
+                            idb_result = check_idb()  # re-check
+                        else:
+                            idb_result = CheckResult(
+                                name="idb (fb-idb)",
+                                status=CheckStatus.ERROR,
+                                message="pip install failed",
+                                detail="Try manually: pip install fb-idb",
+                            )
+                    except (FileNotFoundError, subprocess.TimeoutExpired):
+                        idb_result = CheckResult(
+                            name="idb (fb-idb)",
+                            status=CheckStatus.ERROR,
+                            message="pip install failed",
+                            detail="Try manually: pip install fb-idb",
+                        )
+            report.add(idb_result)
+
+
+    # ── iPhones (#664) ──
+    # Not behind Xcode: an iPhone on iOS 27 and later is driven over its
+    # tunnel through pymobiledevice3, with no Xcode (#706), and the tools for
+    # one before iOS 17 never needed it. Gating these on simctl left a Mac
+    # without Xcode with no phone support at all.
+
+    libimobile_result = check_libimobiledevice()
+    if libimobile_result.status == CheckStatus.MISSING:
+        if _prompt_yn("    libimobiledevice not found. Install via Homebrew?"):
+            if _brew_install("libimobiledevice"):
+                libimobile_result = check_libimobiledevice()  # re-check
+            else:
+                libimobile_result = CheckResult(
+                    name="libimobiledevice",
+                    status=CheckStatus.ERROR,
+                    message="Homebrew install failed",
+                    detail="Try manually: brew install libimobiledevice",
+                )
+    report.add(libimobile_result)
+
+    ideviceinstaller_result = check_ideviceinstaller()
+    if ideviceinstaller_result.status == CheckStatus.MISSING:
+        if _prompt_yn("    ideviceinstaller not found. Install via Homebrew?"):
+            if _brew_install("ideviceinstaller"):
+                ideviceinstaller_result = check_ideviceinstaller()  # re-check
+            else:
+                ideviceinstaller_result = CheckResult(
+                    name="ideviceinstaller",
+                    status=CheckStatus.ERROR,
+                    message="Homebrew install failed",
+                    detail="Try manually: brew install ideviceinstaller",
+                )
+    report.add(ideviceinstaller_result)
+
+    # Physical device support (pymobiledevice3 + tunneld)
+
+    pmd3_result = check_pymobiledevice3()
+    if pmd3_result.status == CheckStatus.WARNING:
+        if not _which("pipx"):
+            if _which("brew") and _prompt_yn(
+                "    pipx not found (needed for pymobiledevice3). "
+                "Install via Homebrew?",
+            ):
+                if _brew_install("pipx"):
+                    pipx_bin = _find_brew_binary("pipx")
+                    if pipx_bin:
+                        try:
+                            subprocess.run(
+                                [pipx_bin, "ensurepath"],
+                                stdin=subprocess.DEVNULL,
+                                timeout=30, capture_output=True,
+                            )
+                        except (FileNotFoundError, subprocess.TimeoutExpired):
+                            pass
+        pipx_bin = _find_brew_binary("pipx")
+        msg = pmd3_result.message or ""
+        wants_global = _home_is_on_external()
+        misplaced = "external home" in msg
+        if pipx_bin and (misplaced or "Not installed" in msg
+                         or "needed for physical" in msg):
+            if misplaced:
+                prompt = (
+                    "    pymobiledevice3 is installed under your external "
+                    "home volume — won't be reachable at boot. Reinstall "
+                    "system-wide via `sudo pipx install --global` "
+                    "(requires sudo)?"
+                )
+            elif wants_global:
+                prompt = (
+                    "    pymobiledevice3 not found. Install system-wide "
+                    "via `sudo pipx install --global` (your home is on an "
+                    "external volume, requires sudo)?"
+                )
+            else:
+                prompt = "    pymobiledevice3 not found. Install via pipx?"
+            # Only the system-wide install is out of reach of `-y`: it
+            # writes outside $HOME under sudo, and the password prompt is
+            # not something a flag can answer. The plain pipx install is
+            # ordinary setup work.
+            if _prompt_yn(prompt, deliberate=wants_global or misplaced):
+                if wants_global:
+                    # Inherit stdin so sudo can prompt for the password.
+                    cmd = ["sudo", pipx_bin, "install", "--global",
+                           "pymobiledevice3"]
+                    run_kwargs = {"timeout": 300}
+                    print("    Installing pymobiledevice3 via "
+                          "`sudo pipx install --global`...")
+                else:
+                    cmd = [pipx_bin, "install", "pymobiledevice3"]
+                    run_kwargs = {
+                        "stdin": subprocess.DEVNULL, "timeout": 300,
+                    }
+                    print("    Installing pymobiledevice3 via pipx...")
+                try:
+                    result = subprocess.run(cmd, **run_kwargs)
+                    if result.returncode == 0:
+                        _record_install(
+                            "pipx_global" if wants_global else "pipx",
+                            "pymobiledevice3",
+                        )
+                        if wants_global:
+                            _maybe_remove_user_pmd3(pipx_bin)
+                        pmd3_result = check_pymobiledevice3()  # re-check
+                    else:
+                        detail = (
+                            "Try manually: sudo pipx install --global "
+                            "pymobiledevice3"
+                            if wants_global
+                            else "Try manually: pipx install pymobiledevice3"
+                        )
+                        pmd3_result = CheckResult(
+                            name="pymobiledevice3",
+                            status=CheckStatus.ERROR,
+                            message="pipx install failed",
+                            detail=detail,
+                        )
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    pmd3_result = CheckResult(
+                        name="pymobiledevice3",
+                        status=CheckStatus.ERROR,
+                        message="pipx install failed",
+                        detail="Try manually: pipx install pymobiledevice3",
+                    )
+    report.add(pmd3_result)
+
+    tunneld_result = check_tunneld()
+    msg = tunneld_result.message or ""
+    needs_install = (
+        tunneld_result.status == CheckStatus.WARNING
+        and "Not installed" in msg
+    )
+    needs_migration = (
+        tunneld_result.status == CheckStatus.WARNING
+        and "Plist outdated" in msg
+    )
+    if needs_install or needs_migration:
+        if pmd3_result.status == CheckStatus.OK:
+            if needs_migration:
+                prompt = (
+                    "    tunneld plist references the old log path under "
+                    "the user home (caused boot races on external-home "
+                    "setups). Reinstall LaunchDaemon now (requires sudo)?"
+                )
+            else:
+                prompt = (
+                    "    tunneld not installed. Install LaunchDaemon "
+                    "now (requires sudo)?"
+                )
+            # Both branches install a LaunchDaemon that runs as root at
+            # boot and survives reboots, via sudo. Larger than the CA
+            # prompt on CONTRIBUTING's own test, not smaller -- and `-y`
+            # could not answer the password prompt that follows anyway,
+            # so saying yes on the user's behalf buys a hang.
+            if _prompt_yn(prompt, deliberate=True):
+                from server.device.ios.tunneld import install_daemon
+                if install_daemon() == 0:
+                    print("    Waiting for tunneld to start...", end="", flush=True)
+                    import urllib.request
+
+                    from server.device.ios.tunneld import TUNNELD_URL
+                    from server.remote.client import loopback_opener
+                    for _ in range(20):
+                        time.sleep(0.5)
+                        try:
+                            req = urllib.request.Request(TUNNELD_URL, method="GET")
+                            with loopback_opener().open(req, timeout=1):
+                                break
+                        except Exception:
+                            print(".", end="", flush=True)
+                    print()
+                    tunneld_result = check_tunneld()  # re-check
+                else:
+                    tunneld_result = CheckResult(
+                        name="tunneld",
+                        status=CheckStatus.ERROR,
+                        message="Installation failed",
+                        detail=f"Try manually: {quern_cmd()} tunneld install",
+                    )
+        elif needs_install:
+            tunneld_result = CheckResult(
+                name="tunneld",
+                status=CheckStatus.WARNING,
+                message="Not installed (install pymobiledevice3 first)",
+                detail=(
+                    "Install with: pipx install pymobiledevice3 && "
+                    f"{quern_cmd()} tunneld install"
+                ),
+            )
+    report.add(tunneld_result)
+
+    report.add(check_iphones())
+    return has_simulators, pmd3_result
 
 
 def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int:
@@ -3435,268 +3805,7 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
     node_result = _node_severity(node_result, mcp_blocked, after_update=after_update)
     report.add(node_result)
 
-    # ── iOS support (requires Xcode CLI Tools) ──
-
-    # Auto-fix developer dir if simctl is missing due to renamed Xcode or
-    # xcode-select pointing at CommandLineTools instead of a full Xcode.
-    dev_dir_msg = _fix_developer_dir_for_setup()
-    xcode_result = check_xcode_cli_tools()
-    has_ios = xcode_result.status == CheckStatus.OK
-    if has_ios and dev_dir_msg:
-        xcode_result = CheckResult(
-            name="Xcode CLI Tools",
-            status=CheckStatus.OK,
-            message="Installed (simctl available)",
-            detail=dev_dir_msg,
-        )
-    report.add(xcode_result)
-
-    if has_ios:
-        # iOS tools — only check/install when Xcode is available
-
-        libimobile_result = check_libimobiledevice()
-        if libimobile_result.status == CheckStatus.MISSING:
-            if _prompt_yn("    libimobiledevice not found. Install via Homebrew?"):
-                if _brew_install("libimobiledevice"):
-                    libimobile_result = check_libimobiledevice()  # re-check
-                else:
-                    libimobile_result = CheckResult(
-                        name="libimobiledevice",
-                        status=CheckStatus.ERROR,
-                        message="Homebrew install failed",
-                        detail="Try manually: brew install libimobiledevice",
-                    )
-        report.add(libimobile_result)
-
-        ideviceinstaller_result = check_ideviceinstaller()
-        if ideviceinstaller_result.status == CheckStatus.MISSING:
-            if _prompt_yn("    ideviceinstaller not found. Install via Homebrew?"):
-                if _brew_install("ideviceinstaller"):
-                    ideviceinstaller_result = check_ideviceinstaller()  # re-check
-                else:
-                    ideviceinstaller_result = CheckResult(
-                        name="ideviceinstaller",
-                        status=CheckStatus.ERROR,
-                        message="Homebrew install failed",
-                        detail="Try manually: brew install ideviceinstaller",
-                    )
-        report.add(ideviceinstaller_result)
-
-        # Simulator UI automation:
-        #   - Xcode 26+ on Apple Silicon → sim-bridge runs natively, idb not needed
-        #   - Older Xcode or Intel → fall back to the patched idb + fb-idb
-
-        if _sim_bridge_supported():
-            print(
-                "    Xcode 26+ on Apple Silicon detected — "
-                "sim-bridge handles simulator UI natively. Skipping idb."
-            )
-            report.add(_setup_idb_companion(sim_bridge=True))
-            report.add(CheckResult(
-                name="idb (fb-idb)",
-                status=CheckStatus.SKIPPED,
-                message="Not required (sim-bridge active)",
-            ))
-        else:
-            report.add(_setup_idb_companion(sim_bridge=False))
-
-            idb_result = check_idb()
-            if idb_result.status == CheckStatus.MISSING:
-                print("    idb CLI not found. This is the Python client for idb_companion.")
-                if _prompt_yn("    Install fb-idb via pip?"):
-                    if sys.prefix != sys.base_prefix:
-                        pip_cmd = str(Path(sys.prefix) / "bin" / "pip")
-                    else:
-                        pip_cmd = "pip" if _which("pip") else "pip3"
-                    print("    Installing fb-idb...")
-                    try:
-                        result = subprocess.run(
-                            [pip_cmd, "install", "fb-idb"],
-                            stdin=subprocess.DEVNULL, timeout=120,
-                        )
-                        if result.returncode == 0:
-                            _record_install("pip", "fb-idb")
-                            if _which("pyenv"):
-                                subprocess.run(
-                                    ["pyenv", "rehash"],
-                                    stdin=subprocess.DEVNULL, timeout=10,
-                                )
-                            idb_result = check_idb()  # re-check
-                        else:
-                            idb_result = CheckResult(
-                                name="idb (fb-idb)",
-                                status=CheckStatus.ERROR,
-                                message="pip install failed",
-                                detail="Try manually: pip install fb-idb",
-                            )
-                    except (FileNotFoundError, subprocess.TimeoutExpired):
-                        idb_result = CheckResult(
-                            name="idb (fb-idb)",
-                            status=CheckStatus.ERROR,
-                            message="pip install failed",
-                            detail="Try manually: pip install fb-idb",
-                        )
-            report.add(idb_result)
-
-        # Physical device support (pymobiledevice3 + tunneld)
-
-        pmd3_result = check_pymobiledevice3()
-        if pmd3_result.status == CheckStatus.WARNING:
-            if not _which("pipx"):
-                if _which("brew") and _prompt_yn(
-                    "    pipx not found (needed for pymobiledevice3). "
-                    "Install via Homebrew?",
-                ):
-                    if _brew_install("pipx"):
-                        pipx_bin = _find_brew_binary("pipx")
-                        if pipx_bin:
-                            try:
-                                subprocess.run(
-                                    [pipx_bin, "ensurepath"],
-                                    stdin=subprocess.DEVNULL,
-                                    timeout=30, capture_output=True,
-                                )
-                            except (FileNotFoundError, subprocess.TimeoutExpired):
-                                pass
-            pipx_bin = _find_brew_binary("pipx")
-            msg = pmd3_result.message or ""
-            wants_global = _home_is_on_external()
-            misplaced = "external home" in msg
-            if pipx_bin and (misplaced or "Not installed" in msg
-                             or "needed for physical" in msg):
-                if misplaced:
-                    prompt = (
-                        "    pymobiledevice3 is installed under your external "
-                        "home volume — won't be reachable at boot. Reinstall "
-                        "system-wide via `sudo pipx install --global` "
-                        "(requires sudo)?"
-                    )
-                elif wants_global:
-                    prompt = (
-                        "    pymobiledevice3 not found. Install system-wide "
-                        "via `sudo pipx install --global` (your home is on an "
-                        "external volume, requires sudo)?"
-                    )
-                else:
-                    prompt = "    pymobiledevice3 not found. Install via pipx?"
-                # Only the system-wide install is out of reach of `-y`: it
-                # writes outside $HOME under sudo, and the password prompt is
-                # not something a flag can answer. The plain pipx install is
-                # ordinary setup work.
-                if _prompt_yn(prompt, deliberate=wants_global or misplaced):
-                    if wants_global:
-                        # Inherit stdin so sudo can prompt for the password.
-                        cmd = ["sudo", pipx_bin, "install", "--global",
-                               "pymobiledevice3"]
-                        run_kwargs = {"timeout": 300}
-                        print("    Installing pymobiledevice3 via "
-                              "`sudo pipx install --global`...")
-                    else:
-                        cmd = [pipx_bin, "install", "pymobiledevice3"]
-                        run_kwargs = {
-                            "stdin": subprocess.DEVNULL, "timeout": 300,
-                        }
-                        print("    Installing pymobiledevice3 via pipx...")
-                    try:
-                        result = subprocess.run(cmd, **run_kwargs)
-                        if result.returncode == 0:
-                            _record_install(
-                                "pipx_global" if wants_global else "pipx",
-                                "pymobiledevice3",
-                            )
-                            if wants_global:
-                                _maybe_remove_user_pmd3(pipx_bin)
-                            pmd3_result = check_pymobiledevice3()  # re-check
-                        else:
-                            detail = (
-                                "Try manually: sudo pipx install --global "
-                                "pymobiledevice3"
-                                if wants_global
-                                else "Try manually: pipx install pymobiledevice3"
-                            )
-                            pmd3_result = CheckResult(
-                                name="pymobiledevice3",
-                                status=CheckStatus.ERROR,
-                                message="pipx install failed",
-                                detail=detail,
-                            )
-                    except (FileNotFoundError, subprocess.TimeoutExpired):
-                        pmd3_result = CheckResult(
-                            name="pymobiledevice3",
-                            status=CheckStatus.ERROR,
-                            message="pipx install failed",
-                            detail="Try manually: pipx install pymobiledevice3",
-                        )
-        report.add(pmd3_result)
-
-        tunneld_result = check_tunneld()
-        msg = tunneld_result.message or ""
-        needs_install = (
-            tunneld_result.status == CheckStatus.WARNING
-            and "Not installed" in msg
-        )
-        needs_migration = (
-            tunneld_result.status == CheckStatus.WARNING
-            and "Plist outdated" in msg
-        )
-        if needs_install or needs_migration:
-            if pmd3_result.status == CheckStatus.OK:
-                if needs_migration:
-                    prompt = (
-                        "    tunneld plist references the old log path under "
-                        "the user home (caused boot races on external-home "
-                        "setups). Reinstall LaunchDaemon now (requires sudo)?"
-                    )
-                else:
-                    prompt = (
-                        "    tunneld not installed. Install LaunchDaemon "
-                        "now (requires sudo)?"
-                    )
-                # Both branches install a LaunchDaemon that runs as root at
-                # boot and survives reboots, via sudo. Larger than the CA
-                # prompt on CONTRIBUTING's own test, not smaller -- and `-y`
-                # could not answer the password prompt that follows anyway,
-                # so saying yes on the user's behalf buys a hang.
-                if _prompt_yn(prompt, deliberate=True):
-                    from server.device.ios.tunneld import install_daemon
-                    if install_daemon() == 0:
-                        print("    Waiting for tunneld to start...", end="", flush=True)
-                        import urllib.request
-
-                        from server.device.ios.tunneld import TUNNELD_URL
-                        from server.remote.client import loopback_opener
-                        for _ in range(20):
-                            time.sleep(0.5)
-                            try:
-                                req = urllib.request.Request(TUNNELD_URL, method="GET")
-                                with loopback_opener().open(req, timeout=1):
-                                    break
-                            except Exception:
-                                print(".", end="", flush=True)
-                        print()
-                        tunneld_result = check_tunneld()  # re-check
-                    else:
-                        tunneld_result = CheckResult(
-                            name="tunneld",
-                            status=CheckStatus.ERROR,
-                            message="Installation failed",
-                            detail=f"Try manually: {quern_cmd()} tunneld install",
-                        )
-            elif needs_install:
-                tunneld_result = CheckResult(
-                    name="tunneld",
-                    status=CheckStatus.WARNING,
-                    message="Not installed (install pymobiledevice3 first)",
-                    detail=(
-                        "Install with: pipx install pymobiledevice3 && "
-                        f"{quern_cmd()} tunneld install"
-                    ),
-                )
-        report.add(tunneld_result)
-
-    else:
-        print("\n    Xcode CLI Tools not found — skipping iOS dependencies.")
-        print("    Install Xcode to enable iOS simulator and device support.\n")
+    has_simulators, pmd3_result = _setup_ios(report)
 
     # ── Android support ──
 
@@ -3752,6 +3861,7 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
             detail="Install Android Studio or: brew install android-platform-tools",
         ))
 
+    has_ios = has_simulators or pmd3_result.status == CheckStatus.OK
     if not has_ios and not has_android:
         report.add(CheckResult(
             name="Platform support",
@@ -3770,9 +3880,9 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
 
     report.add(configure_crash_reporter_dialog())
 
-    # ── Simulator cert setup (only if iOS available) ──
+    # ── Simulator cert setup (only with Xcode: it needs simctl) ──
 
-    if has_ios:
+    if has_simulators:
         booted = check_booted_simulators()
         if booted:
             cert_path = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"

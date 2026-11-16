@@ -3702,3 +3702,188 @@ class TestTheNewNodeRunsOnceBeforeTheProbe:
             raise subprocess.TimeoutExpired(argv, kw["timeout"])
 
         self._warm(which=self.BREW, exists={self.BREW}, run=slow)   # no exception
+
+
+# ── A Mac without Xcode (#664 phase 5) ─────────────────────────────────────
+
+
+class TestCommandLineToolsOnly:
+    def _xcode_select(self, path, rc=0):
+        return patch("server.lifecycle.setup._run",
+                     return_value=(rc, path + "\n", ""))
+
+    def test_the_command_line_tools_and_no_xcode(self, monkeypatch, tmp_path):
+        from server.lifecycle import setup
+
+        monkeypatch.setattr(setup, "APPLICATIONS", tmp_path)
+        with self._xcode_select("/Library/Developer/CommandLineTools"):
+            assert setup._command_line_tools_only() is True
+
+    def test_an_xcode_in_applications_is_not_that(self, monkeypatch, tmp_path):
+        """xcode-select merely pointed elsewhere: _diagnose_developer_dir's fix."""
+        from server.lifecycle import setup
+
+        (tmp_path / "Xcode.app" / "Contents" / "Developer").mkdir(parents=True)
+        monkeypatch.setattr(setup, "APPLICATIONS", tmp_path)
+        with self._xcode_select("/Library/Developer/CommandLineTools"):
+            assert setup._command_line_tools_only() is False
+
+    def test_a_full_xcode_selected_is_not_that(self, monkeypatch, tmp_path):
+        from server.lifecycle import setup
+
+        monkeypatch.setattr(setup, "APPLICATIONS", tmp_path)
+        with self._xcode_select("/Applications/Xcode.app/Contents/Developer"):
+            assert setup._command_line_tools_only() is False
+
+    def test_the_check_skips_simulators_rather_than_failing(self):
+        """It was an ERROR, and on such a Mac setup reported missing
+        dependencies while an iPhone needs none of Xcode's."""
+        with (
+            _patch_which({"xcrun": "/usr/bin/xcrun"}),
+            patch("server.lifecycle.setup.xcode_available", return_value=True),
+            _patch_run(_mock_run(stdout="", returncode=1)),
+            patch("server.lifecycle.setup._command_line_tools_only", return_value=True),
+        ):
+            result = check_xcode_cli_tools()
+        assert result.status == CheckStatus.SKIPPED
+        assert "simulators need Xcode" in result.message
+        assert "iOS 27" in result.detail
+
+
+class TestSetupIos:
+    """The iPhone tools are set up whether or not Xcode is there."""
+
+    def _stub(self, monkeypatch, xcode_status):
+        from server.lifecycle import setup
+
+        calls = []
+
+        def result(name, status=CheckStatus.OK):
+            def check(*a, **k):
+                calls.append(name)
+                return CheckResult(name=name, status=status, message="")
+            return check
+        monkeypatch.setattr(setup, "_fix_developer_dir_for_setup", lambda: None)
+        monkeypatch.setattr(setup, "check_xcode_cli_tools",
+                            result("Xcode CLI Tools", xcode_status))
+        for name in ("check_libimobiledevice", "check_ideviceinstaller",
+                     "check_pymobiledevice3", "check_tunneld", "check_iphones",
+                     "check_idb"):
+            monkeypatch.setattr(setup, name, result(name))
+        monkeypatch.setattr(setup, "_setup_idb_companion",
+                            lambda **k: calls.append("idb_companion") or CheckResult(
+                                name="idb_companion", status=CheckStatus.OK, message=""))
+        monkeypatch.setattr(setup, "_sim_bridge_supported", lambda: True)
+        return setup, calls
+
+    def test_without_xcode_the_phone_tools_are_still_set_up(self, monkeypatch, capsys):
+        setup, calls = self._stub(monkeypatch, CheckStatus.SKIPPED)
+        report = setup.SetupReport()
+
+        has_simulators, pmd3 = setup._setup_ios(report)
+
+        assert has_simulators is False and pmd3.status == CheckStatus.OK
+        assert {"check_libimobiledevice", "check_ideviceinstaller", "check_pymobiledevice3",
+                "check_tunneld", "check_iphones"} <= set(calls)
+        assert "idb_companion" not in calls
+        assert not report.has_errors
+
+    def test_with_xcode_both_are(self, monkeypatch, capsys):
+        setup, calls = self._stub(monkeypatch, CheckStatus.OK)
+        has_simulators, _ = setup._setup_ios(setup.SetupReport())
+        assert has_simulators is True
+        assert "idb_companion" in calls and "check_iphones" in calls
+
+
+class TestCheckIphones:
+    def _phones(self, monkeypatch, *, found, states, mount=None, answer=True):
+        from server.device.ios import phone_readiness as r
+        from server.lifecycle import setup
+
+        monkeypatch.setattr(r, "phones", _async(found))
+        monkeypatch.setattr(r, "readiness", _async_by_udid(states))
+        self.mounted, self.revealed = [], []
+
+        async def mount_image(udid, version):
+            if mount:
+                raise mount
+            self.mounted.append((udid, version))
+        monkeypatch.setattr(r, "mount_image", mount_image)
+
+        async def reveal(udid):
+            self.revealed.append(udid)
+        monkeypatch.setattr(r, "reveal_developer_mode", reveal)
+        monkeypatch.setattr(setup, "_prompt_yn", lambda *a, **k: answer)
+        return setup
+
+    def test_no_phone_is_not_a_problem(self, monkeypatch, capsys):
+        setup = self._phones(monkeypatch, found=[], states={})
+        result = setup.check_iphones()
+        assert result.status == CheckStatus.SKIPPED and "doctor" in result.detail
+
+    def test_a_ready_phone(self, monkeypatch, capsys):
+        from server.device.ios.phone_readiness import Readiness
+
+        setup = self._phones(monkeypatch, found=[("P1", "iPhone 11", "27.2.1")], states={
+            "P1": Readiness("P1", "iPhone 11", "27.2.1", developer_mode=True,
+                            image_mounted=True, errors=[])})
+        result = setup.check_iphones()
+        assert result.status == CheckStatus.OK and "iPhone 11" in result.message
+
+    def test_a_missing_image_is_mounted_when_asked(self, monkeypatch, capsys):
+        from server.device.ios.phone_readiness import Readiness
+
+        setup = self._phones(monkeypatch, found=[("P1", "iPhone 11", "27.2.1")], states={
+            "P1": Readiness("P1", "iPhone 11", "27.2.1", developer_mode=True,
+                            image_mounted=False, errors=[])})
+        result = setup.check_iphones()
+        assert self.mounted == [("P1", "27.2.1")]
+        assert result.status == CheckStatus.OK
+        assert "GitHub" in capsys.readouterr().out          # where it comes from, said
+
+    def test_declined_or_failed_mounts_are_left_to_doctor(self, monkeypatch, capsys):
+        from server.device.ios.phone_readiness import Readiness
+
+        state = {"P1": Readiness("P1", "iPhone 11", "27.2.1", developer_mode=True,
+                                 image_mounted=False, errors=[])}
+        setup = self._phones(monkeypatch, found=[("P1", "iPhone 11", "27.2.1")],
+                             states=state, answer=False)
+        result = setup.check_iphones()
+        assert self.mounted == [] and result.status == CheckStatus.WARNING
+        assert "doctor --fix" in result.detail
+
+        setup = self._phones(monkeypatch, found=[("P1", "iPhone 11", "27.2.1")],
+                             states=state, mount=OSError("no tunnel"))
+        result = setup.check_iphones()
+        assert "did not mount (no tunnel)" in result.detail
+
+    def test_developer_mode_off_is_explained_and_its_switch_shown(self, monkeypatch, capsys):
+        from server.device.ios.phone_readiness import Readiness
+
+        setup = self._phones(monkeypatch, found=[("P1", "iPhone 11", "27.2.1")], states={
+            "P1": Readiness("P1", "iPhone 11", "27.2.1", developer_mode=False,
+                            image_mounted=True, errors=[])})
+        result = setup.check_iphones()
+        assert self.revealed == ["P1"]
+        assert result.status == CheckStatus.WARNING
+        assert "Privacy & Security > Developer Mode" in result.detail
+
+    def test_an_untrusted_mac_says_how_to_trust_it(self, monkeypatch, capsys):
+        from server.device.ios.phone_readiness import Readiness
+
+        setup = self._phones(monkeypatch, found=[("P1", "", "")], states={
+            "P1": Readiness("P1", "", "", errors=["could not connect (not paired)"])})
+        result = setup.check_iphones()
+        assert result.status == CheckStatus.WARNING and "tap Trust" in result.detail
+
+
+def _async(value):
+    async def f(*a, **k):
+        return value
+    return f
+
+
+def _async_by_udid(states):
+    async def f(udid):
+        return states[udid]
+    return f

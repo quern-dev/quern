@@ -2239,13 +2239,10 @@ def _reveal_developer_mode(udid: str) -> bool:
     hides until a developer tool asks."""
     import asyncio
 
-    async def reveal() -> None:
-        from pymobiledevice3.services.amfi import AmfiService
+    from server.device.ios.phone_readiness import reveal_developer_mode
 
-        from server.device.ios.phone_readiness import _lockdown
-        await AmfiService(await _lockdown(udid)).reveal_developer_mode_option_in_ui()
     try:
-        asyncio.run(reveal())
+        asyncio.run(reveal_developer_mode(udid))
     except Exception as e:  # noqa: BLE001
         print(f"    ✗ could not show the Developer Mode switch — {e}")
         return False

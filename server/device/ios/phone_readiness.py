@@ -132,3 +132,11 @@ async def mount_image(udid: str, os_version: str) -> None:
                 await rsd.close()
             except Exception:  # noqa: BLE001
                 pass
+
+
+async def reveal_developer_mode(udid: str) -> None:
+    """Show the Developer Mode switch in the phone's Settings, which iOS
+    hides until a developer tool asks."""
+    from pymobiledevice3.services.amfi import AmfiService
+
+    await AmfiService(await _lockdown(udid)).reveal_developer_mode_option_in_ui()
