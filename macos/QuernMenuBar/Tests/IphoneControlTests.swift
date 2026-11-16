@@ -59,27 +59,27 @@ enum IphoneControlTests {
             Harness.expect(rig.writes.count, 1, "the revert issued another write")
         }
 
-        Harness.test("Through WDA is greyed out only without Xcode, and not when chosen") {
-            let rig = Rig()
-            for (xcode, expected) in [(false, true), (true, false)] as [(Bool?, Bool)] {
+        Harness.test("without Xcode WDA is no choice, whatever the file says") {
+            let rig = Rig(reader: "wda")
+            rig.model.xcodeInstalled = false
+            Harness.expect(rig.model.wdaUnavailable, "the picker was left enabled")
+            Harness.expect(rig.model.shownReader, "coredevice", "WDA shown as in effect")
+            Harness.expect(rig.writes.isEmpty, "showing it wrote the file")
+            for xcode in [true, nil] as [Bool?] {
                 rig.model.xcodeInstalled = xcode
-                Harness.expect(rig.model.wdaChoiceDisabled, expected, "xcode \(String(describing: xcode))")
+                Harness.expect(!rig.model.wdaUnavailable, "disabled with xcode \(String(describing: xcode))")
+                Harness.expect(rig.model.shownReader, "wda", "the setting hidden with xcode \(String(describing: xcode))")
             }
-            // Could not tell is no reason to refuse, as on the server.
-            rig.model.xcodeInstalled = nil
-            Harness.expect(!rig.model.wdaChoiceDisabled, "disabled when it could not tell")
-            // Set to WDA with no Xcode: the picker stays, so it can be moved back.
-            let wda = Rig(reader: "wda")
-            wda.model.xcodeInstalled = false
-            Harness.expect(!wda.model.wdaChoiceDisabled, "a wda setting could not be moved back")
         }
 
-        Harness.test("the note says when WDA is set and cannot run") {
-            let warned = SettingsModel.iphoneControlNote(reader: "wda", xcodeInstalled: false)
-            Harness.expect(warned.contains("Xcode is not installed")
-                           && warned.contains("either way"), "no warning: \(warned)")
-            let greyed = SettingsModel.iphoneControlNote(reader: "coredevice", xcodeInstalled: false)
-            Harness.expect(greyed.contains("Xcode is not installed"), "the greyed choice is not explained")
+        Harness.test("the note says what needs Xcode") {
+            for reader in ["coredevice", "wda"] {
+                let note = SettingsModel.iphoneControlNote(reader: reader, xcodeInstalled: false)
+                Harness.expect(note.contains("Xcode is not installed")
+                               && note.contains("before iOS 27"), "\(reader): \(note)")
+            }
+            let usual = SettingsModel.iphoneControlNote(reader: "coredevice", xcodeInstalled: true)
+            Harness.expect(usual.contains("Earlier versions need it, and Xcode"), "pre-27 not said: \(usual)")
             for xcode in [true, nil] as [Bool?] {
                 for reader in ["coredevice", "wda"] {
                     let note = SettingsModel.iphoneControlNote(reader: reader, xcodeInstalled: xcode)

@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import time
 
-NO_XCODE = ("Xcode is not installed. WebDriverAgent is built and run with it, and "
-            "so is devicectl, which an iPhone driven without WDA needs too")
+NO_XCODE = ("Xcode is not installed. WebDriverAgent, which iPhones before iOS 27 "
+            "need, is built and run with it, and devicectl, which every iPhone needs, "
+            "comes with it")
 NOT_BUILT = "WebDriverAgent has not been built on this Mac (the setup_wda tool builds it)"
 
 #: How long an answer stands: Xcode can be installed while quern runs, and

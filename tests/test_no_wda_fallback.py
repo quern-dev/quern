@@ -271,3 +271,29 @@ class TestAWdaSettingWithNoWda:
 
         assert ctrl._device_tree_reader(PHONE) is None
         assert ctrl._input_backend(PHONE) is not ctrl.coredevice_input
+
+
+def test_without_xcode_wda_cannot_be_chosen(monkeypatch, capsys, no_wda):
+    from server import __main__ as cli
+    from server import config
+
+    written = {}
+    monkeypatch.setattr(config, "update_user_config", lambda f: f(written))
+    assert cli._cmd_set_device_reader(["wda"]) == 1
+    assert written == {}
+    assert "Install Xcode" in capsys.readouterr().err
+
+
+def test_where_wda_is_only_unbuilt_it_can_be_chosen(monkeypatch, capsys):
+    """setup_wda can build it, so the choice stands."""
+    from server import __main__ as cli
+    from server import config
+
+    async def not_built():
+        return wda_availability.NOT_BUILT
+    monkeypatch.setattr(wda_availability, "wda_unavailable_reason", not_built)
+    written = {}
+    monkeypatch.setattr(config, "update_user_config", lambda f: f(written))
+    monkeypatch.setattr(config, "read_user_config", lambda **kw: written)
+    assert cli._cmd_set_device_reader(["wda"]) == 0
+    assert written == {"device_ui_reader": "wda"}

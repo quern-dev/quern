@@ -668,6 +668,10 @@ def _cmd_set_device_reader(args: list[str]) -> int:
         if wanted is None:
             print(f"Unknown value {args[0]!r}. Use 'no-wda' or 'wda'.", file=sys.stderr)
             return 2
+        if wanted == "wda" and asyncio.run(wda_unavailable_reason()) == NO_XCODE:
+            # Not a choice without Xcode: there is no WDA to build or run.
+            print(f"Not set: {NO_XCODE}. Install Xcode first.", file=sys.stderr)
+            return 1
         set_device_ui_reader(wanted)
     reader = get_device_ui_reader()
     print(f"iPhone control: {names[reader]}")
@@ -675,7 +679,8 @@ def _cmd_set_device_reader(args: list[str]) -> int:
     if reason == NO_XCODE:
         print(f"{reason}. No iPhone can be driven from this Mac until Xcode is installed.")
     elif reader == "coredevice":
-        print("Phones on iOS 27 and later are driven without WebDriverAgent.")
+        print("Phones on iOS 27 and later are driven without WebDriverAgent. Earlier "
+              "versions need it, and Xcode to build it.")
         if reason:
             print(f"Older phones need WebDriverAgent, which cannot run here: {reason}.")
     elif reason:

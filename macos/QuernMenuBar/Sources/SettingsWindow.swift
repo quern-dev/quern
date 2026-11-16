@@ -53,26 +53,27 @@ final class SettingsModel: ObservableObject {
         readXcode { [weak self] installed in self?.xcodeInstalled = installed }
     }
 
-    /// Through WDA is offered only where Xcode is installed, or could not be
-    /// told. Where the setting already says "wda" the picker stays enabled,
-    /// so it can be moved back.
-    var wdaChoiceDisabled: Bool { xcodeInstalled == false && deviceReader != "wda" }
+    /// Without Xcode, WDA is no choice at all: there is none to build or run.
+    /// The picker is greyed out on Without WDA, whatever the file says, as
+    /// the server sets a "wda" aside there too. Could not tell is no reason
+    /// to refuse.
+    var wdaUnavailable: Bool { xcodeInstalled == false }
+
+    /// What the picker shows: what is in effect, not only what is written.
+    var shownReader: String { wdaUnavailable ? "coredevice" : deviceReader }
 
     /// The line under the picker.
     static func iphoneControlNote(reader: String, xcodeInstalled: Bool?) -> String {
         switch (reader, xcodeInstalled) {
-        case ("wda", false?):
-            return "Set to WDA, but Xcode is not installed. Quern needs it to drive an "
-                + "iPhone either way: WDA and devicectl both come with it."
+        case (_, false?):
+            return "Xcode is not installed, so WebDriverAgent cannot be used. iPhones "
+                + "before iOS 27 need it, and every iPhone needs Xcode's devicectl."
         case ("wda", _):
             return "Every iPhone is driven through WebDriverAgent, which the "
-                + "setup_wda tool builds."
-        case (_, false?):
-            return "Xcode is not installed. Quern needs it to drive an iPhone, with WDA "
-                + "or without: devicectl comes with it."
+                + "setup_wda tool builds with Xcode."
         default:
-            return "iPhones on iOS 27 and later are driven without WebDriverAgent; "
-                + "earlier versions use it."
+            return "iPhones on iOS 27 and later are driven without WebDriverAgent. "
+                + "Earlier versions need it, and Xcode to build it."
         }
     }
 
@@ -488,26 +489,26 @@ struct SettingsView: View {
                         Text("Drive")
                             .foregroundColor(.secondary)
                             .frame(width: 90, alignment: .leading)
-                        Picker("iPhone control", selection: $model.deviceReader) {
+                        Picker("iPhone control", selection: Binding(
+                            get: { model.shownReader },
+                            set: { model.deviceReader = $0 })) {
                             Text("Without WDA").tag("coredevice")
                             Text("Through WDA").tag("wda")
                         }
                         .labelsHidden()
                         .pickerStyle(.segmented)
                         // The whole control, not the one segment: a segmented
-                        // picker has no per-segment disable. Where WDA is not
-                        // chosen and cannot be, the other segment is the one
-                        // already selected, so nothing is lost.
-                        .disabled(model.wdaChoiceDisabled)
+                        // picker has no per-segment disable, and without WDA
+                        // the other segment is the only choice there is.
+                        .disabled(model.wdaUnavailable)
                         .frame(maxWidth: 240, alignment: .leading)
                         .accessibilityLabel("iPhone control")
-                        .accessibilityValue(model.deviceReader == "wda" ? "Through WDA" : "Without WDA")
+                        .accessibilityValue(model.shownReader == "wda" ? "Through WDA" : "Without WDA")
                         Spacer()
                     }
                     Text(SettingsModel.iphoneControlNote(
                         reader: model.deviceReader, xcodeInstalled: model.xcodeInstalled))
-                        .foregroundColor(model.deviceReader == "wda" && model.xcodeInstalled == false
-                                         ? .orange : .secondary)
+                        .foregroundColor(.secondary)
                         .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                 }
