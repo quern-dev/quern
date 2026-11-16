@@ -58,6 +58,13 @@ async def _check() -> str | None:
     return reason
 
 
+def known_reason() -> str | None:
+    """The last answer `wda_unavailable_reason` gave, however old, for the
+    routing that asks synchronously; None before the first check. The server
+    checks at startup, and every WDA start checks again."""
+    return _cached[1] if _cached is not None else None
+
+
 def forget() -> None:
     """Drop the cached answer: after setup_wda builds WDA, say."""
     global _cached

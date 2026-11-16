@@ -224,3 +224,34 @@ def test_the_command_says_when_wda_cannot_run(monkeypatch, capsys, no_wda):
     out = capsys.readouterr().out
     assert "iPhone control: wda" in out and "cannot run here" in out
 
+
+
+# -- a "wda" setting where WDA cannot run --------------------------------------------
+
+
+class TestAWdaSettingWithNoWda:
+    def test_it_is_followed_as_no_wda_and_each_read_says_so(
+            self, monkeypatch):
+        monkeypatch.setattr(wda_availability, "_cached", (0.0, NO_XCODE))
+        ctrl = _phone_controller(reader="wda", monkeypatch=monkeypatch)
+
+        assert ctrl._device_tree_reader(PHONE) is ctrl.coredevice_ax
+        assert ctrl._input_backend(PHONE) is ctrl.coredevice_input
+
+    async def test_the_read_carries_the_warning(self, monkeypatch):
+        monkeypatch.setattr(wda_availability, "_cached", (0.0, NO_XCODE))
+        ctrl = _phone_controller(reader="wda", monkeypatch=monkeypatch)
+
+        await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+
+        assert "set to WDA" in ctrl.read_note() and "Xcode" in ctrl.read_note()
+        ctrl.wda_client.describe_all.assert_not_called()
+
+    @pytest.mark.parametrize("cached", [None, (0.0, None)])
+    def test_where_wda_can_run_or_nobody_has_looked_it_is_wda(
+            self, monkeypatch, cached):
+        monkeypatch.setattr(wda_availability, "_cached", cached)
+        ctrl = _phone_controller(reader="wda", monkeypatch=monkeypatch)
+
+        assert ctrl._device_tree_reader(PHONE) is None
+        assert ctrl._input_backend(PHONE) is not ctrl.coredevice_input

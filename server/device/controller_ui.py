@@ -906,18 +906,26 @@ class DeviceControllerUI:
     def _coredevice_serves(self, udid: str) -> bool:
         """Whether this device is read and driven over CoreDevice (#664).
 
-        Opt-in through `device_ui_reader` in config.json, and only for a
-        physical iPhone on iOS 27 and later, the only versions it has been
-        measured on. A device whose version quern has not seen stays with WDA
-        rather than being guessed at.
+        The default, unless `device_ui_reader` in config.json says "wda", and
+        only for a physical iPhone on iOS 27 and later, the only versions it
+        has been measured on. A device whose version quern has not seen stays
+        with WDA rather than being guessed at. A "wda" setting on a Mac where
+        WDA cannot run is taken as no WDA, and each read says so (`_wda_overruled`).
         """
         if self._is_android(udid) or not self._is_physical(udid):
             return False
-        if get_device_ui_reader() != "coredevice":
+        if get_device_ui_reader() != "coredevice" and not self._wda_overruled():
             return False
         os_version = self.wda_client._device_os_versions.get(udid)
         match = re.search(r"\d+", os_version or "")
         return bool(match) and int(match.group()) >= COREDEVICE_MIN_IOS
+
+    @staticmethod
+    def _wda_overruled() -> str | None:
+        """Why a "wda" setting is not followed: WDA cannot run here (#664)."""
+        from server.tooling.wda_availability import known_reason
+
+        return known_reason() if get_device_ui_reader() == "wda" else None
 
     def _device_tree_reader(self, udid: str):
         """The CoreDevice tree reader when it should serve this device's
@@ -3287,6 +3295,11 @@ class DeviceControllerUI:
         bare: BareAppTree | None = None
         if reader is not None:
             self._last_read_backend[resolved] = reader.TOOL_NAME
+            if overruled := self._wda_overruled():
+                _READ_NOTE.set(
+                    "iPhone control is set to WDA, but WebDriverAgent cannot run "
+                    f"here ({overruled}), so this device is read without it. "
+                    "`quern set-device-reader no-wda` makes that the setting.")
             failed: DeviceError | None = None
             try:
                 pushed_raw = await reader.describe_all(

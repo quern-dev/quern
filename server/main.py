@@ -714,6 +714,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _log_keyboards(await device_controller.u2.restore_keyboards(), "at startup")
 
     app.state._warmup_task = asyncio.create_task(_warmup_devices())
+    # Whether WDA can run from this Mac, known before the first phone read: a
+    # "wda" setting where it cannot is followed as no WDA (#664).
+    from server.tooling import wda_availability
+
+    app.state._wda_check_task = asyncio.create_task(
+        wda_availability.wda_unavailable_reason())
 
     async def _clear_leftover_conditions():
         """A phone left in a network or thermal condition by a server that
