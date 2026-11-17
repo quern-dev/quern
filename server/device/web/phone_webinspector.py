@@ -52,6 +52,9 @@ class PhoneWebInspector:
         #: connection, never answers -- its `runtime_enable` did not return in
         #: 60 s on an iPhone 11, while the first answered again at once.
         self._sessions: dict[tuple[str, int], Any] = {}
+        #: Pages whose session never got going: asked again, a new session
+        #: would not answer either, so they answer None (CodeRabbit on #715).
+        self._silent: set[tuple[str, int]] = set()
 
     async def __aenter__(self) -> PhoneWebInspector:
         from pymobiledevice3.exceptions import WebInspectorNotEnabledError
@@ -153,11 +156,19 @@ class PhoneWebInspector:
         if entry is None or self._service is None:
             return None
         key = (application_id, page_id)
+        if key in self._silent:
+            return None
         session = self._sessions.get(key)
         if session is None:
             session = await self._service.inspector_session(entry.application, entry.page)
             self._sessions[key] = session
-            await session.runtime_enable()
+            try:
+                await session.runtime_enable()
+            except BaseException:
+                # Given up on, as the visibility probe does after VISIBLE_S: a
+                # session left unenabled would be reused as if it were not.
+                self._silent.add(key)
+                raise
         return await session.runtime_evaluate(script, return_by_value=True)
 
     async def page_contents(self, application_id: str, page_id: int) -> dict | None:

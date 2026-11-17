@@ -394,3 +394,23 @@ async def test_a_page_in_the_background_is_neither_waited_for_nor_cleared(monkey
     assert service.asked == [2]                              # the clear went to page 2 only
     # Its URL is still listed: that is read from the listing, not the page.
     assert [u["url"] for u in await ctrl.web_page_urls(PHONE)] == ["about:blank"] * 2
+
+
+async def test_a_page_whose_session_never_started_is_not_asked_again(monkeypatch):
+    """The probe gives up on a page while its session is still starting. A
+    second session on that page would not answer either, so the page now
+    answers None at once, rather than through a session never enabled."""
+    class SlowToStart(FakeService):
+        async def inspector_session(self, app, page):
+            session = await super().inspector_session(app, page)
+
+            async def never():
+                await asyncio.sleep(60)
+            session.runtime_enable = never
+            return session
+
+    monkeypatch.setattr(phone_webinspector, "VISIBLE_S", 0.05)
+    _patch(monkeypatch, SlowToStart([_entry()]))
+    async with PhoneWebInspector(USB) as inspector:
+        assert await inspector.pages("PID:748") == []
+        assert await asyncio.wait_for(inspector.page_contents("PID:748", 1), 1) is None
