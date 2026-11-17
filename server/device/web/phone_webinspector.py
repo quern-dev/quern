@@ -171,6 +171,38 @@ class PhoneWebInspector:
             return response
         return json.loads(response["params"]["message"])
 
+    async def console_history(self, application_id: str, page_id: int) -> list[dict] | None:
+        """The page's recent console messages, as WebKit replays them when the
+        Console domain is enabled (#714); None for a page not listed. The
+        replay arrives before the enable's answer, and pymobiledevice3's
+        session hands each event to its handler in arrival order, so by the
+        time the enable returns every replayed message is collected. The
+        domain is disabled again after, and the session's own handlers -- which
+        print each message -- put back."""
+        from server.device.web.console import Collector
+
+        session = await self._session(application_id, page_id)
+        if session is None:
+            return None
+        collector = Collector()
+        methods = ("Console.messageAdded", "Console.messageRepeatCountUpdated")
+        saved = {m: session.response_methods.get(m) for m in methods}
+        for m in methods:
+            session.response_methods[m] = collector.on_event
+        try:
+            await session.send_and_receive({"method": "Console.enable", "params": {}})
+            try:
+                await session.send_and_receive({"method": "Console.disable", "params": {}})
+            except Exception:  # noqa: BLE001 -- the history is already read
+                pass
+        finally:
+            for m, handler in saved.items():
+                if handler is None:
+                    session.response_methods.pop(m, None)
+                else:
+                    session.response_methods[m] = handler
+        return collector.messages
+
     async def _session(self, application_id: str, page_id: int) -> Any:
         """The page's one session, started on first use; None for a page not
         listed, or one whose session never got going."""

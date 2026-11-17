@@ -2864,6 +2864,20 @@ class EvaluateWebJsRequest(BaseModel):
         "Seconds the script, and a Promise it returns, have to finish."))
 
 
+class WebConsoleRequest(BaseModel):
+    """Request body for POST /device/ui/web-console (#714)."""
+
+    udid: str | None = None
+    bundle_id: str | None = None
+    """The app whose page to read, as get_web_content names it."""
+    page_id: int | None = None
+    """The page, as get_web_content lists it under `pages`. Optional when one
+    page is on screen."""
+    levels: list[str] | None = None
+    """Only messages at these levels: log, info, debug, warning, error."""
+    timeout: float = Field(default=10.0, gt=0, le=60)
+
+
 class ScrollToElementRequest(BaseModel):
     """Request body for POST /device/ui/scroll-to-element."""
 

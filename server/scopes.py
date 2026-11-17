@@ -214,6 +214,7 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("POST", "/api/v1/device/ui/tap-element"): _RESOLVED,
     ("POST", "/api/v1/device/ui/type"): _RESOLVED,
     ("POST", "/api/v1/device/ui/web-content"): _RESOLVED,
+    ("POST", "/api/v1/device/ui/web-console"): _RESOLVED,
     ("POST", "/api/v1/device/ui/web-js"): _RESOLVED,
     ("POST", "/api/v1/device/wda/setup"): _RESOLVED,
     ("POST", "/api/v1/device/wda/start"): _RESOLVED,
