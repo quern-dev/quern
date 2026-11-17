@@ -35,6 +35,7 @@ WRITERS = {
     "update-info.json": ROOT / "server" / "lifecycle" / "update_check.py",
     "config.json": ROOT / "server" / "config.py",
     "mcp-clients.json": ROOT / "server" / "lifecycle" / "mcp_clients.py",
+    "pending-tool-upgrades.json": ROOT / "server" / "lifecycle" / "updater.py",
 }
 
 

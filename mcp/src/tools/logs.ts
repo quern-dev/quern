@@ -64,6 +64,11 @@ export function registerLogTools(server: McpServer): void {
                 // field. update_available=false is intentionally elided
                 // to keep the response quiet on the happy path.
                 let updateAvailable: unknown = undefined;
+                // Required tool upgrades the last update could not finish
+                // (#725) -- one needing sudo with no terminal. Said so the
+                // agent can tell its user what to run, before a tool too old
+                // for quern shows up as a failure somewhere else.
+                let pendingToolUpgrades: unknown[] = [];
                 try {
                   const upd = (await apiRequest(
                     "GET",
@@ -71,9 +76,12 @@ export function registerLogTools(server: McpServer): void {
                     undefined,
                     undefined,
                     2000,
-                  )) as { update_available?: boolean } | null;
+                  )) as { update_available?: boolean; pending_tool_upgrades?: unknown[] } | null;
                   if (upd && upd.update_available) {
                     updateAvailable = upd;
+                  }
+                  if (upd && Array.isArray(upd.pending_tool_upgrades)) {
+                    pendingToolUpgrades = upd.pending_tool_upgrades;
                   }
                 } catch {
                   // Older server or transient failure — skip silently.
@@ -94,6 +102,13 @@ export function registerLogTools(server: McpServer): void {
                           pid: state.pid,
                           ...(updateAvailable
                             ? { update_available: updateAvailable }
+                            : {}),
+                          ...(pendingToolUpgrades.length
+                            ? {
+                                pending_tool_upgrades: pendingToolUpgrades,
+                                pending_tool_upgrades_note:
+                                  "A required tool upgrade the last update could not finish. Ask the user to run `quern update` in a terminal (it may ask for their password), or the listed command.",
+                              }
                             : {}),
                         },
                         null,

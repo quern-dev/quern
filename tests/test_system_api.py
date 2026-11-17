@@ -80,6 +80,35 @@ async def test_update_status_surfaces_persisted_record(
     assert "Update available" in data["message"]
 
 
+@pytest.mark.parametrize("checked", [False, True])
+@pytest.mark.asyncio
+async def test_update_status_carries_what_the_last_update_left_undone(
+    app, auth_headers, monkeypatch, tmp_path, checked,
+):
+    """A required sudo upgrade the last update could not run (#725) reaches an
+    agent through here, whether or not a check has run since."""
+    import json
+
+    from server.lifecycle import updater
+
+    record = {"name": "pymobiledevice3", "role": "cli", "current": "11.14.0",
+              "floor": "11.55.0", "reason": "below the 11.55.0 quern requires",
+              "command": ["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"],
+              "needs_root": True}
+    pending = tmp_path / "pending-tool-upgrades.json"
+    pending.write_text(json.dumps({"checked_at": "x", "pending": [record]}))
+    monkeypatch.setattr(updater, "PENDING_FILE", pending)
+    monkeypatch.setattr(
+        "server.api.system.read_update_info",
+        lambda: {"update_available": False} if checked else None,
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        data = (await client.get("/api/v1/system/update-status",
+                                 headers=auth_headers)).json()
+    assert data["pending_tool_upgrades"] == [record]
+
+
 # ---------------------------------------------------------------------------
 # /update (trigger)
 # ---------------------------------------------------------------------------

@@ -7,6 +7,8 @@
 //   • active-device.json — the active device UDID and name
 //   • config.json        — user preferences; the update channel lives here
 //   • mcp-clients.json   — MCP clients whose registration will not start Quern
+//   • pending-tool-upgrades.json — required tool upgrades an update could not
+//                          finish, such as one needing sudo with no terminal (#725)
 //
 // Field names mirror what the server writes. That is checked, not asserted:
 // tests/test_menubar_state_sync.py pins every key read here against the module
@@ -87,6 +89,17 @@ struct McpClientHealth: Equatable {
     var checkedAt: Date?
 }
 
+/// A required tool upgrade an update could not finish (#725): below quern's
+/// minimum, and either needing sudo with no terminal to ask on, or still
+/// behind after it ran.
+struct PendingTool: Equatable {
+    var name: String
+    var current: String?
+    var floor: String?
+    var command: [String] = []
+    var needsRoot = false
+}
+
 struct QuernSnapshot {
     var server = ServerState()
     var update = UpdateInfo()
@@ -94,6 +107,7 @@ struct QuernSnapshot {
     var proxy = ProxyPolicy()
     var iphone = IphoneControl()
     var mcpClients = McpClientHealth()
+    var pendingTools: [PendingTool] = []
 }
 
 final class StateReader {
@@ -156,6 +170,7 @@ final class StateReader {
         snap.proxy = ProxyPolicy(autoInstallCert: Self.readAutoInstallCert())
         snap.iphone = IphoneControl(reader: Self.readDeviceReader())
         snap.mcpClients = Self.readMcpClients()
+        snap.pendingTools = Self.readPendingTools()
         snapshot = snap
         onChange?(snap)
     }
@@ -357,6 +372,22 @@ final class StateReader {
                                     carried: d["carried"] as? Bool ?? false)
         }
         return h
+    }
+
+    /// `contents` is for tests; the app reads the file. Anything it cannot
+    /// make sense of reads as nothing pending -- the file is a reminder, and an
+    /// unreadable one must not put an item on the menu that does nothing.
+    static func readPendingTools(contents: [String: Any]?? = nil) -> [PendingTool] {
+        guard let d = contents ?? json("pending-tool-upgrades.json") else { return [] }
+        let pending = d["pending"] as? [[String: Any]] ?? []
+        return pending.compactMap { d in
+            guard let name = d["name"] as? String else { return nil }
+            return PendingTool(name: name,
+                               current: d["current"] as? String,
+                               floor: d["floor"] as? String,
+                               command: d["command"] as? [String] ?? [],
+                               needsRoot: d["needs_root"] as? Bool ?? false)
+        }
     }
 
     private static func readActiveDevice() -> ActiveDevice {

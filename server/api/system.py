@@ -44,6 +44,11 @@ class UpdateStatusResponse(BaseModel):
     latest_version: str | None = None
     checked_at: str | None = None
     message: str | None = None
+    pending_tool_upgrades: list[dict] = []
+    """Required tool upgrades the last update could not finish (#725): each
+    with `name`, `role`, `current`, `floor`, `reason`, `command` and
+    `needs_root`. Run `command` in a terminal, or `quern update` there, which
+    runs them and clears this."""
     channel: str = "stable"  # The user's configured update channel (#41)
     release_branch: str = "release/stable"  # Branch the channel tracks
 
@@ -84,12 +89,18 @@ async def update_status() -> UpdateStatusResponse:
     beta has 0.13.5-beta.2 available"* once the channels work is wired
     end-to-end.
     """
+    from server.lifecycle.updater import read_pending
+
     channel = get_update_channel()
     release_branch = channel_to_release_branch(channel)
+    # Owed by the last update, whatever the check says about the next one.
+    pending = read_pending()
     info = read_update_info()
     if info is None:
-        return UpdateStatusResponse(channel=channel, release_branch=release_branch)
+        return UpdateStatusResponse(channel=channel, release_branch=release_branch,
+                                    pending_tool_upgrades=pending)
     return UpdateStatusResponse(
+        pending_tool_upgrades=pending,
         update_available=bool(info.get("update_available")),
         current_version=info.get("current_version"),
         latest_version=info.get("latest_version"),

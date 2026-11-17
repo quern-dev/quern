@@ -50,6 +50,10 @@ has no terminal to ask for the password on, it is left undone and recorded in
 pipx reported done while the version did not move (a pinned package) -- the update
 checks the versions again afterwards rather than trusting exit codes. `quern status`
 says what is left and the command to run, whether or not the server is running. The
+menu bar offers **Finish Update in Terminal…** and marks its icon as it does for an
+available update; the item opens Terminal running `quern update`, which asks for your
+password and clears the record once the upgrade is done. An agent sees the same list
+in `ensure_server`'s answer, as `pending_tool_upgrades`. The
 record clears itself the next time an update finds nothing left, however the work got
 done.
 
