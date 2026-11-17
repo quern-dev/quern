@@ -84,13 +84,16 @@ BIN_DIR="$(xcrun swift build --package-path "$MEDIA_PKG" --scratch-path "$WORK/m
 cp "$BIN_DIR/quern-media" "$OUT/quern-media"
 MEDIA="$OUT/quern-media"
 
-# Both get the camera entitlement. The screen mirror needs it: opened from the
-# menu bar it is its own app, and under the hardened runtime one without it is
-# refused the camera with no prompt (#662). quern-media is a command-line tool
-# the server starts, and the camera is asked of whatever launched the chain --
-# Terminal, or Quern.app -- not of it: measured from a shell, a signed
-# quern-media streamed a USB iPhone 11 with and without the entitlement. It
-# carries it for the day it is launched as its own responsible process.
+# Both carry the camera entitlement, which #662 expected the hardened runtime
+# to require. Measured on macOS 27 with a USB iPhone 11, it does not for an
+# iPhone's screen: opened as an app, the signed screen mirror asked for camera
+# access in its own name (Quern Preview's usage description) and streamed once
+# allowed, and a copy re-signed without the entitlement streamed too.
+# quern-media, a command-line tool the server starts, is not asked at all:
+# whatever launched the chain is (Terminal, or Quern.app), and from a shell it
+# streamed signed or not. The entitlement stays as the documented way to ask.
+# What the shipped copy does buy is one stable signature: the camera grant is
+# keyed to it, so it survives updates that leave the preview alone.
 echo "==> Signing (Developer ID, hardened runtime, camera)"
 codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" \
   --sign "$DEVELOPER_ID_APP" "$APP"
@@ -98,7 +101,7 @@ codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" \
   --identifier dev.quern.media --sign "$DEVELOPER_ID_APP" "$MEDIA"
 for target in "$APP" "$MEDIA"; do
   codesign --verify --strict --verbose=2 "$target"
-  # A gate, not a hope: without the entitlement the camera is refused silently.
+  # A gate: the entitlement is what this build says it signs with.
   if ! codesign -d --entitlements - --xml "$target" 2>/dev/null \
       | grep -q "com.apple.security.device.camera"; then
     echo "error: ${target##*/} was signed without the camera entitlement" >&2
