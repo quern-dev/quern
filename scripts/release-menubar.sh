@@ -121,51 +121,9 @@ codesign --force --deep --options runtime --timestamp \
   --sign "$DEVELOPER_ID_APP" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
-# Submit and poll rather than using `notarytool --wait`. The built-in wait
-# long-polls a single HTTPS request that intermittently dies with
-# NSURLErrorDomain -1001 ("request timed out") on this machine, which under
-# `set -e` aborts the release *after* signing and *before* upload, even though
-# the submission succeeded server-side. Polling `notarytool info` instead makes
-# a flaky poll a retry rather than a failed release. Same approach, and the
-# same reason, as Apps/burrows/scripts/release-macos.sh in the burrows repo.
-notarize_wait() {
-  local target="$1" submit_out sub_id st i
-  submit_out=$(xcrun notarytool submit "$target" \
-    --keychain-profile "$NOTARY_PROFILE" 2>&1) || true
-  printf '%s\n' "$submit_out" | grep -iE 'id:|error' | head -3
-  sub_id=$(printf '%s\n' "$submit_out" | awk '/id:/{print $2; exit}')
-  if [[ -z "$sub_id" ]]; then
-    echo "error: notary submit failed for ${target##*/}" >&2
-    printf '%s\n' "$submit_out" >&2
-    return 1
-  fi
-  echo "  submission id: $sub_id — polling (tolerant of -1001 timeouts)…"
-  i=0
-  while (( i < 60 )); do
-    i=$((i + 1))
-    # `|| true` is load-bearing, and the reason this differs from the burrows
-    # original it was taken from: that script runs under `set -eu`, where awk
-    # succeeding masks a failed `notarytool info`. This one adds `pipefail`, so
-    # the pipeline reports the failure, `set -e` acts on it, and the shell
-    # exits mid-poll -- defeating the entire point of polling instead of using
-    # `--wait`. An empty `st` is already the loop's "retry" case.
-    st=$(xcrun notarytool info "$sub_id" \
-      --keychain-profile "$NOTARY_PROFILE" 2>/dev/null \
-      | awk -F': ' '/status:/{print $2; exit}') || true
-    echo "  [$i] status: ${st:-<timeout, retrying>}"
-    case "$st" in
-      Accepted) return 0 ;;
-      Invalid|Rejected)
-        echo "error: notarization $st for ${target##*/}" >&2
-        xcrun notarytool log "$sub_id" \
-          --keychain-profile "$NOTARY_PROFILE" 2>&1 | head -40 >&2
-        return 1 ;;
-    esac
-    sleep 20
-  done
-  echo "error: notarization timed out (server-side) for ${target##*/}" >&2
-  return 1
-}
+# notarize_wait: submit and poll, tolerant of notarytool's -1001 timeouts.
+# shellcheck source=lib/notarize.sh
+source "$REPO_ROOT/scripts/lib/notarize.sh"
 
 echo "==> Notarizing"
 ZIP="$WORK/Quern.zip"
@@ -187,6 +145,13 @@ mkdir -p "$DIST"
 rm -rf "$STAGED_APP"
 ditto "$APP" "$STAGED_APP"
 echo "==> Staged: $STAGED_APP (v$(app_version "$STAGED_APP"))"
+
+# The screen mirror and quern-media, pre-built, signed and notarized (#662,
+# #663), so a Mac without the developer tools has USB iPhone mirroring,
+# simulator preview and recorded video. Built from this checkout, which is the
+# candidate: --publish checks they match the tag's sources before shipping.
+echo "==> Building the pre-built screen mirror and quern-media"
+"$REPO_ROOT/scripts/build-prebuilt.sh" "$DIST/prebuilt" "$VERSION"
 
 if [[ "$MODE" == "app" ]]; then
   echo
@@ -270,6 +235,30 @@ echo "==> Assembling release tarball: $TARBALL"
 mkdir -p "$STAGE" "$(dirname "$TARBALL")"
 git -C "$REPO_ROOT" archive --format=tar "$TAG" | tar -x -C "$STAGE"
 cp -R "$APP" "$STAGE/Quern.app"
+
+# The pre-built copies (#662, #663), and a gate that they are of the tag's own
+# sources: a copy for other sources is not wrong to ship, but it is never
+# installed -- every Mac would compile, or go without -- and the release would
+# look as though it had them. Asked of quern itself, from the staged tree, so
+# the check is the one a user's install makes.
+PREBUILT="$DIST/prebuilt"
+if [[ ! -d "$PREBUILT/Quern Preview.app" || ! -f "$PREBUILT/quern-media" ]]; then
+  echo "error: no pre-built copies in $PREBUILT — run '$0 --app-only $VERSION' first" >&2
+  exit 1
+fi
+ditto "$PREBUILT" "$STAGE/prebuilt"
+codesign --verify --strict "$STAGE/prebuilt/Quern Preview.app" \
+  && codesign --verify --strict "$STAGE/prebuilt/quern-media" \
+  && xcrun stapler validate "$STAGE/prebuilt/Quern Preview.app" >/dev/null || {
+  echo "error: a pre-built copy is not validly signed and notarized" >&2; exit 1; }
+if ! ( cd "$STAGE" && "${PYTHON:-$REPO_ROOT/.venv/bin/python}" -c '
+import sys
+from server.device.media import media_engine, preview
+sys.exit(0 if preview.shipped_current() and media_engine.shipped_current() else 1)' ); then
+  echo "error: the pre-built copies are not of $TAG's sources — rebuild with --app-only" >&2
+  exit 1
+fi
+echo "  pre-built screen mirror and quern-media: signed, of $TAG's sources"
 
 # Build the MCP wrapper into the staged tree, so the tarball ships a ready
 # dist/ and a tarball install never needs npm.

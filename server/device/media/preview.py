@@ -183,6 +183,29 @@ async def simulator_entries() -> tuple[list[dict], str | None]:
     return [{"name": n, "id": u, "kind": "simulator"} for u, n in booted], None
 
 
+#: Where a release ships its pre-built, signed copies (#662): in the tarball,
+#: beside the sources they were built from. A git checkout has none.
+PREBUILT_DIR = _PROJECT_ROOT / "prebuilt"
+
+
+def shipped_bundle() -> Path | None:
+    """The signed `Quern Preview.app` a release tarball carries, if any."""
+    bundle = PREBUILT_DIR / APP_BUNDLE_NAME
+    return bundle if (bundle / "Contents" / "MacOS" / BINARY_NAME).exists() else None
+
+
+def shipped_current() -> bool:
+    """Whether a shipped copy of these very sources is here to install, so no
+    developer tools are needed for the screen mirror (#662)."""
+    shipped = shipped_bundle()
+    if shipped is None:
+        return False
+    try:
+        return read_stamp(shipped).digest == expected_digest()
+    except RuntimeError:
+        return False
+
+
 def bundle_paths() -> tuple[Path, Path]:
     """Where the preview app bundle and its binary live."""
     bundle = QUERN_BIN_DIR / APP_BUNDLE_NAME
@@ -351,6 +374,16 @@ def build_preview_bundle() -> Path:
             write_app_bundle(bundle, digest)
         return binary
 
+    # A release's signed copy of these very sources, before any compile: it
+    # needs no developer tools, and its signature -- which the camera grant
+    # is keyed to -- is the same on every Mac and every update that leaves
+    # the preview alone (#662).
+    shipped = shipped_bundle()
+    if shipped is not None and read_stamp(shipped).digest == digest:
+        _install_shipped(shipped, bundle)
+        logger.info("Installed the shipped ios-preview %s", digest[:8])
+        return binary
+
     # Asked before `which`: /usr/bin/swiftc is a stub on every Mac, and running
     # it without the developer tools shows macOS's install dialog (#659).
     swiftc = shutil.which("swiftc") if xcode_available() else None
@@ -425,6 +458,74 @@ def build_preview_bundle() -> Path:
     # none, so the next check builds again rather than calling it current.
     write_app_bundle(bundle, digest)
     return binary
+
+
+def stage_release_bundle(out_dir: Path, binary: Path, version: str | None = None) -> Path:
+    """Make the bundle a release ships (#662): `binary`, built for release,
+    in a bundle stamped exactly as a local build of these sources would be,
+    so every Mac with the same sources takes it as current. Called by
+    `scripts/build-prebuilt.sh` before signing, since the signature covers the
+    Info.plist. `version` is the release's: the cut builds this before the
+    version bump, so the sources would still say the previous one."""
+    bundle = out_dir / APP_BUNDLE_NAME
+    shutil.rmtree(bundle, ignore_errors=True)
+    write_app_bundle(bundle, expected_digest())
+    if version:
+        plist = bundle / "Contents" / "Info.plist"
+        with plist.open("rb") as f:
+            info = plistlib.load(f)
+        info["CFBundleShortVersionString"] = version
+        with plist.open("wb") as f:
+            plistlib.dump(info, f)
+    executable = bundle / "Contents" / "MacOS" / BINARY_NAME
+    shutil.copy2(binary, executable)
+    executable.chmod(0o755)
+    return bundle
+
+
+def _install_shipped(shipped: Path, bundle: Path) -> None:
+    """Copy the shipped bundle into place whole. Copied beside the old one and
+    swapped by rename, so no reader sees half a bundle; a window running the
+    old one keeps its binary until it quits."""
+    try:
+        bundle.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(
+            prefix=f".{BINARY_NAME}-", suffix=".installing", dir=bundle.parent))
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not stage the shipped ios-preview in {bundle.parent}: {exc}") from exc
+    keep_staging = False
+    try:
+        copy = staging / APP_BUNDLE_NAME
+        # `copy`, not `copy2`: the installed binary's mtime is when it was
+        # installed, which `stale_mirror_pids` compares with when each window
+        # started. The release build's own time would pass over a window opened
+        # between the build and the update (CodeRabbit on #723). The signature
+        # does not cover file times.
+        shutil.copytree(shipped, copy, symlinks=True, copy_function=shutil.copy)
+        previous = staging / "previous"
+        moved_aside = False
+        if bundle.exists():
+            os.replace(bundle, previous)
+            moved_aside = True
+        try:
+            os.replace(copy, bundle)
+        except OSError:
+            # Put the old one back, or there is no Screen Mirror at all; and if
+            # even that fails, keep it in the staging directory to recover by
+            # hand rather than deleting it (CodeRabbit on #723).
+            if moved_aside:
+                try:
+                    os.replace(previous, bundle)
+                except OSError:
+                    keep_staging = True
+                    logger.error("The previous Quern Preview is kept at %s", previous)
+            raise
+    except OSError as exc:
+        raise RuntimeError(f"Could not install the shipped ios-preview at {bundle}: {exc}") from exc
+    finally:
+        if not keep_staging:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 @dataclass(frozen=True)
@@ -562,7 +663,7 @@ def refresh_at_server_start() -> PreviewRefresh | None:
     """
     import platform
 
-    if platform.system() != "Darwin" or not xcode_available():
+    if platform.system() != "Darwin" or not (xcode_available() or shipped_current()):
         return None
     if not _owns_the_bin_dir():
         logger.info("Not refreshing the screen-mirror app: %s is not the checkout this "
