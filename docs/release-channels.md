@@ -330,8 +330,14 @@ That leaves a signed, notarized `Quern.app` in `dist/`, and prints the exact
 quern-media pre-built (`scripts/build-prebuilt.sh`, #662/#663) into
 `dist/prebuilt/`, signed with the camera entitlement and notarized, so the
 tarball carries them for Macs without the developer tools. That step needs
-quern's Python (`PYTHON`, default `.venv/bin/python`; in a worktree, link the
-primary's `.venv` first). Step 6 refuses to publish copies that are not of the
+quern's Python: `PYTHON`, default `.venv/bin/python`. In a worktree, pass
+`PYTHON=<primary checkout>/.venv/bin/python` rather than linking the primary's
+`.venv` into the worktree. A linked venv is the primary's: the rehearsal's
+dependency step reinstalled quern into it, editable, pointing at the release
+worktree, and removing that worktree afterwards left the installed `quern`
+command failing with "No module named server" -- and the menu bar's settings
+with it (2026-11-17). If it happens: `<primary>/.venv/bin/python -m pip install
+--no-deps -e <primary>`. Step 6 refuses to publish copies that are not of the
 tag's sources: a source change between this step and the tag means running it
 again. The version bump is not one -- the digest leaves the version out, and
 the app is stamped with the version given here.
