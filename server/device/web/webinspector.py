@@ -61,6 +61,7 @@ _SEL_REPORT_IDENTIFIER = "_rpc_reportIdentifier:"
 _SEL_FORWARD_GET_LISTING = "_rpc_forwardGetListing:"
 _SEL_FORWARD_SOCKET_SETUP = "_rpc_forwardSocketSetup:"
 _SEL_FORWARD_SOCKET_DATA = "_rpc_forwardSocketData:"
+_SEL_FORWARD_DID_CLOSE = "_rpc_forwardDidClose:"
 
 # Replies to a forwarded WebKit message come back under this selector, carrying
 # the raw protocol JSON. Unlike the sim-bridge wire protocol, WebKit messages
@@ -374,6 +375,22 @@ class SimulatorWebInspector:
         connect() dies with "File descriptor ... is used by transport" -- so
         one reconnect would poison the inspector until the server restarted.
         """
+        # Let go of every page first. A page stays bound to the connection that
+        # opened a session on it until that connection says it is done, and
+        # closing the socket does not say so: measured on an iOS 27.2
+        # simulator, a page another process had inspected answered no later
+        # connection -- not even with a refusal -- until a forwardDidClose
+        # named the old connection. So a restarted server, or the CLI after
+        # it, could not read a page the last one had read.
+        if self._service is not None:
+            for application_id, page_id in list(self._sessions):
+                with contextlib.suppress(Exception):
+                    await self._send(_SEL_FORWARD_DID_CLOSE, {
+                        "WIRApplicationIdentifierKey": application_id,
+                        "WIRConnectionIdentifierKey": self._connection_id,
+                        "WIRPageIdentifierKey": page_id,
+                        "WIRSenderKey": self._sender_id,
+                    })
         service, sock = self._service, self._sock
         self._service = None
         self._sock = None

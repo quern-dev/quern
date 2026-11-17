@@ -173,6 +173,50 @@ async def test_closing_forgets_state_tied_to_the_old_connection():
     assert not inspector._applications
 
 
+class _RecordingService(_FakeService):
+    def __init__(self, fail=False):
+        super().__init__()
+        self.sent, self.fail = [], fail
+
+    async def send_plist(self, message):
+        if self.fail:
+            raise OSError("gone")
+        assert not self.closed, "sent after the connection was closed"
+        self.sent.append(message)
+
+
+async def test_closing_lets_go_of_every_page_it_opened():
+    """A page stays bound to the connection that opened a session on it until
+    that connection says it is done. Measured on an iOS 27.2 simulator: after a
+    process exited without saying so, the page answered no later connection,
+    until a forwardDidClose named the old one."""
+    inspector = webinspector.SimulatorWebInspector()
+    service = _RecordingService()
+    inspector._service, inspector._sock = service, _FakeSock()
+    inspector._sessions.update({("PID:1", 1), ("PID:1", 17)})
+
+    await inspector.close()
+
+    released = sorted((m["__argument"]["WIRApplicationIdentifierKey"],
+                       m["__argument"]["WIRPageIdentifierKey"])
+                      for m in service.sent if m["__selector"] == "_rpc_forwardDidClose:")
+    assert released == [("PID:1", 1), ("PID:1", 17)]
+    assert {m["__argument"]["WIRConnectionIdentifierKey"] for m in service.sent} == {
+        inspector._connection_id}
+    assert service.closed
+
+
+async def test_a_connection_that_cannot_say_goodbye_still_closes():
+    inspector = webinspector.SimulatorWebInspector()
+    service = _RecordingService(fail=True)
+    inspector._service, inspector._sock = service, _FakeSock()
+    inspector._sessions.add(("PID:1", 1))
+
+    await inspector.close()
+
+    assert service.closed and inspector._service is None
+
+
 async def test_closing_twice_is_harmless():
     inspector = webinspector.SimulatorWebInspector()
     inspector._service, inspector._sock = _FakeService(), _FakeSock()
