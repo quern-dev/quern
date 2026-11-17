@@ -27,6 +27,7 @@ from server.knowledge.session_landmarks import SessionLandmarks
 from server.models import (
     ClearTextRequest,
     DeviceError,
+    EvaluateWebJsRequest,
     GestureRequest,
     HingeRequest,
     OrientationRequest,
@@ -1130,6 +1131,40 @@ async def get_web_content(request: Request, body: WebContentRequest) -> dict:
             return {"status": "ok", "elapsed_ms": act.duration_ms, **result}
         except DeviceError as e:
             raise _handle_device_error(e)
+
+
+@router.post("/ui/web-js")
+async def evaluate_web_js(request: Request, body: EvaluateWebJsRequest) -> dict:
+    """Run JavaScript in a web page and say what it gave (#713).
+
+    It acts on the page, so it is logged as an action with the script itself:
+    a trace says what was run, not only that something was.
+    """
+    controller = _get_controller(request)
+    with _action("evaluate_web_js", category="device.action") as act:
+        act.detail = (f"page {body.page_id if body.page_id is not None else 'on screen'}"
+                      f"{f' in {body.bundle_id}' if body.bundle_id else ''}: "
+                      f"{_script_detail(body.script)}")
+        try:
+            result = await controller.evaluate_web_js(
+                script=body.script, udid=body.udid, bundle_id=body.bundle_id,
+                page_id=body.page_id, timeout=body.timeout,
+            )
+            act.detail += f" -> {'threw' if result.get('threw') else result.get('type')}"
+            return {"status": "ok", "elapsed_ms": act.duration_ms, **result}
+        except DeviceError as e:
+            raise _handle_device_error(e)
+
+
+#: How much of a script the action log keeps. Enough to recognise it by; a
+#: script is the caller's, and can be as long as a page.
+_SCRIPT_DETAIL_CHARS = 2000
+
+
+def _script_detail(script: str) -> str:
+    if len(script) <= _SCRIPT_DETAIL_CHARS:
+        return script
+    return f"{script[:_SCRIPT_DETAIL_CHARS]}... ({len(script)} characters)"
 
 
 @router.post("/ui/wait-settled")

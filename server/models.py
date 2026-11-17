@@ -2848,6 +2848,22 @@ class WebContentRequest(BaseModel):
     the Web Inspector, which is the usual case."""
 
 
+class EvaluateWebJsRequest(BaseModel):
+    """Request body for POST /device/ui/web-js (#713)."""
+
+    script: str = Field(min_length=1, max_length=100_000, description=(
+        "JavaScript to run in the page. Its value is the value of the last "
+        "expression statement, as in a console; a Promise is awaited."))
+    udid: str | None = None
+    bundle_id: str | None = None
+    """The app whose page to run in, as get_web_content names it."""
+    page_id: int | None = None
+    """The page, as get_web_content lists it under `pages`. Optional when one
+    page is on screen."""
+    timeout: float = Field(default=10.0, gt=0, le=60, description=(
+        "Seconds the script, and a Promise it returns, have to finish."))
+
+
 class ScrollToElementRequest(BaseModel):
     """Request body for POST /device/ui/scroll-to-element."""
 

@@ -231,6 +231,12 @@ _CLEAR_FOCUSED_JS = """
 #: and never closed (#716).
 VISIBLE_S = 2.0
 
+#: Once one page has said it is on screen, how long each other page has to
+#: say so too. A page on screen answered in 0.0-0.1 s every time it was
+#: measured, while each page Safari keeps for Back costs the whole bound, so
+#: a second look is shorter than the first (#713).
+SECOND_LOOK_S = 0.5
+
 _VISIBILITY_JS = "document.visibilityState"
 
 
@@ -668,15 +674,23 @@ class SimulatorWebInspector:
         except ValueError:
             return None
 
-    async def on_screen(self, application_id: str, page_id: int) -> bool:
-        """Whether the page says it is visible, within `VISIBLE_S`.
+    async def send_command(self, application_id: str, page_id: int, method: str,
+                           params: dict, timeout: float | None = None) -> dict | None:
+        """One WebKit protocol message to the page, and its reply message --
+        `{"result": ...}` or `{"error": ...}` -- or None when it did not
+        answer within `timeout` (default: the connection's)."""
+        return await self._forward(application_id, page_id, method, params, timeout)
+
+    async def on_screen(self, application_id: str, page_id: int,
+                        timeout: float = VISIBLE_S) -> bool:
+        """Whether the page says it is visible, within `timeout`.
 
         Asked in a script that changes nothing, so a page that answers late,
         or runs what it was sent once whatever held it lets go, is left
         nothing that acts.
         """
         return await self.evaluate(application_id, page_id, _VISIBILITY_JS,
-                                   timeout=VISIBLE_S) == "visible"
+                                   timeout=timeout) == "visible"
 
     async def clear_focused_input(self, application_id: str, page_id: int) -> bool:
         """Empty the focused input on a page. True only if it actually emptied.

@@ -265,6 +265,86 @@ def _natively_there(web: UIElement, native: list[UIElement]) -> bool:
     return False
 
 
+_WEB_JS = "web-js"
+
+
+async def _choose_web_page(
+        apps: list[dict], pages_of: Callable[[str], Awaitable[list[dict]]],
+        on_screen: Callable[[str, int, float], Awaitable[bool]], bundle_id: str | None,
+        page_id: int | None) -> tuple[dict, dict]:
+    """The app and page `evaluate_web_js` runs in (#713): `page_id` among the
+    listed pages, or else the one page on screen. A refusal names the pages,
+    so the caller can choose."""
+    if bundle_id:
+        apps = [a for a in apps if a.get("bundle_id") == bundle_id]
+        if not apps:
+            raise InvalidDeviceRequestError(
+                f"{bundle_id} is not connected to the Web Inspector: it must be running, "
+                "with an inspectable web view (isInspectable = true).", tool=_WEB_JS)
+    listed = [(a, p) for a in apps for p in await pages_of(a["application_id"])]
+    if page_id is not None:
+        chosen = [(a, p) for a, p in listed if p.get("page_id") == page_id]
+        if len(chosen) == 1:
+            return chosen[0]
+        if chosen:
+            raise InvalidDeviceRequestError(
+                f"page {page_id} is listed by several apps "
+                f"({', '.join(str(a.get('bundle_id')) for a, _ in chosen)}); "
+                "pass bundle_id too.", tool=_WEB_JS)
+        raise InvalidDeviceRequestError(
+            f"no page {page_id} is listed{_listing(listed)}. On a physical iPhone only "
+            "pages on screen are listed: a Safari tab in the background does not "
+            "answer.", tool=_WEB_JS)
+    # Newest first: a page is numbered when it is made, so the one a tab is
+    # showing is usually the highest, and the pages Safari keeps for Back --
+    # which never answer -- are older. The first to say it is visible gets
+    # VISIBLE_S; the rest only a second look, to see whether it is alone.
+    # Measured on a simulator tab with four pages behind it: 8.5 s a call,
+    # asking each for the whole 2 s.
+    from server.device.web.webinspector import SECOND_LOOK_S, VISIBLE_S
+
+    shown: list[tuple[dict, dict]] = []
+    for a, p in sorted(listed, key=lambda ap: _page_number(ap[1]), reverse=True):
+        if await on_screen(a["application_id"], p["page_id"],
+                           SECOND_LOOK_S if shown else VISIBLE_S):
+            shown.append((a, p))
+    if len(shown) == 1:
+        return shown[0]
+    if not shown:
+        raise InvalidDeviceRequestError(
+            f"no web page is on screen{_listing(listed)}. An app's web view must set "
+            "isInspectable = true to be listed.", tool=_WEB_JS)
+    raise InvalidDeviceRequestError(
+        f"several web pages are on screen{_listing(shown)}; pass page_id.", tool=_WEB_JS)
+
+
+def _page_number(page: dict) -> int:
+    try:
+        return int(page.get("page_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _listing(pages: list[tuple[dict, dict]]) -> str:
+    if not pages:
+        return ""
+    return " (listed: " + "; ".join(
+        f"page_id {p.get('page_id')} in {a.get('bundle_id')}, {p.get('url')}"
+        for a, p in pages) + ")"
+
+
+def _page_fields(app: dict, page: dict) -> dict:
+    return {"bundle_id": app.get("bundle_id"), "page_id": page.get("page_id"),
+            "url": page.get("url"), "title": page.get("title")}
+
+
+def _no_answer(page: dict, timeout: float) -> str:
+    return (f"page {page.get('page_id')} ({page.get('url')}) did not answer within "
+            f"{timeout:g} s. A script that waits on something that never comes -- a "
+            "Promise that never settles, a loop -- holds the page; anything it changed "
+            "before then stays changed.")
+
+
 def _web_content_hint(elements: list[UIElement]) -> str | None:
     """Why a lookup may have missed: the screen is web content the
     accessibility tree cannot see, and `get_web_content` is what reads it.
@@ -5446,6 +5526,109 @@ class DeviceControllerUI:
         result["udid"] = resolved
         self._store_web_overlay(resolved, result.get("elements") or [])
         return result
+
+    async def evaluate_web_js(self, script: str, udid: str | None = None,
+                              bundle_id: str | None = None, page_id: int | None = None,
+                              timeout: float = 10.0) -> dict:
+        """Run the caller's script in a web page and say what it gave (#713).
+
+        The page is `page_id` when given, as `get_web_content` lists it, and
+        otherwise the one page on screen. The answer is `scripts.run_script`'s
+        -- `threw`, then `exception` or `type`/`value` -- with the page it ran in.
+        """
+        resolved = await self.resolve_udid(udid)
+        if self._is_android(resolved):
+            raise DeviceOperationUnsupportedError(
+                "evaluate_web_js runs in an iOS web view, through the Web Inspector. "
+                "Android's WebView is not reachable this way.", tool=_WEB_JS)
+        try:
+            if self._is_physical(resolved):
+                result = await self._evaluate_on_phone(resolved, script, bundle_id, page_id,
+                                                       timeout)
+            else:
+                result = await self._evaluate_on_simulator(resolved, script, bundle_id,
+                                                           page_id, timeout)
+        finally:
+            # Whatever the script did -- or had done when it stopped answering --
+            # the page, and the web elements read from it, may have changed.
+            self._invalidate_ui_cache(resolved)
+        result["udid"] = resolved
+        return result
+
+    async def _evaluate_on_simulator(self, udid: str, script: str, bundle_id: str | None,
+                                     page_id: int | None, timeout: float) -> dict:
+        from server.device.web.scripts import NoAnswer, run_script
+        from server.device.web.web_content import _is_app
+        from server.device.web.webinspector import (
+            WebInspectorError,
+            simulator_udid_for_application,
+        )
+
+        booted = await self._booted_simulator_count()
+        require_match = booted is None or booted > 1
+        async with self._web_inspector_op_lock:
+            try:
+                inspector = await self._connected_web_inspector()
+                apps = []
+                for app in await inspector.connected_applications():
+                    if not (_is_app(app) or app.get("bundle_id") == bundle_id):
+                        continue
+                    # The socket carries no UDID: a page on another booted
+                    # simulator must not run a script meant for this one.
+                    owner = await simulator_udid_for_application(app.get("application_id"))
+                    if owner == udid or (owner is None and not require_match):
+                        apps.append(app)
+                app, page = await _choose_web_page(
+                    apps, inspector.pages, inspector.on_screen, bundle_id, page_id)
+            except WebInspectorError as e:
+                raise DeviceError(f"the simulator's Web Inspector: {e}", tool=_WEB_JS) from e
+            deadline = time.monotonic() + timeout
+
+            async def send(method: str, params: dict) -> dict | None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                return await inspector.send_command(
+                    app["application_id"], page["page_id"], method, params, timeout=left)
+            try:
+                outcome = await run_script(send, script)
+            except NoAnswer:
+                raise DeviceError(_no_answer(page, timeout), tool=_WEB_JS) from None
+        return {**_page_fields(app, page), **outcome}
+
+    async def _evaluate_on_phone(self, udid: str, script: str, bundle_id: str | None,
+                                 page_id: int | None, timeout: float) -> dict:
+        from server.device.web.phone_webinspector import CALL_TIMEOUT_S, PhoneWebInspector
+        from server.device.web.scripts import NoAnswer, run_script
+        from server.device.web.web_content import _is_app
+
+        usb = await self.get_libimobiledevice_udid(udid) or udid
+
+        async def shown(_app_id: str, _page_id: int, _timeout: float) -> bool:
+            return True                 # the phone lists only pages on screen
+
+        async def run() -> dict:
+            async with PhoneWebInspector(usb) as inspector:
+                apps = [a for a in await inspector.connected_applications()
+                        if _is_app(a) or a.get("bundle_id") == bundle_id]
+                app, page = await _choose_web_page(apps, inspector.pages, shown, bundle_id,
+                                                   page_id)
+
+                async def send(method: str, params: dict) -> dict | None:
+                    return await inspector.send_command(
+                        app["application_id"], page["page_id"], method, params)
+                try:
+                    outcome = await asyncio.wait_for(run_script(send, script), timeout)
+                except (TimeoutError, NoAnswer):
+                    raise DeviceError(_no_answer(page, timeout), tool=_WEB_JS) from None
+                return {**_page_fields(app, page), **outcome}
+        try:
+            # The script's own bound, plus connecting and finding the page.
+            return await asyncio.wait_for(run(), timeout + CALL_TIMEOUT_S)
+        except TimeoutError as e:
+            raise DeviceError(
+                "the phone's Web Inspector did not answer while finding the page",
+                tool=_WEB_JS) from e
 
     async def swipe(
         self,
