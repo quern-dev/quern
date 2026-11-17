@@ -367,6 +367,18 @@ def _no_device_identity_leaks_between_tests():
 
 
 @pytest.fixture(autouse=True)
+def _no_phone_inspector_kept_between_tests():
+    """The phones' Web Inspector connections are kept in a module-level pool
+    (#718). Left there, one test's fake service would answer the next test's
+    call, and its idle timer belongs to an event loop that has gone."""
+    from server.device.web import phone_webinspector
+
+    phone_webinspector.POOL.forget()
+    yield
+    phone_webinspector.POOL.forget()
+
+
+@pytest.fixture(autouse=True)
 def _no_hardware_attached(monkeypatch, request):
     """Device enumeration finds nothing, unless a test says otherwise.
 

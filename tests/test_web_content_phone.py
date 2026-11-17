@@ -50,10 +50,18 @@ class FakeService:
     def __init__(self, entries, contents=PAGE, raises=None):
         self.entries, self.contents, self.raises = entries, contents, raises
         self.closed = False
+        self.is_connected = True
+        self.connects = 0
+        #: (session id, application id, page id) for every page released.
+        self.torn_down: list[tuple[str, str, int]] = []
 
     async def connect(self):
+        self.connects += 1
         if self.raises:
             raise self.raises
+
+    async def teardown_inspector_socket(self, session_id, app_id, page_id):
+        self.torn_down.append((session_id, app_id, page_id))
 
     async def get_open_application_pages(self, timeout):
         return self.entries
@@ -87,6 +95,17 @@ def _patch(monkeypatch, service):
         return "lockdown"
     monkeypatch.setattr(lockdown, "create_using_usbmux", connect)
     monkeypatch.setattr(webinspector, "WebinspectorService", lambda lockdown: service)
+
+    # Every session handed out carries the id its page is released by, as
+    # pymobiledevice3's does, whichever fake made it.
+    made = service.inspector_session
+    count = iter(range(1, 1000))
+
+    async def inspector_session(app, page):
+        session = await made(app, page)
+        session.protocol = SimpleNamespace(id_=f"S{next(count)}")
+        return session
+    service.inspector_session = inspector_session
     return seen
 
 
@@ -108,7 +127,9 @@ class TestTheInspector:
                          "name": "Probe", "pid": 748}]
         assert pages == [{"page_id": 1, "title": "", "url": "about:blank"}]   # no JSContext
         assert contents["elements"][0]["id"] == "web_heading"
-        assert service.closed
+        # Kept for the next call (#718), with the page it opened released.
+        assert not service.closed
+        assert service.torn_down == [("S1", "PID:748", 1)]
 
     async def test_the_switch_being_off_says_where_it_is(self, monkeypatch):
         from pymobiledevice3.exceptions import WebInspectorNotEnabledError
@@ -414,3 +435,117 @@ async def test_a_page_whose_session_never_started_is_not_asked_again(monkeypatch
     async with PhoneWebInspector(USB) as inspector:
         assert await inspector.pages("PID:748") == []
         assert await asyncio.wait_for(inspector.page_contents("PID:748", 1), 1) is None
+
+
+# -- one connection per phone, kept between calls (#718) --------------------------------
+
+
+async def _one_call(page_id=1):
+    async with PhoneWebInspector(USB) as inspector:
+        return await inspector.page_contents("PID:748", page_id)
+
+
+async def test_the_next_call_reuses_the_connection_and_lists_afresh(monkeypatch):
+    """The phone admits a new connection only ~10 s after the last began:
+    measured, a second took 7.15 s, where a kept one served the next call's
+    session in 0.02 s."""
+    service = FakeService([_entry()])
+    _patch(monkeypatch, service)
+    await _one_call()
+    service.entries = [_entry(page_id=7)]                   # a navigation since
+    assert await _one_call(7) is not None
+    assert service.connects == 1
+    # A fresh session per call, each released: a page left held never
+    # answered the next call's session on the same connection.
+    assert service.torn_down == [("S1", "PID:748", 1), ("S2", "PID:748", 7)]
+    assert not service.closed
+
+
+async def test_a_call_that_failed_does_not_keep_its_connection(monkeypatch):
+    service = FakeService([_entry()])
+    _patch(monkeypatch, service)
+    with pytest.raises(RuntimeError):
+        async with PhoneWebInspector(USB) as inspector:
+            await inspector.page_contents("PID:748", 1)
+            raise RuntimeError("the caller's own failure")
+    assert service.closed
+    assert service.torn_down == [("S1", "PID:748", 1)]       # released all the same
+    assert await phone_webinspector.POOL.take(USB) is None
+
+
+async def test_a_release_that_did_not_go_through_closes_the_connection(monkeypatch):
+    class Stuck(FakeService):
+        async def teardown_inspector_socket(self, *args):
+            raise OSError("broken pipe")
+
+    service = Stuck([_entry()])
+    _patch(monkeypatch, service)
+    await _one_call()
+    assert service.closed
+    assert await phone_webinspector.POOL.take(USB) is None
+
+
+async def test_a_session_whose_setup_was_given_up_on_closes_the_connection(monkeypatch):
+    """The visibility probe gives a page VISIBLE_S and carries on. If that was
+    the session's own setup, the phone may hold the page with nothing here to
+    release it, so the connection must not be handed to the next call."""
+    class SlowSetup(FakeService):
+        async def inspector_session(self, app, page):
+            await asyncio.sleep(5)
+
+    monkeypatch.setattr(phone_webinspector, "VISIBLE_S", 0.05)
+    service = SlowSetup([_entry()])
+    _patch(monkeypatch, service)
+    async with PhoneWebInspector(USB) as inspector:
+        assert await inspector.pages("PID:748") == []           # not on screen
+    assert service.closed
+
+
+async def test_a_dropped_connection_is_replaced(monkeypatch):
+    first = FakeService([_entry()])
+    _patch(monkeypatch, first)
+    await _one_call()
+    first.is_connected = False                               # a cable pull
+    second = FakeService([_entry()])
+    _patch(monkeypatch, second)
+    await _one_call()
+    assert first.closed
+    assert second.connects == 1
+
+
+async def test_an_idle_connection_is_closed(monkeypatch):
+    monkeypatch.setattr(phone_webinspector, "IDLE_S", 0.05)
+    service = FakeService([_entry()])
+    _patch(monkeypatch, service)
+    await _one_call()
+    assert not service.closed
+    await asyncio.sleep(0.2)
+    assert service.closed
+    assert await phone_webinspector.POOL.take(USB) is None
+
+
+async def test_calls_on_one_phone_take_turns(monkeypatch):
+    """Two at once on one connection could each open a session on the same
+    page, and the second of those never answers."""
+    inside = []
+
+    class Watched(FakeService):
+        async def get_open_application_pages(self, timeout):
+            inside.append("in")
+            await asyncio.sleep(0.05)
+            inside.append("out")
+            return self.entries
+
+    service = Watched([_entry()])
+    _patch(monkeypatch, service)
+    await asyncio.gather(_one_call(), _one_call())
+    assert inside == ["in", "out", "in", "out"]
+    assert service.connects == 1
+
+
+async def test_the_server_stopping_closes_the_kept_connection(monkeypatch):
+    service = FakeService([_entry()])
+    _patch(monkeypatch, service)
+    await _one_call()
+    await phone_webinspector.POOL.close_all()
+    assert service.closed
