@@ -638,3 +638,32 @@ def test_without_a_screen_the_label_decides():
                              leaf=True) is None
     assert _covering_element(COVERED, hit("Overlay", 89, 539.5, 58, 20.5, "StaticText"),
                              leaf=True) is not None
+
+
+# -- the target read a moment apart (#709) --------------------------------------
+
+
+def test_the_row_itself_read_a_moment_apart_is_not_covering():
+    """Measured on an iPhone 11: the hit-test answered "Row 40" at y=167,
+    inset 20 pt each side, where the tree had the row 1.5 pt lower. Neither
+    frame held the other, and the tap was refused as covered by Row 40."""
+    row_40 = element("Row 40", 0, 168.5, 414, 52, "StaticText", "row_40")
+    assert _covering_element(row_40, hit("Row 40", 20, 167, 374, 52, "StaticText"),
+                             leaf=True) is None
+    assert _covering_element(row_40, hit("Row 40", 20, 167, 374, 52, "StaticText")) is None
+
+
+def test_a_title_that_says_what_the_row_says_still_covers_it():
+    """A row scrolled under the bar whose title has the same text: the title
+    shares a sliver of the row's area, so it is still on top."""
+    # The row's top 12 pt under the bar, as in the navigation-title case above.
+    general = element("General", 0, 80, 414, 52)
+    covering = _covering_element(general, hit("General", 170, 71, 74, 21, "Heading"),
+                                 leaf=True)
+    assert covering is not None and covering["type"] == "Heading"
+
+
+def test_another_row_in_much_the_same_place_is_not_the_target():
+    row_40 = element("Row 40", 0, 168.5, 414, 52, "StaticText", "row_40")
+    assert _covering_element(row_40, hit("Row 41", 20, 167, 374, 52, "StaticText"),
+                             leaf=True) is not None

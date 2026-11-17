@@ -607,6 +607,30 @@ def _same_element(a: UIElement, b: UIElement) -> bool:
     return (a.type, a.identifier, a.label, a.frame) == (b.type, b.identifier, b.label, b.frame)
 
 
+#: How much of the smaller frame two frames must share to be one element.
+_SAME_PLACE = 0.8
+
+
+def _same_place(label: str, frame: dict[str, float], target_label: str | None,
+                tframe: dict[str, float]) -> bool:
+    """The hit says what the target says and covers most of where it is.
+
+    The overlap is of the smaller frame, so a row's text, inset from the
+    row's edges, counts; a navigation bar's title that says the same as a row
+    scrolled under it does not -- a short title shares a sliver of a row's
+    area -- and stays covering, as it is."""
+    if not label.strip() or label.strip() != (target_label or "").strip():
+        return False
+    w = (min(frame["x"] + frame["width"], tframe["x"] + tframe["width"])
+         - max(frame["x"], tframe["x"]))
+    h = (min(frame["y"] + frame["height"], tframe["y"] + tframe["height"])
+         - max(frame["y"], tframe["y"]))
+    if w <= 0 or h <= 0:
+        return False
+    smaller = min(frame["width"] * frame["height"], tframe["width"] * tframe["height"])
+    return smaller > 0 and w * h >= _SAME_PLACE * smaller
+
+
 def _covering_element(target: UIElement, hit: dict | None, *,
                       leaf: bool = False,
                       screen: list[UIElement] | None = None) -> dict | None:
@@ -652,6 +676,12 @@ def _covering_element(target: UIElement, hit: dict | None, *,
     if inside and around:
         # The target itself -- checked before the overlay labels, or tapping
         # a "dismiss popup" layer by name was refused as covered by itself.
+        return None
+    if _same_place(label, frame, target.label, tframe):
+        # The target again, read a moment apart: the hit-test answered with
+        # "Row 40" at y=167, x 20-394, where the tree had it a little apart,
+        # so neither frame held the other and it was refused as covered by
+        # itself (#709, iPhone 11).
         return None
     if label.strip().lower() in _OVERLAY_LABELS:
         return covering
