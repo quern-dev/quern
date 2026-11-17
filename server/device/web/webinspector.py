@@ -69,6 +69,9 @@ _SEL_FORWARD_DID_CLOSE = "_rpc_forwardDidClose:"
 #: server's shutdown on a blocked send (CodeRabbit on #717).
 _GOODBYE_S = 2.0
 
+#: The least a console read's disable is given, when the enable used the rest.
+_DISABLE_FLOOR_S = 0.5
+
 # Replies to a forwarded WebKit message come back under this selector, carrying
 # the raw protocol JSON. Unlike the sim-bridge wire protocol, WebKit messages
 # carry their own ids, so a reply can be matched to its request rather than to
@@ -690,13 +693,28 @@ class SimulatorWebInspector:
         from server.device.web.console import Collector
 
         collector = Collector()
-        reply = await self._forward(application_id, page_id, "Console.enable", {},
-                                    timeout, on_event=collector.on_event)
-        if reply is None:
-            return None
-        with contextlib.suppress(Exception):
-            await self._forward(application_id, page_id, "Console.disable", {}, timeout)
-        return collector.messages
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + (timeout or self._timeout)
+        try:
+            reply = await self._forward(application_id, page_id, "Console.enable", {},
+                                        timeout, on_event=collector.on_event)
+            if reply is None:
+                return None
+            # What is left of the read's own budget, not a second one -- with a
+            # short floor, since skipping the disable would leave the domain
+            # streaming into this connection (CodeRabbit on #722).
+            with contextlib.suppress(Exception):
+                await self._forward(application_id, page_id, "Console.disable", {},
+                                    max(deadline - loop.time(), _DISABLE_FLOOR_S))
+            return collector.messages
+        finally:
+            # Nothing stays attached to the page after a read: a page stays
+            # bound to the connection that opened it until it is let go, so
+            # Safari's Develop menu could not open it while quern ran
+            # (CodeRabbit on #722). The next call opens a session afresh.
+            await self._release(application_id, page_id)
+            self._sessions.discard((application_id, page_id))
+            self._targets.pop((application_id, page_id), None)
 
     async def on_screen(self, application_id: str, page_id: int) -> bool:
         """Whether the page says it is visible, within `VISIBLE_S`.

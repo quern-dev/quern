@@ -245,3 +245,72 @@ async def test_the_route_logs_a_read(monkeypatch):
     assert entry.action == "get_web_console" and entry.category == "device.read"
     assert "1 of 5 messages" in entry.message
     assert controller.get_web_console.await_args.kwargs["levels"] == ["error"]
+
+
+# -- CodeRabbit on #722 -----------------------------------------------------------------
+
+
+def test_a_replayed_message_keeps_its_own_repeat_count():
+    collector = Collector()
+    collector.on_event({"method": "Console.messageAdded",
+                        "params": {"message": dict(LOG, repeatCount=3)}})
+    assert console.entry(collector.messages[0])["repeat"] == 3
+
+
+@pytest.mark.parametrize("parameter, text", [
+    ({"type": "object", "subtype": "null", "value": None}, "null"),
+    ({"type": "boolean", "value": True}, "true"),
+    ({"type": "boolean", "value": False}, "false"),
+    ({"type": "number", "value": 0, "description": "-0"}, "-0"),
+    ({"type": "number", "description": "NaN"}, "NaN"),
+    ({"type": "undefined"}, "undefined"),
+    ({"type": "string", "value": "a"}, "a"),
+])
+def test_an_argument_reads_as_javascript_writes_it(parameter, text):
+    message = {"level": "log", "text": "?", "parameters": [parameter]}
+    assert console.entry(message)["text"] == text
+
+
+async def _reading(monkeypatch, enable_takes: float, enable_reply):
+    """A console read against a stubbed `_forward`, recording each call's
+    timeout and every page let go."""
+    from server.device.web import webinspector as wi
+
+    inspector = wi.SimulatorWebInspector(timeout=10.0)
+    inspector._sessions.add(("PID:9", 21))
+    inspector._targets[("PID:9", 21)] = "page-21"
+    calls, released = [], []
+
+    async def forward(app, page, method, params, timeout=None, on_event=None):
+        calls.append((method, timeout))
+        if method == "Console.enable":
+            await asyncio.sleep(enable_takes)
+            return enable_reply
+        return {"result": {}}
+
+    async def release(app, page):
+        released.append(page)
+    monkeypatch.setattr(inspector, "_forward", forward)
+    monkeypatch.setattr(inspector, "_release", release)
+    result = await inspector.console_history("PID:9", 21, timeout=1.0)
+    return inspector, result, calls, released
+
+
+async def test_a_console_read_lets_go_of_the_page(monkeypatch):
+    """So Safari's Develop menu can open it while quern runs."""
+    inspector, result, calls, released = await _reading(monkeypatch, 0, {"result": {}})
+    assert result == [] and released == [21]
+    assert ("PID:9", 21) not in inspector._sessions
+    assert ("PID:9", 21) not in inspector._targets
+
+
+async def test_a_read_the_page_did_not_answer_lets_go_too(monkeypatch):
+    inspector, result, calls, released = await _reading(monkeypatch, 0, None)
+    assert result is None and released == [21]
+
+
+async def test_the_disable_has_what_is_left_of_the_read_s_budget(monkeypatch):
+    inspector, result, calls, released = await _reading(monkeypatch, 0.6, {"result": {}})
+    (_, enable), (_, disable) = calls
+    assert enable == 1.0
+    assert disable < 0.5 or disable == pytest.approx(0.5)   # never a second full second

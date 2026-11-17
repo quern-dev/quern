@@ -34,7 +34,11 @@ class Collector:
         method = event.get("method")
         params = event.get("params") or {}
         if method == "Console.messageAdded":
-            self.messages.append(dict(params.get("message") or {}, repeat=1))
+            message = params.get("message") or {}
+            # A replayed message carries its own count: logged three times
+            # before quern attached, it arrives once with repeatCount 3
+            # (CodeRabbit on #722).
+            self.messages.append(dict(message, repeat=int(message.get("repeatCount") or 1)))
         elif method == "Console.messageRepeatCountUpdated" and self.messages:
             # The last message again, `count` times in all.
             self.messages[-1]["repeat"] = int(params.get("count") or 1)
@@ -72,9 +76,20 @@ def _text(message: dict) -> str:
 
 
 def _argument(parameter: dict) -> str:
-    if "value" in parameter and parameter.get("type") != "object":
-        value = parameter["value"]
-        return value if isinstance(value, str) else repr(value) if value is None else str(value)
-    if parameter.get("type") == "undefined":
+    """One console argument as the console shows it: JavaScript's spelling,
+    not Python's (CodeRabbit on #722)."""
+    kind = parameter.get("type")
+    if kind == "object" and parameter.get("subtype") == "null":
+        return "null"
+    if kind == "undefined":
         return "undefined"
-    return str(parameter.get("description") or parameter.get("className") or parameter.get("type"))
+    if kind == "boolean":
+        return "true" if parameter.get("value") else "false"
+    if kind == "string":
+        return str(parameter.get("value", ""))
+    # A number's description is how JavaScript writes it: -0, NaN, Infinity.
+    if parameter.get("description") is not None:
+        return str(parameter["description"])
+    if "value" in parameter:
+        return str(parameter["value"])
+    return str(parameter.get("className") or kind)
