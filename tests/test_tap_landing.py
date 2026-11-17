@@ -653,6 +653,24 @@ def test_the_row_itself_read_a_moment_apart_is_not_covering():
     assert _covering_element(row_40, hit("Row 40", 20, 167, 374, 52, "StaticText")) is None
 
 
+def test_an_overlay_with_the_target_s_label_still_covers_it():
+    """Both say "Covered": the title is inside the target and shares all its
+    area, but the screen says it is the overlay's (CodeRabbit on #712)."""
+    overlay = OVERLAY.model_copy(update={"label": "Covered"})
+    title = hit("Covered", 89, 539.5, 58, 20.5, "StaticText")
+    covering = _covering_element(COVERED, title, leaf=True, screen=[COVERED, overlay])
+    assert covering is not None and covering["label"] == "Covered"
+
+
+def test_the_row_read_apart_with_its_table_on_screen_is_not_covering():
+    """The offset row's hit is held by the table around it, not by the row:
+    that owner is a container, not something on top."""
+    row_40 = element("Row 40", 0, 168.5, 414, 52, "StaticText", "row_40")
+    table = element("", 0, 100, 414, 700, "Table", "table")
+    assert _covering_element(row_40, hit("Row 40", 20, 167, 374, 52, "StaticText"),
+                             leaf=True, screen=[table, row_40]) is None
+
+
 def test_a_title_that_says_what_the_row_says_still_covers_it():
     """A row scrolled under the bar whose title has the same text: the title
     shares a sliver of the row's area, so it is still on top."""

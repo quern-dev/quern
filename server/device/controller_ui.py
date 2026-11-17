@@ -603,6 +603,15 @@ def _hit_owner(screen: list[UIElement], frame: dict[str, float]) -> UIElement | 
     return min(owners, key=lambda o: o[0])[1] if owners else None
 
 
+def _encloses(e: UIElement, frame: dict[str, float]) -> bool:
+    """`e`'s frame holds `frame`: a container of it, not something on top."""
+    try:
+        ef = {k: float(e.frame[k]) for k in ("x", "y", "width", "height")}
+    except (KeyError, TypeError, ValueError):
+        return False
+    return _contains(ef, frame)
+
+
 def _same_element(a: UIElement, b: UIElement) -> bool:
     return (a.type, a.identifier, a.label, a.frame) == (b.type, b.identifier, b.label, b.frame)
 
@@ -681,8 +690,13 @@ def _covering_element(target: UIElement, hit: dict | None, *,
         # The target again, read a moment apart: the hit-test answered with
         # "Row 40" at y=167, x 20-394, where the tree had it a little apart,
         # so neither frame held the other and it was refused as covered by
-        # itself (#709, iPhone 11).
-        return None
+        # itself (#709, iPhone 11). Unless the screen says the hit is some
+        # other element's, smaller than the target: an overlay with the same
+        # label, its title inside the target (CodeRabbit on #712).
+        owner = _hit_owner(screen, frame) if leaf and screen else None
+        if owner is None or _same_element(owner, target) or _encloses(owner, tframe):
+            return None
+        return covering
     if label.strip().lower() in _OVERLAY_LABELS:
         return covering
     if leaf and inside and not around:
