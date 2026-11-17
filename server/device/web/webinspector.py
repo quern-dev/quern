@@ -219,9 +219,10 @@ _CLEAR_FOCUSED_JS = """
 
 
 #: How long a page has to say whether it is on screen before it is taken to
-#: be off it. A page that does not answer is not one the caller is looking at:
-#: on a phone a Safari tab in the background never answers (#715), and on a
-#: simulator neither does a page Safari keeps for Back (#716).
+#: be off it. Some pages never answer: on a phone a Safari tab in the
+#: background (#715), and on a simulator a page another inspector connection
+#: still holds -- one a process that has since exited opened a session on,
+#: and never closed (#716).
 VISIBLE_S = 2.0
 
 _VISIBILITY_JS = "document.visibilityState"
@@ -633,9 +634,9 @@ class SimulatorWebInspector:
     async def on_screen(self, application_id: str, page_id: int) -> bool:
         """Whether the page says it is visible, within `VISIBLE_S`.
 
-        Asked in a script that changes nothing, so a page that answers late
-        -- one Safari keeps for Back runs what it was sent when it comes back
-        -- is left nothing that acts.
+        Asked in a script that changes nothing, so a page that answers late,
+        or runs what it was sent once whatever held it lets go, is left
+        nothing that acts.
         """
         return await self.evaluate(application_id, page_id, _VISIBILITY_JS,
                                    timeout=VISIBLE_S) == "visible"

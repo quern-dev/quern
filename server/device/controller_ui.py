@@ -5092,8 +5092,9 @@ class DeviceControllerUI:
                         # Only a page on screen is asked to act, and only the
                         # one with an input focused does. A Safari tab in the
                         # background keeps its focus, and its field was emptied
-                        # instead; a page kept for Back never answers, and held
-                        # the clear for the connection's timeout (#716).
+                        # instead; a page another connection holds never
+                        # answers, and held the clear for the connection's
+                        # timeout (#716).
                         if not await inspector.on_screen(app_id, page["page_id"]):
                             continue
                         if await inspector.clear_focused_input(app_id, page["page_id"]):

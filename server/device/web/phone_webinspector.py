@@ -119,9 +119,9 @@ class PhoneWebInspector:
 
         A page in the background -- a Safari tab behind another -- does not
         answer an evaluation, so asking it held a call until `CALL_TIMEOUT_S`
-        and failed it. And what is sent to it waits there and runs when the tab
-        comes back: a clear sent to every page would empty a field the user
-        returns to later (CodeRabbit on #715, measured on an iPhone 11). Every
+        and failed it (CodeRabbit on #715, measured on an iPhone 11). What is
+        sent to it may still run when the tab comes back -- not measured -- so
+        nothing that acts is sent to a page that has not answered. Every
         page is asked at once, in a script that changes nothing, and only those
         that answer "visible" are given.
         """

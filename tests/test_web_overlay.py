@@ -802,14 +802,14 @@ async def test_a_web_clear_on_another_simulator_does_not_count():
 async def test_only_a_page_on_screen_is_asked_to_clear():
     """Measured on an iOS 27.2 simulator (#716): Safari's tab in the
     background answered, kept its input focused, and was emptied in place of
-    the field on screen; a page kept for Back never answered at all. Neither
-    is sent the clear."""
+    the field on screen; a page another connection held never answered at
+    all. Neither is sent the clear."""
     ctrl = DeviceController()
     ctrl._is_android = lambda _u: False
     ctrl._is_physical = lambda _u: False
     ctrl._booted_simulator_count = lambda: _immediate(1)
     asked: list = []
-    shown = {1: False, 17: False, 19: True}   # background tab, Back page, on screen
+    shown = {1: False, 17: False, 19: True}   # background tab, held page, on screen
 
     class Inspector:
         async def connected_applications(self):

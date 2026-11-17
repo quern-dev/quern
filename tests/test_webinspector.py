@@ -361,8 +361,9 @@ async def test_the_installed_pymobiledevice3_makes_a_working_connection():
 
 
 async def test_on_screen_asks_with_its_own_short_bound(monkeypatch):
-    """A page kept for Back never answers, and the connection's 10 s each
-    held a clear behind it. The probe has VISIBLE_S, and only "visible" is."""
+    """A page another connection holds never answers, and the connection's
+    10 s each held a clear behind it. The probe has VISIBLE_S, and only
+    "visible" is."""
     from server.device.web import webinspector as wi
 
     inspector = wi.SimulatorWebInspector()
