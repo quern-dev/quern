@@ -270,7 +270,7 @@ _WEB_JS = "web-js"
 
 async def _choose_web_page(
         apps: list[dict], pages_of: Callable[[str], Awaitable[list[dict]]],
-        on_screen: Callable[[str, int, float], Awaitable[bool]], bundle_id: str | None,
+        on_screen: Callable[[str, int], Awaitable[bool]], bundle_id: str | None,
         page_id: int | None) -> tuple[dict, dict]:
     """The app and page `evaluate_web_js` runs in (#713): `page_id` among the
     listed pages, or else the one page on screen. A refusal names the pages,
@@ -295,19 +295,7 @@ async def _choose_web_page(
             f"no page {page_id} is listed{_listing(listed)}. On a physical iPhone only "
             "pages on screen are listed: a Safari tab in the background does not "
             "answer.", tool=_WEB_JS)
-    # Newest first: a page is numbered when it is made, so the one a tab is
-    # showing is usually the highest, and the pages Safari keeps for Back --
-    # which never answer -- are older. The first to say it is visible gets
-    # VISIBLE_S; the rest only a second look, to see whether it is alone.
-    # Measured on a simulator tab with four pages behind it: 8.5 s a call,
-    # asking each for the whole 2 s.
-    from server.device.web.webinspector import SECOND_LOOK_S, VISIBLE_S
-
-    shown: list[tuple[dict, dict]] = []
-    for a, p in sorted(listed, key=lambda ap: _page_number(ap[1]), reverse=True):
-        if await on_screen(a["application_id"], p["page_id"],
-                           SECOND_LOOK_S if shown else VISIBLE_S):
-            shown.append((a, p))
+    shown = [(a, p) for a, p in listed if await on_screen(a["application_id"], p["page_id"])]
     if len(shown) == 1:
         return shown[0]
     if not shown:
@@ -316,13 +304,6 @@ async def _choose_web_page(
             "isInspectable = true to be listed.", tool=_WEB_JS)
     raise InvalidDeviceRequestError(
         f"several web pages are on screen{_listing(shown)}; pass page_id.", tool=_WEB_JS)
-
-
-def _page_number(page: dict) -> int:
-    try:
-        return int(page.get("page_id") or 0)
-    except (TypeError, ValueError):
-        return 0
 
 
 def _listing(pages: list[tuple[dict, dict]]) -> str:
@@ -5604,7 +5585,7 @@ class DeviceControllerUI:
 
         usb = await self.get_libimobiledevice_udid(udid) or udid
 
-        async def shown(_app_id: str, _page_id: int, _timeout: float) -> bool:
+        async def shown(_app_id: str, _page_id: int) -> bool:
             return True                 # the phone lists only pages on screen
 
         async def run() -> dict:
