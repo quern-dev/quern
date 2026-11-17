@@ -428,3 +428,35 @@ async def test_a_page_that_takes_the_message_and_never_replies_is_given_up_on_to
     assert await inspector.evaluate("PID:9", 17, "1", timeout=0.1) is None
     assert inspector._targets[("PID:9", 17)] == "page-17"      # it got that far
     assert asyncio.get_running_loop().time() - started < 1
+
+
+async def test_a_target_found_late_leaves_the_reply_only_what_is_left():
+    """Finding the target and the reply share one deadline: a target found at
+    0.3 s of 0.4 left the reply 0.1 s, not another 0.4 (CodeRabbit on #717)."""
+    from server.device.web import webinspector as wi
+
+    created = {"__selector": wi._SEL_APPLICATION_SENT_DATA, "__argument": {
+        "WIRPageIdentifierKey": 17, "WIRMessageDataKey": json.dumps(
+            {"method": "Target.targetCreated",
+             "params": {"targetInfo": {"targetId": "page-17"}}}).encode()}}
+
+    class SlowTarget:
+        def __init__(self):
+            self.sent = False
+
+        async def send_plist(self, _message):
+            pass
+
+        async def recv_plist(self):
+            if not self.sent:
+                self.sent = True
+                await asyncio.sleep(0.3)
+                return created
+            await asyncio.sleep(60)
+
+    inspector = wi.SimulatorWebInspector(timeout=10.0)
+    inspector._service = SlowTarget()
+    started = asyncio.get_running_loop().time()
+    assert await inspector.evaluate("PID:9", 17, "1", timeout=0.4) is None
+    assert inspector._targets[("PID:9", 17)] == "page-17"
+    assert asyncio.get_running_loop().time() - started < 0.6

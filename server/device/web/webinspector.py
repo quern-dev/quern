@@ -510,10 +510,14 @@ class SimulatorWebInspector:
         daemon interleaves unrelated events.
         """
         session = (application_id, page_id)
+        # One deadline for the whole exchange: finding the target and the reply
+        # share `timeout`, or a target found late would start the reply's wait
+        # afresh and double it (CodeRabbit on #717).
+        deadline = asyncio.get_running_loop().time() + (timeout or self._timeout)
         await self._open_session(application_id, page_id)
 
         if session not in self._targets:
-            target_id = await self._await_target(application_id, page_id, timeout)
+            target_id = await self._await_target(application_id, page_id, deadline)
             if target_id is None:
                 # Drop the session too. Setup is skipped when the session is
                 # cached, and Target.targetCreated is only announced when it is
@@ -535,7 +539,6 @@ class SimulatorWebInspector:
             "params": {"targetId": self._targets[session], "message": json.dumps(inner)},
         })
 
-        deadline = asyncio.get_running_loop().time() + (timeout or self._timeout)
         while asyncio.get_running_loop().time() < deadline:
             decoded = await self._next_page_message(page_id, deadline)
             if decoded is None:
@@ -585,9 +588,9 @@ class SimulatorWebInspector:
         return None
 
     async def _await_target(self, application_id: str, page_id: int,
-                            timeout: float | None = None) -> str | None:
-        """Read the target id the page announces after its session opens."""
-        deadline = asyncio.get_running_loop().time() + (timeout or self._timeout)
+                            deadline: float) -> str | None:
+        """Read the target id the page announces after its session opens, by
+        `deadline` (the event loop's clock)."""
         while asyncio.get_running_loop().time() < deadline:
             decoded = await self._next_page_message(page_id, deadline)
             if decoded is None:
