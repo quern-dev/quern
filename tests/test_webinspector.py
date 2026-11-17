@@ -505,3 +505,31 @@ async def test_a_target_found_late_leaves_the_reply_only_what_is_left():
     assert await inspector.evaluate("PID:9", 17, "1", timeout=0.4) is None
     assert inspector._targets[("PID:9", 17)] == "page-17"
     assert asyncio.get_running_loop().time() - started < 0.6
+
+
+async def test_the_server_lets_go_of_its_pages_when_it_stops(monkeypatch):
+    """The page a stopped server had read answered no later server: pinned
+    against the real lifespan."""
+    from server.config import ServerConfig
+    from server.device.controller import DeviceController
+    from server.lifecycle import network_monitor, update_check
+    from server.main import create_app, lifespan
+
+    async def _never(*a, **k):
+        return None
+
+    closed: list = []
+
+    async def close(self):
+        closed.append(True)
+
+    monkeypatch.setattr(network_monitor, "update_network_state", lambda *a: None)
+    monkeypatch.setattr(network_monitor, "network_monitor_loop", _never)
+    monkeypatch.setattr(update_check, "periodic_update_check", _never)
+    monkeypatch.setattr(DeviceController, "_close_web_inspector", close)
+    app = create_app(config=ServerConfig(api_key="k"),
+                     enable_oslog=False, enable_crash=False, enable_proxy=False)
+    async with lifespan(app):
+        assert closed == []
+
+    assert closed == [True]
