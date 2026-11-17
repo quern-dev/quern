@@ -61,6 +61,12 @@ _SEL_REPORT_IDENTIFIER = "_rpc_reportIdentifier:"
 _SEL_FORWARD_GET_LISTING = "_rpc_forwardGetListing:"
 _SEL_FORWARD_SOCKET_SETUP = "_rpc_forwardSocketSetup:"
 _SEL_FORWARD_SOCKET_DATA = "_rpc_forwardSocketData:"
+_SEL_FORWARD_DID_CLOSE = "_rpc_forwardDidClose:"
+
+#: How long closing has to say goodbye to every page before it lets go of the
+#: connection anyway: a peer that stopped reading would otherwise hold the
+#: server's shutdown on a blocked send (CodeRabbit on #717).
+_GOODBYE_S = 2.0
 
 # Replies to a forwarded WebKit message come back under this selector, carrying
 # the raw protocol JSON. Unlike the sim-bridge wire protocol, WebKit messages
@@ -203,6 +209,7 @@ _REFRESH_SETTLE = 0.3
 # is what makes the clear real.
 _CLEAR_FOCUSED_JS = """
 (function () {
+  if (document.visibilityState !== 'visible') return 'not visible';
   var el = document.activeElement;
   if (!el) return 'not focused';
   var proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
@@ -215,6 +222,16 @@ _CLEAR_FOCUSED_JS = """
   return el.value === '' ? 'cleared' : 'not cleared';
 })()
 """
+
+
+#: How long a page has to say whether it is on screen before it is taken to
+#: be off it. Some pages never answer: on a phone a Safari tab in the
+#: background (#715), and on a simulator a page another inspector connection
+#: still holds -- one a process that has since exited opened a session on,
+#: and never closed (#716).
+VISIBLE_S = 2.0
+
+_VISIBILITY_JS = "document.visibilityState"
 
 
 class WebInspectorError(RuntimeError):
@@ -363,20 +380,47 @@ class SimulatorWebInspector:
         connect() dies with "File descriptor ... is used by transport" -- so
         one reconnect would poison the inspector until the server restarted.
         """
-        service, sock = self._service, self._sock
-        self._service = None
-        self._sock = None
-        # Sessions and targets are keyed to the connection that opened them.
-        self._sessions.clear()
-        self._targets.clear()
-        self._applications.clear()
-        if service is not None:
-            with contextlib.suppress(Exception):
-                await service.close()
-        if sock is not None:
-            with contextlib.suppress(Exception):
-                if sock.fileno() != -1:
-                    sock.close()
+        # Let go of every page first. A page stays bound to the connection that
+        # opened a session on it until that connection says it is done, and
+        # closing the socket does not say so: measured on an iOS 27.2
+        # simulator, a page another process had inspected answered no later
+        # connection -- not even with a refusal -- until a forwardDidClose
+        # named the old connection. So a restarted server, or the CLI after
+        # it, could not read a page the last one had read.
+        try:
+            if self._service is not None:
+                async with asyncio.timeout(_GOODBYE_S):
+                    for application_id, page_id in list(self._sessions):
+                        await self._release(application_id, page_id)
+        except TimeoutError:
+            logger.debug("webinspector: saying goodbye to its pages timed out")
+        finally:
+            service, sock = self._service, self._sock
+            self._service = None
+            self._sock = None
+            # Sessions and targets are keyed to the connection that opened them.
+            self._sessions.clear()
+            self._targets.clear()
+            self._applications.clear()
+            if service is not None:
+                with contextlib.suppress(Exception):
+                    await service.close()
+            if sock is not None:
+                with contextlib.suppress(Exception):
+                    if sock.fileno() != -1:
+                        sock.close()
+
+    async def _release(self, application_id: str, page_id: int) -> None:
+        """Tell the daemon this connection is done with the page, which it
+        otherwise keeps bound here. Best effort: a page that cannot be told is
+        no worse off than before."""
+        with contextlib.suppress(Exception):
+            await self._send(_SEL_FORWARD_DID_CLOSE, {
+                "WIRApplicationIdentifierKey": application_id,
+                "WIRConnectionIdentifierKey": self._connection_id,
+                "WIRPageIdentifierKey": page_id,
+                "WIRSenderKey": self._sender_id,
+            })
 
     async def _send(self, selector: str, argument: dict) -> None:
         await self._service.send_plist({"__selector": selector, "__argument": argument})
@@ -478,6 +522,7 @@ class SimulatorWebInspector:
 
     async def _forward(
         self, application_id: str, page_id: int, method: str, params: dict | None = None,
+        timeout: float | None = None,
     ) -> dict | None:
         """Send one WebKit protocol message to a page and wait for its reply.
 
@@ -499,15 +544,23 @@ class SimulatorWebInspector:
         daemon interleaves unrelated events.
         """
         session = (application_id, page_id)
+        # One deadline for the whole exchange: finding the target and the reply
+        # share `timeout`, or a target found late would start the reply's wait
+        # afresh and double it (CodeRabbit on #717).
+        deadline = asyncio.get_running_loop().time() + (timeout or self._timeout)
         await self._open_session(application_id, page_id)
 
         if session not in self._targets:
-            target_id = await self._await_target(application_id, page_id)
+            target_id = await self._await_target(application_id, page_id, deadline)
             if target_id is None:
                 # Drop the session too. Setup is skipped when the session is
                 # cached, and Target.targetCreated is only announced when it is
                 # established — so keeping a session whose target never arrived
                 # means every later call waits for an event that cannot come.
+                # Let go of the page first: the socket setup bound it to this
+                # connection whether or not its target arrived, and once out
+                # of `_sessions` nothing would release it (CodeRabbit on #717).
+                await self._release(application_id, page_id)
                 self._sessions.discard(session)
                 logger.debug("webinspector: no target for page %s", page_id)
                 return None
@@ -524,7 +577,6 @@ class SimulatorWebInspector:
             "params": {"targetId": self._targets[session], "message": json.dumps(inner)},
         })
 
-        deadline = asyncio.get_running_loop().time() + self._timeout
         while asyncio.get_running_loop().time() < deadline:
             decoded = await self._next_page_message(page_id, deadline)
             if decoded is None:
@@ -573,9 +625,10 @@ class SimulatorWebInspector:
                 continue
         return None
 
-    async def _await_target(self, application_id: str, page_id: int) -> str | None:
-        """Read the target id the page announces after its session opens."""
-        deadline = asyncio.get_running_loop().time() + self._timeout
+    async def _await_target(self, application_id: str, page_id: int,
+                            deadline: float) -> str | None:
+        """Read the target id the page announces after its session opens, by
+        `deadline` (the event loop's clock)."""
         while asyncio.get_running_loop().time() < deadline:
             decoded = await self._next_page_message(page_id, deadline)
             if decoded is None:
@@ -587,12 +640,14 @@ class SimulatorWebInspector:
                     return str(target)
         return None
 
-    async def evaluate(self, application_id: str, page_id: int, expression: str) -> object:
-        """Run JavaScript in a page and return the decoded result."""
+    async def evaluate(self, application_id: str, page_id: int, expression: str,
+                       timeout: float | None = None) -> object:
+        """Run JavaScript in a page and return the decoded result, or None when
+        it does not answer within `timeout` (default: the connection's)."""
         reply = await self._forward(application_id, page_id, "Runtime.evaluate", {
             "expression": expression,
             "returnByValue": True,
-        })
+        }, timeout)
         if not reply:
             return None
         result = ((reply.get("result") or {}).get("result") or {})
@@ -613,11 +668,23 @@ class SimulatorWebInspector:
         except ValueError:
             return None
 
+    async def on_screen(self, application_id: str, page_id: int) -> bool:
+        """Whether the page says it is visible, within `VISIBLE_S`.
+
+        Asked in a script that changes nothing, so a page that answers late,
+        or runs what it was sent once whatever held it lets go, is left
+        nothing that acts.
+        """
+        return await self.evaluate(application_id, page_id, _VISIBILITY_JS,
+                                   timeout=VISIBLE_S) == "visible"
+
     async def clear_focused_input(self, application_id: str, page_id: int) -> bool:
         """Empty the focused input on a page. True only if it actually emptied.
 
-        Scoped to whatever has focus, so asking every page is safe: only the one
-        being typed into has an input focused, and the rest decline.
+        Scoped to whatever has focus, and only on a page that is on screen: a
+        Safari tab in the background keeps its input focused, and was emptied
+        in place of the field the caller meant (#716). Callers ask `on_screen`
+        first, so nothing is sent to a page that would run it later.
         """
         result = await self.evaluate(application_id, page_id, _CLEAR_FOCUSED_JS)
         return result == "cleared"

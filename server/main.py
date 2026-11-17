@@ -1064,6 +1064,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await device_controller.u2.close()
         except Exception:
             logger.warning("Stopping the Android gesture servers failed", exc_info=True)
+        # The simulator's Web Inspector keeps every page this server opened a
+        # session on bound to its connection until it is told otherwise, and
+        # the next server could not read them until they navigated.
+        try:
+            await device_controller._close_web_inspector()
+        except Exception:
+            logger.debug("closing the Web Inspector connection failed", exc_info=True)
 
     if (session_proxies := getattr(app.state, "session_proxies", None)) is not None:
         try:

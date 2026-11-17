@@ -776,6 +776,9 @@ async def test_a_web_clear_on_another_simulator_does_not_count():
         async def pages(self, app_id):
             return [{"page_id": 1}]
 
+        async def on_screen(self, app_id, page_id):
+            return True                  # so only the owner check can refuse
+
         async def clear_focused_input(self, app_id, page_id):
             cleared.append((app_id, page_id))
             return True
@@ -792,6 +795,44 @@ async def test_a_web_clear_on_another_simulator_does_not_count():
     try:
         assert await ctrl._clear_web_input("SIM") is False
         assert cleared == [], "cleared an input on another simulator"
+    finally:
+        wi.simulator_udid_for_application = original
+
+
+async def test_only_a_page_on_screen_is_asked_to_clear():
+    """Measured on an iOS 27.2 simulator (#716): Safari's tab in the
+    background answered, kept its input focused, and was emptied in place of
+    the field on screen; a page another connection held never answered at
+    all. Neither is sent the clear."""
+    ctrl = DeviceController()
+    ctrl._is_android = lambda _u: False
+    ctrl._is_physical = lambda _u: False
+    ctrl._booted_simulator_count = lambda: _immediate(1)
+    asked: list = []
+    shown = {1: False, 17: False, 19: True}   # background tab, held page, on screen
+
+    class Inspector:
+        async def connected_applications(self):
+            return [{"application_id": "PID:9", "bundle_id": "com.apple.mobilesafari"}]
+
+        async def pages(self, app_id):
+            return [{"page_id": p} for p in (1, 17, 19)]
+
+        async def on_screen(self, app_id, page_id):
+            return shown[page_id]
+
+        async def clear_focused_input(self, app_id, page_id):
+            asked.append(page_id)
+            return True                  # each would answer "cleared" if asked
+
+    ctrl._connected_web_inspector = lambda: _immediate(Inspector())
+    ctrl._close_web_inspector = lambda: _immediate(None)
+    import server.device.web.webinspector as wi
+    original = wi.simulator_udid_for_application
+    wi.simulator_udid_for_application = lambda _app_id: _immediate("SIM")
+    try:
+        assert await ctrl._clear_web_input("SIM") is True
+        assert asked == [19]
     finally:
         wi.simulator_udid_for_application = original
 
