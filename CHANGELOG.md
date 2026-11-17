@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A web-field clear on a simulator no longer empties a field in a Safari tab in the background (#716).** `clear_text` and `type_text`'s clear ask the Web Inspector to empty the focused input, page by page, stopping at the first that does. Measured on an iOS 27.2 simulator: a tab in the background answers, keeps its input focused, and was emptied and reported as cleared, so the field on screen was left as it was and no keystroke clear ran. Each page is now first asked whether it is visible (2 s), and only a page on screen is asked to clear; the clear script declines a hidden page itself too. A page Safari keeps for Back never answers, and held the clear for the connection's 10 s; it now costs the 2 s.
+
 ## [0.26.0-beta.5] - 2026-11-16
 
 ### Changed

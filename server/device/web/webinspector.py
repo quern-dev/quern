@@ -203,6 +203,7 @@ _REFRESH_SETTLE = 0.3
 # is what makes the clear real.
 _CLEAR_FOCUSED_JS = """
 (function () {
+  if (document.visibilityState !== 'visible') return 'not visible';
   var el = document.activeElement;
   if (!el) return 'not focused';
   var proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
@@ -215,6 +216,15 @@ _CLEAR_FOCUSED_JS = """
   return el.value === '' ? 'cleared' : 'not cleared';
 })()
 """
+
+
+#: How long a page has to say whether it is on screen before it is taken to
+#: be off it. A page that does not answer is not one the caller is looking at:
+#: on a phone a Safari tab in the background never answers (#715), and on a
+#: simulator neither does a page Safari keeps for Back (#716).
+VISIBLE_S = 2.0
+
+_VISIBILITY_JS = "document.visibilityState"
 
 
 class WebInspectorError(RuntimeError):
@@ -478,6 +488,7 @@ class SimulatorWebInspector:
 
     async def _forward(
         self, application_id: str, page_id: int, method: str, params: dict | None = None,
+        timeout: float | None = None,
     ) -> dict | None:
         """Send one WebKit protocol message to a page and wait for its reply.
 
@@ -502,7 +513,7 @@ class SimulatorWebInspector:
         await self._open_session(application_id, page_id)
 
         if session not in self._targets:
-            target_id = await self._await_target(application_id, page_id)
+            target_id = await self._await_target(application_id, page_id, timeout)
             if target_id is None:
                 # Drop the session too. Setup is skipped when the session is
                 # cached, and Target.targetCreated is only announced when it is
@@ -524,7 +535,7 @@ class SimulatorWebInspector:
             "params": {"targetId": self._targets[session], "message": json.dumps(inner)},
         })
 
-        deadline = asyncio.get_running_loop().time() + self._timeout
+        deadline = asyncio.get_running_loop().time() + (timeout or self._timeout)
         while asyncio.get_running_loop().time() < deadline:
             decoded = await self._next_page_message(page_id, deadline)
             if decoded is None:
@@ -573,9 +584,10 @@ class SimulatorWebInspector:
                 continue
         return None
 
-    async def _await_target(self, application_id: str, page_id: int) -> str | None:
+    async def _await_target(self, application_id: str, page_id: int,
+                            timeout: float | None = None) -> str | None:
         """Read the target id the page announces after its session opens."""
-        deadline = asyncio.get_running_loop().time() + self._timeout
+        deadline = asyncio.get_running_loop().time() + (timeout or self._timeout)
         while asyncio.get_running_loop().time() < deadline:
             decoded = await self._next_page_message(page_id, deadline)
             if decoded is None:
@@ -587,12 +599,14 @@ class SimulatorWebInspector:
                     return str(target)
         return None
 
-    async def evaluate(self, application_id: str, page_id: int, expression: str) -> object:
-        """Run JavaScript in a page and return the decoded result."""
+    async def evaluate(self, application_id: str, page_id: int, expression: str,
+                       timeout: float | None = None) -> object:
+        """Run JavaScript in a page and return the decoded result, or None when
+        it does not answer within `timeout` (default: the connection's)."""
         reply = await self._forward(application_id, page_id, "Runtime.evaluate", {
             "expression": expression,
             "returnByValue": True,
-        })
+        }, timeout)
         if not reply:
             return None
         result = ((reply.get("result") or {}).get("result") or {})
@@ -613,11 +627,23 @@ class SimulatorWebInspector:
         except ValueError:
             return None
 
+    async def on_screen(self, application_id: str, page_id: int) -> bool:
+        """Whether the page says it is visible, within `VISIBLE_S`.
+
+        Asked in a script that changes nothing, so a page that answers late
+        -- one Safari keeps for Back runs what it was sent when it comes back
+        -- is left nothing that acts.
+        """
+        return await self.evaluate(application_id, page_id, _VISIBILITY_JS,
+                                   timeout=VISIBLE_S) == "visible"
+
     async def clear_focused_input(self, application_id: str, page_id: int) -> bool:
         """Empty the focused input on a page. True only if it actually emptied.
 
-        Scoped to whatever has focus, so asking every page is safe: only the one
-        being typed into has an input focused, and the rest decline.
+        Scoped to whatever has focus, and only on a page that is on screen: a
+        Safari tab in the background keeps its input focused, and was emptied
+        in place of the field the caller meant (#716). Callers ask `on_screen`
+        first, so nothing is sent to a page that would run it later.
         """
         result = await self.evaluate(application_id, page_id, _CLEAR_FOCUSED_JS)
         return result == "cleared"

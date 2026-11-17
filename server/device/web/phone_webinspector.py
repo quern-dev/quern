@@ -18,7 +18,12 @@ import asyncio
 import json
 from typing import Any
 
-from server.device.web.webinspector import _CLEAR_FOCUSED_JS, _COLLECT_JS
+from server.device.web.webinspector import (
+    _CLEAR_FOCUSED_JS,
+    _COLLECT_JS,
+    _VISIBILITY_JS,
+    VISIBLE_S,
+)
 from server.models import DeviceError
 
 TOOL = "web-content"
@@ -26,12 +31,6 @@ TOOL = "web-content"
 LISTING_S = 1.0
 #: The whole of one call: connect, list, and every page's collection.
 CALL_TIMEOUT_S = 30.0
-#: How long a page has to say it is on screen. A Safari tab in the background
-#: never answers at all: measured on an iPhone 11, the foreground tab in
-#: 0.0 s and the other not in 10 s.
-VISIBLE_S = 2.0
-
-_VISIBILITY_JS = "document.visibilityState"
 
 SWITCH = "Settings > Apps > Safari > Advanced > Web Inspector"
 
