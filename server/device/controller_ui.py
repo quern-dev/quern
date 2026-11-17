@@ -764,6 +764,12 @@ def _header_bottom(elements: list[UIElement], clearance: float, screen_height: f
 
 
 def _footer_top(elements: list[UIElement], screen_height: float, screen_width: float) -> float:
+    """`_footer`'s top alone."""
+    return _footer(elements, screen_height, screen_width)[0]
+
+
+def _footer(elements: list[UIElement], screen_height: float,
+            screen_width: float) -> tuple[float, set[tuple]]:
     """Where a bar along the bottom -- a tab bar, a toolbar -- begins, or the
     screen's height when nothing says there is one (#709).
 
@@ -774,18 +780,31 @@ def _footer_top(elements: list[UIElement], screen_height: float, screen_width: f
     iPhone 11: five Buttons 79x54 at y=817 on an 896 pt screen. Without this a
     sweep took "Row 40" at y=831 for in view, and the tap the obstruction
     check then refused was under the Scroll tab.
+
+    Returns the bar's top -- the screen's height when there is none -- and
+    its items (`_footer_key`), which are judged as being on it, not under it.
+    Narrow is under three quarters of the width: a two-tab bar's items are
+    half each (CodeRabbit on #712), a row is all of it.
     """
     low = screen_height * 0.85
-    narrow = screen_width * 0.5
+    narrow = screen_width * 0.75
     rows: dict[int, list[UIElement]] = {}
     for e in elements:
         f = e.frame
         if (f and e.type == "Button" and f["y"] >= low and f["width"] < narrow
                 and f["height"] < screen_height * 0.15):
             rows.setdefault(round(f["y"]), []).append(e)
-    tops = [y for y, row in rows.items()
-            if len({round(e.frame["x"]) for e in row}) >= 2]
-    return float(min(tops)) if tops else screen_height
+    bars = {y: row for y, row in rows.items()
+            if len({round(e.frame["x"]) for e in row}) >= 2}
+    if not bars:
+        return screen_height, set()
+    return float(min(bars)), {_footer_key(e) for row in bars.values() for e in row}
+
+
+def _footer_key(e: UIElement) -> tuple:
+    """A bar item as the same item in a later read: a tab does not move."""
+    f = e.frame or {}
+    return (e.type, e.identifier, e.label, round(f.get("x", 0)), round(f.get("y", 0)))
 
 
 _INDEXED = re.compile(r"(.*?)(\d+)")
@@ -2179,8 +2198,8 @@ class DeviceControllerUI:
         top_safe = self._TOP_SAFE_INSET
         # Above the home indicator, and above a bar along the bottom where the
         # screen shows one: a row under a tab bar is no row to tap (#709).
-        bottom_safe = min(screen_height - self._HOME_INDICATOR_INSET,
-                          _footer_top(screen_els, screen_height, screen_width))
+        footer_top, footer_items = _footer(screen_els, screen_height, screen_width)
+        bottom_safe = min(screen_height - self._HOME_INDICATOR_INSET, footer_top)
         mid_x = screen_width / 2
         # Swipe endpoints: near the bottom (y_far) and near the top (y_near).
         # Swiping y_far -> y_near reveals content below; y_near -> y_far reveals
@@ -2518,6 +2537,10 @@ class DeviceControllerUI:
             if el.frame is None:
                 return False
             _, cy = get_tap_point(el)
+            if _footer_key(el) in footer_items:
+                # A tab is on the bar, not under it: the target may be one
+                # (CodeRabbit on #712).
+                return cy <= screen_height - self._HOME_INDICATOR_INSET
             return el.frame["y"] >= top_safe and cy <= bottom_safe
 
         async def _swipe(y1: float, y2: float) -> None:

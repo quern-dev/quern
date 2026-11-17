@@ -1307,3 +1307,23 @@ def test_a_list_s_last_rows_are_no_bar():
     assert _footer_top(cells, SCREEN["height"], SCREEN["width"]) == SCREEN["height"]
     one = [TAB_BAR[0]]                        # a lone button is no bar either
     assert _footer_top(one, SCREEN["height"], SCREEN["width"]) == SCREEN["height"]
+
+
+def test_a_two_tab_bar_is_a_bar():
+    """Two tabs are half the width each (CodeRabbit on #712)."""
+    from server.device.controller_ui import _footer_top
+
+    two = [UIElement(type="Button", identifier=f"tab_{i}", label=f"Tab {i}",
+                     frame={"x": 196.5 * i, "y": 769, "width": 196.5, "height": 49})
+           for i in range(2)]
+    assert _footer_top(two, SCREEN["height"], SCREEN["width"]) == 769.0
+
+
+@pytest.mark.asyncio
+async def test_a_tab_itself_is_found_where_it_is():
+    """A target on the bar is on it, not under it: no swipe, no miss
+    (CodeRabbit on #712)."""
+    screen = PushedListScreen(footer=TAB_BAR)
+    found = await _sweep(screen, "tab_0", pushed=True)
+    assert found is not None and found.identifier == "tab_0"
+    assert screen.swipes() == []
