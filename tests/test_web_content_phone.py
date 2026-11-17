@@ -7,6 +7,7 @@ the tree push, which already carries the web view's elements.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -65,6 +66,8 @@ class FakeService:
                 pass
 
             async def runtime_evaluate(self, exp, return_by_value=False):
+                if exp == "document.visibilityState":
+                    return "visible"
                 assert "elements" in exp                     # the collector, not a guess
                 return contents
         return Session()
@@ -237,9 +240,9 @@ async def test_a_web_tap_on_a_phone_is_checked_with_the_push_s_hit_test(monkeypa
 class Evaluating(FakeService):
     """Answers the clear script per page, and the collector otherwise."""
 
-    def __init__(self, entries, cleared_on=None):
+    def __init__(self, entries, cleared_on=None, background=()):
         super().__init__(entries)
-        self.cleared_on, self.asked = cleared_on, []
+        self.cleared_on, self.asked, self.background = cleared_on, [], set(background)
 
     async def inspector_session(self, app, page):
         outer = self
@@ -249,6 +252,10 @@ class Evaluating(FakeService):
                 pass
 
             async def runtime_evaluate(self, exp, return_by_value=False):
+                if page.id_ in outer.background:
+                    await asyncio.sleep(60)                  # a tab behind another
+                if exp == "document.visibilityState":
+                    return "visible"
                 outer.asked.append(page.id_)
                 if "elements" in exp:
                     return PAGE
@@ -345,9 +352,11 @@ async def test_a_connect_given_up_on_closes_the_service(monkeypatch):
     assert service.closed
 
 
-async def test_each_evaluation_ends_its_session_s_receive_loop(monkeypatch):
+async def test_a_page_has_one_session_and_its_loop_ends_with_the_inspector(monkeypatch):
     """pymobiledevice3's InspectorSession starts a loop that never ends by
-    itself; left running, every read added one."""
+    itself; left running, every read added one. And a second session on the
+    same page never answers, so the visibility probe and the collection that
+    follows it share one."""
     import asyncio
 
     loops = []
@@ -361,6 +370,27 @@ async def test_each_evaluation_ends_its_session_s_receive_loop(monkeypatch):
 
     _patch(monkeypatch, Looping([_entry()]))
     async with PhoneWebInspector(USB) as inspector:
+        assert await inspector.pages("PID:748")
         await inspector.page_contents("PID:748", 1)
-        await asyncio.sleep(0)
-        assert len(loops) == 1 and loops[0].cancelled()
+        assert len(loops) == 1 and not loops[0].done()
+    await asyncio.sleep(0)
+    assert loops[0].cancelled()
+
+
+async def test_a_page_in_the_background_is_neither_waited_for_nor_cleared(monkeypatch):
+    """Measured on an iPhone 11: a Safari tab behind another never answers.
+    Asked in turn, it held the clear until the call's 30 s bound; and what is
+    sent to it runs when the tab comes back."""
+    import time
+
+    monkeypatch.setattr(phone_webinspector, "VISIBLE_S", 0.05)
+    ctrl = _phone(monkeypatch)
+    service = Evaluating([_entry(page_id=1), _entry(page_id=2)], cleared_on=2,
+                         background={1})
+    _patch(monkeypatch, service)
+    started = time.monotonic()
+    assert await ctrl._clear_web_input(PHONE) is True
+    assert time.monotonic() - started < 1
+    assert service.asked == [2]                              # the clear went to page 2 only
+    # Its URL is still listed: that is read from the listing, not the page.
+    assert [u["url"] for u in await ctrl.web_page_urls(PHONE)] == ["about:blank"] * 2

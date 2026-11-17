@@ -26,6 +26,12 @@ TOOL = "web-content"
 LISTING_S = 1.0
 #: The whole of one call: connect, list, and every page's collection.
 CALL_TIMEOUT_S = 30.0
+#: How long a page has to say it is on screen. A Safari tab in the background
+#: never answers at all: measured on an iPhone 11, the foreground tab in
+#: 0.0 s and the other not in 10 s.
+VISIBLE_S = 2.0
+
+_VISIBILITY_JS = "document.visibilityState"
 
 SWITCH = "Settings > Apps > Safari > Advanced > Web Inspector"
 
@@ -41,6 +47,11 @@ class PhoneWebInspector:
         self.udid = udid
         self._service: Any = None
         self._pages: list[Any] = []
+        self._shown: set[tuple[str, int]] | None = None
+        #: One session per page: a second on the same page, on the same
+        #: connection, never answers -- its `runtime_enable` did not return in
+        #: 60 s on an iPhone 11, while the first answered again at once.
+        self._sessions: dict[tuple[str, int], Any] = {}
 
     async def __aenter__(self) -> PhoneWebInspector:
         from pymobiledevice3.exceptions import WebInspectorNotEnabledError
@@ -72,6 +83,13 @@ class PhoneWebInspector:
         await self._close()
 
     async def _close(self) -> None:
+        # A session starts a receive loop that never ends by itself, and
+        # pymobiledevice3 (11.55) has no call that ends it (CodeRabbit on #715).
+        for session in self._sessions.values():
+            task = getattr(session, "_receive_task", None)
+            if task is not None:
+                task.cancel()
+        self._sessions.clear()
         if self._service is not None:
             try:
                 await self._service.close()
@@ -87,13 +105,46 @@ class PhoneWebInspector:
                                       "name": app.name, "pid": app.pid})
         return list(seen.values())
 
-    async def pages(self, application_id: str) -> list[dict]:
+    def _web_pages(self, application_id: str) -> list[Any]:
         # Web pages only: an app's JSContexts and automation targets are
         # listed too, and have no document to collect.
-        return [{"page_id": e.page.id_, "title": e.page.web_title, "url": e.page.web_url}
-                for e in self._pages
+        return [e for e in self._pages
                 if e.application.id_ == application_id
                 and e.page.type_.value in ("WIRTypeWeb", "WIRTypeWebPage")]
+
+    async def pages(self, application_id: str) -> list[dict]:
+        """The application's web pages that are on screen.
+
+        A page in the background -- a Safari tab behind another -- does not
+        answer an evaluation, so asking it held a call until `CALL_TIMEOUT_S`
+        and failed it. And what is sent to it waits there and runs when the tab
+        comes back: a clear sent to every page would empty a field the user
+        returns to later (CodeRabbit on #715, measured on an iPhone 11). Every
+        page is asked at once, in a script that changes nothing, and only those
+        that answer "visible" are given.
+        """
+        shown = await self._on_screen()
+        return [{"page_id": e.page.id_, "title": e.page.web_title, "url": e.page.web_url}
+                for e in self._web_pages(application_id)
+                if (application_id, e.page.id_) in shown]
+
+    async def _on_screen(self) -> set[tuple[str, int]]:
+        if self._shown is None:
+            entries = [e for e in self._pages
+                       if e.page.type_.value in ("WIRTypeWeb", "WIRTypeWebPage")]
+
+            async def visible(entry: Any) -> bool:
+                try:
+                    state = await asyncio.wait_for(
+                        self.evaluate(entry.application.id_, entry.page.id_, _VISIBILITY_JS),
+                        VISIBLE_S)
+                except Exception:  # noqa: BLE001 -- no answer is not on screen
+                    return False
+                return state == "visible"
+            answers = await asyncio.gather(*(visible(e) for e in entries))
+            self._shown = {(e.application.id_, e.page.id_)
+                           for e, shown in zip(entries, answers, strict=True) if shown}
+        return self._shown
 
     async def evaluate(self, application_id: str, page_id: int, script: str) -> Any:
         """`script`'s value in the page, or None when the page is gone."""
@@ -101,16 +152,13 @@ class PhoneWebInspector:
                       if e.application.id_ == application_id and e.page.id_ == page_id), None)
         if entry is None or self._service is None:
             return None
-        session = await self._service.inspector_session(entry.application, entry.page)
-        try:
+        key = (application_id, page_id)
+        session = self._sessions.get(key)
+        if session is None:
+            session = await self._service.inspector_session(entry.application, entry.page)
+            self._sessions[key] = session
             await session.runtime_enable()
-            return await session.runtime_evaluate(script, return_by_value=True)
-        finally:
-            # A session starts a receive loop that never ends by itself, and
-            # pymobiledevice3 (11.55) has no call that ends it (CodeRabbit on #715).
-            task = getattr(session, "_receive_task", None)
-            if task is not None:
-                task.cancel()
+        return await session.runtime_evaluate(script, return_by_value=True)
 
     async def page_contents(self, application_id: str, page_id: int) -> dict | None:
         """The page's elements in page space, by `_COLLECT_JS`."""
@@ -134,9 +182,11 @@ class PhoneWebInspector:
         for app in await self.connected_applications():
             if not _is_app(app):
                 continue
-            for page in await self.pages(app["application_id"]):
-                if page.get("url"):
-                    urls.append({"url": str(page["url"]), "process": app["bundle_id"]})
+            # Every page, in the background too: a URL is read from the
+            # listing, and nothing is sent to the page.
+            for entry in self._web_pages(app["application_id"]):
+                if entry.page.web_url:
+                    urls.append({"url": str(entry.page.web_url), "process": app["bundle_id"]})
         return urls
 
 
