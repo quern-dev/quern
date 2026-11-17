@@ -65,7 +65,7 @@ def _with_input_warning(
         return payload
     from server.device.ios.phone_readiness import take_note
 
-    if (note := take_note(udid)) and "developer_image" not in payload:
+    if (note := take_note()) and "developer_image" not in payload:
         payload["developer_image"] = note        # the image this call mounted (#664)
     warning = controller.input_warning(udid)
     if isinstance(warning, str) and warning and warning not in (payload.get("warning") or ""):

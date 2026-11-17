@@ -778,7 +778,7 @@ class TestMountingOnDemand:
     class DeveloperDiskImageServiceError(Exception):
         pass
 
-    def _mountable(self, monkeypatch, *, fails=False):
+    def _mountable(self, monkeypatch, *, fails=False, already=False):
         class Lockdown:
             product_version = "27.2.1"
         monkeypatch.setattr(phone_readiness, "_lockdown", AsyncMock(return_value=Lockdown()))
@@ -786,11 +786,12 @@ class TestMountingOnDemand:
 
         async def mount(udid, version):
             mounts.append((udid, version))
+            await asyncio.sleep(0.01)
             if fails:
                 raise DeviceError("no tunnel", tool="pymobiledevice3")
+            return not already
         monkeypatch.setattr(phone_readiness, "mount_image", mount)
         monkeypatch.setattr(phone_readiness, "_failed", {})
-        monkeypatch.setattr(phone_readiness, "_notes", {})
         monkeypatch.setattr(phone_readiness, "ensure_image", ENSURE_IMAGE)
 
         async def mounted_yet(udid, version):
@@ -849,30 +850,69 @@ class TestMountingOnDemand:
         assert await phone_readiness.ensure_image(PHONE) is False
         assert len(mounts) == 1
 
-    async def test_without_a_mount_nothing_is_noted(self, monkeypatch):
-        monkeypatch.setattr(phone_readiness, "_notes", {})
+    async def test_two_requests_mount_once_and_only_the_mounter_is_told(self, monkeypatch):
+        mounts = self._mountable(monkeypatch)
 
+        @phone_readiness.noted
+        async def route():
+            assert await phone_readiness.ensure_image(PHONE)
+            return {"status": "ok", "udid": PHONE}
+
+        first, second = await asyncio.gather(route(), route())
+        assert len(mounts) == 1
+        assert ["developer_image" in r for r in (first, second)].count(True) == 1
+
+    async def test_an_image_already_there_is_ready_and_unannounced(self, monkeypatch):
+        self._mountable(monkeypatch, already=True)
+
+        @phone_readiness.noted
+        async def route():
+            assert await phone_readiness.ensure_image(PHONE)
+            return {"status": "ok", "udid": PHONE}
+        assert "developer_image" not in await route()
+
+    async def test_the_input_warning_reads_the_request_s_own_scope(self, monkeypatch):
+        from server.api.actions import action
+        from server.api.device_ui import _with_input_warning
+
+        self._mountable(monkeypatch)
+        ctrl = type("C", (), {"input_warning": lambda self, udid: None})()
+        with action("tap"):
+            await asyncio.create_task(phone_readiness.ensure_image(PHONE))
+            payload = _with_input_warning(ctrl, PHONE, {"status": "ok"})
+        assert "mounted it" in payload["developer_image"]
+        with action("tap"):                       # another request: nothing to say
+            assert "developer_image" not in _with_input_warning(ctrl, PHONE, {"status": "ok"})
+
+    async def test_without_a_mount_nothing_is_noted(self):
         @phone_readiness.noted
         async def route():
             return {"status": "ok", "udid": PHONE}
         assert await route() == {"status": "ok", "udid": PHONE}
 
-    async def test_two_calls_that_find_it_missing_mount_it_once(self, monkeypatch):
-        mounts = self._mountable(monkeypatch)
-        results = await asyncio.gather(phone_readiness.ensure_image(PHONE),
-                                       phone_readiness.ensure_image(PHONE))
-        assert results == [True, True] and len(mounts) == 1
-        assert phone_readiness.take_note(PHONE) is not None      # said once
-        assert phone_readiness.take_note(PHONE) is None
 
-    async def test_already_mounted_is_ready(self, monkeypatch):
+class TestTheMountItself:
+    async def test_already_mounted_is_ready_however_wrapped(self, monkeypatch):
         class AlreadyMountedError(Exception):
             pass
 
-        def mount(udid, version):
+        async def wrapped_plain(udid, version):
             raise RuntimeError("wrapped") from AlreadyMountedError("there already")
-        monkeypatch.setattr(phone_readiness, "_mount", lambda u, v: _raising(mount, u, v))
-        await phone_readiness.mount_image(PHONE, "27.2.1")        # no raise
+
+        async def wrapped_device(udid, version):
+            raise DeviceError("mount failed", tool="pymobiledevice3") from \
+                AlreadyMountedError("there already")
+        for mount in (wrapped_plain, wrapped_device):
+            monkeypatch.setattr(phone_readiness, "_workers", {})
+            monkeypatch.setattr(phone_readiness, "_mount", mount)
+            assert await phone_readiness.mount_image(PHONE, "27.2.1") is False
+
+    async def test_a_real_mount_says_so(self, monkeypatch):
+        async def fine(udid, version):
+            return None
+        monkeypatch.setattr(phone_readiness, "_workers", {})
+        monkeypatch.setattr(phone_readiness, "_mount", fine)
+        assert await phone_readiness.mount_image(PHONE, "27.2.1") is True
 
     async def test_a_slow_mount_does_not_hold_the_server(self, monkeypatch):
         """auto-mount downloads synchronously: on a thread of its own."""
@@ -880,6 +920,7 @@ class TestMountingOnDemand:
 
         async def slow(udid, version):
             clock.sleep(0.3)                                        # blocking, as its I/O is
+        monkeypatch.setattr(phone_readiness, "_workers", {})
         monkeypatch.setattr(phone_readiness, "_mount", slow)
         ticks = []
 
@@ -890,14 +931,22 @@ class TestMountingOnDemand:
         await asyncio.gather(phone_readiness.mount_image(PHONE, "27.2.1"), ticker())
         assert len(ticks) == 5
 
-    async def test_the_input_warning_takes_the_note_by_phone(self, monkeypatch):
-        from server.api.device_ui import _with_input_warning
+    async def test_no_second_mount_beside_one_past_its_deadline(self, monkeypatch):
+        import time as clock
 
-        monkeypatch.setattr(phone_readiness, "_notes", {PHONE: phone_readiness.time.monotonic()})
-        ctrl = type("C", (), {"input_warning": lambda self, udid: None})()
-        payload = _with_input_warning(ctrl, PHONE, {"status": "ok"})
-        assert "mounted it" in payload["developer_image"]
-        assert "developer_image" not in _with_input_warning(ctrl, PHONE, {"status": "ok"})
+        async def slow(udid, version):
+            clock.sleep(0.4)
+        monkeypatch.setattr(phone_readiness, "_workers", {})
+        monkeypatch.setattr(phone_readiness, "_mount", slow)
+        monkeypatch.setattr(phone_readiness, "MOUNT_TIMEOUT_S", 0.05)
+
+        with pytest.raises(DeviceError, match="took over"):
+            await phone_readiness.mount_image(PHONE, "27.2.1")
+        with pytest.raises(DeviceError, match="still going"):
+            await phone_readiness.mount_image(PHONE, "27.2.1")
+        await asyncio.sleep(0.5)                                     # it ends
+        monkeypatch.setattr(phone_readiness, "MOUNT_TIMEOUT_S", 5)
+        assert await phone_readiness.mount_image(PHONE, "27.2.1") is True
 
 
 async def _raising(fn, *a):

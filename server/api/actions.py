@@ -46,7 +46,7 @@ class ActionScope:
 
     __slots__ = (
         "name", "category", "udid", "outcome", "detail", "_start",
-        "started_monotonic",
+        "started_monotonic", "developer_image",
     )
 
     def __init__(self, name: str, category: str) -> None:
@@ -55,6 +55,10 @@ class ActionScope:
         self.udid = ""
         self.outcome = "ok"
         self.detail = ""
+        #: Set when this request mounted the phone's developer disk image
+        #: (#664), and said on its response. On the request's own scope, which
+        #: the child tasks it starts share, so no other request can take it.
+        self.developer_image: str | None = None
         self._start = time.perf_counter()
         # Recorded as well as the perf_counter, because this one is published.
         # Same base on this platform, but perf_counter is documented only as
