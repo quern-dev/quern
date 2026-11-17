@@ -47,7 +47,8 @@ From there, use the right tool for your task. If any tool fails with a connectio
 | You want to | Reach for | Read |
 |---|---|---|
 | See what's on screen | `get_screen_summary`, then `get_ui_tree`; `take_annotated_screenshot` when an element can't be found | `quern://guide/ui/reading` |
-| Read a web view | `get_web_content` (iOS simulators; elsewhere the UI tree covers it) | `quern://guide/ui/debugging` |
+| Read a web view | `get_web_content` (iOS simulators, and iPhones read without WDA; elsewhere the UI tree covers it) | `quern://guide/ui/debugging` |
+| Run JavaScript in a web page | `evaluate_web_js` | `quern://guide/ui/web-scripts` |
 | Tap, type, swipe | `tap_element`, `type_text` (after `clear_text`), `swipe`, `gesture` | `quern://guide/ui/tapping` |
 | Reach an element off screen | `tap_element` (sweeps when the screen scrolls), `scroll_to_element` | `quern://guide/ui/off-screen` |
 | Know which screen you're on | `identify_screen`, or `get_screen_summary(identify=true)` | `quern://guide/ui/landmarks` |
