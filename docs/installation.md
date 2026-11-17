@@ -10,7 +10,7 @@ This downloads the latest release to `~/.local/share/quern`, creates a virtualen
 
 ### Without Xcode
 
-Setup works on a Mac with only the Command Line Tools (`xcode-select --install`). It skips what needs Xcode -- iOS simulators, and the simulator certificate -- and still sets up what a physical iPhone needs: pymobiledevice3 and its `tunneld` LaunchDaemon, which asks for your password. An iPhone on iOS 27 or later is then read, tapped, typed into, screenshotted, and has apps installed, launched and stopped, all without Xcode.
+Setup works on a Mac without Xcode, and without the Command Line Tools too: Homebrew installs what setup asks of it from prebuilt bottles. It skips what needs Xcode -- iOS simulators, and the simulator certificate -- and, without the Command Line Tools, Screen Mirror and the simulator preview, which are built from source until they ship prebuilt (#662, #663). It still sets up what a physical iPhone needs: pymobiledevice3 and its `tunneld` LaunchDaemon, which asks for your password. An iPhone on iOS 27 or later is then read, tapped, typed into, screenshotted, and has apps installed, launched and stopped, all without Xcode.
 
 For each iPhone plugged in over USB, setup then checks three things, and says what to do about each:
 
