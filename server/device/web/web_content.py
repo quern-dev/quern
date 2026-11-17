@@ -333,6 +333,36 @@ def _is_app(application: dict) -> bool:
     return bool(bundle) and not bundle.startswith(_HELPER_PREFIXES)
 
 
+def native_anchors(native: list[dict], contents: dict, limit: int = 3) -> list[Anchor]:
+    """Origins from DOM texts the native tree carries too, each once.
+
+    Only a text unique on both sides: one shared by two elements identifies
+    neither. Measured on an iPhone 11, the probe's web heading is at y=24 in
+    the page and y=180 in the push, so the page starts at y=156.
+    """
+    by_label: dict[str, list[dict]] = {}
+    for e in native:
+        key = normalise(e.get("AXLabel"))
+        if key and e.get("frame"):
+            by_label.setdefault(key, []).append(e)
+    anchors: list[Anchor] = []
+    for key, element in _unique_texts(contents.get("elements") or []).items():
+        matches = by_label.get(key) or []
+        if len(matches) != 1:
+            continue
+        frame = matches[0]["frame"]
+        try:
+            anchor = Anchor(dx=float(frame["x"]) - float(element["x"]),
+                            dy=float(frame["y"]) - float(element["y"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if all(abs(anchor.dx - a.dx) > 2 or abs(anchor.dy - a.dy) > 2 for a in anchors):
+            anchors.append(anchor)
+        if len(anchors) >= limit:
+            break
+    return anchors
+
+
 def _unique_texts(dom: list[dict]) -> dict[str, dict]:
     """DOM elements indexed by text, dropping any text that appears twice.
 
@@ -692,6 +722,16 @@ async def collect_web_content(
     for page, page_contents in contents:
         hint = _anchor_hint_for(hints, page)
         if hint is not None and await attempt(page, page_contents, [hint], 3, "hint"):
+            located.add(page["page_id"])
+
+    # A phone's tree push already holds the web view's elements, in screen
+    # space (#708): a DOM text that a native label says too gives the origin
+    # outright, and one probe confirms it. A simulator's tree has none.
+    for page, page_contents in contents:
+        if page["page_id"] in located:
+            continue
+        if await attempt(page, page_contents, native_anchors(native, page_contents),
+                         MAX_PROBES_PER_PAGE, "native"):
             located.add(page["page_id"])
 
     for page, page_contents in contents:

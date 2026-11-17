@@ -9,6 +9,7 @@ import logging
 import math
 import re
 import time
+from typing import TYPE_CHECKING, TypeVar
 
 from server.config import get_device_ui_reader
 from server.device import gestures
@@ -37,6 +38,13 @@ from server.models import (
     UIElement,
     WaitCondition,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from server.device.web.phone_webinspector import PhoneWebInspector
+
+_T = TypeVar("_T")
 
 #: The longest press a tap can hold, as for the timed gestures (#252).
 MAX_HOLD_SECONDS = 10.0
@@ -228,6 +236,33 @@ def _build_screen_context(elements: list[UIElement]) -> dict:
     except Exception:
         return {}  # best-effort — don't mask the original error
 
+
+
+def _natively_there(web: UIElement, native: list[UIElement]) -> bool:
+    """A web element the native tree carries too, in its own box (#708).
+
+    A phone's tree push holds a web view's elements, framed as accessibility
+    sees them: the probe's button is 24,276 86x21 there, 36,279 61x14 in the
+    DOM. Not the same frame, so the exact match above missed it, and a tap by
+    label was refused as ambiguous between the two. Same label, and the web
+    element's centre inside the native one, is the same element -- of the
+    same type, so a container that says what a control in it says, such as a
+    web view labelled with the page title its heading carries, does not hide
+    the control (CodeRabbit on #715).
+    """
+    from server.device.web.web_content import normalise
+
+    label = normalise(web.label)
+    if not label or not web.frame:
+        return False
+    cx = web.frame["x"] + web.frame["width"] / 2
+    cy = web.frame["y"] + web.frame["height"] / 2
+    for e in native:
+        f = e.frame
+        if (f and e.type == web.type and normalise(e.label) == label
+                and f["x"] <= cx <= f["x"] + f["width"] and f["y"] <= cy <= f["y"] + f["height"]):
+            return True
+    return False
 
 
 def _web_content_hint(elements: list[UIElement]) -> str | None:
@@ -3193,7 +3228,7 @@ class DeviceControllerUI:
         merged = list(elements)
         for element in web:
             key = frame_key(element.frame)
-            if key is None or key in seen:
+            if key is None or key in seen or _natively_there(element, elements):
                 continue
             seen.add(key)
             merged.append(element)
@@ -3273,8 +3308,11 @@ class DeviceControllerUI:
         frame = element.frame or {}
         x = frame.get("x", 0) + frame.get("width", 0) / 2
         y = frame.get("y", 0) + frame.get("height", 0) / 2
+        # The push's hit-test on a phone it reads (#708): there the UI backend
+        # is WDA, which has no point lookup, and every web tap read as stale.
+        reader = self._device_tree_reader(udid) or self._ui_backend(udid)
         try:
-            hit = await self._ui_backend(udid).describe_point(udid, x, y)
+            hit = await reader.describe_point(udid, x, y)
         except Exception:
             logger.debug("web element verification probe failed", exc_info=True)
             return False
@@ -5026,8 +5064,10 @@ class DeviceControllerUI:
         ASWebAuthenticationSession reports no connected application at all, and
         that is the OAuth form every app has.
         """
-        if self._is_android(udid) or self._is_physical(udid):
+        if self._is_android(udid):
             return False
+        if self._is_physical(udid):
+            return await self._on_phone_inspector(udid, self._clear_on_phone, False)
         from server.device.web.web_content import _is_app
         from server.device.web.webinspector import simulator_udid_for_application
 
@@ -5148,11 +5188,14 @@ class DeviceControllerUI:
         from server.device.web.web_content import _is_app
         from server.device.web.webinspector import simulator_udid_for_application
 
-        if self._is_android(udid) or self._is_physical(udid):
+        if self._is_android(udid):
             # Not "no pages" -- no listing at all. Android's tree already holds
-            # web content, and a physical device is reached over another
-            # transport, so nothing here can speak to what is on screen.
+            # web content, so nothing here can speak to what is on screen.
             return None
+        if self._is_physical(udid):
+            async def urls(inspector: PhoneWebInspector) -> list[dict]:
+                return await inspector.page_urls()
+            return await self._on_phone_inspector(udid, urls, None)
         booted = await self._booted_simulator_count()
         require_match = booted is None or booted > 1
         try:
@@ -5213,9 +5256,11 @@ class DeviceControllerUI:
         The Web Inspector can read the DOM, but reports geometry in page space;
         this pairs the two, returning elements with real screen frames.
 
-        Simulator-only. Android's accessibility tree already descends into
-        `WebView`, and physical iOS devices are reached over a different
-        transport, so on both the ordinary UI tree is the right tool.
+        On a simulator, through its Web Inspector socket; on a physical
+        iPhone read without WDA, through the phone's Web Inspector service
+        (#708, `_web_content_on_phone`). Android's accessibility tree already
+        descends into `WebView`, and so does WDA's on a phone it reads, so
+        there the ordinary UI tree is the right tool.
         """
         from server.device.web.web_content import collect_web_content, from_probe
         from server.device.web.webinspector import (
@@ -5231,11 +5276,7 @@ class DeviceControllerUI:
                 tool="web-content",
             )
         if self._is_physical(resolved):
-            raise DeviceError(
-                "get_web_content is for iOS simulators; the Web Inspector service "
-                "used here is the simulator's. Use get_ui_tree on a physical device.",
-                tool="web-content",
-            )
+            return await self._web_content_on_phone(resolved, bundle_id, hints)
         if self._served_by_wda(resolved):
             # Its fallback hit-tests point by point through the backend, and
             # WDA has no point lookup: each probe would be a full /source. Nor
@@ -5321,6 +5362,83 @@ class DeviceControllerUI:
 
         result["udid"] = resolved
         # Make the elements addressable by label through the ordinary UI path.
+        self._store_web_overlay(resolved, result.get("elements") or [])
+        return result
+
+    async def _on_phone_inspector(
+            self, udid: str, use: Callable[[PhoneWebInspector], Awaitable[_T]],
+            failed: _T) -> _T:
+        """`use(inspector)` on the phone's Web Inspector (#708), or `failed`
+        when it cannot be asked: a phone WDA reads, or one whose Inspector is
+        off or not answering. Silent, as these callers' simulator paths are --
+        a fallback or an identification must not fail because of it."""
+        from server.device.web.phone_webinspector import PhoneWebInspector, bounded
+
+        if self._device_tree_reader(udid) is None:
+            return failed
+        usb = await self.get_libimobiledevice_udid(udid) or udid
+
+        async def run() -> _T:
+            async with PhoneWebInspector(usb) as inspector:
+                return await use(inspector)
+        try:
+            return await bounded(run())
+        except Exception:
+            logger.debug("the phone's Web Inspector could not be asked", exc_info=True)
+            return failed
+
+    @staticmethod
+    async def _clear_on_phone(inspector: PhoneWebInspector) -> bool:
+        """Every page asked; only the one with an input focused acts."""
+        from server.device.web.web_content import _is_app
+
+        for app in await inspector.connected_applications():
+            if not _is_app(app):
+                continue
+            for page in await inspector.pages(app["application_id"]):
+                if await inspector.clear_focused_input(app["application_id"], page["page_id"]):
+                    return True
+        return False
+
+    async def _web_content_on_phone(self, resolved: str, bundle_id: str | None,
+                                    hints: list | None) -> dict:
+        """`get_web_content` on a physical iPhone (#708): the phone's Web
+        Inspector service, through pymobiledevice3 with no Xcode, the page
+        collected with the simulator's own script and placed on screen with
+        the push's hit-test. Measured on an iPhone 11 against the probe's
+        web view: listed in 1.2 s, its five elements collected in 0.1 s.
+
+        Not the simulator path's point-by-point sweep when the Inspector
+        returns nothing: on a phone each hit-test is a round trip of its own.
+        """
+        from server.device.web.phone_webinspector import PhoneWebInspector, bounded
+        from server.device.web.web_content import collect_web_content
+
+        if self._device_tree_reader(resolved) is None:
+            raise DeviceError(
+                "This iPhone's screen is read through WebDriverAgent, and its "
+                "get_ui_tree already includes web content -- XCUITest enumerates web "
+                "views itself. Use get_ui_tree.", tool="web-content")
+        # The whole screen, so the push answers it: any other read goes to
+        # WDA, which a phone read without it has none of (CodeRabbit on #715).
+        elements, resolved = await self._native_ui_elements(resolved, whole_screen=True)
+        native = [{"type": e.type, "AXLabel": e.label, "frame": e.frame}
+                  for e in elements if e.frame]
+        # The Web Inspector is a lockdown service, reached by the phone's own
+        # UDID; a CoreDevice UUID is not one usbmux knows.
+        usb = await self.get_libimobiledevice_udid(resolved) or resolved
+
+        async def collect() -> dict:
+            async with PhoneWebInspector(usb) as inspector:
+                return await collect_web_content(
+                    resolved, bundle_id, self.coredevice_ax.describe_point,
+                    inspector, native, hints=hints)
+
+        result = await bounded(collect())
+        result["route"] = "inspector" if result.get("elements") else None
+        # The connection is the phone's own: no other device's page can answer.
+        result["device_verified"] = True
+        result["udid"] = resolved
         self._store_web_overlay(resolved, result.get("elements") or [])
         return result
 

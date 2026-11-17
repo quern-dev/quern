@@ -18,6 +18,6 @@ Both `take_screenshot` and `take_annotated_screenshot` support a `save_path` par
 
 **"The screen looks empty, or I know it's a web view"**
 - `get_web_content` — reads `WKWebView` content the accessibility tree cannot see, with real screen coordinates
-- iOS simulator only; on Android and physical iOS the normal `get_ui_tree` already covers web views
+- iOS simulators, and physical iPhones on iOS 27+ read without WDA (#708), where it goes through the phone's Web Inspector -- turn on Settings > Apps > Safari > Advanced > Web Inspector first. On Android, and a phone WDA reads, the normal `get_ui_tree` already covers web views
 - Optional `bundle_id` when several apps are running, and `udid` to target a specific simulator
 - Re-read after every interaction; the merged results are dropped when the screen changes
