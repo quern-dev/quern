@@ -355,6 +355,11 @@ async def _plan_one(
     if site.source in UNMANAGED_REASONS:
         base.action = "unmanaged"
         base.reason = UNMANAGED_REASONS[site.source]
+        if floor is not None and is_behind(site.version, floor):
+            # Not quern's to upgrade, but too old for quern all the same: said,
+            # or a copy quern cannot classify sits below its floor with nothing
+            # to show for it (#725).
+            base.reason += f"; below the {floor} quern requires, so upgrade it yourself"
         return base
 
     # `checked` records whether the newest version could actually be looked up.
@@ -490,7 +495,9 @@ def format_offer(updates: list[ToolUpdate], *, apply: bool = False) -> str:
         # so "will run" there would be a different false claim in place of the
         # old one. `format_report` (doctor) says "run:" for the same text, and
         # there it *is* imperative, because doctor never applies anything.
-        lead = "will run" if apply else "`quern update --tools` will run"
+        # A required one runs either way (#725), so it is never `--tools`'s.
+        runs_now = apply or update.action == "upgrade_required"
+        lead = "will run" if runs_now else "`quern update --tools` will run"
         if update.needs_root:
             lead += ", asking sudo for your password"
         lines.append(f"      {lead}: {' '.join(update.command)}")

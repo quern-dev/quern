@@ -1922,3 +1922,31 @@ def test_status_names_what_is_left_for_a_terminal(required_tool, monkeypatch):
     lines = _pending_tool_lines()
     assert "Needs a terminal: pymobiledevice3 (cli) 11.14.0" in lines[0]
     assert lines[1].strip() == "run: sudo pipx upgrade --global pymobiledevice3"
+
+
+async def test_a_copy_quern_cannot_upgrade_still_says_it_is_below_the_floor(monkeypatch):
+    """Found live: a pipx home whose path quern did not recognise read as
+    'quern cannot tell how this was installed', and its 11.14.0 as nothing
+    worse (#725)."""
+    monkeypatch.setitem(CLI_FLOORS, ("pymobiledevice3", "cli"), "11.55.0")
+    update = _by_name(await _plan([_site(source="unknown", version="11.14.0")]),
+                      "pymobiledevice3")
+    assert update.action == "unmanaged" and not update.actionable
+    assert "below the 11.55.0 quern requires" in update.reason
+
+
+async def test_a_required_upgrade_is_not_offered_as_tools_work():
+    """It runs on every update (#725), so pointing at --tools for it was a
+    false claim -- seen live, right above the line saying it was upgrading."""
+    from server.tooling.tool_updates import ToolUpdate
+
+    text = format_offer([
+        ToolUpdate(name="pymobiledevice3", role="cli", action="upgrade_required",
+                   current="11.14.0", latest="11.58.0", floor="11.55.0",
+                   command=["pipx", "upgrade", "pymobiledevice3"], reason="below"),
+        ToolUpdate(name="mitmproxy", role="cli", action="upgrade_available",
+                   current="11.0", latest="12.0",
+                   command=["pipx", "upgrade", "mitmproxy"], reason="newer"),
+    ], apply=False)
+    assert "      will run: pipx upgrade pymobiledevice3" in text
+    assert "`quern update --tools` will run: pipx upgrade mitmproxy" in text
