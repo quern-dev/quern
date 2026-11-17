@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Both read a USB iPhone's screen through AVCapture. Under the hardened
+	     runtime, a binary without this entitlement is refused the camera
+	     silently: no prompt and no devices, which reads as "no iPhone
+	     connected" (#662, #663). -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
+</dict>
+</plist>

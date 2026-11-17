@@ -715,7 +715,10 @@ def build_preview_app() -> CheckResult:
     # xcode_available first: /usr/bin/swiftc is a stub on every Mac, so `which`
     # finds it with no toolchain, and the build then ran it and macOS showed
     # its install dialog unasked (#659).
-    if not xcode_available() or _which("swiftc") is None:
+    from server.device.media import preview
+
+    # A release ships it signed (#662): with that copy here, no tools needed.
+    if (not xcode_available() or _which("swiftc") is None) and not preview.shipped_current():
         result = CheckResult(
             name=name,
             status=CheckStatus.SKIPPED,
@@ -806,7 +809,9 @@ def build_simulator_preview_engine() -> CheckResult:
             status=CheckStatus.SKIPPED,
             message="QuernMedia sources not present in this install",
         )
-    if not xcode_available() or _which("swift") is None:      # the stub, as above (#659)
+    # The stub, as above (#659); a release's shipped copy needs no tools (#663).
+    if ((not xcode_available() or _which("swift") is None)
+            and not media_engine.shipped_current()):
         return CheckResult(
             name=name,
             status=CheckStatus.SKIPPED,

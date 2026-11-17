@@ -203,6 +203,15 @@ def _build_locked(force: bool) -> Path:
     if not force and installed_digest() == digest:
         return installed
 
+    # A release's signed copy of these very sources, before any build: it
+    # needs no developer tools, and keeps one signature across Macs (#663).
+    # Taken only when its stamp says these sources and that binary.
+    shipped = shipped_binary(digest, package)
+    if shipped is not None:
+        _install_binary(shipped, digest)
+        logger.info("Installed the shipped quern-media %s", digest[:8])
+        return installed
+
     # Asked before `which`: /usr/bin/swift is a stub on every Mac, and running
     # it without the developer tools shows macOS's install dialog (#659).
     swift = shutil.which("swift") if xcode_available() else None
@@ -246,6 +255,39 @@ def _build_locked(force: bool) -> Path:
         raise RuntimeError(f"Failed to build quern-media:\n{detail}")
 
     built = _locate_built_binary(swift, package)
+    _install_binary(built, digest)
+    return installed
+
+
+def shipped_current() -> bool:
+    """Whether a shipped copy of these very sources is here to install, so no
+    developer tools are needed for simulator preview and video (#663)."""
+    package = package_dir()
+    if package is None:
+        return False
+    try:
+        return shipped_binary(source_digest(package), package) is not None
+    except OSError:
+        return False
+
+
+def shipped_binary(digest: str, package: Path) -> Path | None:
+    """The signed quern-media a release tarball carries beside these sources
+    (`prebuilt/`, #663), when its stamp names these sources and that very
+    binary; None otherwise -- none shipped, or one for other sources."""
+    shipped = package.parents[1] / "prebuilt" / BINARY_NAME
+    try:
+        fields = shipped.with_name(f"{BINARY_NAME}.sha256").read_text().split()
+        if len(fields) != 2 or fields[0] != digest:
+            return None
+        return shipped if binary_digest(shipped) == fields[1] else None
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _install_binary(built: Path, digest: str) -> None:
+    """Put `built` in place as the installed quern-media, and stamp it."""
+    installed = binary_path()
     QUERN_BIN_DIR.mkdir(parents=True, exist_ok=True)
     # Copy rather than symlink into the scratch tree: the binary should
     # survive a `rm -rf` of the build directory, and it sits alongside
@@ -291,7 +333,6 @@ def _build_locked(force: bool) -> Path:
         logger.warning("Could not write %s; quern-media is rebuilt next time", stamp,
                        exc_info=True)
     logger.info("quern-media installed at %s", installed)
-    return installed
 
 
 def refresh_at_server_start() -> bool | None:
@@ -308,7 +349,8 @@ def refresh_at_server_start() -> bool | None:
 
     from server.device.media import preview
 
-    if platform.system() != "Darwin" or not xcode_available() or package_dir() is None:
+    if (platform.system() != "Darwin" or package_dir() is None
+            or not (xcode_available() or shipped_current())):
         return None
     if not preview._owns_the_bin_dir():
         return None
