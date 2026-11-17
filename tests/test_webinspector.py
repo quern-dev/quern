@@ -533,3 +533,38 @@ async def test_the_server_lets_go_of_its_pages_when_it_stops(monkeypatch):
         assert closed == []
 
     assert closed == [True]
+
+
+async def test_a_page_whose_target_never_came_is_released_not_forgotten():
+    """The socket setup bound the page whether or not its target arrived; out
+    of the sessions without a release, nothing would ever let it go
+    (CodeRabbit on #717)."""
+    class Silent(_RecordingService):
+        async def recv_plist(self):
+            await asyncio.sleep(60)
+
+    inspector = webinspector.SimulatorWebInspector(timeout=10.0)
+    service = Silent()
+    inspector._service = service
+    assert await inspector.evaluate("PID:1", 17, "1", timeout=0.1) is None
+    released = [m["__argument"]["WIRPageIdentifierKey"] for m in service.sent
+                if m["__selector"] == "_rpc_forwardDidClose:"]
+    assert released == [17]
+    assert ("PID:1", 17) not in inspector._sessions
+
+
+async def test_closing_does_not_wait_forever_on_a_peer_that_stopped_reading(monkeypatch):
+    """A blocked goodbye held the server's shutdown, and the rest of it --
+    proxy, adapters, system proxy -- never ran (CodeRabbit on #717)."""
+    monkeypatch.setattr(webinspector, "_GOODBYE_S", 0.1)
+
+    class Blocked(_RecordingService):
+        async def send_plist(self, message):
+            await asyncio.sleep(60)
+
+    inspector = webinspector.SimulatorWebInspector()
+    service = Blocked()
+    inspector._service, inspector._sock = service, _FakeSock()
+    inspector._sessions.update({("PID:1", 1), ("PID:1", 2)})
+    await asyncio.wait_for(inspector.close(), 2)
+    assert service.closed and inspector._service is None and not inspector._sessions

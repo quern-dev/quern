@@ -63,6 +63,11 @@ _SEL_FORWARD_SOCKET_SETUP = "_rpc_forwardSocketSetup:"
 _SEL_FORWARD_SOCKET_DATA = "_rpc_forwardSocketData:"
 _SEL_FORWARD_DID_CLOSE = "_rpc_forwardDidClose:"
 
+#: How long closing has to say goodbye to every page before it lets go of the
+#: connection anyway: a peer that stopped reading would otherwise hold the
+#: server's shutdown on a blocked send (CodeRabbit on #717).
+_GOODBYE_S = 2.0
+
 # Replies to a forwarded WebKit message come back under this selector, carrying
 # the raw protocol JSON. Unlike the sim-bridge wire protocol, WebKit messages
 # carry their own ids, so a reply can be matched to its request rather than to
@@ -382,29 +387,40 @@ class SimulatorWebInspector:
         # connection -- not even with a refusal -- until a forwardDidClose
         # named the old connection. So a restarted server, or the CLI after
         # it, could not read a page the last one had read.
-        if self._service is not None:
-            for application_id, page_id in list(self._sessions):
+        try:
+            if self._service is not None:
+                async with asyncio.timeout(_GOODBYE_S):
+                    for application_id, page_id in list(self._sessions):
+                        await self._release(application_id, page_id)
+        except TimeoutError:
+            logger.debug("webinspector: saying goodbye to its pages timed out")
+        finally:
+            service, sock = self._service, self._sock
+            self._service = None
+            self._sock = None
+            # Sessions and targets are keyed to the connection that opened them.
+            self._sessions.clear()
+            self._targets.clear()
+            self._applications.clear()
+            if service is not None:
                 with contextlib.suppress(Exception):
-                    await self._send(_SEL_FORWARD_DID_CLOSE, {
-                        "WIRApplicationIdentifierKey": application_id,
-                        "WIRConnectionIdentifierKey": self._connection_id,
-                        "WIRPageIdentifierKey": page_id,
-                        "WIRSenderKey": self._sender_id,
-                    })
-        service, sock = self._service, self._sock
-        self._service = None
-        self._sock = None
-        # Sessions and targets are keyed to the connection that opened them.
-        self._sessions.clear()
-        self._targets.clear()
-        self._applications.clear()
-        if service is not None:
-            with contextlib.suppress(Exception):
-                await service.close()
-        if sock is not None:
-            with contextlib.suppress(Exception):
-                if sock.fileno() != -1:
-                    sock.close()
+                    await service.close()
+            if sock is not None:
+                with contextlib.suppress(Exception):
+                    if sock.fileno() != -1:
+                        sock.close()
+
+    async def _release(self, application_id: str, page_id: int) -> None:
+        """Tell the daemon this connection is done with the page, which it
+        otherwise keeps bound here. Best effort: a page that cannot be told is
+        no worse off than before."""
+        with contextlib.suppress(Exception):
+            await self._send(_SEL_FORWARD_DID_CLOSE, {
+                "WIRApplicationIdentifierKey": application_id,
+                "WIRConnectionIdentifierKey": self._connection_id,
+                "WIRPageIdentifierKey": page_id,
+                "WIRSenderKey": self._sender_id,
+            })
 
     async def _send(self, selector: str, argument: dict) -> None:
         await self._service.send_plist({"__selector": selector, "__argument": argument})
@@ -541,6 +557,10 @@ class SimulatorWebInspector:
                 # cached, and Target.targetCreated is only announced when it is
                 # established — so keeping a session whose target never arrived
                 # means every later call waits for an event that cannot come.
+                # Let go of the page first: the socket setup bound it to this
+                # connection whether or not its target arrived, and once out
+                # of `_sessions` nothing would release it (CodeRabbit on #717).
+                await self._release(application_id, page_id)
                 self._sessions.discard(session)
                 logger.debug("webinspector: no target for page %s", page_id)
                 return None
