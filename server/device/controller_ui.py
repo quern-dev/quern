@@ -5562,6 +5562,9 @@ class DeviceControllerUI:
                 app, page = await _choose_web_page(
                     apps, inspector.pages, inspector.on_screen, bundle_id, page_id)
             except WebInspectorError as e:
+                # A dead connection stays cached otherwise, and every later
+                # call fails on it the same way (CodeRabbit on #720).
+                await self._close_web_inspector()
                 raise DeviceError(f"the simulator's Web Inspector: {e}", tool=_WEB_JS) from e
             deadline = time.monotonic() + timeout
 
@@ -5573,6 +5576,10 @@ class DeviceControllerUI:
                     app["application_id"], page["page_id"], method, params, timeout=left)
             try:
                 outcome = await run_script(send, script)
+            except WebInspectorError as e:
+                # Not run again: the page may already have changed.
+                await self._close_web_inspector()
+                raise DeviceError(f"the simulator's Web Inspector: {e}", tool=_WEB_JS) from e
             except NoAnswer:
                 raise DeviceError(_no_answer(page, timeout), tool=_WEB_JS) from None
         return {**_page_fields(app, page), **outcome}

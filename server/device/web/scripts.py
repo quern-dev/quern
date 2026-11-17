@@ -20,6 +20,7 @@ So the script runs once without it, and what came back is read from its type:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -30,6 +31,10 @@ Send = Callable[[str, dict], Awaitable[dict | None]]
 #: Objects the script's result holds are kept under this group, and released
 #: together once it has been read.
 GROUP = "quern-evaluate"
+
+#: The release is housekeeping: a page that does not answer it must not hold
+#: the call past its own timeout (CodeRabbit on #720).
+RELEASE_S = 2.0
 
 _THIS = "function () { return this; }"
 
@@ -50,7 +55,8 @@ async def run_script(send: Send, script: str) -> dict:
         return await _describe(send, reply)
     finally:
         try:
-            await send("Runtime.releaseObjectGroup", {"objectGroup": GROUP})
+            await asyncio.wait_for(
+                send("Runtime.releaseObjectGroup", {"objectGroup": GROUP}), RELEASE_S)
         except Exception:  # noqa: BLE001 -- the answer is already read
             pass
 
@@ -75,7 +81,15 @@ async def _describe(send: Send, reply: dict | None) -> dict:
             return {"threw": False, "type": "bigint", "value": result.get("description")}
         if result.get("subtype") == "null":
             return {"threw": False, "type": "null", "value": None}
-        return {"threw": False, "type": kind, "value": result.get("value")}
+        out = {"threw": False, "type": kind, "value": result.get("value")}
+        # NaN, Infinity and a Symbol have no JSON value, and WebKit says what
+        # they are in the description instead; -0 comes as value 0, and only
+        # the description keeps its sign (CodeRabbit on #720, measured).
+        description = result.get("description")
+        if description and (out["value"] is None or (
+                kind == "number" and description != _number_text(out["value"]))):
+            out["description"] = description
+        return out
 
     described: dict[str, Any] = {
         "threw": False, "type": result.get("subtype") or "object", "value": None,
@@ -103,6 +117,13 @@ async def _describe(send: Send, reply: dict | None) -> dict:
         return described
     described["value"] = ((by_value.get("result") or {}).get("result") or {}).get("value")
     return described
+
+
+def _number_text(value: Any) -> str:
+    """A number as JavaScript writes it, near enough to tell -0 from 0."""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 def _text(result: dict) -> str:

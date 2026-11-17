@@ -407,3 +407,57 @@ async def test_a_long_script_is_kept_in_part_and_a_failure_still_logged(route):
     assert entry.outcome == "failed"
     assert f"({len(script)} characters)" in entry.message
     assert len(entry.message) < len(script)
+
+
+# -- CodeRabbit on #720 -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("result, description", [
+    # As an iOS 27.2 simulator answered each.
+    ({"type": "number", "value": None, "description": "NaN"}, "NaN"),
+    ({"type": "number", "value": None, "description": "Infinity"}, "Infinity"),
+    ({"type": "number", "value": 0, "description": "-0"}, "-0"),
+    ({"type": "symbol", "objectId": OBJECT_ID, "className": "Symbol",
+      "description": "Symbol(x)"}, "Symbol(x)"),
+])
+async def test_what_json_cannot_hold_keeps_its_description(result, description):
+    page = Page(**{"Runtime.evaluate": _reply(result)})
+    assert (await run_script(page, "x"))["description"] == description
+
+
+async def test_an_ordinary_number_has_no_description_added():
+    page = Page(**{"Runtime.evaluate": _reply(
+        {"type": "number", "value": 42, "description": "42"})})
+    assert "description" not in await run_script(page, "42")
+
+
+async def test_a_release_that_never_answers_does_not_hold_the_call(monkeypatch):
+    """The page answers the script, never the release: the answer still comes
+    back, after the release's own bound (CodeRabbit on #720)."""
+    monkeypatch.setattr(scripts, "RELEASE_S", 0.05)
+
+    async def page(method, params):
+        if method == "Runtime.releaseObjectGroup":
+            await asyncio.sleep(60)
+        return _reply({"type": "number", "value": 1})
+    answer = await asyncio.wait_for(run_script(page, "1"), 1)
+    assert answer["value"] == 1
+
+
+async def test_a_dead_simulator_inspector_is_not_kept_for_the_next_call(monkeypatch):
+    """Kept, every later call failed on it the same way (CodeRabbit on #720)."""
+    from server.device.web.webinspector import WebInspectorError
+
+    class Dead(Inspector):
+        async def connected_applications(self):
+            raise WebInspectorError("connection reset")
+
+    ctrl = _simulator(monkeypatch, Dead(None))
+    closed = []
+
+    async def close():
+        closed.append(True)
+    ctrl._close_web_inspector = close
+    with pytest.raises(DeviceError, match="connection reset"):
+        await ctrl.evaluate_web_js("1", udid="SIM")
+    assert closed == [True]
