@@ -4935,8 +4935,10 @@ class DeviceControllerUI:
         ASWebAuthenticationSession reports no connected application at all, and
         that is the OAuth form every app has.
         """
-        if self._is_android(udid) or self._is_physical(udid):
+        if self._is_android(udid):
             return False
+        if self._is_physical(udid):
+            return await self._on_phone_inspector(udid, self._clear_on_phone, False)
         from server.device.web.web_content import _is_app
         from server.device.web.webinspector import simulator_udid_for_application
 
@@ -5057,11 +5059,14 @@ class DeviceControllerUI:
         from server.device.web.web_content import _is_app
         from server.device.web.webinspector import simulator_udid_for_application
 
-        if self._is_android(udid) or self._is_physical(udid):
+        if self._is_android(udid):
             # Not "no pages" -- no listing at all. Android's tree already holds
-            # web content, and a physical device is reached over another
-            # transport, so nothing here can speak to what is on screen.
+            # web content, so nothing here can speak to what is on screen.
             return None
+        if self._is_physical(udid):
+            async def urls(inspector) -> list[dict]:
+                return await inspector.page_urls()
+            return await self._on_phone_inspector(udid, urls, None)
         booted = await self._booted_simulator_count()
         require_match = booted is None or booted > 1
         try:
@@ -5230,6 +5235,39 @@ class DeviceControllerUI:
         # Make the elements addressable by label through the ordinary UI path.
         self._store_web_overlay(resolved, result.get("elements") or [])
         return result
+
+    async def _on_phone_inspector(self, udid: str, use, failed):
+        """`use(inspector)` on the phone's Web Inspector (#708), or `failed`
+        when it cannot be asked: a phone WDA reads, or one whose Inspector is
+        off or not answering. Silent, as these callers' simulator paths are --
+        a fallback or an identification must not fail because of it."""
+        from server.device.web.phone_webinspector import PhoneWebInspector, bounded
+
+        if self._device_tree_reader(udid) is None:
+            return failed
+        usb = await self.get_libimobiledevice_udid(udid) or udid
+
+        async def run():
+            async with PhoneWebInspector(usb) as inspector:
+                return await use(inspector)
+        try:
+            return await bounded(run())
+        except Exception:
+            logger.debug("the phone's Web Inspector could not be asked", exc_info=True)
+            return failed
+
+    @staticmethod
+    async def _clear_on_phone(inspector) -> bool:
+        """Every page asked; only the one with an input focused acts."""
+        from server.device.web.web_content import _is_app
+
+        for app in await inspector.connected_applications():
+            if not _is_app(app):
+                continue
+            for page in await inspector.pages(app["application_id"]):
+                if await inspector.clear_focused_input(app["application_id"], page["page_id"]):
+                    return True
+        return False
 
     async def _web_content_on_phone(self, resolved: str, bundle_id: str | None,
                                     hints: list | None) -> dict:

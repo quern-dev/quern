@@ -18,7 +18,7 @@ import asyncio
 import json
 from typing import Any
 
-from server.device.web.webinspector import _COLLECT_JS
+from server.device.web.webinspector import _CLEAR_FOCUSED_JS, _COLLECT_JS
 from server.models import DeviceError
 
 TOOL = "web-content"
@@ -90,19 +90,42 @@ class PhoneWebInspector:
                 if e.application.id_ == application_id
                 and e.page.type_.value in ("WIRTypeWeb", "WIRTypeWebPage")]
 
-    async def page_contents(self, application_id: str, page_id: int) -> dict | None:
-        """The page's elements in page space, by `_COLLECT_JS`."""
+    async def evaluate(self, application_id: str, page_id: int, script: str) -> Any:
+        """`script`'s value in the page, or None when the page is gone."""
         entry = next((e for e in self._pages
                       if e.application.id_ == application_id and e.page.id_ == page_id), None)
         if entry is None or self._service is None:
             return None
         session = await self._service.inspector_session(entry.application, entry.page)
         await session.runtime_enable()
-        raw = await session.runtime_evaluate(_COLLECT_JS, return_by_value=True)
+        return await session.runtime_evaluate(script, return_by_value=True)
+
+    async def page_contents(self, application_id: str, page_id: int) -> dict | None:
+        """The page's elements in page space, by `_COLLECT_JS`."""
+        raw = await self.evaluate(application_id, page_id, _COLLECT_JS)
         try:
             return json.loads(raw) if isinstance(raw, str) else raw
         except ValueError:
             return None
+
+    async def clear_focused_input(self, application_id: str, page_id: int) -> bool:
+        """Empty the focused input on a page, by `_CLEAR_FOCUSED_JS`: True only
+        when it emptied one, as the simulator's says."""
+        return await self.evaluate(application_id, page_id, _CLEAR_FOCUSED_JS) == "cleared"
+
+    async def page_urls(self) -> list[dict]:
+        """Every web page's URL, with the bundle hosting it, as
+        `web_page_urls` gives a simulator's."""
+        from server.device.web.web_content import _is_app
+
+        urls = []
+        for app in await self.connected_applications():
+            if not _is_app(app):
+                continue
+            for page in await self.pages(app["application_id"]):
+                if page.get("url"):
+                    urls.append({"url": str(page["url"]), "process": app["bundle_id"]})
+        return urls
 
 
 async def bounded(coro: Any) -> Any:

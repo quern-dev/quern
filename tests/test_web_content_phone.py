@@ -229,3 +229,63 @@ async def test_a_web_tap_on_a_phone_is_checked_with_the_push_s_hit_test(monkeypa
     element = UIElement(type="Button", label="Web Button",
                         frame={"x": 36, "y": 279.4, "width": 61.4, "height": 14})
     assert await ctrl._web_element_still_there(PHONE, element)
+
+
+# -- page URLs and the instant clear (#708) ------------------------------------------
+
+
+class Evaluating(FakeService):
+    """Answers the clear script per page, and the collector otherwise."""
+
+    def __init__(self, entries, cleared_on=None):
+        super().__init__(entries)
+        self.cleared_on, self.asked = cleared_on, []
+
+    async def inspector_session(self, app, page):
+        outer = self
+
+        class Session:
+            async def runtime_enable(self):
+                pass
+
+            async def runtime_evaluate(self, exp, return_by_value=False):
+                outer.asked.append(page.id_)
+                if "elements" in exp:
+                    return PAGE
+                return "cleared" if page.id_ == outer.cleared_on else "no-focus"
+        return Session()
+
+
+async def test_a_phone_s_page_urls_carry_their_app(monkeypatch):
+    ctrl = _phone(monkeypatch)
+    helper = _entry(app_id="PID:9", bundle="com.apple.WebKit.WebContent")
+    _patch(monkeypatch, FakeService([_entry(), helper]))
+    assert await ctrl.web_page_urls(PHONE) == [
+        {"url": "about:blank", "process": "com.quern.probe.hosted"}]   # no WebKit helper
+
+
+async def test_the_focused_web_input_is_cleared_on_the_page_that_has_it(monkeypatch):
+    ctrl = _phone(monkeypatch)
+    service = Evaluating([_entry(page_id=1), _entry(page_id=2)], cleared_on=2)
+    _patch(monkeypatch, service)
+    assert await ctrl._clear_web_input(PHONE) is True
+    assert service.asked == [1, 2]
+
+
+async def test_no_focused_input_is_no_clear(monkeypatch):
+    ctrl = _phone(monkeypatch)
+    _patch(monkeypatch, Evaluating([_entry()], cleared_on=None))
+    assert await ctrl._clear_web_input(PHONE) is False
+
+
+async def test_where_the_inspector_cannot_be_asked_both_say_so_quietly(monkeypatch):
+    """URLs: None, not [] -- an empty list is evidence there are no pages.
+    The clear: False, so the keystroke path runs."""
+    from pymobiledevice3.exceptions import WebInspectorNotEnabledError
+
+    ctrl = _phone(monkeypatch)
+    _patch(monkeypatch, FakeService([], raises=WebInspectorNotEnabledError()))
+    assert await ctrl.web_page_urls(PHONE) is None
+    assert await ctrl._clear_web_input(PHONE) is False
+    wda = _phone(monkeypatch, pushed=False)
+    assert await wda.web_page_urls(PHONE) is None
