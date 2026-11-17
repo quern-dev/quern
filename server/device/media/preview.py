@@ -494,16 +494,38 @@ def _install_shipped(shipped: Path, bundle: Path) -> None:
     except OSError as exc:
         raise RuntimeError(
             f"Could not stage the shipped ios-preview in {bundle.parent}: {exc}") from exc
+    keep_staging = False
     try:
         copy = staging / APP_BUNDLE_NAME
-        shutil.copytree(shipped, copy, symlinks=True)
+        # `copy`, not `copy2`: the installed binary's mtime is when it was
+        # installed, which `stale_mirror_pids` compares with when each window
+        # started. The release build's own time would pass over a window opened
+        # between the build and the update (CodeRabbit on #723). The signature
+        # does not cover file times.
+        shutil.copytree(shipped, copy, symlinks=True, copy_function=shutil.copy)
+        previous = staging / "previous"
+        moved_aside = False
         if bundle.exists():
-            os.replace(bundle, staging / "previous")
-        os.replace(copy, bundle)
+            os.replace(bundle, previous)
+            moved_aside = True
+        try:
+            os.replace(copy, bundle)
+        except OSError:
+            # Put the old one back, or there is no Screen Mirror at all; and if
+            # even that fails, keep it in the staging directory to recover by
+            # hand rather than deleting it (CodeRabbit on #723).
+            if moved_aside:
+                try:
+                    os.replace(previous, bundle)
+                except OSError:
+                    keep_staging = True
+                    logger.error("The previous Quern Preview is kept at %s", previous)
+            raise
     except OSError as exc:
         raise RuntimeError(f"Could not install the shipped ios-preview at {bundle}: {exc}") from exc
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        if not keep_staging:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 @dataclass(frozen=True)

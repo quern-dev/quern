@@ -240,3 +240,63 @@ def test_the_release_s_version_is_stamped_and_the_copy_is_still_current(tmp_path
     stamp = preview.read_stamp(bundle)
     assert stamp.version == "9.9.9-beta.1"
     assert stamp.digest == preview.expected_digest()
+
+
+# -- CodeRabbit on #723 -----------------------------------------------------------------
+
+
+def test_an_installed_copy_is_dated_when_it_was_installed(tmp_path, monkeypatch):
+    """`stale_mirror_pids` takes a window started before the binary was
+    written as old. Dated as the release build, a window opened between the
+    build and the update was passed over and kept running the old build."""
+    import os
+    import time
+
+    bundle, binary, compiled = _stage(tmp_path, monkeypatch)
+    shipped = _ship_preview(tmp_path, monkeypatch)
+    built_long_ago = time.time() - 86400
+    os.utime(shipped / "Contents" / "MacOS" / "ios-preview", (built_long_ago, built_long_ago))
+    before = time.time()
+    preview.build_preview_bundle()
+    assert binary.stat().st_mtime >= before - 1
+
+
+def _failing_swap(monkeypatch, *, restore_fails: bool):
+    """os.replace that fails moving the new copy into place, and -- when
+    asked -- putting the old one back too."""
+    import os
+
+    real = os.replace
+
+    def replace(src, dst):
+        name = Path(src).name
+        if name == "Quern Preview.app" and ".installing" in str(src):
+            raise OSError("disk full")
+        if name == "previous" and restore_fails:
+            raise OSError("still full")
+        return real(src, dst)
+    monkeypatch.setattr(preview.os, "replace", replace)
+
+
+def test_a_failed_swap_puts_the_old_bundle_back(tmp_path, monkeypatch):
+    bundle, binary, compiled = _stage(tmp_path, monkeypatch)
+    preview.write_app_bundle(bundle, "1" * 64)
+    binary.write_text("old")
+    _ship_preview(tmp_path, monkeypatch)
+    _failing_swap(monkeypatch, restore_fails=False)
+    with pytest.raises(RuntimeError, match="disk full"):
+        preview.build_preview_bundle()
+    assert binary.read_text() == "old"                  # still a Screen Mirror
+    assert not list(bundle.parent.glob(".ios-preview-*"))
+
+
+def test_an_old_bundle_that_cannot_be_put_back_is_kept(tmp_path, monkeypatch):
+    bundle, binary, compiled = _stage(tmp_path, monkeypatch)
+    preview.write_app_bundle(bundle, "1" * 64)
+    binary.write_text("old")
+    _ship_preview(tmp_path, monkeypatch)
+    _failing_swap(monkeypatch, restore_fails=True)
+    with pytest.raises(RuntimeError, match="disk full"):
+        preview.build_preview_bundle()
+    [kept] = list(bundle.parent.glob(".ios-preview-*.installing/previous"))
+    assert (kept / "Contents" / "MacOS" / "ios-preview").read_text() == "old"
