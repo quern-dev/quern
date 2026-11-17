@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import socket
 
@@ -170,6 +171,50 @@ async def test_closing_forgets_state_tied_to_the_old_connection():
     assert not inspector._sessions
     assert not inspector._targets
     assert not inspector._applications
+
+
+class _RecordingService(_FakeService):
+    def __init__(self, fail=False):
+        super().__init__()
+        self.sent, self.fail = [], fail
+
+    async def send_plist(self, message):
+        if self.fail:
+            raise OSError("gone")
+        assert not self.closed, "sent after the connection was closed"
+        self.sent.append(message)
+
+
+async def test_closing_lets_go_of_every_page_it_opened():
+    """A page stays bound to the connection that opened a session on it until
+    that connection says it is done. Measured on an iOS 27.2 simulator: after a
+    process exited without saying so, the page answered no later connection,
+    until a forwardDidClose named the old one."""
+    inspector = webinspector.SimulatorWebInspector()
+    service = _RecordingService()
+    inspector._service, inspector._sock = service, _FakeSock()
+    inspector._sessions.update({("PID:1", 1), ("PID:1", 17)})
+
+    await inspector.close()
+
+    released = sorted((m["__argument"]["WIRApplicationIdentifierKey"],
+                       m["__argument"]["WIRPageIdentifierKey"])
+                      for m in service.sent if m["__selector"] == "_rpc_forwardDidClose:")
+    assert released == [("PID:1", 1), ("PID:1", 17)]
+    assert {m["__argument"]["WIRConnectionIdentifierKey"] for m in service.sent} == {
+        inspector._connection_id}
+    assert service.closed
+
+
+async def test_a_connection_that_cannot_say_goodbye_still_closes():
+    inspector = webinspector.SimulatorWebInspector()
+    service = _RecordingService(fail=True)
+    inspector._service, inspector._sock = service, _FakeSock()
+    inspector._sessions.add(("PID:1", 1))
+
+    await inspector.close()
+
+    assert service.closed and inspector._service is None
 
 
 async def test_closing_twice_is_harmless():
@@ -354,3 +399,172 @@ async def test_the_installed_pymobiledevice3_makes_a_working_connection():
         for sock in (a, b):
             with contextlib.suppress(Exception):
                 sock.close()
+
+
+# -- what is on screen (#716) ------------------------------------------------------
+
+
+async def test_on_screen_asks_with_its_own_short_bound(monkeypatch):
+    """A page another connection holds never answers, and the connection's
+    10 s each held a clear behind it. The probe has VISIBLE_S, and only
+    "visible" is."""
+    from server.device.web import webinspector as wi
+
+    inspector = wi.SimulatorWebInspector()
+    asked = []
+
+    async def evaluate(app_id, page_id, expression, timeout=None):
+        asked.append((expression, timeout))
+        return {1: "hidden", 2: "visible", 3: None}[page_id]
+    monkeypatch.setattr(inspector, "evaluate", evaluate)
+
+    assert [await inspector.on_screen("PID:9", p) for p in (1, 2, 3)] == [False, True, False]
+    assert set(asked) == {("document.visibilityState", wi.VISIBLE_S)}
+
+
+async def test_a_page_that_never_answers_is_given_up_on_at_the_timeout_asked():
+    from server.device.web import webinspector as wi
+
+    class Silent:
+        async def send_plist(self, _message):
+            pass
+
+        async def recv_plist(self):
+            await asyncio.sleep(60)
+
+    inspector = wi.SimulatorWebInspector(timeout=10.0)
+    inspector._service = Silent()
+    started = asyncio.get_running_loop().time()
+    assert await inspector.evaluate("PID:9", 17, "1", timeout=0.1) is None
+    assert asyncio.get_running_loop().time() - started < 1
+
+
+def test_the_clear_itself_declines_a_page_off_screen():
+    """For a caller that does not ask on_screen first."""
+    from server.device.web.webinspector import _CLEAR_FOCUSED_JS
+
+    first = _CLEAR_FOCUSED_JS.strip().splitlines()[1]
+    assert "visibilityState !== 'visible'" in first and "return" in first
+
+
+async def test_a_page_that_takes_the_message_and_never_replies_is_given_up_on_too():
+    from server.device.web import webinspector as wi
+
+    created = {"__selector": wi._SEL_APPLICATION_SENT_DATA, "__argument": {
+        "WIRPageIdentifierKey": 17, "WIRMessageDataKey": json.dumps(
+            {"method": "Target.targetCreated",
+             "params": {"targetInfo": {"targetId": "page-17"}}}).encode()}}
+
+    class TargetThenSilence:
+        def __init__(self):
+            self.queue = [created]
+
+        async def send_plist(self, _message):
+            pass
+
+        async def recv_plist(self):
+            if self.queue:
+                return self.queue.pop(0)
+            await asyncio.sleep(60)
+
+    inspector = wi.SimulatorWebInspector(timeout=10.0)
+    inspector._service = TargetThenSilence()
+    started = asyncio.get_running_loop().time()
+    assert await inspector.evaluate("PID:9", 17, "1", timeout=0.1) is None
+    assert inspector._targets[("PID:9", 17)] == "page-17"      # it got that far
+    assert asyncio.get_running_loop().time() - started < 1
+
+
+async def test_a_target_found_late_leaves_the_reply_only_what_is_left():
+    """Finding the target and the reply share one deadline: a target found at
+    0.3 s of 0.4 left the reply 0.1 s, not another 0.4 (CodeRabbit on #717)."""
+    from server.device.web import webinspector as wi
+
+    created = {"__selector": wi._SEL_APPLICATION_SENT_DATA, "__argument": {
+        "WIRPageIdentifierKey": 17, "WIRMessageDataKey": json.dumps(
+            {"method": "Target.targetCreated",
+             "params": {"targetInfo": {"targetId": "page-17"}}}).encode()}}
+
+    class SlowTarget:
+        def __init__(self):
+            self.sent = False
+
+        async def send_plist(self, _message):
+            pass
+
+        async def recv_plist(self):
+            if not self.sent:
+                self.sent = True
+                await asyncio.sleep(0.3)
+                return created
+            await asyncio.sleep(60)
+
+    inspector = wi.SimulatorWebInspector(timeout=10.0)
+    inspector._service = SlowTarget()
+    started = asyncio.get_running_loop().time()
+    assert await inspector.evaluate("PID:9", 17, "1", timeout=0.4) is None
+    assert inspector._targets[("PID:9", 17)] == "page-17"
+    assert asyncio.get_running_loop().time() - started < 0.6
+
+
+async def test_the_server_lets_go_of_its_pages_when_it_stops(monkeypatch):
+    """The page a stopped server had read answered no later server: pinned
+    against the real lifespan."""
+    from server.config import ServerConfig
+    from server.device.controller import DeviceController
+    from server.lifecycle import network_monitor, update_check
+    from server.main import create_app, lifespan
+
+    async def _never(*a, **k):
+        return None
+
+    closed: list = []
+
+    async def close(self):
+        closed.append(True)
+
+    monkeypatch.setattr(network_monitor, "update_network_state", lambda *a: None)
+    monkeypatch.setattr(network_monitor, "network_monitor_loop", _never)
+    monkeypatch.setattr(update_check, "periodic_update_check", _never)
+    monkeypatch.setattr(DeviceController, "_close_web_inspector", close)
+    app = create_app(config=ServerConfig(api_key="k"),
+                     enable_oslog=False, enable_crash=False, enable_proxy=False)
+    async with lifespan(app):
+        assert closed == []
+
+    assert closed == [True]
+
+
+async def test_a_page_whose_target_never_came_is_released_not_forgotten():
+    """The socket setup bound the page whether or not its target arrived; out
+    of the sessions without a release, nothing would ever let it go
+    (CodeRabbit on #717)."""
+    class Silent(_RecordingService):
+        async def recv_plist(self):
+            await asyncio.sleep(60)
+
+    inspector = webinspector.SimulatorWebInspector(timeout=10.0)
+    service = Silent()
+    inspector._service = service
+    assert await inspector.evaluate("PID:1", 17, "1", timeout=0.1) is None
+    released = [m["__argument"]["WIRPageIdentifierKey"] for m in service.sent
+                if m["__selector"] == "_rpc_forwardDidClose:"]
+    assert released == [17]
+    assert ("PID:1", 17) not in inspector._sessions
+
+
+async def test_closing_does_not_wait_forever_on_a_peer_that_stopped_reading(monkeypatch):
+    """A blocked goodbye held the server's shutdown, and the rest of it --
+    proxy, adapters, system proxy -- never ran (CodeRabbit on #717)."""
+    monkeypatch.setattr(webinspector, "_GOODBYE_S", 0.1)
+
+    class Blocked(_RecordingService):
+        async def send_plist(self, message):
+            await asyncio.sleep(60)
+
+    inspector = webinspector.SimulatorWebInspector()
+    service = Blocked()
+    inspector._service, inspector._sock = service, _FakeSock()
+    inspector._sessions.update({("PID:1", 1), ("PID:1", 2)})
+    await asyncio.wait_for(inspector.close(), 2)
+    assert service.closed and inspector._service is None and not inspector._sessions

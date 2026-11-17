@@ -380,7 +380,7 @@ async def test_a_page_has_one_session_and_its_loop_ends_with_the_inspector(monke
 async def test_a_page_in_the_background_is_neither_waited_for_nor_cleared(monkeypatch):
     """Measured on an iPhone 11: a Safari tab behind another never answers.
     Asked in turn, it held the clear until the call's 30 s bound; and what is
-    sent to it runs when the tab comes back."""
+    sent to it may run when the tab comes back."""
     import time
 
     monkeypatch.setattr(phone_webinspector, "VISIBLE_S", 0.05)

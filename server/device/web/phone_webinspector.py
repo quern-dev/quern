@@ -18,7 +18,12 @@ import asyncio
 import json
 from typing import Any
 
-from server.device.web.webinspector import _CLEAR_FOCUSED_JS, _COLLECT_JS
+from server.device.web.webinspector import (
+    _CLEAR_FOCUSED_JS,
+    _COLLECT_JS,
+    _VISIBILITY_JS,
+    VISIBLE_S,
+)
 from server.models import DeviceError
 
 TOOL = "web-content"
@@ -26,12 +31,6 @@ TOOL = "web-content"
 LISTING_S = 1.0
 #: The whole of one call: connect, list, and every page's collection.
 CALL_TIMEOUT_S = 30.0
-#: How long a page has to say it is on screen. A Safari tab in the background
-#: never answers at all: measured on an iPhone 11, the foreground tab in
-#: 0.0 s and the other not in 10 s.
-VISIBLE_S = 2.0
-
-_VISIBILITY_JS = "document.visibilityState"
 
 SWITCH = "Settings > Apps > Safari > Advanced > Web Inspector"
 
@@ -120,9 +119,9 @@ class PhoneWebInspector:
 
         A page in the background -- a Safari tab behind another -- does not
         answer an evaluation, so asking it held a call until `CALL_TIMEOUT_S`
-        and failed it. And what is sent to it waits there and runs when the tab
-        comes back: a clear sent to every page would empty a field the user
-        returns to later (CodeRabbit on #715, measured on an iPhone 11). Every
+        and failed it (CodeRabbit on #715, measured on an iPhone 11). What is
+        sent to it may still run when the tab comes back -- not measured -- so
+        nothing that acts is sent to a page that has not answered. Every
         page is asked at once, in a script that changes nothing, and only those
         that answer "visible" are given.
         """
@@ -151,6 +150,30 @@ class PhoneWebInspector:
 
     async def evaluate(self, application_id: str, page_id: int, script: str) -> Any:
         """`script`'s value in the page, or None when the page is gone."""
+        session = await self._session(application_id, page_id)
+        if session is None:
+            return None
+        return await session.runtime_evaluate(script, return_by_value=True)
+
+    async def send_command(self, application_id: str, page_id: int, method: str,
+                           params: dict) -> dict | None:
+        """One WebKit protocol message to the page, and its reply message --
+        `{"result": ...}` or `{"error": ...}` -- as the simulator's
+        `send_command` gives it; None when the page is gone. The caller bounds
+        the wait (`bounded`)."""
+        session = await self._session(application_id, page_id)
+        if session is None:
+            return None
+        response = await session.send_and_receive({"method": method, "params": params})
+        # Behind a target, the reply is wrapped as pymobiledevice3's own
+        # `_parse_runtime_evaluate` unwraps it.
+        if getattr(session, "target_id", None) is None:
+            return response
+        return json.loads(response["params"]["message"])
+
+    async def _session(self, application_id: str, page_id: int) -> Any:
+        """The page's one session, started on first use; None for a page not
+        listed, or one whose session never got going."""
         entry = next((e for e in self._pages
                       if e.application.id_ == application_id and e.page.id_ == page_id), None)
         if entry is None or self._service is None:
@@ -169,7 +192,7 @@ class PhoneWebInspector:
                 # session left unenabled would be reused as if it were not.
                 self._silent.add(key)
                 raise
-        return await session.runtime_evaluate(script, return_by_value=True)
+        return session
 
     async def page_contents(self, application_id: str, page_id: int) -> dict | None:
         """The page's elements in page space, by `_COLLECT_JS`."""
