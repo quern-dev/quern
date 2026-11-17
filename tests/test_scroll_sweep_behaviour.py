@@ -1028,10 +1028,13 @@ class PushedListScreen(ListScreen):
     its own drag speed and hold, and every read is asked of the push."""
 
     def __init__(self, *, merged: str = "", fails_at: int | None = None,
-                 header: list[UIElement] | None = None, **kw):
+                 header: list[UIElement] | None = None,
+                 footer: list[UIElement] | None = None, **kw):
         super().__init__(**kw)
         self.header = header or []      # the bar's controls, as the push lists them
+        self.footer = footer or []      # a tab bar's items: Buttons, in the push
         self.durations: list[float] = []
+        self.starts: list[float] = []
         self.reads: list[dict] = []
         self.merged = merged            # appended to each row's label: ", Detail"
         self.fails_at = fails_at        # this read (1-based) falls back to WDA
@@ -1051,6 +1054,7 @@ class PushedListScreen(ListScreen):
 
         async def timed(*a, **k):
             self.durations.append(a[5])
+            self.starts.append(a[2])            # where each drag began
             return await swipe(*a, **k)
 
         backend.swipe = AsyncMock(side_effect=timed)
@@ -1071,7 +1075,8 @@ class PushedListScreen(ListScreen):
         if k.get("whole_screen"):
             # A pushed tree's first element is the Application, the screen.
             els = [UIElement(type="Application", identifier="", label="App",
-                             frame={"x": 0, "y": 0, **SCREEN}), *self.header, *els]
+                             frame={"x": 0, "y": 0, **SCREEN}), *self.header, *els,
+                   *self.footer]
         return els, udid
 
 
@@ -1266,3 +1271,93 @@ async def test_a_pushed_sweeps_first_read_is_a_lookup():
 
     assert screen.reads[0].get("whole_screen") is True
     assert screen.reads[0].get("lookup") is True
+
+
+
+# -- a bar along the bottom (#709) ----------------------------------------------
+
+#: The probe's hosted tab bar as the push lists it: five Buttons side by side.
+TAB_BAR = [UIElement(type="Button", identifier=f"tab_{i}", label=f"Tab {i}",
+                     frame={"x": 3 + 78 * i, "y": 769, "width": 78, "height": 49})
+           for i in range(5)]
+
+
+def test_a_row_under_the_tab_bar_is_not_in_view():
+    """Row 15's tap point is y=782, inside the bar at 769 and above the home
+    indicator: taken as in view, the tap went to the tab (#709)."""
+    from server.device.controller_ui import _footer_top
+
+    assert _footer_top(TAB_BAR, SCREEN["height"], SCREEN["width"]) == 769.0
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_sweep_brings_a_row_clear_of_the_tab_bar():
+    screen = PushedListScreen(footer=TAB_BAR)
+    found = await _sweep(screen, "row_15", pushed=True)
+    assert found is not None and found.identifier == "row_15"
+    centre = found.frame["y"] + found.frame["height"] / 2
+    assert centre < 769, f"row_15 left under the tab bar at {centre}"
+
+
+def test_a_list_s_last_rows_are_no_bar():
+    """Full-width Buttons, one per height, as Settings' cells are."""
+    from server.device.controller_ui import _footer_top
+
+    cells = [UIElement(type="Button", identifier=f"cell_{i}", label="",
+                       frame={"x": 0, "y": 760 + 44 * i, "width": 393, "height": 44})
+             for i in range(2)]
+    assert _footer_top(cells, SCREEN["height"], SCREEN["width"]) == SCREEN["height"]
+    one = [TAB_BAR[0]]                        # a lone button is no bar either
+    assert _footer_top(one, SCREEN["height"], SCREEN["width"]) == SCREEN["height"]
+
+
+def test_a_two_tab_bar_is_a_bar():
+    """Two tabs are half the width each (CodeRabbit on #712)."""
+    from server.device.controller_ui import _footer_top
+
+    two = [UIElement(type="Button", identifier=f"tab_{i}", label=f"Tab {i}",
+                     frame={"x": 196.5 * i, "y": 769, "width": 196.5, "height": 49})
+           for i in range(2)]
+    assert _footer_top(two, SCREEN["height"], SCREEN["width"]) == 769.0
+
+
+@pytest.mark.asyncio
+async def test_a_tab_itself_is_found_where_it_is():
+    """A target on the bar is on it, not under it: no swipe, no miss
+    (CodeRabbit on #712)."""
+    screen = PushedListScreen(footer=TAB_BAR)
+    found = await _sweep(screen, "tab_0", pushed=True)
+    assert found is not None and found.identifier == "tab_0"
+    assert screen.swipes() == []
+
+
+# -- a search field floating over the list (#709) --------------------------------
+
+#: iOS 27 Settings' top level on an iPhone 11 (896 pt): the search field and
+#: its dictation button, floating over the last rows.
+SEARCH = [UIElement(type="TextField", identifier="", label="", value="Search",
+                    frame={"x": 28, "y": 830, "width": 358, "height": 28}),
+          UIElement(type="Button", identifier="", label="Dictate",
+                    frame={"x": 353, "y": 833, "width": 18, "height": 22.5})]
+
+
+def test_a_floating_search_field_is_bottom_chrome_from_above_its_frame():
+    """Drags moved the list from y=770 and below, never from 775: the field
+    takes touches well above its frame (measured, iPhone 11)."""
+    from server.device.controller_ui import _FIELD_REACH, _footer_top
+
+    assert _footer_top(SEARCH, 896, 414) == 830 - _FIELD_REACH
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_does_not_start_its_drags_on_a_floating_search_field():
+    # On the double's 852 pt screen, with the field where its reach puts the
+    # usual drag start (852 - 100 = 752) inside the dead zone.
+    field = UIElement(type="TextField", identifier="", label="", value="Search",
+                      frame={"x": 28, "y": 800, "width": 337, "height": 28})
+    screen = PushedListScreen(footer=[field])
+    await _sweep(screen, "row_150", pushed=True)
+    from server.device.controller_ui import _FIELD_REACH, _FOOTER_DRAG_MARGIN
+
+    assert screen.starts
+    assert max(screen.starts) <= 800 - _FIELD_REACH - _FOOTER_DRAG_MARGIN + 0.5
