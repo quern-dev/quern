@@ -97,9 +97,27 @@ struct QuernSnapshot {
 }
 
 final class StateReader {
-    static let quernDir = FileManager.default
-        .homeDirectoryForCurrentUser
-        .appendingPathComponent(".quern", isDirectory: true)
+    static let quernDir = stateDir()
+
+    /// Where quern keeps its state, by the CLI's own rule (`CONFIG_DIR` in
+    /// server/config.py): `QUERN_STATE_DIR` when set and non-empty, else
+    /// ~/.quern.
+    ///
+    /// It has to be the CLI's rule because every write this app makes is a
+    /// `quern set-...` child, and the child inherits this environment. The app
+    /// used to read a fixed ~/.quern regardless (#721): launched from a shell
+    /// that had exported a scratch QUERN_STATE_DIR, each channel click wrote
+    /// the scratch config.json, exited 0, and the next poll read the real one
+    /// and put the picker back. A relaunch from the Dock "fixed" it.
+    static func stateDir(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        if let dir = environment["QUERN_STATE_DIR"], !dir.isEmpty {
+            return URL(fileURLWithPath: dir, isDirectory: true)
+        }
+        return home.appendingPathComponent(".quern", isDirectory: true)
+    }
 
     /// Called on the main thread whenever a fresh snapshot is read.
     var onChange: ((QuernSnapshot) -> Void)?
