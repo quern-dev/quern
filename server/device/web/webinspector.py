@@ -33,6 +33,7 @@ import os
 import re
 import socket
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -522,7 +523,7 @@ class SimulatorWebInspector:
 
     async def _forward(
         self, application_id: str, page_id: int, method: str, params: dict | None = None,
-        timeout: float | None = None,
+        timeout: float | None = None, on_event: Callable[[dict], None] | None = None,
     ) -> dict | None:
         """Send one WebKit protocol message to a page and wait for its reply.
 
@@ -589,6 +590,11 @@ class SimulatorWebInspector:
                     continue
                 if unwrapped and unwrapped.get("id") == inner_id:
                     return unwrapped
+                # An event the page sent while the reply was on its way: a
+                # caller that asked for them gets it, rather than its being
+                # dropped with the rest (#714).
+                if on_event is not None and unwrapped and "method" in unwrapped:
+                    on_event(unwrapped)
         return None
 
     async def _next_page_message(self, page_id: int, deadline: float) -> dict | None:
@@ -674,6 +680,23 @@ class SimulatorWebInspector:
         `{"result": ...}` or `{"error": ...}` -- or None when it did not
         answer within `timeout` (default: the connection's)."""
         return await self._forward(application_id, page_id, method, params, timeout)
+
+    async def console_history(self, application_id: str, page_id: int,
+                              timeout: float | None = None) -> list[dict] | None:
+        """The page's recent console messages, as WebKit replays them when the
+        Console domain is enabled -- before it answers the enable (#714). None
+        when the page did not answer. The domain is disabled again after, so
+        nothing streams in between reads."""
+        from server.device.web.console import Collector
+
+        collector = Collector()
+        reply = await self._forward(application_id, page_id, "Console.enable", {},
+                                    timeout, on_event=collector.on_event)
+        if reply is None:
+            return None
+        with contextlib.suppress(Exception):
+            await self._forward(application_id, page_id, "Console.disable", {}, timeout)
+        return collector.messages
 
     async def on_screen(self, application_id: str, page_id: int) -> bool:
         """Whether the page says it is visible, within `VISIBLE_S`.
