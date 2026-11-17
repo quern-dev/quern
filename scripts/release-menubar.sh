@@ -151,7 +151,7 @@ echo "==> Staged: $STAGED_APP (v$(app_version "$STAGED_APP"))"
 # simulator preview and recorded video. Built from this checkout, which is the
 # candidate: --publish checks they match the tag's sources before shipping.
 echo "==> Building the pre-built screen mirror and quern-media"
-"$REPO_ROOT/scripts/build-prebuilt.sh" "$DIST/prebuilt"
+"$REPO_ROOT/scripts/build-prebuilt.sh" "$DIST/prebuilt" "$VERSION"
 
 if [[ "$MODE" == "app" ]]; then
   echo

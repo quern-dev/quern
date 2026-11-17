@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A release ships the screen mirror and quern-media pre-built, signed and notarized (#662, #663).** Both were compiled on the user's Mac, so a Mac without the developer tools had no USB iPhone mirroring, simulator preview or recorded video. Now `scripts/build-prebuilt.sh`, run by `release-menubar.sh --app-only`, builds `Quern Preview.app` and `quern-media` universal at macOS 14 and stamps each with its source digest. It signs both with the hardened runtime and the camera entitlement, then notarizes them. `--publish` puts them in the tarball as `prebuilt/`, and refuses unless quern itself, run from the staged tree, takes them as current for the tag's sources. Setup and the server's start install a shipped copy when its stamp matches the sources, even where the tools are there: its signature, which the camera grant is keyed to, then stays the same across Macs and updates. A git checkout ships none and compiles as before. Measured with the developer tools treated as missing: setup installed both, still signed and stapled, and a second run found them up to date. The app is macOS 14 and later, not the menu bar's 13: it finds iPhones with AVCaptureDevice's `.external` type, which is 14 and later.
+
 ## [0.26.0-beta.5] - 2026-11-16
 
 ### Changed

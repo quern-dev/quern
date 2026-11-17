@@ -776,11 +776,15 @@ def build_preview_app() -> CheckResult:
             detail="Open Screen Mirror from the menu bar.",
         )
     reopened = " -- reopened the running window" if refreshed.relaunched else ""
+    done = "Up to date"
+    if refreshed.rebuilt:
+        # Nothing compiled when the release's signed copy was put in place (#662).
+        done = ("Installed the release's signed copy"
+                if preview.is_sealed(preview.bundle_paths()[0]) else "Rebuilt")
     return CheckResult(
         name=name,
         status=CheckStatus.OK,
-        message=("Rebuilt" if refreshed.rebuilt else "Up to date")
-        + f" (available from the menu bar){reopened}",
+        message=f"{done} (available from the menu bar){reopened}",
     )
 
 
@@ -844,6 +848,8 @@ def build_simulator_preview_engine() -> CheckResult:
         status=CheckStatus.OK,
         message=("Up to date"
                  if before == media_engine.file_identity(media_engine.binary_path())
+                 # Taken before any build, so a shipped copy here is what went in.
+                 else "Installed the release's signed copy" if media_engine.shipped_current()
                  else "Built")
         + " (simulator preview and recorded video)",
     )
@@ -1967,9 +1973,9 @@ def _no_developer_tools() -> CheckResult:
     27+ was set up in full. On an Intel Mac Homebrew needs the tools to
     install bottles, so there they are still required (CodeRabbit on #711).
 
-    What does need the tools says so in its own line, and only there: today
-    Screen Mirror and the simulator preview, which are built from source.
-    Naming them here would go stale when they ship pre-built (#662, #663).
+    What does need the tools says so in its own line, and only there:
+    Screen Mirror and the simulator preview in a git checkout, which builds
+    them from source. A release ships them pre-built (#662, #663).
     """
     if not _is_apple_silicon():
         return CheckResult(

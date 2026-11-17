@@ -460,15 +460,23 @@ def build_preview_bundle() -> Path:
     return binary
 
 
-def stage_release_bundle(out_dir: Path, binary: Path) -> Path:
+def stage_release_bundle(out_dir: Path, binary: Path, version: str | None = None) -> Path:
     """Make the bundle a release ships (#662): `binary`, built for release,
     in a bundle stamped exactly as a local build of these sources would be,
     so every Mac with the same sources takes it as current. Called by
     `scripts/build-prebuilt.sh` before signing, since the signature covers the
-    Info.plist."""
+    Info.plist. `version` is the release's: the cut builds this before the
+    version bump, so the sources would still say the previous one."""
     bundle = out_dir / APP_BUNDLE_NAME
     shutil.rmtree(bundle, ignore_errors=True)
     write_app_bundle(bundle, expected_digest())
+    if version:
+        plist = bundle / "Contents" / "Info.plist"
+        with plist.open("rb") as f:
+            info = plistlib.load(f)
+        info["CFBundleShortVersionString"] = version
+        with plist.open("wb") as f:
+            plistlib.dump(info, f)
     executable = bundle / "Contents" / "MacOS" / BINARY_NAME
     shutil.copy2(binary, executable)
     executable.chmod(0o755)

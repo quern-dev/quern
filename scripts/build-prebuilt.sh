@@ -3,7 +3,10 @@
 # ships pre-built (#662, #663), so a Mac without the developer tools still gets
 # USB iPhone mirroring, simulator preview and recorded video.
 #
-#   scripts/build-prebuilt.sh <out-dir>
+#   scripts/build-prebuilt.sh <out-dir> [version]
+#
+# <version>, bare (0.27.0-beta.1), is what the screen mirror's About panel says;
+# the release cut builds this before its version bump. Default: the sources'.
 #
 # Leaves in <out-dir>:
 #   Quern Preview.app      universal, macOS 13+, stamped with its source digest,
@@ -23,7 +26,8 @@
 #                      (default: <repo>/.venv/bin/python)
 set -euo pipefail
 
-OUT="${1:?usage: build-prebuilt.sh <out-dir>}"
+OUT="${1:?usage: build-prebuilt.sh <out-dir> [version]}"
+VERSION="${2:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
@@ -67,7 +71,8 @@ lipo -create -output "$WORK/ios-preview" "$WORK/ios-preview-arm64" "$WORK/ios-pr
 quern_py "
 from pathlib import Path
 from server.device.media import preview
-preview.stage_release_bundle(Path('''$OUT'''), Path('''$WORK/ios-preview'''))"
+preview.stage_release_bundle(Path('''$OUT'''), Path('''$WORK/ios-preview'''),
+                             '''$VERSION''' or None)"
 APP="$OUT/Quern Preview.app"
 
 echo "==> Building quern-media (universal)"

@@ -154,9 +154,10 @@ dead item.
 device's own proportions, open when you plug a phone in, and close when you
 unplug it. See [Live Video Preview](ios-preview.md) for the detail.
 
-This item is hidden if the screen-mirror app could not be built, which happens
-when Xcode Command Line Tools are missing. `quern setup` will tell you, and
-offer to open the installer.
+A release install ships the screen-mirror app pre-built and signed, so it
+needs no developer tools. A git checkout builds it from source, and there the
+item is hidden if it could not be built, which happens when Xcode Command Line
+Tools are missing. `quern setup` will tell you, and offer to open the installer.
 
 **Settings.** Things you would otherwise reach for the CLI to change.
 

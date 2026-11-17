@@ -326,7 +326,15 @@ NOTARY_PROFILE="your-notarytool-profile" \
 ```
 
 That leaves a signed, notarized `Quern.app` in `dist/`, and prints the exact
-`--publish` command to run at step 6.
+`--publish` command to run at step 6. It also builds the screen mirror and
+quern-media pre-built (`scripts/build-prebuilt.sh`, #662/#663) into
+`dist/prebuilt/`, signed with the camera entitlement and notarized, so the
+tarball carries them for Macs without the developer tools. That step needs
+quern's Python (`PYTHON`, default `.venv/bin/python`; in a worktree, link the
+primary's `.venv` first). Step 6 refuses to publish copies that are not of the
+tag's sources: a source change between this step and the tag means running it
+again. The version bump is not one -- the digest leaves the version out, and
+the app is stamped with the version given here.
 
 **Step 0b. Bump the version first, then rehearse** — *after* step 1's edits are
 committed, and before the tag in step 2:
