@@ -18,7 +18,6 @@ wherever it happens (`IMAGE_SOURCE`).
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import functools
 import logging
 import time
@@ -171,36 +170,64 @@ async def mount_image(udid: str, os_version: str) -> None:
     """Mount the developer disk image with pymobiledevice3's auto-mount
     (`IMAGE_SOURCE`): over the phone's tunnel on iOS 17 and later, which
     need it for the image, and over USB lockdown before that, where there is
-    no tunnel. Raises DeviceError when it cannot."""
-    from pymobiledevice3.remote.remote_service_discovery import RemoteServiceDiscoveryService
-    from pymobiledevice3.services.mobile_image_mounter import auto_mount
+    no tunnel. Raises DeviceError when it cannot.
 
-    from server.device.performance import _device_address
+    On a worker thread with its own event loop: auto-mount downloads and
+    writes the image synchronously, which on the server's loop would hold
+    every other request, and which no deadline could interrupt (CodeRabbit
+    on #711). The deadline is kept here; a mount past it is left to finish
+    on its thread, and the caller is told it did not.
+    """
     from server.models import DeviceError
 
-    rsd = None
     try:
         async with asyncio.timeout(MOUNT_TIMEOUT_S):
-            if _major(os_version) >= 17:
-                rsd = RemoteServiceDiscoveryService(await _device_address(udid))
-                await rsd.connect()
-                await auto_mount(rsd)
-            else:
-                await auto_mount(await _lockdown(udid))
+            await asyncio.to_thread(asyncio.run, _mount(udid, os_version))
     except DeviceError:
         raise
     except TimeoutError as e:
         raise DeviceError(f"mounting the developer disk image on {udid[:8]} took over "
                           f"{MOUNT_TIMEOUT_S:.0f} s", tool="pymobiledevice3") from e
     except Exception as e:  # noqa: BLE001 -- pymobiledevice3 raises its own kinds
+        if already_mounted(e):
+            return
         raise DeviceError(f"mounting the developer disk image on {udid[:8]} failed: {e}",
                           tool="pymobiledevice3") from e
+
+
+async def _mount(udid: str, os_version: str) -> None:
+    """The mount itself, on the worker's own loop: every connection it
+    makes is made there."""
+    from pymobiledevice3.remote.remote_service_discovery import RemoteServiceDiscoveryService
+    from pymobiledevice3.services.mobile_image_mounter import auto_mount
+
+    from server.device.performance import _device_address
+
+    if _major(os_version) < 17:
+        await auto_mount(await _lockdown(udid))
+        return
+    rsd = RemoteServiceDiscoveryService(await _device_address(udid))
+    try:
+        await rsd.connect()
+        await auto_mount(rsd)
     finally:
-        if rsd is not None:
-            try:
-                await rsd.close()
-            except Exception:  # noqa: BLE001
-                pass
+        try:
+            await rsd.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def already_mounted(error: BaseException) -> bool:
+    """pymobiledevice3's AlreadyMountedError, here or among its causes: a
+    mount another call made first, which is the phone being ready."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if type(current).__name__ == "AlreadyMountedError":
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 async def reveal_developer_mode(udid: str) -> None:
@@ -215,9 +242,15 @@ async def reveal_developer_mode(udid: str) -> None:
 
 logger = logging.getLogger(__name__)
 
-#: Said on the response of the call that mounted the image: see `noted`.
-MOUNTED: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "developer_image_mounted", default=None)
+#: Per phone, the mount a call made, and when: taken by the response of a
+#: call on that phone (`take_note`). Per phone rather than a ContextVar,
+#: which a child task -- `tap_element` runs its work in one -- sets for
+#: itself alone (CodeRabbit on #711).
+_notes: dict[str, float] = {}
+#: A note no response took within this long is not someone else's to take.
+NOTE_TTL_S = 120.0
+MOUNTED_NOTE = (f"The phone had no developer disk image, which this needs, so quern "
+                f"mounted it: {IMAGE_SOURCE}.")
 #: A phone whose mount failed is not asked again for this long, so every
 #: call does not wait on a mount that cannot work.
 RETRY_AFTER_S = 60.0
@@ -238,6 +271,8 @@ async def ensure_image(udid: str) -> bool:
         try:
             async with asyncio.timeout(READ_TIMEOUT_S):
                 version = (await _lockdown(udid)).product_version
+            if await _image_is_mounted(udid, version):
+                return True                 # another call mounted it meanwhile
             await mount_image(udid, version)
         except Exception as e:  # noqa: BLE001 -- the call's own error stands
             _failed[udid] = time.monotonic()
@@ -246,23 +281,32 @@ async def ensure_image(udid: str) -> bool:
             return False
         _failed.pop(udid, None)
         logger.info("[coredevice] mounted the developer disk image on %s", udid[:8])
-        MOUNTED.set(f"The phone had no developer disk image, which this needs, so quern "
-                    f"mounted it: {IMAGE_SOURCE}.")
+        _notes[udid] = time.monotonic()
         return True
 
 
+def take_note(udid: str | None) -> str | None:
+    """`MOUNTED_NOTE` when a call on this phone just mounted the image, once."""
+    when = _notes.pop(udid, None) if udid else None
+    if when is None or time.monotonic() - when > NOTE_TTL_S:
+        return None
+    return MOUNTED_NOTE
+
+
+async def _image_is_mounted(udid: str, version: str) -> bool:
+    """Asked again under the lock: a call that waited for another's mount
+    finds it done, rather than mounting over it."""
+    state = await readiness(udid)
+    return bool(state.image_mounted)
+
+
 def noted(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Put `MOUNTED` on a route's dict response as `developer_image`, when
-    the call mounted the image."""
+    """Put `take_note` on a route's dict response as `developer_image`, for
+    the phone the response names."""
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        token = MOUNTED.set(None)
-        try:
-            result = await fn(*args, **kwargs)
-            note = MOUNTED.get()
-            if note and isinstance(result, dict):
-                result.setdefault("developer_image", note)
-            return result
-        finally:
-            MOUNTED.reset(token)
+        result = await fn(*args, **kwargs)
+        if isinstance(result, dict) and (note := take_note(result.get("udid"))):
+            result.setdefault("developer_image", note)
+        return result
     return wrapper

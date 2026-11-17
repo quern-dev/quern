@@ -61,12 +61,12 @@ def _with_input_warning(
     nowhere first because the input services were taken, so the advisory is
     the likelier explanation and must still be read. Not added twice.
     """
-    from server.device.ios.phone_readiness import MOUNTED
-
-    if (note := MOUNTED.get()) and "developer_image" not in payload:
-        payload["developer_image"] = note        # the image this call mounted (#664)
     if not udid:
         return payload
+    from server.device.ios.phone_readiness import take_note
+
+    if (note := take_note(udid)) and "developer_image" not in payload:
+        payload["developer_image"] = note        # the image this call mounted (#664)
     warning = controller.input_warning(udid)
     if isinstance(warning, str) and warning and warning not in (payload.get("warning") or ""):
         # Added to a warning already there -- a target still moving (#529) --

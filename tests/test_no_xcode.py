@@ -9,6 +9,7 @@ pymobiledevice3 instead, which is what devicectl talks to.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import signal
 from unittest.mock import AsyncMock
@@ -759,7 +760,9 @@ class TestTrustAndDeadlines:
         from server.device.ios import phone_readiness as r
 
         async def hang(provider):
-            await asyncio.sleep(60)
+            # Longer than the deadline, short enough not to hold the test run
+            # open: a mount past its deadline finishes on its own thread.
+            await asyncio.sleep(0.5)
         monkeypatch.setattr("pymobiledevice3.services.mobile_image_mounter.auto_mount", hang)
         monkeypatch.setattr(r, "_lockdown", AsyncMock(return_value="lockdown"))
         monkeypatch.setattr(r, "MOUNT_TIMEOUT_S", 0.05)
@@ -787,7 +790,12 @@ class TestMountingOnDemand:
                 raise DeviceError("no tunnel", tool="pymobiledevice3")
         monkeypatch.setattr(phone_readiness, "mount_image", mount)
         monkeypatch.setattr(phone_readiness, "_failed", {})
+        monkeypatch.setattr(phone_readiness, "_notes", {})
         monkeypatch.setattr(phone_readiness, "ensure_image", ENSURE_IMAGE)
+
+        async def mounted_yet(udid, version):
+            return bool(mounts) and not fails
+        monkeypatch.setattr(phone_readiness, "_image_is_mounted", mounted_yet)
         return mounts
 
     async def test_input_mounts_it_and_goes_over_hid(self, monkeypatch):
@@ -808,7 +816,9 @@ class TestMountingOnDemand:
 
         @phone_readiness.noted
         async def route():
-            return {"status": "ok", "via": await cdi._or_fallback(PHONE, "tap", None, wda)}
+            # In a child task, as tap_element runs its work (CodeRabbit on #711).
+            via = await asyncio.create_task(cdi._or_fallback(PHONE, "tap", None, wda))
+            return {"status": "ok", "udid": PHONE, "via": via}
 
         result = await route()
 
@@ -839,8 +849,56 @@ class TestMountingOnDemand:
         assert await phone_readiness.ensure_image(PHONE) is False
         assert len(mounts) == 1
 
-    async def test_without_a_mount_nothing_is_noted(self):
+    async def test_without_a_mount_nothing_is_noted(self, monkeypatch):
+        monkeypatch.setattr(phone_readiness, "_notes", {})
+
         @phone_readiness.noted
         async def route():
-            return {"status": "ok"}
-        assert await route() == {"status": "ok"}
+            return {"status": "ok", "udid": PHONE}
+        assert await route() == {"status": "ok", "udid": PHONE}
+
+    async def test_two_calls_that_find_it_missing_mount_it_once(self, monkeypatch):
+        mounts = self._mountable(monkeypatch)
+        results = await asyncio.gather(phone_readiness.ensure_image(PHONE),
+                                       phone_readiness.ensure_image(PHONE))
+        assert results == [True, True] and len(mounts) == 1
+        assert phone_readiness.take_note(PHONE) is not None      # said once
+        assert phone_readiness.take_note(PHONE) is None
+
+    async def test_already_mounted_is_ready(self, monkeypatch):
+        class AlreadyMountedError(Exception):
+            pass
+
+        def mount(udid, version):
+            raise RuntimeError("wrapped") from AlreadyMountedError("there already")
+        monkeypatch.setattr(phone_readiness, "_mount", lambda u, v: _raising(mount, u, v))
+        await phone_readiness.mount_image(PHONE, "27.2.1")        # no raise
+
+    async def test_a_slow_mount_does_not_hold_the_server(self, monkeypatch):
+        """auto-mount downloads synchronously: on a thread of its own."""
+        import time as clock
+
+        async def slow(udid, version):
+            clock.sleep(0.3)                                        # blocking, as its I/O is
+        monkeypatch.setattr(phone_readiness, "_mount", slow)
+        ticks = []
+
+        async def ticker():
+            for _ in range(5):
+                ticks.append(1)
+                await asyncio.sleep(0.02)
+        await asyncio.gather(phone_readiness.mount_image(PHONE, "27.2.1"), ticker())
+        assert len(ticks) == 5
+
+    async def test_the_input_warning_takes_the_note_by_phone(self, monkeypatch):
+        from server.api.device_ui import _with_input_warning
+
+        monkeypatch.setattr(phone_readiness, "_notes", {PHONE: phone_readiness.time.monotonic()})
+        ctrl = type("C", (), {"input_warning": lambda self, udid: None})()
+        payload = _with_input_warning(ctrl, PHONE, {"status": "ok"})
+        assert "mounted it" in payload["developer_image"]
+        assert "developer_image" not in _with_input_warning(ctrl, PHONE, {"status": "ok"})
+
+
+async def _raising(fn, *a):
+    fn(*a)
