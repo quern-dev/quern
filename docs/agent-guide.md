@@ -58,6 +58,7 @@ From there, use the right tool for your task. If any tool fails with a connectio
 | Fake a response | `set_mock`, `update_mock` | `quern://guide/network/mocks` |
 | Hold or change a live request | `set_intercept`, `list_held_flows`, `release_flow`, `clear_intercept` | `quern://guide/network/intercept` |
 | Read app logs | `get_log_summary`, `query_logs`, `tail_logs`, `get_errors` | `quern://guide/logs/reading` |
+| Read a web page's console and JS errors | `get_web_console` | `quern://guide/logs/web-console` |
 | See what an action caused | `get_trace` | `quern://guide/logs/trace` |
 | Investigate a crash | `get_latest_crash`, then logs and flows around it | `quern://guide/logs/crashes` |
 | Keep a whole run | `start_recording` / `stop_recording` | `quern://guide/logs/bug-reports` |
