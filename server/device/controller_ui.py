@@ -733,6 +733,31 @@ def _header_bottom(elements: list[UIElement], clearance: float, screen_height: f
     return min(edge, screen_height * 0.4) if edge > clearance else 0.0
 
 
+def _footer_top(elements: list[UIElement], screen_height: float, screen_width: float) -> float:
+    """Where a bar along the bottom -- a tab bar, a toolbar -- begins, or the
+    screen's height when nothing says there is one (#709).
+
+    The push has no TabBar or Toolbar: its tab items are Buttons. What tells
+    a bar from a list's last rows, which can be Buttons too, is two or more
+    narrow controls side by side at one height in the bottom 15% of the
+    screen; a row spans the width. Measured on the probe's hosted tab bar,
+    iPhone 11: five Buttons 79x54 at y=817 on an 896 pt screen. Without this a
+    sweep took "Row 40" at y=831 for in view, and the tap the obstruction
+    check then refused was under the Scroll tab.
+    """
+    low = screen_height * 0.85
+    narrow = screen_width * 0.5
+    rows: dict[int, list[UIElement]] = {}
+    for e in elements:
+        f = e.frame
+        if (f and e.type == "Button" and f["y"] >= low and f["width"] < narrow
+                and f["height"] < screen_height * 0.15):
+            rows.setdefault(round(f["y"]), []).append(e)
+    tops = [y for y, row in rows.items()
+            if len({round(e.frame["x"]) for e in row}) >= 2]
+    return float(min(tops)) if tops else screen_height
+
+
 _INDEXED = re.compile(r"(.*?)(\d+)")
 
 
@@ -2122,7 +2147,10 @@ class DeviceControllerUI:
         screen_width = screen_width or 393
 
         top_safe = self._TOP_SAFE_INSET
-        bottom_safe = screen_height - self._HOME_INDICATOR_INSET
+        # Above the home indicator, and above a bar along the bottom where the
+        # screen shows one: a row under a tab bar is no row to tap (#709).
+        bottom_safe = min(screen_height - self._HOME_INDICATOR_INSET,
+                          _footer_top(screen_els, screen_height, screen_width))
         mid_x = screen_width / 2
         # Swipe endpoints: near the bottom (y_far) and near the top (y_near).
         # Swiping y_far -> y_near reveals content below; y_near -> y_far reveals

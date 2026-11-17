@@ -1028,9 +1028,11 @@ class PushedListScreen(ListScreen):
     its own drag speed and hold, and every read is asked of the push."""
 
     def __init__(self, *, merged: str = "", fails_at: int | None = None,
-                 header: list[UIElement] | None = None, **kw):
+                 header: list[UIElement] | None = None,
+                 footer: list[UIElement] | None = None, **kw):
         super().__init__(**kw)
         self.header = header or []      # the bar's controls, as the push lists them
+        self.footer = footer or []      # a tab bar's items: Buttons, in the push
         self.durations: list[float] = []
         self.reads: list[dict] = []
         self.merged = merged            # appended to each row's label: ", Detail"
@@ -1071,7 +1073,8 @@ class PushedListScreen(ListScreen):
         if k.get("whole_screen"):
             # A pushed tree's first element is the Application, the screen.
             els = [UIElement(type="Application", identifier="", label="App",
-                             frame={"x": 0, "y": 0, **SCREEN}), *self.header, *els]
+                             frame={"x": 0, "y": 0, **SCREEN}), *self.header, *els,
+                   *self.footer]
         return els, udid
 
 
@@ -1266,3 +1269,41 @@ async def test_a_pushed_sweeps_first_read_is_a_lookup():
 
     assert screen.reads[0].get("whole_screen") is True
     assert screen.reads[0].get("lookup") is True
+
+
+
+# -- a bar along the bottom (#709) ----------------------------------------------
+
+#: The probe's hosted tab bar as the push lists it: five Buttons side by side.
+TAB_BAR = [UIElement(type="Button", identifier=f"tab_{i}", label=f"Tab {i}",
+                     frame={"x": 3 + 78 * i, "y": 769, "width": 78, "height": 49})
+           for i in range(5)]
+
+
+def test_a_row_under_the_tab_bar_is_not_in_view():
+    """Row 15's tap point is y=782, inside the bar at 769 and above the home
+    indicator: taken as in view, the tap went to the tab (#709)."""
+    from server.device.controller_ui import _footer_top
+
+    assert _footer_top(TAB_BAR, SCREEN["height"], SCREEN["width"]) == 769.0
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_sweep_brings_a_row_clear_of_the_tab_bar():
+    screen = PushedListScreen(footer=TAB_BAR)
+    found = await _sweep(screen, "row_15", pushed=True)
+    assert found is not None and found.identifier == "row_15"
+    centre = found.frame["y"] + found.frame["height"] / 2
+    assert centre < 769, f"row_15 left under the tab bar at {centre}"
+
+
+def test_a_list_s_last_rows_are_no_bar():
+    """Full-width Buttons, one per height, as Settings' cells are."""
+    from server.device.controller_ui import _footer_top
+
+    cells = [UIElement(type="Button", identifier=f"cell_{i}", label="",
+                       frame={"x": 0, "y": 760 + 44 * i, "width": 393, "height": 44})
+             for i in range(2)]
+    assert _footer_top(cells, SCREEN["height"], SCREEN["width"]) == SCREEN["height"]
+    one = [TAB_BAR[0]]                        # a lone button is no bar either
+    assert _footer_top(one, SCREEN["height"], SCREEN["width"]) == SCREEN["height"]
