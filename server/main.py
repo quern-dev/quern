@@ -1865,12 +1865,18 @@ def _cmd_status(args: argparse.Namespace) -> None:
     state = read_state()
     if not state:
         print("No server running")
+        # Owed upgrades are not the server's: said whether or not it runs
+        # (CodeRabbit on #726).
+        for line in _pending_tool_lines():
+            print(line)
         sys.exit(1)
 
     port = state.get("server_port", DEFAULT_SERVER_PORT)
     if not is_server_healthy(port):
         print("Server state file exists but server is not responding")
         print("  State file may be stale. Run 'quern-debug-server stop' to clean up.")
+        for line in _pending_tool_lines():
+            print(line)
         sys.exit(1)
 
     # Calculate uptime
@@ -1912,14 +1918,16 @@ def _cmd_status(args: argparse.Namespace) -> None:
 
 
 def _pending_tool_lines() -> list[str]:
-    """What an update could not finish without a terminal (#725), as status
-    lines: a required upgrade that needs sudo, with the command to run."""
+    """The required upgrades an update could not finish (#725), as status
+    lines with the command to run: one that needs sudo and had no terminal,
+    or one that ran and is still below its floor."""
     from server.lifecycle.updater import read_pending
 
     lines = []
     for item in read_pending():
         name = f"{item.get('name')} ({item.get('role')})"
-        lines.append(f"  Needs a terminal: {name} {item.get('current')} is "
+        label = "Needs a terminal" if item.get("needs_root") else "Still required"
+        lines.append(f"  {label}: {name} {item.get('current')} is "
                      f"{item.get('reason') or 'out of date'}")
         command = " ".join(item.get("command") or [])
         if command:

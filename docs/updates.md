@@ -46,9 +46,12 @@ without `--tools` -- including one started from the menu bar, which never passes
 cannot fall behind quern's own. When that upgrade needs `sudo` -- a `pipx --global`
 install, which setup chooses when your home is on an external volume -- and the update
 has no terminal to ask for the password on, it is left undone and recorded in
-`~/.quern/pending-tool-upgrades.json`. `quern status` then says what is left and the
-command to run. The record clears itself the next time an update finds nothing left,
-however the work got done.
+`~/.quern/pending-tool-upgrades.json`. So is a required upgrade that failed, or that
+pipx reported done while the version did not move (a pinned package) -- the update
+checks the versions again afterwards rather than trusting exit codes. `quern status`
+says what is left and the command to run, whether or not the server is running. The
+record clears itself the next time an update finds nothing left, however the work got
+done.
 
 Merely newer versions stay opt-in: reporting is the default because a `pipx` or
 `brew` upgrade changes state for every other consumer on the machine, not just quern. Tools that arrived as a dependency of

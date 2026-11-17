@@ -773,14 +773,12 @@ def _report_tool_updates(apply: bool = False) -> bool:
     required = [u for u in todo if u.action == "upgrade_required"]
     run_now = todo if apply else required
     if not offer:
-        _record_pending([])
-        return True
+        return _record_pending([])
     print(offer)
     if not apply and len(run_now) < len(todo):
         print("\n  Run `quern update --tools` to apply the rest.")
     if not run_now:
-        _record_pending([])
-        return True
+        return _record_pending([])
 
     failures: list[str] = []
     #: Upgrades that were never attempted. Still unfinished work, so it still
@@ -789,8 +787,6 @@ def _report_tool_updates(apply: bool = False) -> bool:
     #: upgrade(s) failed" about something never tried sends the reader looking
     #: for a broken tool instead of opening a terminal.
     deferred: list[str] = []
-    #: Required upgrades left for a terminal, kept for whoever looks next.
-    pending: list = []
     for update in run_now:
         if update.needs_root and not _can_ask_for_a_password():
             # sudo with nowhere to prompt either hangs or fails with a message
@@ -800,8 +796,6 @@ def _report_tool_updates(apply: bool = False) -> bool:
             for line in run_it_yourself(update.command):
                 print(f"  {line}")
             deferred.append(update.name)
-            if update.action == "upgrade_required":
-                pending.append(update)
             continue
         print(f"\nUpgrading {update.name}...")
         if update.needs_root:
@@ -816,12 +810,32 @@ def _report_tool_updates(apply: bool = False) -> bool:
             print(f"  failed: {' '.join(update.command)} exited {result.returncode}")
             failures.append(update.name)
 
+    # What is still required now, asked again rather than inferred from exit
+    # codes: `pipx upgrade` exits 0 for a pinned package it skipped, and a
+    # failed or deferred upgrade is still owed (CodeRabbit on #726). Whatever
+    # is still below its floor is recorded, however it came to be.
+    try:
+        after = asyncio.run(gather())
+        still = [u for u in after if u.action == "upgrade_required"]
+    except Exception:  # noqa: BLE001 -- a check that cannot run must not clear the record
+        still = [u for u in required if u.name in deferred or u.name in failures]
+    deferred_names = set(deferred)
+    for update in still:
+        if update.name not in deferred_names and update.name not in failures:
+            # Ran, said it worked, and is still below the floor.
+            print(f"\n{update.name} is still {update.current}, below the "
+                  f"{update.floor} quern requires, after its upgrade.")
+            failures.append(update.name)
     if failures:
         print(f"\n{len(failures)} tool upgrade(s) failed: {', '.join(failures)}")
     if deferred:
         print(f"\n{len(deferred)} still to do, needing a terminal: "
               f"{', '.join(deferred)}")
-    _record_pending(pending)
+    if not _record_pending(still):
+        # Owed work that could not be written down would be lost: the update
+        # has to say so itself (CodeRabbit on #726).
+        print(f"\nCould not record the upgrades still owed in {PENDING_FILE}.")
+        failures.append("the pending-upgrade record")
     if not apply:
         # Nobody asked for tools: a required upgrade that failed is still a
         # failed update, but one left for a terminal is recorded, not failed --
@@ -839,14 +853,14 @@ def _report_tool_updates(apply: bool = False) -> bool:
 PENDING_FILE = CONFIG_DIR / "pending-tool-upgrades.json"
 
 
-def _record_pending(updates: list) -> None:
-    """Write what is left for a terminal, or remove the file when nothing is.
-    Rewritten by every check, so it clears itself once the work is done --
-    however it was done. Best-effort, like the result file."""
+def _record_pending(updates: list) -> bool:
+    """Write the required upgrades still owed, or remove the file when none
+    are. Rewritten by every check, so it clears itself once the work is done
+    -- however it was done. False when the record could not be written."""
     try:
         if not updates:
             PENDING_FILE.unlink(missing_ok=True)
-            return
+            return True
         PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = PENDING_FILE.with_name(f".{PENDING_FILE.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps({
@@ -858,8 +872,9 @@ def _record_pending(updates: list) -> None:
             } for u in updates],
         }, indent=2))
         os.replace(tmp, PENDING_FILE)
+        return True
     except OSError:
-        pass
+        return False
 
 
 def read_pending() -> list[dict]:
