@@ -1955,35 +1955,39 @@ def _diagnose_developer_dir() -> str | None:
     )
 
 
+def _no_developer_tools() -> CheckResult:
+    """No Command Line Tools, and no Xcode: skipped, not failed (#664 phase
+    5). Measured on a Mac with neither, Homebrew installed everything setup
+    asks of it from bottles, and an iPhone on iOS 27+ was set up in full.
+
+    What does need the tools says so in its own line, and only there: today
+    Screen Mirror and the simulator preview, which are built from source.
+    Naming them here would go stale when they ship pre-built (#662, #663).
+    """
+    return CheckResult(
+        name="Xcode CLI Tools",
+        status=CheckStatus.SKIPPED,
+        message="Not installed",
+        detail=(
+            "Anything below that needs them says so (install with: xcode-select "
+            "--install). iOS simulators need the full Xcode. iPhones on iOS 27 and "
+            "later, and Android, need neither."
+        ),
+    )
+
+
 def check_xcode_cli_tools() -> CheckResult:
     """Check for Xcode command line tools (provides xcrun, simctl)."""
     xcrun = _which("xcrun")
     if not xcrun:
-        return CheckResult(
-            name="Xcode CLI Tools",
-            status=CheckStatus.MISSING,
-            message="Not installed",
-            detail="Install with: xcode-select --install",
-        )
+        return _no_developer_tools()
     # /usr/bin/xcrun ships on every modern macOS as an install-prompt stub
     # even when no CLT is present, so `which xcrun` returning a path isn't
     # proof anything works. Gate on xcode-select reporting an actual
     # developer dir before invoking xcrun — otherwise we'd trigger the
     # macOS install dialog here on Android-only machines.
     if not xcode_available():
-        # Required, though neither an iPhone on iOS 27+ nor Android needs the
-        # tools themselves: Homebrew does, and setup installs Python, pipx and
-        # pymobiledevice3 with it.
-        return CheckResult(
-            name="Xcode CLI Tools",
-            status=CheckStatus.MISSING,
-            message="Not installed (no developer directory configured)",
-            detail=(
-                "Needed by Homebrew, which setup installs Python and pymobiledevice3 "
-                "with. Install with: xcode-select --install, then run setup again. "
-                "iOS simulators need the full Xcode as well."
-            ),
-        )
+        return _no_developer_tools()
     # Verify simctl works
     rc, stdout, _ = _run(["xcrun", "simctl", "help"])
     if rc == 0:

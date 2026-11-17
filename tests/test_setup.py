@@ -511,8 +511,20 @@ class TestCheckXcodeCliTools:
     def test_not_installed(self):
         with _patch_which({"xcrun": None}):
             result = check_xcode_cli_tools()
-            assert result.status == CheckStatus.MISSING
+            assert result.status == CheckStatus.SKIPPED
             assert "xcode-select" in result.detail
+
+    def test_no_developer_directory_is_not_a_failure(self):
+        """#664 phase 5: measured on a Mac with no developer tools, Homebrew
+        installed everything from bottles and an iPhone was set up in full;
+        the check alone failed setup."""
+        with (
+            _patch_which({"xcrun": "/usr/bin/xcrun"}),
+            patch("server.lifecycle.setup.xcode_available", return_value=False),
+        ):
+            result = check_xcode_cli_tools()
+        assert result.status == CheckStatus.SKIPPED
+        assert "iOS 27" in result.detail and "xcode-select --install" in result.detail
 
     def test_xcrun_without_simctl(self):
         def side_effect(cmd, **kwargs):
@@ -1796,7 +1808,8 @@ class TestXcodeGate:
         )
         with patch.object(setup_mod, "_run") as run_mock:
             result = setup_mod.check_xcode_cli_tools()
-        assert result.status.name == "MISSING"
+        # Skipped, not failed, since #664 phase 5 -- but never run either way.
+        assert result.status.name == "SKIPPED"
         assert run_mock.call_count == 0
 
     def test_check_booted_simulators_returns_empty_without_invoking_xcrun(
