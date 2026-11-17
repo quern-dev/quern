@@ -251,6 +251,18 @@ def _wda_available_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_image_mounts(monkeypatch):
+    """Never mount a developer disk image from a test (#664 phase 5): the
+    real `ensure_image` connects to the phone over USB, and a test's UDID can
+    be a real, plugged-in phone's. Tests of it call `ENSURE_IMAGE`."""
+    from server.device.ios import phone_readiness
+
+    async def not_mounted(udid):
+        return False
+    monkeypatch.setattr(phone_readiness, "ensure_image", not_mounted)
+
+
+@pytest.fixture(autouse=True)
 def _default_xcode_available(monkeypatch):
     """Default xcode_available() to True so existing iOS-backend tests work
     regardless of whether the CI runner has Xcode installed. Each consumer

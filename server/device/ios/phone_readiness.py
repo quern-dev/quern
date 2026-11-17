@@ -18,7 +18,13 @@ wherever it happens (`IMAGE_SOURCE`).
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
+import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 IMAGE_SOURCE = (
     "pymobiledevice3 downloads Apple's developer disk image from its "
@@ -29,7 +35,8 @@ IMAGE_SOURCE = (
 #: What to do about a missing image, said where its absence shows.
 NO_IMAGE_FIX = (
     "The phone has no developer disk image mounted, which its HID and app services "
-    "need: `quern doctor --fix` mounts it")
+    "need, and quern could not mount it just now: `quern doctor --fix` tries again "
+    "and says why")
 
 
 def missing_image(error: BaseException) -> bool:
@@ -202,3 +209,60 @@ async def reveal_developer_mode(udid: str) -> None:
     from pymobiledevice3.services.amfi import AmfiService
 
     await AmfiService(await _lockdown(udid)).reveal_developer_mode_option_in_ui()
+
+
+# -- mounting on demand -------------------------------------------------------
+
+logger = logging.getLogger(__name__)
+
+#: Said on the response of the call that mounted the image: see `noted`.
+MOUNTED: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "developer_image_mounted", default=None)
+#: A phone whose mount failed is not asked again for this long, so every
+#: call does not wait on a mount that cannot work.
+RETRY_AFTER_S = 60.0
+_failed: dict[str, float] = {}
+_locks: dict[str, asyncio.Lock] = {}
+
+
+async def ensure_image(udid: str) -> bool:
+    """Mount the developer disk image a call found missing: whether it is
+    mounted now. Measured on an iPhone 11 (iOS 27.2.1): 1 s with the image
+    cached, 2 s downloading it, so the call that needs it waits for it rather
+    than failing. One mount per phone at a time; a failed one is not tried
+    again for `RETRY_AFTER_S`. Said on the call's response (`MOUNTED`)."""
+    lock = _locks.setdefault(udid, asyncio.Lock())
+    async with lock:
+        if time.monotonic() - _failed.get(udid, float("-inf")) < RETRY_AFTER_S:
+            return False
+        try:
+            async with asyncio.timeout(READ_TIMEOUT_S):
+                version = (await _lockdown(udid)).product_version
+            await mount_image(udid, version)
+        except Exception as e:  # noqa: BLE001 -- the call's own error stands
+            _failed[udid] = time.monotonic()
+            logger.warning("[coredevice] could not mount the developer disk image on %s: %s",
+                           udid[:8], e)
+            return False
+        _failed.pop(udid, None)
+        logger.info("[coredevice] mounted the developer disk image on %s", udid[:8])
+        MOUNTED.set(f"The phone had no developer disk image, which this needs, so quern "
+                    f"mounted it: {IMAGE_SOURCE}.")
+        return True
+
+
+def noted(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Put `MOUNTED` on a route's dict response as `developer_image`, when
+    the call mounted the image."""
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        token = MOUNTED.set(None)
+        try:
+            result = await fn(*args, **kwargs)
+            note = MOUNTED.get()
+            if note and isinstance(result, dict):
+                result.setdefault("developer_image", note)
+            return result
+        finally:
+            MOUNTED.reset(token)
+    return wrapper

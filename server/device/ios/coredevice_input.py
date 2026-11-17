@@ -415,9 +415,20 @@ class CoreDeviceInput:
         try:
             await self._send(udid, what, send, needs_screen)
         except NotSent as e:
-            logger.info("[coredevice] %s on %s through WDA: %s", what, udid[:8], e)
-            from server.device.ios.phone_readiness import NO_IMAGE_FIX, missing_image
+            from server.device.ios.phone_readiness import (
+                NO_IMAGE_FIX,
+                ensure_image,
+                missing_image,
+            )
 
+            # HID is the image's: mounted, the same send goes over HID.
+            if missing_image(e) and await ensure_image(udid):
+                try:
+                    await self._send(udid, what, send, needs_screen)
+                    return self.TOOL_NAME
+                except NotSent as again:
+                    e = again
+            logger.info("[coredevice] %s on %s through WDA: %s", what, udid[:8], e)
             try:
                 await fallback()
             except DeviceError as wda:

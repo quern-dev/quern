@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from server.device.controller import DeviceController
+from server.device.ios import phone_readiness
 from server.device.ios.coredevice_apps import CoreDeviceApps
 from server.device.ios.usbmux import UsbmuxBackend
 from server.models import (
@@ -26,6 +27,8 @@ from server.models import (
 )
 
 PHONE = "00008030-000C59623A69802E"
+#: The real `ensure_image`, taken before conftest's fixture replaces it.
+ENSURE_IMAGE = phone_readiness.ensure_image
 SETTINGS = {"bundleIdentifier": "com.apple.Preferences", "name": "Settings",
             "path": "/Applications/Preferences.app", "isFirstParty": True}
 PROBE = {"bundleIdentifier": "com.quern.probe", "name": "Probe", "isFirstParty": False,
@@ -762,3 +765,82 @@ class TestTrustAndDeadlines:
         monkeypatch.setattr(r, "MOUNT_TIMEOUT_S", 0.05)
         with pytest.raises(DeviceError, match="took over"):
             await r.mount_image(PHONE, "16.7")
+
+
+
+class TestMountingOnDemand:
+    """1 s cached, 2 s downloading, measured on an iPhone 11: the call that
+    needs the image mounts it and goes ahead (#664 phase 5)."""
+
+    class DeveloperDiskImageServiceError(Exception):
+        pass
+
+    def _mountable(self, monkeypatch, *, fails=False):
+        class Lockdown:
+            product_version = "27.2.1"
+        monkeypatch.setattr(phone_readiness, "_lockdown", AsyncMock(return_value=Lockdown()))
+        mounts = []
+
+        async def mount(udid, version):
+            mounts.append((udid, version))
+            if fails:
+                raise DeviceError("no tunnel", tool="pymobiledevice3")
+        monkeypatch.setattr(phone_readiness, "mount_image", mount)
+        monkeypatch.setattr(phone_readiness, "_failed", {})
+        monkeypatch.setattr(phone_readiness, "ensure_image", ENSURE_IMAGE)
+        return mounts
+
+    async def test_input_mounts_it_and_goes_over_hid(self, monkeypatch):
+        from server.device.ios.coredevice_input import CoreDeviceInput, NotSent
+
+        mounts = self._mountable(monkeypatch)
+        cdi = CoreDeviceInput.__new__(CoreDeviceInput)
+        cdi._fallback = type("Wda", (), {"TOOL_NAME": "wda"})()
+        sends = []
+
+        async def send(*a, **k):
+            sends.append(1)
+            if len(sends) == 1:
+                raise NotSent("the HID service could not be opened") from \
+                    self.DeveloperDiskImageServiceError("no hid service")
+        cdi._send = send
+        wda = AsyncMock()
+
+        @phone_readiness.noted
+        async def route():
+            return {"status": "ok", "via": await cdi._or_fallback(PHONE, "tap", None, wda)}
+
+        result = await route()
+
+        assert mounts == [(PHONE, "27.2.1")] and len(sends) == 2
+        wda.assert_not_called()
+        assert result["via"] == "coredevice" and "mounted it" in result["developer_image"]
+
+    async def test_the_app_service_mounts_it_and_calls_again(self, monkeypatch):
+        mounts = self._mountable(monkeypatch)
+        calls = []
+        backend = CoreDeviceApps()
+
+        @contextlib.asynccontextmanager
+        async def apps(uuid):
+            calls.append(1)
+            if len(calls) == 1:
+                raise self.DeveloperDiskImageServiceError("no app service")
+            yield FakeAppService([SETTINGS], [])
+        backend._apps = apps
+
+        listed = await backend.list_apps(PHONE)
+
+        assert mounts == [(PHONE, "27.2.1")] and [a.name for a in listed] == ["Settings"]
+
+    async def test_a_failed_mount_is_not_tried_again_at_once(self, monkeypatch):
+        mounts = self._mountable(monkeypatch, fails=True)
+        assert await phone_readiness.ensure_image(PHONE) is False
+        assert await phone_readiness.ensure_image(PHONE) is False
+        assert len(mounts) == 1
+
+    async def test_without_a_mount_nothing_is_noted(self):
+        @phone_readiness.noted
+        async def route():
+            return {"status": "ok"}
+        assert await route() == {"status": "ok"}

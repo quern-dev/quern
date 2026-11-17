@@ -95,7 +95,15 @@ class CoreDeviceApps(DevicectlBackend):
         async def run() -> Any:
             async with (service or self._apps)(uuid) as apps:
                 return await op(apps)
+        from server.device.ios.phone_readiness import ensure_image, missing_image
+
         try:
+            try:
+                return await asyncio.wait_for(run(), timeout)
+            except Exception as e:  # noqa: BLE001 -- only a missing image is retried
+                # The app service is the image's: mounted, the call is made again.
+                if not missing_image(e) or not await ensure_image(uuid):
+                    raise
             return await asyncio.wait_for(run(), timeout)
         except DeviceError:
             raise

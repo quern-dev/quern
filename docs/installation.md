@@ -18,7 +18,7 @@ For each iPhone plugged in over USB, setup then checks three things, and says wh
 - **Developer Mode** (iOS 16 and later): in Settings > Privacy & Security > Developer Mode. iOS hides the switch until a developer tool asks for it, so setup offers to show it. Turning it on restarts the phone.
 - **The developer disk image:** taps, typing and app control need it; screen reads and screenshots do not. Xcode mounts it when it first meets a phone, and on iOS 27 it stays mounted across restarts. With no Xcode, setup offers to mount it with pymobiledevice3, which downloads Apple's image from its GitHub repository and has Apple's signing server personalize it for the phone.
 
-`quern doctor` reports the same three for any phone plugged in later, and `quern doctor --fix` mounts a missing image and shows the Developer Mode switch.
+`quern doctor` reports the same three for any phone plugged in later, and `quern doctor --fix` mounts a missing image and shows the Developer Mode switch. A phone with no image is not stuck until then: the first tap, typing or app call that needs it mounts it, which took about 2 s on an iPhone 11.
 
 ### Pre-commit checklist hook
 

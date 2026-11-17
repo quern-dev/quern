@@ -61,6 +61,10 @@ def _with_input_warning(
     nowhere first because the input services were taken, so the advisory is
     the likelier explanation and must still be read. Not added twice.
     """
+    from server.device.ios.phone_readiness import MOUNTED
+
+    if (note := MOUNTED.get()) and "developer_image" not in payload:
+        payload["developer_image"] = note        # the image this call mounted (#664)
     if not udid:
         return payload
     warning = controller.input_warning(udid)
