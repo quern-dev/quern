@@ -5095,9 +5095,11 @@ class DeviceControllerUI:
         The Web Inspector can read the DOM, but reports geometry in page space;
         this pairs the two, returning elements with real screen frames.
 
-        Simulator-only. Android's accessibility tree already descends into
-        `WebView`, and physical iOS devices are reached over a different
-        transport, so on both the ordinary UI tree is the right tool.
+        On a simulator, through its Web Inspector socket; on a physical
+        iPhone read without WDA, through the phone's Web Inspector service
+        (#708, `_web_content_on_phone`). Android's accessibility tree already
+        descends into `WebView`, and so does WDA's on a phone it reads, so
+        there the ordinary UI tree is the right tool.
         """
         from server.device.web.web_content import collect_web_content, from_probe
         from server.device.web.webinspector import (
@@ -5113,11 +5115,7 @@ class DeviceControllerUI:
                 tool="web-content",
             )
         if self._is_physical(resolved):
-            raise DeviceError(
-                "get_web_content is for iOS simulators; the Web Inspector service "
-                "used here is the simulator's. Use get_ui_tree on a physical device.",
-                tool="web-content",
-            )
+            return await self._web_content_on_phone(resolved, bundle_id, hints)
         if self._served_by_wda(resolved):
             # Its fallback hit-tests point by point through the backend, and
             # WDA has no point lookup: each probe would be a full /source. Nor
@@ -5203,6 +5201,46 @@ class DeviceControllerUI:
 
         result["udid"] = resolved
         # Make the elements addressable by label through the ordinary UI path.
+        self._store_web_overlay(resolved, result.get("elements") or [])
+        return result
+
+    async def _web_content_on_phone(self, resolved: str, bundle_id: str | None,
+                                    hints: list | None) -> dict:
+        """`get_web_content` on a physical iPhone (#708): the phone's Web
+        Inspector service, through pymobiledevice3 with no Xcode, the page
+        collected with the simulator's own script and placed on screen with
+        the push's hit-test. Measured on an iPhone 11 against the probe's
+        web view: listed in 1.2 s, its five elements collected in 0.1 s.
+
+        Not the simulator path's point-by-point sweep when the Inspector
+        returns nothing: on a phone each hit-test is a round trip of its own.
+        """
+        from server.device.web.phone_webinspector import PhoneWebInspector, bounded
+        from server.device.web.web_content import collect_web_content
+
+        if self._device_tree_reader(resolved) is None:
+            raise DeviceError(
+                "This iPhone's screen is read through WebDriverAgent, and its "
+                "get_ui_tree already includes web content -- XCUITest enumerates web "
+                "views itself. Use get_ui_tree.", tool="web-content")
+        elements, resolved = await self._native_ui_elements(resolved)
+        native = [{"type": e.type, "AXLabel": e.label, "frame": e.frame}
+                  for e in elements if e.frame]
+        # The Web Inspector is a lockdown service, reached by the phone's own
+        # UDID; a CoreDevice UUID is not one usbmux knows.
+        usb = await self.get_libimobiledevice_udid(resolved) or resolved
+
+        async def collect() -> dict:
+            async with PhoneWebInspector(usb) as inspector:
+                return await collect_web_content(
+                    resolved, bundle_id, self.coredevice_ax.describe_point,
+                    inspector, native, hints=hints)
+
+        result = await bounded(collect())
+        result["route"] = "inspector" if result.get("elements") else None
+        # The connection is the phone's own: no other device's page can answer.
+        result["device_verified"] = True
+        result["udid"] = resolved
         self._store_web_overlay(resolved, result.get("elements") or [])
         return result
 
