@@ -150,6 +150,30 @@ class PhoneWebInspector:
 
     async def evaluate(self, application_id: str, page_id: int, script: str) -> Any:
         """`script`'s value in the page, or None when the page is gone."""
+        session = await self._session(application_id, page_id)
+        if session is None:
+            return None
+        return await session.runtime_evaluate(script, return_by_value=True)
+
+    async def send_command(self, application_id: str, page_id: int, method: str,
+                           params: dict) -> dict | None:
+        """One WebKit protocol message to the page, and its reply message --
+        `{"result": ...}` or `{"error": ...}` -- as the simulator's
+        `send_command` gives it; None when the page is gone. The caller bounds
+        the wait (`bounded`)."""
+        session = await self._session(application_id, page_id)
+        if session is None:
+            return None
+        response = await session.send_and_receive({"method": method, "params": params})
+        # Behind a target, the reply is wrapped as pymobiledevice3's own
+        # `_parse_runtime_evaluate` unwraps it.
+        if getattr(session, "target_id", None) is None:
+            return response
+        return json.loads(response["params"]["message"])
+
+    async def _session(self, application_id: str, page_id: int) -> Any:
+        """The page's one session, started on first use; None for a page not
+        listed, or one whose session never got going."""
         entry = next((e for e in self._pages
                       if e.application.id_ == application_id and e.page.id_ == page_id), None)
         if entry is None or self._service is None:
@@ -168,7 +192,7 @@ class PhoneWebInspector:
                 # session left unenabled would be reused as if it were not.
                 self._silent.add(key)
                 raise
-        return await session.runtime_evaluate(script, return_by_value=True)
+        return session
 
     async def page_contents(self, application_id: str, page_id: int) -> dict | None:
         """The page's elements in page space, by `_COLLECT_JS`."""

@@ -668,6 +668,13 @@ class SimulatorWebInspector:
         except ValueError:
             return None
 
+    async def send_command(self, application_id: str, page_id: int, method: str,
+                           params: dict, timeout: float | None = None) -> dict | None:
+        """One WebKit protocol message to the page, and its reply message --
+        `{"result": ...}` or `{"error": ...}` -- or None when it did not
+        answer within `timeout` (default: the connection's)."""
+        return await self._forward(application_id, page_id, method, params, timeout)
+
     async def on_screen(self, application_id: str, page_id: int) -> bool:
         """Whether the page says it is visible, within `VISIBLE_S`.
 

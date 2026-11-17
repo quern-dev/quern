@@ -984,6 +984,73 @@ Returns where the fingers went. An app's recogniser reports a little less than w
     }
   });
 
+  server.registerTool("evaluate_web_js", {
+    description: `Run your own JavaScript in a web page inside an app or Safari, and get back what it gave -- on an iOS simulator, or on a physical iPhone with no Xcode needed (turn on Settings > Apps > Safari > Advanced > Web Inspector first; the error says so when it is off). For reading state the DOM does not show (a JS variable, localStorage, a framework's store), setting a value, calling a page function, or changing the DOM. It ACTS ON THE PAGE: what the script changes stays changed, and every call is logged as an action with its script. The page is page_id, as get_web_content lists it under "pages" (with bundle_id), or, without it, the one page on screen; with none or several on screen the error lists them. The answer has threw: true and the exception's text when the script threw (a thrown error is an answer, not a tool failure), and otherwise type and value: a primitive or a JSON-serialisable object by value; a DOM node by its description (value null); an object that cannot be serialised (a cycle) with a note. The value of a script is its last expression statement, as in a console, so "document.title" or "var n = 2; n * 21" both work. A returned Promise is awaited (awaited: true), and a rejection reads as a throw, so async work can be written as an async function called at the end: "(async () => (await fetch('/api/me')).status)()". timeout (default 10 s, at most 60) bounds the script and its Promise; a page that does not answer in time is an error, and whatever the script changed before then stays changed. The web content overlay from get_web_content is dropped afterwards, since the page may have changed: read it again before tapping web elements. Android's WebView is not reachable this way.`,
+    inputSchema: strictParams({
+      script: z
+        .string()
+        .min(1)
+        .max(100000)
+        .describe(
+          "The JavaScript to run. Its value is the last expression statement's."
+        ),
+      bundle_id: z
+        .string()
+        .optional()
+        .describe(
+          "The app whose page to run in, as get_web_content names it. Needed only when page_id is listed by more than one app."
+        ),
+      page_id: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "The page, from get_web_content's pages. Optional when one page is on screen."
+        ),
+      timeout: z
+        .number()
+        .positive()
+        .max(60)
+        .optional()
+        .describe("Seconds the script, and a Promise it returns, have to finish (default 10)."),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ script, bundle_id, page_id, timeout, udid }) => {
+    try {
+      const body: Record<string, unknown> = { script };
+      if (bundle_id) body.bundle_id = bundle_id;
+      if (page_id !== undefined) body.page_id = page_id;
+      if (timeout !== undefined) body.timeout = timeout;
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/device/ui/web-js",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: errorText(e),
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("scroll_to_element", {
     description: `Scroll a scrollable container until an element is in view, WITHOUT tapping it. Resolve by identifier or label. Supported on Android and iOS (simulator + physical). Android drives a bounded swipe loop that re-checks the target by selector after each swipe, with no full UI-tree dump, so it avoids the dump-induced scroll a tree read can cause there. Android covers View RecyclerView, Compose LazyColumn, and Compose-in-ScrollView. On Android each direction of the sweep stops early at the list's end, and the sweep then turns round to search the other way; the whole search stops early only when a frame after each swipe confirms the screen does not scroll. A not_found carries \`scroll\` with \`swipes\` and \`moved\`; \`ends\` is there when a list end was found, and \`no_progress\` when the screen was confirmed not to scroll, and \`detail\` then says why it stopped, including when the bottom was never reached within max_swipes. An Android sweep also stops at a 120 s deadline: then \`scroll.timed_out\` is true with \`deadline_s\`, and \`detail\` says the search stopped before it had looked everywhere -- the element may be there, so that not_found is not a completed search. A miss that used its whole swipe budget without finding an end has neither, and \`detail\` says only that the element was not found after scrolling. On iOS, where reading the tree has no side effects, each swipe is followed by a full tree read that both looks for the target and shows whether the list moved. On a simulator each swipe is held at the end so the list stops where the finger does, and covers as much of the screen as the chrome leaves — about seven-tenths, with both ends kept off the navigation bar, an app's own header and the tab bar, because those handle a drag that starts on them. The idb fallback cannot hold a swipe, so it still flings and steps a quarter of the screen. On a physical device WDA's swipe returns only once the app is idle, so one read after each swipe is enough; on the other paths reads are repeated until two agree, so nothing is judged mid-bounce. A located-but-off-screen target is swiped toward by as much as it needs. A lazy list is swept blind: down until a swipe moves nothing, then up until one moves nothing again. Rows scrolled under the nav/status bar are rejected rather than counted as already visible. The first lookup also reads containers the static tree omits, so a target such as a tab-bar item is found without scrolling at all. On iOS it is bounded by a wall-clock deadline as well as the swipe budget (up to 2x max_swipes down, 3x in all). Returns the element's on-screen position once visible; 404 if it never appears. Abandoning the call stops the sweep. If your client times out and disconnects, the server stops driving the device rather than sweeping on for a caller that has gone — so the device is free for your next call instead of being swiped while you use it. You will not see a status for the abandoned call; you have already gone. The response carries "backend", which is how you tell which of those two simulator behaviours you actually got -- a sweep that overshoots looks the same whether it was sim-bridge behaving unexpectedly or a silent fall-back to idb's fling.`,
     inputSchema: strictParams({
