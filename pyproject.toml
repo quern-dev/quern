@@ -63,7 +63,14 @@ dependencies = [
     # would bring a venv forward anyway; the floor is what reaches a venv that
     # only ever sees the start path's constraint check, such as a git checkout
     # updated by `git pull`. Full suite verified at 11.20.0 and 11.55.0.
-    "pymobiledevice3>=11.20.0",
+    #
+    # Raised to 11.55.0 (#725): the phone's Web Inspector paths -- get_web_content,
+    # evaluate_web_js and get_web_console on an iPhone (#708, #713, #714) -- were
+    # built and live-tested on 11.55.0 only, and pymobiledevice3 reworked its Web
+    # Inspector service between 11.20 and 11.55 (11.43 changed ServiceConnection).
+    # So 11.55.0 is the version everything quern ships was verified on. tunneld's
+    # own copy is held to the same floor (tool_updates.CLI_FLOORS).
+    "pymobiledevice3>=11.55.0",
     "pydantic>=2.0",                    # inherited; v1 genuinely breaks, but 2.0 exactly is untested
     "sse-starlette>=2.0",               # inherited
     "mitmproxy>=10.0",                  # inherited

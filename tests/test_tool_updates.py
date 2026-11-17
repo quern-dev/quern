@@ -47,6 +47,19 @@ from server.tooling.tool_versions import ToolSite
 #: version from the fixed one in either direction.
 FAKE_HOME = Path("/tmp/quern-tests-home")
 
+#: The floors as declared, taken before any fixture edits the dict.
+DECLARED_FLOORS = dict(CLI_FLOORS)
+
+
+@pytest.fixture(autouse=True)
+def _no_declared_floors(monkeypatch):
+    """Most of these tests are about latest, not floors, and use made-up
+    versions far below the real pymobiledevice3 floor. The floor tests set
+    their own entry. Removed from the same dict, not a new one: the tests hold
+    the module's dict by name."""
+    for key in list(CLI_FLOORS):
+        monkeypatch.delitem(CLI_FLOORS, key)
+
 
 @pytest.fixture(autouse=True)
 def _no_real_update_check(monkeypatch):
@@ -289,15 +302,37 @@ async def test_an_unrecorded_install_is_still_offered():
 # --------------------------------------------------------------------------
 
 
-async def test_no_cli_floors_are_declared_unverified():
+async def test_only_the_documented_cli_floors_are_declared():
     """Guards the finding, not the code. Every floor quern declared was a `>=`
     that nothing had tested; adding an unverified CLI floor here would repeat
     exactly that. A new entry must arrive with a comment saying what breaks
-    below it and where that was measured."""
-    assert CLI_FLOORS == {}, (
+    below it and where that was measured -- as tunneld's pymobiledevice3 did
+    (#725), held to quern's own copy's floor."""
+    assert DECLARED_FLOORS == {("pymobiledevice3", "cli"): "11.55.0"}, (
         "adding a CLI floor is a decision -- document what breaks below it "
         "and at which versions that was verified"
     )
+
+
+async def test_tunneld_s_copy_is_held_to_quern_s_own_floor():
+    """One pymobiledevice3 across the machine (#725). The two floors drift
+    apart otherwise: quern's copy rose to 11.20.0 (#666) while tunneld's had
+    none, and Romulus ran tunneld on 11.14.0 with nothing saying so."""
+    import tomllib
+
+    deps = tomllib.loads(Path("pyproject.toml").read_text())["project"]["dependencies"]
+    [pin] = [d for d in deps if d.startswith("pymobiledevice3")]
+    assert pin == f"pymobiledevice3>={DECLARED_FLOORS[('pymobiledevice3', 'cli')]}"
+
+
+async def test_below_the_floor_is_required_even_when_latest_cannot_be_looked_up(
+        monkeypatch):
+    """The floor needs no network. Offline, a copy too old to work read as
+    'could not check' instead of required."""
+    monkeypatch.setitem(CLI_FLOORS, ("pymobiledevice3", "cli"), "11.55.0")
+    update = _by_name(await _plan([_site(version="11.14.0")]), "pymobiledevice3")
+    assert update.action == "upgrade_required" and update.actionable
+    assert update.command == ["pipx", "upgrade", "pymobiledevice3"]
 
 
 async def test_below_floor_escalates_to_required(monkeypatch):
@@ -1771,3 +1806,217 @@ def test_doctor_still_speaks_imperatively():
     text = format_report([_plain_update()])
     assert "run: pipx upgrade pymobiledevice3" in text
     assert "will run" not in text
+
+
+# --------------------------------------------------------------------------
+# Required upgrades, with or without --tools (#725)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def required_tool(monkeypatch, tmp_path):
+    """One upgrade below the floor, and where its pending record goes. Returns
+    (ran, set_update): what was run, and a way to change the one update."""
+    from server.lifecycle import updater
+    from server.tooling import tool_updates
+
+    state = {"pinned": False, "update": tool_updates.ToolUpdate(
+        name="pymobiledevice3", role="cli", action="upgrade_required",
+        current="11.14.0", latest="11.58.0", floor="11.55.0",
+        command=["pipx", "upgrade", "pymobiledevice3"],
+        reason="below the 11.55.0 quern requires")}
+
+    async def fake_sites():
+        return [_site(version="11.14.0")]
+
+    async def fake_plan(_sites, **_kw):
+        # The machine as it is now: an upgrade that ran moved the tool,
+        # unless pipx skipped it (pinned) and still exited 0.
+        if not state["update"]:
+            return []
+        if state["update"].command in ran and not state["pinned"]:
+            return []
+        return [state["update"]]
+
+    monkeypatch.setattr("server.tooling.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.tooling.tool_updates.plan_updates", fake_plan)
+    monkeypatch.setattr(updater, "PENDING_FILE", tmp_path / "pending-tool-upgrades.json")
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        "server.lifecycle.updater.subprocess.run",
+        lambda cmd, **kw: ran.append(cmd) or __import__("types").SimpleNamespace(returncode=0),
+    )
+
+    def set_update(**changes):
+        if "pinned" in changes:
+            state["pinned"] = changes.pop("pinned")
+            if not changes:
+                return
+        state["update"] = (None if changes.get("none")
+                           else tool_updates.ToolUpdate(**{**state["update"].__dict__, **changes}))
+    return ran, set_update
+
+
+def test_a_required_upgrade_runs_without_tools(required_tool, capsys):
+    """The menu bar never passes --tools. Romulus ran tunneld on
+    pymobiledevice3 11.14.0 while every update only printed an offer."""
+    from server.lifecycle.updater import _report_tool_updates, read_pending
+
+    ran, _ = required_tool
+    assert _report_tool_updates(apply=False) is True
+    assert ran == [["pipx", "upgrade", "pymobiledevice3"]]
+    assert read_pending() == []
+
+
+def test_a_required_sudo_upgrade_with_no_terminal_is_recorded_not_failed(
+        required_tool, monkeypatch, capsys):
+    """Nowhere to ask for the password: left for a terminal and recorded,
+    and a menu-bar update does not read as failed over it."""
+    from server.lifecycle import updater
+
+    ran, set_update = required_tool
+    set_update(command=["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"],
+               needs_root=True)
+    monkeypatch.setattr(updater, "_can_ask_for_a_password", lambda: False)
+    assert updater._report_tool_updates(apply=False) is True
+    assert ran == []
+    [pending] = updater.read_pending()
+    assert pending["name"] == "pymobiledevice3" and pending["needs_root"] is True
+    assert pending["command"] == ["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"]
+
+
+def test_the_record_clears_once_nothing_is_left(required_tool, monkeypatch):
+    """However the work got done -- by a later update, or by hand."""
+    from server.lifecycle import updater
+
+    ran, set_update = required_tool
+    set_update(command=["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"],
+               needs_root=True)
+    monkeypatch.setattr(updater, "_can_ask_for_a_password", lambda: False)
+    updater._report_tool_updates(apply=False)
+    assert updater.read_pending()
+    set_update(none=True)
+    updater._report_tool_updates(apply=False)
+    assert updater.read_pending() == []
+    assert not updater.PENDING_FILE.exists()
+
+
+def test_a_merely_newer_tool_is_still_left_alone_without_tools(required_tool, capsys):
+    from server.lifecycle.updater import _report_tool_updates
+
+    ran, set_update = required_tool
+    set_update(action="upgrade_available", reason="newer release available (11.58.0)")
+    assert _report_tool_updates(apply=False) is True
+    assert ran == []
+    assert "quern update --tools" in capsys.readouterr().out
+
+
+def test_a_failed_required_upgrade_fails_the_update(required_tool, monkeypatch, capsys):
+    from server.lifecycle import updater
+
+    monkeypatch.setattr(
+        "server.lifecycle.updater.subprocess.run",
+        lambda cmd, **kw: __import__("types").SimpleNamespace(returncode=1))
+    assert updater._report_tool_updates(apply=False) is False
+
+
+def test_status_names_what_is_left_for_a_terminal(required_tool, monkeypatch):
+    from server.lifecycle import updater
+    from server.main import _pending_tool_lines
+
+    ran, set_update = required_tool
+    set_update(command=["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"],
+               needs_root=True)
+    monkeypatch.setattr(updater, "_can_ask_for_a_password", lambda: False)
+    updater._report_tool_updates(apply=False)
+    lines = _pending_tool_lines()
+    assert "Needs a terminal: pymobiledevice3 (cli) 11.14.0" in lines[0]
+    assert lines[1].strip() == "run: sudo pipx upgrade --global pymobiledevice3"
+
+
+async def test_a_copy_quern_cannot_upgrade_still_says_it_is_below_the_floor(monkeypatch):
+    """Found live: a pipx home whose path quern did not recognise read as
+    'quern cannot tell how this was installed', and its 11.14.0 as nothing
+    worse (#725)."""
+    monkeypatch.setitem(CLI_FLOORS, ("pymobiledevice3", "cli"), "11.55.0")
+    update = _by_name(await _plan([_site(source="unknown", version="11.14.0")]),
+                      "pymobiledevice3")
+    assert update.action == "unmanaged" and not update.actionable
+    assert "below the 11.55.0 quern requires" in update.reason
+
+
+async def test_a_required_upgrade_is_not_offered_as_tools_work():
+    """It runs on every update (#725), so pointing at --tools for it was a
+    false claim -- seen live, right above the line saying it was upgrading."""
+    from server.tooling.tool_updates import ToolUpdate
+
+    text = format_offer([
+        ToolUpdate(name="pymobiledevice3", role="cli", action="upgrade_required",
+                   current="11.14.0", latest="11.58.0", floor="11.55.0",
+                   command=["pipx", "upgrade", "pymobiledevice3"], reason="below"),
+        ToolUpdate(name="mitmproxy", role="cli", action="upgrade_available",
+                   current="11.0", latest="12.0",
+                   command=["pipx", "upgrade", "mitmproxy"], reason="newer"),
+    ], apply=False)
+    assert "      will run: pipx upgrade pymobiledevice3" in text
+    assert "`quern update --tools` will run: pipx upgrade mitmproxy" in text
+
+
+
+def test_an_upgrade_that_exits_0_and_leaves_the_tool_behind_is_a_failure(required_tool, capsys):
+    """pipx skips a pinned package and exits 0: the copy stays below the floor
+    while the exit code says done (CodeRabbit on #726)."""
+    from server.lifecycle import updater
+
+    ran, set_update = required_tool
+    set_update(pinned=True)
+    assert updater._report_tool_updates(apply=False) is False
+    assert ran == [["pipx", "upgrade", "pymobiledevice3"]]
+    assert [p["name"] for p in updater.read_pending()] == ["pymobiledevice3"]
+    assert "still 11.14.0" in capsys.readouterr().out
+
+
+def test_a_failed_required_upgrade_keeps_its_reminder(required_tool, monkeypatch):
+    """Retried and failed again: still owed, so the record stays."""
+    from server.lifecycle import updater
+
+    ran, set_update = required_tool
+    monkeypatch.setattr(
+        "server.lifecycle.updater.subprocess.run",
+        lambda cmd, **kw: __import__("types").SimpleNamespace(returncode=1))
+    assert updater._report_tool_updates(apply=False) is False
+    assert [p["name"] for p in updater.read_pending()] == ["pymobiledevice3"]
+
+
+def test_a_reminder_that_cannot_be_written_fails_the_update(required_tool, monkeypatch, tmp_path):
+    """Owed work that is neither done nor written down would be lost."""
+    from server.lifecycle import updater
+
+    ran, set_update = required_tool
+    set_update(command=["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"],
+               needs_root=True)
+    monkeypatch.setattr(updater, "_can_ask_for_a_password", lambda: False)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("x")
+    monkeypatch.setattr(updater, "PENDING_FILE", blocker / "pending-tool-upgrades.json")
+    assert updater._report_tool_updates(apply=False) is False
+
+
+def test_status_names_owed_upgrades_with_no_server_running(required_tool, monkeypatch, capsys):
+    """Owed upgrades are not the server's; a stopped server must not hide them."""
+    import argparse
+
+    from server import main as server_main
+    from server.lifecycle import updater
+
+    ran, set_update = required_tool
+    set_update(command=["sudo", "pipx", "upgrade", "--global", "pymobiledevice3"],
+               needs_root=True)
+    monkeypatch.setattr(updater, "_can_ask_for_a_password", lambda: False)
+    updater._report_tool_updates(apply=False)
+    monkeypatch.setattr(server_main, "read_state", lambda: None)
+    with pytest.raises(SystemExit) as exit_:
+        server_main._cmd_status(argparse.Namespace())
+    assert exit_.value.code == 1
+    out = capsys.readouterr().out
+    assert "No server running" in out and "Needs a terminal: pymobiledevice3" in out

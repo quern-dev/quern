@@ -764,14 +764,21 @@ def _report_tool_updates(apply: bool = False) -> bool:
         return True
 
     offer = format_offer(updates, apply=apply)
-    if not offer:
-        return True
-    print(offer)
-
     todo = actionable(updates)
-    if not apply:
-        print("\n  Run `quern update --tools` to apply these.")
-        return True
+    # Below a floor is not a preference, so it is applied with or without
+    # `--tools` -- from the menu bar too, which never passes it. A copy quern
+    # cannot work with is not the caller's to keep (#725): Romulus ran tunneld
+    # on pymobiledevice3 11.14.0 while every update only printed an offer.
+    # Merely newer stays opt-in, for the reason above.
+    required = [u for u in todo if u.action == "upgrade_required"]
+    run_now = todo if apply else required
+    if not offer:
+        return _record_pending([])
+    print(offer)
+    if not apply and len(run_now) < len(todo):
+        print("\n  Run `quern update --tools` to apply the rest.")
+    if not run_now:
+        return _record_pending([])
 
     failures: list[str] = []
     #: Upgrades that were never attempted. Still unfinished work, so it still
@@ -780,7 +787,7 @@ def _report_tool_updates(apply: bool = False) -> bool:
     #: upgrade(s) failed" about something never tried sends the reader looking
     #: for a broken tool instead of opening a terminal.
     deferred: list[str] = []
-    for update in todo:
+    for update in run_now:
         if update.needs_root and not _can_ask_for_a_password():
             # sudo with nowhere to prompt either hangs or fails with a message
             # about a terminal, neither of which tells the reader what to do.
@@ -803,14 +810,81 @@ def _report_tool_updates(apply: bool = False) -> bool:
             print(f"  failed: {' '.join(update.command)} exited {result.returncode}")
             failures.append(update.name)
 
+    # What is still required now, asked again rather than inferred from exit
+    # codes: `pipx upgrade` exits 0 for a pinned package it skipped, and a
+    # failed or deferred upgrade is still owed (CodeRabbit on #726). Whatever
+    # is still below its floor is recorded, however it came to be.
+    try:
+        after = asyncio.run(gather())
+        still = [u for u in after if u.action == "upgrade_required"]
+    except Exception:  # noqa: BLE001 -- a check that cannot run must not clear the record
+        still = [u for u in required if u.name in deferred or u.name in failures]
+    deferred_names = set(deferred)
+    for update in still:
+        if update.name not in deferred_names and update.name not in failures:
+            # Ran, said it worked, and is still below the floor.
+            print(f"\n{update.name} is still {update.current}, below the "
+                  f"{update.floor} quern requires, after its upgrade.")
+            failures.append(update.name)
     if failures:
         print(f"\n{len(failures)} tool upgrade(s) failed: {', '.join(failures)}")
     if deferred:
         print(f"\n{len(deferred)} still to do, needing a terminal: "
               f"{', '.join(deferred)}")
+    if not _record_pending(still):
+        # Owed work that could not be written down would be lost: the update
+        # has to say so itself (CodeRabbit on #726).
+        print(f"\nCould not record the upgrades still owed in {PENDING_FILE}.")
+        failures.append("the pending-upgrade record")
+    if not apply:
+        # Nobody asked for tools: a required upgrade that failed is still a
+        # failed update, but one left for a terminal is recorded, not failed --
+        # a menu-bar update would otherwise read as broken over a password it
+        # had no way to ask for.
+        return not failures
     # Deferred counts against the exit status, deliberately: the caller asked
     # for the upgrades to be applied and one was not. Only the wording changes.
     return not failures and not deferred
+
+
+#: Required tool upgrades an update could not run -- sudo, with no terminal to
+#: ask for the password on (#725). Kept apart from `last-update.json`, which
+#: every update rewrites: a later no-op update must not erase the reminder.
+PENDING_FILE = CONFIG_DIR / "pending-tool-upgrades.json"
+
+
+def _record_pending(updates: list) -> bool:
+    """Write the required upgrades still owed, or remove the file when none
+    are. Rewritten by every check, so it clears itself once the work is done
+    -- however it was done. False when the record could not be written."""
+    try:
+        if not updates:
+            PENDING_FILE.unlink(missing_ok=True)
+            return True
+        PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = PENDING_FILE.with_name(f".{PENDING_FILE.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({
+            "checked_at": datetime.now(UTC).isoformat(),
+            "pending": [{
+                "name": u.name, "role": u.role, "current": u.current,
+                "floor": u.floor, "reason": u.reason,
+                "command": u.command, "needs_root": u.needs_root,
+            } for u in updates],
+        }, indent=2))
+        os.replace(tmp, PENDING_FILE)
+        return True
+    except OSError:
+        return False
+
+
+def read_pending() -> list[dict]:
+    """The required upgrades left for a terminal, as last recorded."""
+    try:
+        data = json.loads(PENDING_FILE.read_text())
+    except (OSError, ValueError):
+        return []
+    pending = data.get("pending") if isinstance(data, dict) else None
+    return [p for p in pending if isinstance(p, dict)] if isinstance(pending, list) else []
 
 
 #: Where `quern update` records what it did.

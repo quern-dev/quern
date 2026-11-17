@@ -56,7 +56,15 @@ UNMANAGED_REASONS = {
 # and at which versions that was verified.
 #
 #   ("pymobiledevice3", "cli"): "10.0",   # example shape -- do not add unverified
-CLI_FLOORS: dict[tuple[str, str], str] = {}
+CLI_FLOORS: dict[tuple[str, str], str] = {
+    # The copy tunneld runs, held to the floor of quern's own (pyproject.toml).
+    # What is measured: 11.15.0 gets one RSD session per tunnel on iOS 27.2
+    # (#665), 11.20.0 and 11.55.0 open them freely, and the phone's Web
+    # Inspector features were verified on 11.55.0 only. What is not: a break in
+    # tunneld itself between 11.20 and 11.55. One version across the machine is
+    # the policy (#725); Romulus ran tunneld on 11.14.0 with nothing saying so.
+    ("pymobiledevice3", "cli"): "11.55.0",
+}
 
 # Actions, most urgent first. Ordering is a property of the data, so callers
 # that sort by it cannot disagree about which is worse.
@@ -347,6 +355,11 @@ async def _plan_one(
     if site.source in UNMANAGED_REASONS:
         base.action = "unmanaged"
         base.reason = UNMANAGED_REASONS[site.source]
+        if floor is not None and is_behind(site.version, floor):
+            # Not quern's to upgrade, but too old for quern all the same: said,
+            # or a copy quern cannot classify sits below its floor with nothing
+            # to show for it (#725).
+            base.reason += f"; below the {floor} quern requires, so upgrade it yourself"
         return base
 
     # `checked` records whether the newest version could actually be looked up.
@@ -401,6 +414,16 @@ async def _plan_one(
         base.reason = f"no upgrade route known for source {site.source!r}"
         return base
 
+    # The floor needs no network: a copy below it is required whether or not
+    # the newest version could be looked up. It also overrides the dependency
+    # exemption further down: a tool too old to work is not made acceptable by
+    # something else having installed it. The note still says what the upgrade
+    # would touch.
+    if floor is not None and is_behind(site.version, floor):
+        base.action = "upgrade_required"
+        base.reason = f"below the {floor} quern requires"
+        return base
+
     if not checked:
         base.action = "unknown"
         base.reason = (
@@ -410,16 +433,7 @@ async def _plan_one(
         base.command = []
         return base
 
-    below_floor = floor is not None and is_behind(site.version, floor)
     behind_latest = is_behind(site.version, base.latest)
-
-    if below_floor:
-        base.action = "upgrade_required"
-        base.reason = f"below the {floor} quern requires"
-        # A floor overrides the dependency exemption below: a tool that is too
-        # old to work is not made acceptable by something else having installed
-        # it. The note still says what the upgrade would touch.
-        return base
 
     if not behind_latest:
         base.action = "current"
@@ -481,7 +495,9 @@ def format_offer(updates: list[ToolUpdate], *, apply: bool = False) -> str:
         # so "will run" there would be a different false claim in place of the
         # old one. `format_report` (doctor) says "run:" for the same text, and
         # there it *is* imperative, because doctor never applies anything.
-        lead = "will run" if apply else "`quern update --tools` will run"
+        # A required one runs either way (#725), so it is never `--tools`'s.
+        runs_now = apply or update.action == "upgrade_required"
+        lead = "will run" if runs_now else "`quern update --tools` will run"
         if update.needs_root:
             lead += ", asking sudo for your password"
         lines.append(f"      {lead}: {' '.join(update.command)}")
