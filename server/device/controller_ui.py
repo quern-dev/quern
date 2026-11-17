@@ -268,6 +268,17 @@ def _natively_there(web: UIElement, native: list[UIElement]) -> bool:
 _WEB_JS = "web-js"
 
 
+class _WebPage:
+    """The page a web call acts on, whichever Web Inspector reaches it: `send`
+    one protocol message and get its reply (None when it did not answer), or
+    read its `console` history (#713, #714)."""
+
+    def __init__(self, send: Callable[[str, dict], Awaitable[dict | None]],
+                 console: Callable[[], Awaitable[list[dict]]]) -> None:
+        self.send = send
+        self.console = console
+
+
 async def _choose_web_page(
         apps: list[dict], pages_of: Callable[[str], Awaitable[list[dict]]],
         on_screen: Callable[[str, int], Awaitable[bool]], bundle_id: str | None,
@@ -5517,18 +5528,13 @@ class DeviceControllerUI:
         otherwise the one page on screen. The answer is `scripts.run_script`'s
         -- `threw`, then `exception` or `type`/`value` -- with the page it ran in.
         """
+        from server.device.web.scripts import run_script
+
         resolved = await self.resolve_udid(udid)
-        if self._is_android(resolved):
-            raise DeviceOperationUnsupportedError(
-                "evaluate_web_js runs in an iOS web view, through the Web Inspector. "
-                "Android's WebView is not reachable this way.", tool=_WEB_JS)
         try:
-            if self._is_physical(resolved):
-                result = await self._evaluate_on_phone(resolved, script, bundle_id, page_id,
-                                                       timeout)
-            else:
-                result = await self._evaluate_on_simulator(resolved, script, bundle_id,
-                                                           page_id, timeout)
+            result = await self._on_web_page(
+                resolved, "evaluate_web_js", bundle_id, page_id, timeout,
+                lambda page: run_script(page.send, script))
         finally:
             # Whatever the script did -- or had done when it stopped answering --
             # the page, and the web elements read from it, may have changed.
@@ -5536,9 +5542,52 @@ class DeviceControllerUI:
         result["udid"] = resolved
         return result
 
-    async def _evaluate_on_simulator(self, udid: str, script: str, bundle_id: str | None,
-                                     page_id: int | None, timeout: float) -> dict:
-        from server.device.web.scripts import NoAnswer, run_script
+    async def get_web_console(self, udid: str | None = None, bundle_id: str | None = None,
+                              page_id: int | None = None, timeout: float = 10.0,
+                              levels: list[str] | None = None) -> dict:
+        """A web page's recent console messages, read on demand (#714).
+
+        WebKit keeps about the last `console.WINDOW` messages of each page and
+        replays them to an inspector that enables the Console domain, so this
+        reads them and lets go: nothing stays attached to the page.
+        """
+        from server.device.web import console
+
+        async def read(page: _WebPage) -> dict:
+            messages = await page.console()
+            entries = [console.entry(m) for m in messages]
+            kept = [e for e in entries if not levels or e.get("level") in levels]
+            out: dict = {"messages": kept, "count": len(kept), "read": len(entries)}
+            if len(entries) >= console.NEAR_WINDOW:
+                out["note"] = (
+                    f"WebKit keeps about the last {console.WINDOW} messages of a page, and "
+                    f"{len(entries)} were there: older ones may be gone.")
+            return out
+
+        resolved = await self.resolve_udid(udid)
+        result = await self._on_web_page(resolved, "get_web_console", bundle_id, page_id,
+                                         timeout, read)
+        result["udid"] = resolved
+        return result
+
+    async def _on_web_page(self, udid: str, tool: str, bundle_id: str | None,
+                           page_id: int | None, timeout: float,
+                           act: Callable[[_WebPage], Awaitable[dict]]) -> dict:
+        """`act` on the page a web call names (#713, #714): `page_id` when
+        given, else the one page on screen, through the simulator's Web
+        Inspector or the phone's. The answer carries the page as well."""
+        if self._is_android(udid):
+            raise DeviceOperationUnsupportedError(
+                f"{tool} runs in an iOS web view, through the Web Inspector. Android's "
+                "WebView is not reachable this way.", tool=_WEB_JS)
+        if self._is_physical(udid):
+            return await self._on_phone_page(udid, bundle_id, page_id, timeout, act)
+        return await self._on_simulator_page(udid, bundle_id, page_id, timeout, act)
+
+    async def _on_simulator_page(self, udid: str, bundle_id: str | None, page_id: int | None,
+                                 timeout: float,
+                                 act: Callable[[_WebPage], Awaitable[dict]]) -> dict:
+        from server.device.web.scripts import NoAnswer
         from server.device.web.web_content import _is_app
         from server.device.web.webinspector import (
             WebInspectorError,
@@ -5555,7 +5604,7 @@ class DeviceControllerUI:
                     if not (_is_app(app) or app.get("bundle_id") == bundle_id):
                         continue
                     # The socket carries no UDID: a page on another booted
-                    # simulator must not run a script meant for this one.
+                    # simulator must not be acted on for this one.
                     owner = await simulator_udid_for_application(app.get("application_id"))
                     if owner == udid or (owner is None and not require_match):
                         apps.append(app)
@@ -5568,14 +5617,26 @@ class DeviceControllerUI:
                 raise DeviceError(f"the simulator's Web Inspector: {e}", tool=_WEB_JS) from e
             deadline = time.monotonic() + timeout
 
+            def left() -> float | None:
+                remaining = deadline - time.monotonic()
+                return remaining if remaining > 0 else None
+
             async def send(method: str, params: dict) -> dict | None:
-                left = deadline - time.monotonic()
-                if left <= 0:
+                remaining = left()
+                if remaining is None:
                     return None
                 return await inspector.send_command(
-                    app["application_id"], page["page_id"], method, params, timeout=left)
+                    app["application_id"], page["page_id"], method, params, timeout=remaining)
+
+            async def history() -> list[dict]:
+                remaining = left()
+                messages = None if remaining is None else await inspector.console_history(
+                    app["application_id"], page["page_id"], timeout=remaining)
+                if messages is None:
+                    raise NoAnswer
+                return messages
             try:
-                outcome = await run_script(send, script)
+                outcome = await act(_WebPage(send, history))
             except WebInspectorError as e:
                 # Not run again: the page may already have changed.
                 await self._close_web_inspector()
@@ -5584,10 +5645,11 @@ class DeviceControllerUI:
                 raise DeviceError(_no_answer(page, timeout), tool=_WEB_JS) from None
         return {**_page_fields(app, page), **outcome}
 
-    async def _evaluate_on_phone(self, udid: str, script: str, bundle_id: str | None,
-                                 page_id: int | None, timeout: float) -> dict:
+    async def _on_phone_page(self, udid: str, bundle_id: str | None, page_id: int | None,
+                             timeout: float,
+                             act: Callable[[_WebPage], Awaitable[dict]]) -> dict:
         from server.device.web.phone_webinspector import CALL_TIMEOUT_S, PhoneWebInspector
-        from server.device.web.scripts import NoAnswer, run_script
+        from server.device.web.scripts import NoAnswer
         from server.device.web.web_content import _is_app
 
         usb = await self.get_libimobiledevice_udid(udid) or udid
@@ -5605,13 +5667,20 @@ class DeviceControllerUI:
                 async def send(method: str, params: dict) -> dict | None:
                     return await inspector.send_command(
                         app["application_id"], page["page_id"], method, params)
+
+                async def history() -> list[dict]:
+                    messages = await inspector.console_history(
+                        app["application_id"], page["page_id"])
+                    if messages is None:
+                        raise NoAnswer
+                    return messages
                 try:
-                    outcome = await asyncio.wait_for(run_script(send, script), timeout)
+                    outcome = await asyncio.wait_for(act(_WebPage(send, history)), timeout)
                 except (TimeoutError, NoAnswer):
                     raise DeviceError(_no_answer(page, timeout), tool=_WEB_JS) from None
                 return {**_page_fields(app, page), **outcome}
         try:
-            # The script's own bound, plus connecting and finding the page.
+            # The call's own bound, plus connecting and finding the page.
             return await asyncio.wait_for(run(), timeout + CALL_TIMEOUT_S)
         except TimeoutError as e:
             raise DeviceError(

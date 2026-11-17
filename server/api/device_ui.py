@@ -41,6 +41,7 @@ from server.models import (
     TypeTextRequest,
     WaitForElementRequest,
     WaitSettledRequest,
+    WebConsoleRequest,
     WebContentRequest,
 )
 
@@ -1151,6 +1152,24 @@ async def evaluate_web_js(request: Request, body: EvaluateWebJsRequest) -> dict:
                 page_id=body.page_id, timeout=body.timeout,
             )
             act.detail += f" -> {'threw' if result.get('threw') else result.get('type')}"
+            return {"status": "ok", "elapsed_ms": act.duration_ms, **result}
+        except DeviceError as e:
+            raise _handle_device_error(e)
+
+
+@router.post("/ui/web-console")
+async def get_web_console(request: Request, body: WebConsoleRequest) -> dict:
+    """A web page's recent console messages, read on demand (#714)."""
+    controller = _get_controller(request)
+    with _action("get_web_console", category="device.read") as act:
+        act.detail = (f"page {body.page_id if body.page_id is not None else 'on screen'}"
+                      f"{f' in {body.bundle_id}' if body.bundle_id else ''}")
+        try:
+            result = await controller.get_web_console(
+                udid=body.udid, bundle_id=body.bundle_id, page_id=body.page_id,
+                timeout=body.timeout, levels=body.levels,
+            )
+            act.detail += f", {result.get('count')} of {result.get('read')} messages"
             return {"status": "ok", "elapsed_ms": act.duration_ms, **result}
         except DeviceError as e:
             raise _handle_device_error(e)

@@ -984,6 +984,69 @@ Returns where the fingers went. An app's recogniser reports a little less than w
     }
   });
 
+  server.registerTool("get_web_console", {
+    description: `Read a web page's recent console messages -- console.log/info/warn/error output, uncaught JavaScript errors and unhandled Promise rejections -- inside an app's WKWebView or Safari, on an iOS simulator or a physical iPhone (no Xcode needed; turn on Settings > Apps > Safari > Advanced > Web Inspector first). The device log capture does not carry a page's console, so this is where a web view's JS errors are. It reads what WebKit keeps for the page, including what was logged before you asked: about the last 100 messages, so on a page that logs a lot the oldest are gone (the answer says so with a note when it read 80 or more). Each message has level, text (every argument, not only the first), source ("console-api" for console calls, "javascript" for uncaught errors), timestamp (UTC), and url/line/column where the page gave one. levels filters, e.g. ["error"] for the errors alone; read says how many were there before the filter. The page is page_id with bundle_id, as get_web_content lists them, or the one page on screen. Nothing stays attached to the page after the read, so Safari's Develop menu can still inspect it. To see what an action logged, read once after it: older messages have earlier timestamps.`,
+    inputSchema: strictParams({
+      bundle_id: z
+        .string()
+        .optional()
+        .describe("The app whose page to read, as get_web_content names it."),
+      page_id: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "The page, from get_web_content's pages. Optional when one page is on screen."
+        ),
+      levels: z
+        .array(z.enum(["log", "info", "debug", "warning", "error"]))
+        .optional()
+        .describe("Only messages at these levels, e.g. [\"error\"]."),
+      timeout: z
+        .number()
+        .positive()
+        .max(60)
+        .optional()
+        .describe("Seconds the page has to answer (default 10)."),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ bundle_id, page_id, levels, timeout, udid }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (bundle_id) body.bundle_id = bundle_id;
+      if (page_id !== undefined) body.page_id = page_id;
+      if (levels) body.levels = levels;
+      if (timeout !== undefined) body.timeout = timeout;
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/device/ui/web-console",
+        undefined,
+        body
+      );
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: errorText(e),
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("evaluate_web_js", {
     description: `Run your own JavaScript in a web page inside an app or Safari, and get back what it gave -- on an iOS simulator, or on a physical iPhone with no Xcode needed (turn on Settings > Apps > Safari > Advanced > Web Inspector first; the error says so when it is off). For reading state the DOM does not show (a JS variable, localStorage, a framework's store), setting a value, calling a page function, or changing the DOM. It ACTS ON THE PAGE: what the script changes stays changed, and every call is logged as an action with its script. The page is page_id, as get_web_content lists it under "pages" (with bundle_id), or, without it, the one page on screen; with none or several on screen the error lists them. The answer has threw: true and the exception's text when the script threw (a thrown error is an answer, not a tool failure), and otherwise type and value: a primitive or a JSON-serialisable object by value; a DOM node by its description (value null); an object that cannot be serialised (a cycle) with a note. The value of a script is its last expression statement, as in a console, so "document.title" or "var n = 2; n * 21" both work. A returned Promise is awaited (awaited: true), and a rejection reads as a throw, so async work can be written as an async function called at the end: "(async () => (await fetch('/api/me')).status)()". timeout (default 10 s, at most 60) bounds the script and its Promise; a page that does not answer in time is an error, and whatever the script changed before then stays changed. The web content overlay from get_web_content is dropped afterwards, since the page may have changed: read it again before tapping web elements. Android's WebView is not reachable this way.`,
     inputSchema: strictParams({
