@@ -568,3 +568,32 @@ async def test_closing_does_not_wait_forever_on_a_peer_that_stopped_reading(monk
     inspector._sessions.update({("PID:1", 1), ("PID:1", 2)})
     await asyncio.wait_for(inspector.close(), 2)
     assert service.closed and inspector._service is None and not inspector._sessions
+
+
+
+async def test_a_listing_is_only_the_application_s_it_names():
+    """The daemon pushes listings nobody asked for -- Safari's, twice, as it
+    navigated -- and the first that came was taken as the answer: another
+    app's pages became this one's, or this app's pages none."""
+    def listing(app_id, pages):
+        return {"__selector": "_rpc_applicationSentListing:", "__argument": {
+            "WIRApplicationIdentifierKey": app_id,
+            "WIRListingKey": {str(p): {"WIRPageIdentifierKey": p, "WIRURLKey": f"u{p}"}
+                              for p in pages}}}
+
+    class Daemon:
+        def __init__(self):
+            self.queue = [listing("PID:57191", []), listing("PID:51915", [21, 23])]
+
+        async def send_plist(self, _message):
+            pass
+
+        async def recv_plist(self):
+            if self.queue:
+                return self.queue.pop(0)
+            await asyncio.sleep(60)
+
+    inspector = webinspector.SimulatorWebInspector(timeout=1.0)
+    inspector._service = Daemon()
+    pages = await inspector.pages("PID:51915")
+    assert [p["page_id"] for p in pages] == [21, 23]

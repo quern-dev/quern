@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A simulator app's web pages are no longer read from another app's listing.** Listing an app's pages took the first listing the Web Inspector sent, whichever app it was for. The daemon also sends listings nobody asked for: measured on an iOS 27.2 simulator, Safari's arrived twice, unasked, as it navigated. So right after a navigation, Safari could read as having no pages -- `get_web_content`, `evaluate_web_js` and the web-field clear then found "no web page on screen" -- or another app's pages could be taken as its own. A listing now counts only for the app it names. Measured while Safari navigated every 0.4 s: listing the WebKit content process (which has no pages) returned Safari's pages 7 times in 15 before, and none after.
+
 ### Added
 - **`evaluate_web_js`: run your own JavaScript in a web page (#713).** On an iOS simulator, or a physical iPhone with no Xcode through the phone's Web Inspector. The page is `page_id` as `get_web_content` lists it, or the one page on screen; with none or several, the error lists them. The answer is described rather than taken by value, because WebKit's by-value answer is `{}` for a DOM node and a Promise alike, which reads as an empty object really there. So a throw comes back as `threw` with its text, a primitive or JSON-serialisable object as its `value`, a DOM node by its description (`<input id="q">`), an object with a cycle with a `note`, and a Promise is awaited (`awaited`), its rejection read as a throw. The script runs once: an object's value is fetched from what it returned, not by running it again. `timeout` (10 s, at most 60) bounds it, and every call is logged as an action with its script. Measured on an iOS 27.2 simulator: about 0.5 s a call on a connected inspector.
 
