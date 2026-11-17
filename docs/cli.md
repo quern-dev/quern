@@ -24,7 +24,7 @@ quern help                   # Show the command list
 quern version                # Print the installed version
 quern check-updates          # Ask now, ignoring the once-a-day rate limit
 quern update                 # Update to the latest release on your channel and rebuild
-quern update --tools         # Also upgrade external tools quern installed (pipx, brew)
+quern update --tools         # Also upgrade external tools quern installed (pipx, brew); those below quern's minimum are upgraded either way
 quern set-channel [name]     # Show or set the update channel (stable / beta)
 quern record start --udid UDID [--out DIR]   # Record a device's actions, flows and logs to disk
 quern record start --udid UDID --kinds flows,logs --host H --exclude-host H --include-unattributed --video

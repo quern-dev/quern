@@ -40,8 +40,18 @@ typical machine — a library in the venv and a `pipx` binary — and they drift
 Every update run reports external tools that have fallen behind, with the exact
 command to move each one; `--tools` runs those commands for you.
 
-Reporting is the default because a `pipx` or `brew` upgrade changes state for every
-other consumer on the machine, not just quern. Tools that arrived as a dependency of
+A tool **below the version quern requires** is upgraded on every update, with or
+without `--tools` -- including one started from the menu bar, which never passes it.
+`pymobiledevice3` is held to the same minimum in both places, so the copy tunneld runs
+cannot fall behind quern's own. When that upgrade needs `sudo` -- a `pipx --global`
+install, which setup chooses when your home is on an external volume -- and the update
+has no terminal to ask for the password on, it is left undone and recorded in
+`~/.quern/pending-tool-upgrades.json`. `quern status` then says what is left and the
+command to run. The record clears itself the next time an update finds nothing left,
+however the work got done.
+
+Merely newer versions stay opt-in: reporting is the default because a `pipx` or
+`brew` upgrade changes state for every other consumer on the machine, not just quern. Tools that arrived as a dependency of
 something else are reported but not offered — upgrading those directly can be undone
 by whatever pulled them in. Tools quern does not manage (node under `fnm`, `adb`
 inside Android Studio's SDK) are named along with who does manage them, decided by

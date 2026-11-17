@@ -1906,7 +1906,25 @@ def _cmd_status(args: argparse.Namespace) -> None:
     print(f"  Disk:       {lines[0]}")
     for extra in lines[1:]:
         print(f"              {extra}")
+    for line in _pending_tool_lines():
+        print(line)
     sys.exit(0)
+
+
+def _pending_tool_lines() -> list[str]:
+    """What an update could not finish without a terminal (#725), as status
+    lines: a required upgrade that needs sudo, with the command to run."""
+    from server.lifecycle.updater import read_pending
+
+    lines = []
+    for item in read_pending():
+        name = f"{item.get('name')} ({item.get('role')})"
+        lines.append(f"  Needs a terminal: {name} {item.get('current')} is "
+                     f"{item.get('reason') or 'out of date'}")
+        command = " ".join(item.get("command") or [])
+        if command:
+            lines.append(f"              run: {command}")
+    return lines
 
 
 def _fetch_device_tools() -> tuple[dict | None, str]:
