@@ -195,3 +195,37 @@ async def test_a_phone_wda_reads_is_pointed_at_its_tree(monkeypatch):
     _patch(monkeypatch, FakeService([_entry()]))
     with pytest.raises(DeviceError, match="already includes web content"):
         await ctrl.get_web_content(udid=PHONE)
+
+
+# -- tapping what was read (#708) ----------------------------------------------------
+
+
+def test_a_web_element_the_push_carries_is_not_added_twice():
+    """The push frames the probe's button 24,276 86x21, the DOM 36,279 61x14:
+    added as a second "Web Button", a tap by label was refused as ambiguous."""
+    from server.models import UIElement
+
+    ctrl = DeviceController()
+    native = [UIElement(type="Button", label="Web Button",
+                        frame={"x": 24, "y": 276, "width": 86, "height": 21})]
+    ctrl._store_web_overlay(PHONE, [
+        {"type": "Button", "AXLabel": "Web Button", "source": "web-inspector",
+         "dom_id": "web_button", "frame": {"x": 36, "y": 279.4, "width": 61.4, "height": 14}},
+        {"type": "StaticText", "AXLabel": "only in the DOM", "source": "web-inspector",
+         "frame": {"x": 24, "y": 400, "width": 120, "height": 20}}])
+
+    merged = ctrl._merge_web_overlay(PHONE, native)
+
+    assert [e.label for e in merged] == ["Web Button", "only in the DOM"]
+
+
+async def test_a_web_tap_on_a_phone_is_checked_with_the_push_s_hit_test(monkeypatch):
+    """The UI backend there is WDA, which has no point lookup: every web
+    tap read as stale."""
+    from server.models import UIElement
+
+    ctrl = _phone(monkeypatch)
+    ctrl.wda_client.describe_point = AsyncMock(side_effect=AssertionError("asked WDA"))
+    element = UIElement(type="Button", label="Web Button",
+                        frame={"x": 36, "y": 279.4, "width": 61.4, "height": 14})
+    assert await ctrl._web_element_still_there(PHONE, element)

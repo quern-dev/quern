@@ -230,6 +230,30 @@ def _build_screen_context(elements: list[UIElement]) -> dict:
 
 
 
+def _natively_there(web: UIElement, native: list[UIElement]) -> bool:
+    """A web element the native tree carries too, in its own box (#708).
+
+    A phone's tree push holds a web view's elements, framed as accessibility
+    sees them: the probe's button is 24,276 86x21 there, 36,279 61x14 in the
+    DOM. Not the same frame, so the exact match above missed it, and a tap by
+    label was refused as ambiguous between the two. Same label, and the web
+    element's centre inside the native one, is the same element.
+    """
+    from server.device.web.web_content import normalise
+
+    label = normalise(web.label)
+    if not label or not web.frame:
+        return False
+    cx = web.frame["x"] + web.frame["width"] / 2
+    cy = web.frame["y"] + web.frame["height"] / 2
+    for e in native:
+        f = e.frame
+        if (f and normalise(e.label) == label
+                and f["x"] <= cx <= f["x"] + f["width"] and f["y"] <= cy <= f["y"] + f["height"]):
+            return True
+    return False
+
+
 def _web_content_hint(elements: list[UIElement]) -> str | None:
     """Why a lookup may have missed: the screen is web content the
     accessibility tree cannot see, and `get_web_content` is what reads it.
@@ -3075,7 +3099,7 @@ class DeviceControllerUI:
         merged = list(elements)
         for element in web:
             key = frame_key(element.frame)
-            if key is None or key in seen:
+            if key is None or key in seen or _natively_there(element, elements):
                 continue
             seen.add(key)
             merged.append(element)
@@ -3155,8 +3179,11 @@ class DeviceControllerUI:
         frame = element.frame or {}
         x = frame.get("x", 0) + frame.get("width", 0) / 2
         y = frame.get("y", 0) + frame.get("height", 0) / 2
+        # The push's hit-test on a phone it reads (#708): there the UI backend
+        # is WDA, which has no point lookup, and every web tap read as stale.
+        reader = self._device_tree_reader(udid) or self._ui_backend(udid)
         try:
-            hit = await self._ui_backend(udid).describe_point(udid, x, y)
+            hit = await reader.describe_point(udid, x, y)
         except Exception:
             logger.debug("web element verification probe failed", exc_info=True)
             return False
