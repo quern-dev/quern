@@ -95,7 +95,15 @@ class CoreDeviceApps(DevicectlBackend):
         async def run() -> Any:
             async with (service or self._apps)(uuid) as apps:
                 return await op(apps)
+        from server.device.ios.phone_readiness import ensure_image, missing_image
+
         try:
+            try:
+                return await asyncio.wait_for(run(), timeout)
+            except Exception as e:  # noqa: BLE001 -- only a missing image is retried
+                # The app service is the image's: mounted, the call is made again.
+                if not missing_image(e) or not await ensure_image(uuid):
+                    raise
             return await asyncio.wait_for(run(), timeout)
         except DeviceError:
             raise
@@ -106,6 +114,11 @@ class CoreDeviceApps(DevicectlBackend):
                    "same; check before doing it again" if write else ""),
                 tool=TOOL) from e
         except Exception as e:  # noqa: BLE001 -- pymobiledevice3 raises its own kinds
+            from server.device.ios.phone_readiness import NO_IMAGE_FIX, missing_image
+
+            if missing_image(e):
+                raise DeviceError(f"{what} on {uuid[:8]} failed. {NO_IMAGE_FIX}.",
+                                  tool=TOOL) from e
             raise DeviceError(f"{what} on {uuid[:8]} failed: {e}", tool=TOOL) from e
 
     async def open_url(self, uuid: str, url: str, bundle_id: str) -> None:

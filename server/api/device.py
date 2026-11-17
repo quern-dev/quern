@@ -15,6 +15,7 @@ from starlette.responses import StreamingResponse
 from server import visibility
 from server.api.actions import action, logged_action
 from server.device import performance, platform, thread_stacks
+from server.device.ios.phone_readiness import noted
 from server.device.media import media_engine
 from server.device.media.preview import simulator_entries
 from server.device.pool import DevicePool
@@ -656,6 +657,7 @@ def _without_upload_path(exc: HTTPException, upload) -> HTTPException:
 
 
 @router.post("/app/install")
+@noted
 async def install_app(request: Request, body: InstallAppRequest):
     """Install an app: from a path on the server, or from an upload."""
     from server import visibility
@@ -741,6 +743,7 @@ _RECORDING: set[asyncio.Task] = set()
 
 @router.post("/app/launch")
 @logged_action("launch_app", category="device.action")
+@noted
 async def launch_app(request: Request, body: LaunchAppRequest):
     """Launch an app on a simulator, emulator, or device."""
     controller = _get_controller(request)
@@ -769,6 +772,7 @@ async def launch_app(request: Request, body: LaunchAppRequest):
 
 
 @router.post("/app/terminate")
+@noted
 async def terminate_app(request: Request, body: TerminateAppRequest):
     """Terminate an app on a simulator."""
     controller = _get_controller(request)
@@ -790,6 +794,7 @@ async def terminate_app(request: Request, body: TerminateAppRequest):
 
 
 @router.post("/app/uninstall")
+@noted
 async def uninstall_app(request: Request, body: UninstallAppRequest):
     """Uninstall an app from a simulator or physical device."""
     controller = _get_controller(request)
@@ -806,6 +811,7 @@ async def uninstall_app(request: Request, body: UninstallAppRequest):
 
 @router.get("/app/list")
 @logged_action("list_apps", category="device.read")
+@noted
 async def list_apps(request: Request, udid: str | None = Query(default=None)):
     """List installed apps on a simulator."""
     controller = _get_controller(request)
@@ -1039,6 +1045,7 @@ async def set_location(request: Request, body: SetLocationRequest):
 
 @router.post("/open-url")
 @logged_action("open_url", category="device.action")
+@noted
 async def open_url(request: Request, body: OpenUrlRequest):
     """Open a URL on a simulator, emulator, or device."""
     controller = _get_controller(request)

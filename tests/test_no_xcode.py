@@ -9,6 +9,7 @@ pymobiledevice3 instead, which is what devicectl talks to.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import signal
 from unittest.mock import AsyncMock
@@ -16,6 +17,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from server.device.controller import DeviceController
+from server.device.ios import phone_readiness
 from server.device.ios.coredevice_apps import CoreDeviceApps
 from server.device.ios.usbmux import UsbmuxBackend
 from server.models import (
@@ -26,6 +28,8 @@ from server.models import (
 )
 
 PHONE = "00008030-000C59623A69802E"
+#: The real `ensure_image`, taken before conftest's fixture replaces it.
+ENSURE_IMAGE = phone_readiness.ensure_image
 SETTINGS = {"bundleIdentifier": "com.apple.Preferences", "name": "Settings",
             "path": "/Applications/Preferences.app", "isFirstParty": True}
 PROBE = {"bundleIdentifier": "com.quern.probe", "name": "Probe", "isFirstParty": False,
@@ -346,6 +350,7 @@ class TestReadiness:
         class Lockdown:
             all_values = {"DeviceName": "iPhone 11"}
             product_version = "27.2.1"
+            paired = True
 
             async def get_developer_mode_status(self):
                 raise OSError("amfi said no")
@@ -395,8 +400,10 @@ class TestDoctor:
         self.mount = AsyncMock(side_effect=mount)
         monkeypatch.setattr(r, "mount_image", self.mount)
         self.reveal = []
-        monkeypatch.setattr(main, "_reveal_developer_mode",
-                            lambda udid: self.reveal.append(udid) or reveal)
+        async def fake_reveal(udid):
+            self.reveal.append(udid)
+            return reveal
+        monkeypatch.setattr(main, "_reveal_developer_mode", fake_reveal)
         return main
 
     def test_a_ready_phone(self, monkeypatch, capsys):
@@ -560,6 +567,7 @@ class TestReviewFixes:
         class Lockdown:
             all_values = {"DeviceName": "Phone"}
             product_version = version
+            paired = True
 
             async def get_developer_mode_status(self):
                 asked.append("mode")
@@ -630,3 +638,316 @@ async def test_the_url_check_s_read_is_remembered_for_a_late_crash(monkeypatch):
     await ctrl._front_bundle_over_coredevice(PHONE, "com.quern.probe")
 
     assert noted == [(PHONE, 711, "Probe")]
+
+
+class TestAMissingImageIsNamed:
+    """Measured on an iPhone 11 with its image removed: HID and the app
+    service failed, and the error named WDA and Xcode instead (#664 phase 5)."""
+
+    class DeveloperDiskImageServiceError(Exception):
+        """pymobiledevice3's, by name: what `missing_image` recognises."""
+
+    def test_it_is_recognised_through_the_cause_chain(self):
+        from server.device.ios.phone_readiness import missing_image
+
+        try:
+            try:
+                raise self.DeveloperDiskImageServiceError("no hid service")
+            except Exception as inner:
+                raise RuntimeError("the HID service could not be opened") from inner
+        except RuntimeError as outer:
+            assert missing_image(outer)
+        assert not missing_image(OSError("no tunnel"))
+
+    async def test_input_that_falls_back_to_no_wda_names_the_image(self):
+        from server.device.ios.coredevice_input import CoreDeviceInput, NotSent
+
+        cdi = CoreDeviceInput.__new__(CoreDeviceInput)
+        cdi._fallback = type("Wda", (), {"TOOL_NAME": "wda"})()
+
+        async def send(*a, **k):
+            raise NotSent("the HID service could not be opened") from \
+                self.DeveloperDiskImageServiceError("The device does not offer ... "
+                                                   "which its DeveloperDiskImage provides")
+        cdi._send = send
+
+        async def wda():
+            raise DeviceError("This needs WebDriverAgent ... Xcode is not installed", tool="wda")
+
+        with pytest.raises(DeviceError, match="no developer disk image.*doctor --fix") as e:
+            await cdi._or_fallback(PHONE, "HOME button", None, wda)
+        assert "WebDriverAgent could not send it instead" in str(e.value)
+
+    async def test_another_hid_failure_keeps_wda_s_own_error(self):
+        from server.device.ios.coredevice_input import CoreDeviceInput, NotSent
+
+        cdi = CoreDeviceInput.__new__(CoreDeviceInput)
+        cdi._fallback = type("Wda", (), {"TOOL_NAME": "wda"})()
+
+        async def send(*a, **k):
+            raise NotSent("no tunnel to 00008030")
+        cdi._send = send
+
+        async def wda():
+            raise DeviceError("WDA said no", tool="wda")
+        with pytest.raises(DeviceError, match="^.*WDA said no$"):
+            await cdi._or_fallback(PHONE, "tap", None, wda)
+
+    async def test_the_app_service_names_it_too(self):
+        backend = CoreDeviceApps()
+
+        @contextlib.asynccontextmanager
+        async def no_image(uuid):
+            raise self.DeveloperDiskImageServiceError(
+                "The device does not offer the com.apple.coredevice.appservice service")
+            yield
+        backend._apps = no_image
+        with pytest.raises(DeviceError, match="listing apps on 00008030 failed. The phone "
+                                              "has no developer disk image.*doctor --fix"):
+            await backend.list_apps(PHONE)
+
+
+
+class TestTrustAndDeadlines:
+    """CodeRabbit on #711."""
+
+    async def test_an_unpaired_phone_is_told_to_trust_and_asked_nothing_else(self, monkeypatch):
+        from server.device.ios import phone_readiness as r
+
+        class Lockdown:
+            all_values = {"DeviceName": "iPhone 11"}
+            product_version = "27.2.1"
+            paired = False
+
+            async def get_developer_mode_status(self):
+                raise AssertionError("asked an unpaired phone")
+        monkeypatch.setattr(r, "_lockdown", AsyncMock(return_value=Lockdown()))
+
+        state = await r.readiness(PHONE)
+
+        assert state.paired is False and state.os_version == "27.2.1"
+        assert (state.developer_mode, state.image_mounted) == (None, None)
+        assert "tap Trust" in state.errors[0]
+
+    async def test_a_read_that_never_finishes_is_given_up(self, monkeypatch):
+        import asyncio
+
+        from server.device.ios import phone_readiness as r
+
+        async def hang(udid):
+            await asyncio.sleep(60)
+        monkeypatch.setattr(r, "_lockdown", hang)
+        monkeypatch.setattr(r, "READ_TIMEOUT_S", 0.05)
+
+        state = await r.readiness(PHONE)
+        assert "did not answer" in state.errors[0]
+
+    async def test_listing_is_bounded_too(self, monkeypatch):
+        import asyncio
+
+        from server.device.ios import phone_readiness as r
+
+        async def hang():
+            await asyncio.sleep(60)
+        monkeypatch.setattr(r, "_phones", hang)
+        monkeypatch.setattr(r, "LIST_TIMEOUT_S", 0.05)
+        with pytest.raises(TimeoutError):
+            await r.phones()
+
+    async def test_a_mount_that_never_finishes_says_so(self, monkeypatch):
+        import asyncio
+
+        from server.device.ios import phone_readiness as r
+
+        async def hang(provider):
+            # Longer than the deadline, short enough not to hold the test run
+            # open: a mount past its deadline finishes on its own thread.
+            await asyncio.sleep(0.5)
+        monkeypatch.setattr("pymobiledevice3.services.mobile_image_mounter.auto_mount", hang)
+        monkeypatch.setattr(r, "_lockdown", AsyncMock(return_value="lockdown"))
+        monkeypatch.setattr(r, "MOUNT_TIMEOUT_S", 0.05)
+        with pytest.raises(DeviceError, match="took over"):
+            await r.mount_image(PHONE, "16.7")
+
+
+
+class TestMountingOnDemand:
+    """1 s cached, 2 s downloading, measured on an iPhone 11: the call that
+    needs the image mounts it and goes ahead (#664 phase 5)."""
+
+    class DeveloperDiskImageServiceError(Exception):
+        pass
+
+    def _mountable(self, monkeypatch, *, fails=False, already=False):
+        class Lockdown:
+            product_version = "27.2.1"
+        monkeypatch.setattr(phone_readiness, "_lockdown", AsyncMock(return_value=Lockdown()))
+        mounts = []
+
+        async def mount(udid, version):
+            mounts.append((udid, version))
+            await asyncio.sleep(0.01)
+            if fails:
+                raise DeviceError("no tunnel", tool="pymobiledevice3")
+            return not already
+        monkeypatch.setattr(phone_readiness, "mount_image", mount)
+        monkeypatch.setattr(phone_readiness, "_failed", {})
+        monkeypatch.setattr(phone_readiness, "ensure_image", ENSURE_IMAGE)
+
+        async def mounted_yet(udid, version):
+            return bool(mounts) and not fails
+        monkeypatch.setattr(phone_readiness, "_image_is_mounted", mounted_yet)
+        return mounts
+
+    async def test_input_mounts_it_and_goes_over_hid(self, monkeypatch):
+        from server.device.ios.coredevice_input import CoreDeviceInput, NotSent
+
+        mounts = self._mountable(monkeypatch)
+        cdi = CoreDeviceInput.__new__(CoreDeviceInput)
+        cdi._fallback = type("Wda", (), {"TOOL_NAME": "wda"})()
+        sends = []
+
+        async def send(*a, **k):
+            sends.append(1)
+            if len(sends) == 1:
+                raise NotSent("the HID service could not be opened") from \
+                    self.DeveloperDiskImageServiceError("no hid service")
+        cdi._send = send
+        wda = AsyncMock()
+
+        @phone_readiness.noted
+        async def route():
+            # In a child task, as tap_element runs its work (CodeRabbit on #711).
+            via = await asyncio.create_task(cdi._or_fallback(PHONE, "tap", None, wda))
+            return {"status": "ok", "udid": PHONE, "via": via}
+
+        result = await route()
+
+        assert mounts == [(PHONE, "27.2.1")] and len(sends) == 2
+        wda.assert_not_called()
+        assert result["via"] == "coredevice" and "mounted it" in result["developer_image"]
+
+    async def test_the_app_service_mounts_it_and_calls_again(self, monkeypatch):
+        mounts = self._mountable(monkeypatch)
+        calls = []
+        backend = CoreDeviceApps()
+
+        @contextlib.asynccontextmanager
+        async def apps(uuid):
+            calls.append(1)
+            if len(calls) == 1:
+                raise self.DeveloperDiskImageServiceError("no app service")
+            yield FakeAppService([SETTINGS], [])
+        backend._apps = apps
+
+        listed = await backend.list_apps(PHONE)
+
+        assert mounts == [(PHONE, "27.2.1")] and [a.name for a in listed] == ["Settings"]
+
+    async def test_a_failed_mount_is_not_tried_again_at_once(self, monkeypatch):
+        mounts = self._mountable(monkeypatch, fails=True)
+        assert await phone_readiness.ensure_image(PHONE) is False
+        assert await phone_readiness.ensure_image(PHONE) is False
+        assert len(mounts) == 1
+
+    async def test_two_requests_mount_once_and_only_the_mounter_is_told(self, monkeypatch):
+        mounts = self._mountable(monkeypatch)
+
+        @phone_readiness.noted
+        async def route():
+            assert await phone_readiness.ensure_image(PHONE)
+            return {"status": "ok", "udid": PHONE}
+
+        first, second = await asyncio.gather(route(), route())
+        assert len(mounts) == 1
+        assert ["developer_image" in r for r in (first, second)].count(True) == 1
+
+    async def test_an_image_already_there_is_ready_and_unannounced(self, monkeypatch):
+        self._mountable(monkeypatch, already=True)
+
+        @phone_readiness.noted
+        async def route():
+            assert await phone_readiness.ensure_image(PHONE)
+            return {"status": "ok", "udid": PHONE}
+        assert "developer_image" not in await route()
+
+    async def test_the_input_warning_reads_the_request_s_own_scope(self, monkeypatch):
+        from server.api.actions import action
+        from server.api.device_ui import _with_input_warning
+
+        self._mountable(monkeypatch)
+        ctrl = type("C", (), {"input_warning": lambda self, udid: None})()
+        with action("tap"):
+            await asyncio.create_task(phone_readiness.ensure_image(PHONE))
+            payload = _with_input_warning(ctrl, PHONE, {"status": "ok"})
+        assert "mounted it" in payload["developer_image"]
+        with action("tap"):                       # another request: nothing to say
+            assert "developer_image" not in _with_input_warning(ctrl, PHONE, {"status": "ok"})
+
+    async def test_without_a_mount_nothing_is_noted(self):
+        @phone_readiness.noted
+        async def route():
+            return {"status": "ok", "udid": PHONE}
+        assert await route() == {"status": "ok", "udid": PHONE}
+
+
+class TestTheMountItself:
+    async def test_already_mounted_is_ready_however_wrapped(self, monkeypatch):
+        class AlreadyMountedError(Exception):
+            pass
+
+        async def wrapped_plain(udid, version):
+            raise RuntimeError("wrapped") from AlreadyMountedError("there already")
+
+        async def wrapped_device(udid, version):
+            raise DeviceError("mount failed", tool="pymobiledevice3") from \
+                AlreadyMountedError("there already")
+        for mount in (wrapped_plain, wrapped_device):
+            monkeypatch.setattr(phone_readiness, "_workers", {})
+            monkeypatch.setattr(phone_readiness, "_mount", mount)
+            assert await phone_readiness.mount_image(PHONE, "27.2.1") is False
+
+    async def test_a_real_mount_says_so(self, monkeypatch):
+        async def fine(udid, version):
+            return None
+        monkeypatch.setattr(phone_readiness, "_workers", {})
+        monkeypatch.setattr(phone_readiness, "_mount", fine)
+        assert await phone_readiness.mount_image(PHONE, "27.2.1") is True
+
+    async def test_a_slow_mount_does_not_hold_the_server(self, monkeypatch):
+        """auto-mount downloads synchronously: on a thread of its own."""
+        import time as clock
+
+        async def slow(udid, version):
+            clock.sleep(0.3)                                        # blocking, as its I/O is
+        monkeypatch.setattr(phone_readiness, "_workers", {})
+        monkeypatch.setattr(phone_readiness, "_mount", slow)
+        ticks = []
+
+        async def ticker():
+            for _ in range(5):
+                ticks.append(1)
+                await asyncio.sleep(0.02)
+        await asyncio.gather(phone_readiness.mount_image(PHONE, "27.2.1"), ticker())
+        assert len(ticks) == 5
+
+    async def test_no_second_mount_beside_one_past_its_deadline(self, monkeypatch):
+        import time as clock
+
+        async def slow(udid, version):
+            clock.sleep(0.4)
+        monkeypatch.setattr(phone_readiness, "_workers", {})
+        monkeypatch.setattr(phone_readiness, "_mount", slow)
+        monkeypatch.setattr(phone_readiness, "MOUNT_TIMEOUT_S", 0.05)
+
+        with pytest.raises(DeviceError, match="took over"):
+            await phone_readiness.mount_image(PHONE, "27.2.1")
+        with pytest.raises(DeviceError, match="still going"):
+            await phone_readiness.mount_image(PHONE, "27.2.1")
+        await asyncio.sleep(0.5)                                     # it ends
+        monkeypatch.setattr(phone_readiness, "MOUNT_TIMEOUT_S", 5)
+        assert await phone_readiness.mount_image(PHONE, "27.2.1") is True
+
+
+async def _raising(fn, *a):
+    fn(*a)

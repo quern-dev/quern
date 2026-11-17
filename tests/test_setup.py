@@ -509,10 +509,36 @@ class TestCheckXcodeCliTools:
             assert "simctl" in result.message
 
     def test_not_installed(self):
-        with _patch_which({"xcrun": None}):
+        with (
+            _patch_which({"xcrun": None}),
+            patch("server.lifecycle.setup._is_apple_silicon", return_value=True),
+        ):
             result = check_xcode_cli_tools()
-            assert result.status == CheckStatus.MISSING
+            assert result.status == CheckStatus.SKIPPED
             assert "xcode-select" in result.detail
+
+    def test_on_an_intel_mac_they_are_still_required(self):
+        """Homebrew needs them to install bottles there (CodeRabbit on #711)."""
+        with (
+            _patch_which({"xcrun": "/usr/bin/xcrun"}),
+            patch("server.lifecycle.setup.xcode_available", return_value=False),
+            patch("server.lifecycle.setup._is_apple_silicon", return_value=False),
+        ):
+            result = check_xcode_cli_tools()
+        assert result.status == CheckStatus.MISSING and "Intel" in result.detail
+
+    def test_no_developer_directory_is_not_a_failure(self):
+        """#664 phase 5: measured on a Mac with no developer tools, Homebrew
+        installed everything from bottles and an iPhone was set up in full;
+        the check alone failed setup."""
+        with (
+            _patch_which({"xcrun": "/usr/bin/xcrun"}),
+            patch("server.lifecycle.setup.xcode_available", return_value=False),
+            patch("server.lifecycle.setup._is_apple_silicon", return_value=True),
+        ):
+            result = check_xcode_cli_tools()
+        assert result.status == CheckStatus.SKIPPED
+        assert "iOS 27" in result.detail and "xcode-select --install" in result.detail
 
     def test_xcrun_without_simctl(self):
         def side_effect(cmd, **kwargs):
@@ -1794,9 +1820,11 @@ class TestXcodeGate:
             "server.lifecycle.setup._which",
             lambda name: "/usr/bin/xcrun" if name == "xcrun" else None,
         )
+        monkeypatch.setattr(setup_mod, "_is_apple_silicon", lambda: True)
         with patch.object(setup_mod, "_run") as run_mock:
             result = setup_mod.check_xcode_cli_tools()
-        assert result.status.name == "MISSING"
+        # Skipped, not failed, since #664 phase 5 -- but never run either way.
+        assert result.status.name == "SKIPPED"
         assert run_mock.call_count == 0
 
     def test_check_booted_simulators_returns_empty_without_invoking_xcrun(
@@ -3702,3 +3730,263 @@ class TestTheNewNodeRunsOnceBeforeTheProbe:
             raise subprocess.TimeoutExpired(argv, kw["timeout"])
 
         self._warm(which=self.BREW, exists={self.BREW}, run=slow)   # no exception
+
+
+# ── A Mac without Xcode (#664 phase 5) ─────────────────────────────────────
+
+
+class TestCommandLineToolsOnly:
+    def _xcode_select(self, path, rc=0):
+        return patch("server.lifecycle.setup._run",
+                     return_value=(rc, path + "\n", ""))
+
+    def test_the_command_line_tools_and_no_xcode(self, monkeypatch, tmp_path):
+        from server.lifecycle import setup
+
+        monkeypatch.setattr(setup, "APPLICATIONS", tmp_path)
+        with self._xcode_select("/Library/Developer/CommandLineTools"):
+            assert setup._command_line_tools_only() is True
+
+    def test_an_xcode_in_applications_is_not_that(self, monkeypatch, tmp_path):
+        """xcode-select merely pointed elsewhere: _diagnose_developer_dir's fix."""
+        from server.lifecycle import setup
+
+        (tmp_path / "Xcode.app" / "Contents" / "Developer").mkdir(parents=True)
+        monkeypatch.setattr(setup, "APPLICATIONS", tmp_path)
+        with self._xcode_select("/Library/Developer/CommandLineTools"):
+            assert setup._command_line_tools_only() is False
+
+    def test_a_full_xcode_selected_is_not_that(self, monkeypatch, tmp_path):
+        from server.lifecycle import setup
+
+        monkeypatch.setattr(setup, "APPLICATIONS", tmp_path)
+        with self._xcode_select("/Applications/Xcode.app/Contents/Developer"):
+            assert setup._command_line_tools_only() is False
+
+    def test_the_check_skips_simulators_rather_than_failing(self):
+        """It was an ERROR, and on such a Mac setup reported missing
+        dependencies while an iPhone needs none of Xcode's."""
+        with (
+            _patch_which({"xcrun": "/usr/bin/xcrun"}),
+            patch("server.lifecycle.setup.xcode_available", return_value=True),
+            _patch_run(_mock_run(stdout="", returncode=1)),
+            patch("server.lifecycle.setup._command_line_tools_only", return_value=True),
+        ):
+            result = check_xcode_cli_tools()
+        assert result.status == CheckStatus.SKIPPED
+        assert "simulators need Xcode" in result.message
+        assert "iOS 27" in result.detail
+
+
+class TestSetupIos:
+    """The iPhone tools are set up whether or not Xcode is there."""
+
+    def _stub(self, monkeypatch, xcode_status):
+        from server.lifecycle import setup
+
+        calls = []
+
+        def result(name, status=CheckStatus.OK):
+            def check(*a, **k):
+                calls.append(name)
+                return CheckResult(name=name, status=status, message="")
+            return check
+        monkeypatch.setattr(setup, "_fix_developer_dir_for_setup", lambda: None)
+        monkeypatch.setattr(setup, "check_xcode_cli_tools",
+                            result("Xcode CLI Tools", xcode_status))
+        for name in ("check_libimobiledevice", "check_ideviceinstaller",
+                     "check_pymobiledevice3", "check_tunneld", "check_iphones",
+                     "check_idb"):
+            monkeypatch.setattr(setup, name, result(name))
+        monkeypatch.setattr(setup, "_setup_idb_companion",
+                            lambda **k: calls.append("idb_companion") or CheckResult(
+                                name="idb_companion", status=CheckStatus.OK, message=""))
+        monkeypatch.setattr(setup, "_sim_bridge_supported", lambda: True)
+        return setup, calls
+
+    def test_without_xcode_the_phone_tools_are_still_set_up(self, monkeypatch, capsys):
+        setup, calls = self._stub(monkeypatch, CheckStatus.SKIPPED)
+        report = setup.SetupReport()
+
+        ios = setup._setup_ios(report)
+
+        assert ios.simulators is False and ios.pmd3.status == CheckStatus.OK
+        assert ios.tunneld.status == CheckStatus.OK
+        assert {"check_libimobiledevice", "check_ideviceinstaller", "check_pymobiledevice3",
+                "check_tunneld", "check_iphones"} <= set(calls)
+        assert "idb_companion" not in calls
+        assert not report.has_errors
+
+    def test_with_xcode_both_are(self, monkeypatch, capsys):
+        setup, calls = self._stub(monkeypatch, CheckStatus.OK)
+        assert setup._setup_ios(setup.SetupReport()).simulators is True
+        assert "idb_companion" in calls and "check_iphones" in calls
+
+
+class TestCheckIphones:
+    def _phones(self, monkeypatch, *, found, states, mount=None, answer=True):
+        from server.device.ios import phone_readiness as r
+        from server.lifecycle import setup
+
+        monkeypatch.setattr(r, "phones", _async(found))
+        monkeypatch.setattr(r, "readiness", _async_by_udid(states))
+        self.mounted, self.revealed = [], []
+
+        async def mount_image(udid, version):
+            if mount:
+                raise mount
+            self.mounted.append((udid, version))
+        monkeypatch.setattr(r, "mount_image", mount_image)
+
+        async def reveal(udid):
+            self.revealed.append(udid)
+        monkeypatch.setattr(r, "reveal_developer_mode", reveal)
+        monkeypatch.setattr(setup, "_prompt_yn", lambda *a, **k: answer)
+        return setup
+
+    def test_no_phone_is_not_a_problem(self, monkeypatch, capsys):
+        setup = self._phones(monkeypatch, found=[], states={})
+        result = setup.check_iphones()
+        assert result.status == CheckStatus.SKIPPED and "doctor" in result.detail
+
+    def test_a_ready_phone(self, monkeypatch, capsys):
+        from server.device.ios.phone_readiness import Readiness
+
+        setup = self._phones(monkeypatch, found=[("P1", "iPhone 11", "27.2.1")], states={
+            "P1": Readiness("P1", "iPhone 11", "27.2.1", developer_mode=True,
+                            image_mounted=True, errors=[])})
+        result = setup.check_iphones()
+        assert result.status == CheckStatus.OK and "iPhone 11" in result.message
+
+    def test_a_missing_image_is_mounted_when_asked(self, monkeypatch, capsys):
+        from server.device.ios.phone_readiness import Readiness
+
+        setup = self._phones(monkeypatch, found=[("P1", "iPhone 11", "27.2.1")], states={
+            "P1": Readiness("P1", "iPhone 11", "27.2.1", developer_mode=True,
+                            image_mounted=False, errors=[])})
+        result = setup.check_iphones()
+        assert self.mounted == [("P1", "27.2.1")]
+        assert result.status == CheckStatus.OK
+        assert "GitHub" in capsys.readouterr().out          # where it comes from, said
+
+    def test_declined_or_failed_mounts_are_left_to_doctor(self, monkeypatch, capsys):
+        from server.device.ios.phone_readiness import Readiness
+
+        state = {"P1": Readiness("P1", "iPhone 11", "27.2.1", developer_mode=True,
+                                 image_mounted=False, errors=[])}
+        setup = self._phones(monkeypatch, found=[("P1", "iPhone 11", "27.2.1")],
+                             states=state, answer=False)
+        result = setup.check_iphones()
+        assert self.mounted == [] and result.status == CheckStatus.WARNING
+        assert "doctor --fix" in result.detail
+
+        setup = self._phones(monkeypatch, found=[("P1", "iPhone 11", "27.2.1")],
+                             states=state, mount=OSError("no tunnel"))
+        result = setup.check_iphones()
+        assert "did not mount (no tunnel)" in result.detail
+
+    def test_developer_mode_off_is_explained_and_its_switch_shown(self, monkeypatch, capsys):
+        from server.device.ios.phone_readiness import Readiness
+
+        setup = self._phones(monkeypatch, found=[("P1", "iPhone 11", "27.2.1")], states={
+            "P1": Readiness("P1", "iPhone 11", "27.2.1", developer_mode=False,
+                            image_mounted=True, errors=[])})
+        result = setup.check_iphones()
+        assert self.revealed == ["P1"]
+        assert result.status == CheckStatus.WARNING
+        assert "Privacy & Security > Developer Mode" in result.detail
+
+    def test_an_untrusted_mac_says_how_to_trust_it(self, monkeypatch, capsys):
+        """An unpaired phone answers with its version (CodeRabbit on #711)."""
+        from server.device.ios.phone_readiness import TRUST, Readiness
+
+        setup = self._phones(monkeypatch, found=[("P1", "iPhone 11", "27.2.1")], states={
+            "P1": Readiness("P1", "iPhone 11", "27.2.1", paired=False,
+                            errors=[f"it does not trust this Mac yet: {TRUST}"])})
+        result = setup.check_iphones()
+        assert result.status == CheckStatus.WARNING and "tap Trust" in result.detail
+        assert self.mounted == [] and self.revealed == []
+
+
+def _async(value):
+    async def f(*a, **k):
+        return value
+    return f
+
+
+def _async_by_udid(states):
+    async def f(udid):
+        return states[udid]
+    return f
+
+
+
+class TestPlatformMatrix:
+    """What quern can drive, from what setup found."""
+
+    def _ios(self, *, xcode, pmd3=CheckStatus.OK, tunneld=CheckStatus.OK):
+        from server.lifecycle.setup import IosFacts
+
+        return IosFacts(xcode, CheckResult(name="pymobiledevice3", status=pmd3, message=""),
+                        CheckResult(name="tunneld", status=tunneld, message=""))
+
+    def _rows(self, ios, adb=None, emulator=None, avds=None):
+        from server.lifecycle.setup import platform_matrix
+
+        return {name: (status, how) for name, status, how in
+                platform_matrix(ios, adb, emulator, avds)}
+
+    def test_command_line_tools_only_and_no_android(self):
+        rows = self._rows(self._ios(xcode=False))
+        assert rows["iOS simulators"][0] == CheckStatus.SKIPPED
+        assert rows["iPhones, iOS 27+"][0] == CheckStatus.OK
+        assert "no Xcode" in rows["iPhones, iOS 27+"][1]
+        assert rows["iPhones before iOS 27"][0] == CheckStatus.SKIPPED
+        assert rows["Android emulators"][0] == CheckStatus.SKIPPED
+        assert rows["Android devices"][0] == CheckStatus.SKIPPED
+
+    def test_xcode_and_android_studio_with_a_virtual_device(self):
+        rows = self._rows(self._ios(xcode=True), adb="/sdk/adb",
+                          emulator="/sdk/emulator", avds=["Pixel_7"])
+        assert all(status == CheckStatus.OK for status, _ in rows.values())
+        assert "setup_wda" in rows["iPhones before iOS 27"][1]
+        assert rows["Android emulators"][1] == "1 virtual device"
+
+    def test_one_step_left_is_named(self):
+        rows = self._rows(self._ios(xcode=True, tunneld=CheckStatus.WARNING),
+                          adb="/sdk/adb", emulator="/sdk/emulator", avds=[])
+        assert rows["iPhones, iOS 27+"] == (
+            CheckStatus.WARNING, rows["iPhones, iOS 27+"][1])
+        assert "tunneld install" in rows["iPhones, iOS 27+"][1]
+        assert rows["iPhones before iOS 27"][0] == CheckStatus.WARNING
+        assert rows["Android emulators"][0] == CheckStatus.WARNING
+        assert "Device Manager" in rows["Android emulators"][1]
+
+    def test_avds_that_could_not_be_listed_are_not_none(self):
+        rows = self._rows(self._ios(xcode=False), adb="/sdk/adb", emulator="/sdk/emulator",
+                          avds=None)
+        assert rows["Android emulators"][0] == CheckStatus.WARNING
+        assert "could not list" in rows["Android emulators"][1]
+
+    def test_no_pymobiledevice3_no_iphones(self):
+        rows = self._rows(self._ios(xcode=False, pmd3=CheckStatus.WARNING,
+                                    tunneld=CheckStatus.WARNING))
+        assert rows["iPhones, iOS 27+"][0] == CheckStatus.SKIPPED
+        assert "pipx install pymobiledevice3" in rows["iPhones, iOS 27+"][1]
+
+    def test_android_studio_s_sdk_counts_off_path(self, monkeypatch, tmp_path):
+        """Android Studio puts adb and the emulator in its SDK, which is not
+        on PATH; quern's backend finds them there, so the report must too."""
+        from server.lifecycle import setup
+
+        sdk = tmp_path / "sdk"
+        for sub, name in (("platform-tools", "adb"), ("emulator", "emulator")):
+            (sdk / sub).mkdir(parents=True)
+            (sdk / sub / name).write_text("")
+        monkeypatch.setenv("ANDROID_HOME", str(sdk))
+        monkeypatch.setattr("server.device.android.adb.shutil.which", lambda name: None)
+        monkeypatch.setattr(setup, "_run", lambda cmd, **k: (0, "Pixel_7\nPixel_6\n", ""))
+
+        adb, emulator, avds = setup._android_facts()
+        assert adb == str(sdk / "platform-tools" / "adb")
+        assert avds == ["Pixel_7", "Pixel_6"]

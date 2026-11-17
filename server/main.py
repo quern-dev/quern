@@ -2179,20 +2179,24 @@ def _report_iphone_control() -> None:
 
 def _report_phones(fix: bool = False) -> tuple[bool, bool | None]:
     """Each iPhone on USB: Developer Mode, and the developer disk image that
-    screenshots and app control need (#706). Xcode mounts the image when it
+    input and app control need (#706). Xcode mounts the image when it
     first meets a phone; with no Xcode, `--fix` mounts it with
     pymobiledevice3, and says where the image comes from, and reveals the
     Developer Mode switch in Settings.
 
     Returns `(checked, repaired)` as `_report_menubar` does: `repaired` is
-    None when nothing needed it."""
+    None when nothing needed it. One event loop for the section."""
     import asyncio
 
+    return asyncio.run(_report_phones_async(fix))
+
+
+async def _report_phones_async(fix: bool) -> tuple[bool, bool | None]:
     from server.device.ios import phone_readiness
 
     print("iPhones:")
     try:
-        found = asyncio.run(phone_readiness.phones())
+        found = await phone_readiness.phones()
     except Exception as e:  # noqa: BLE001 -- a check that could not run is said
         print(f"  ? not checked — {e}")
         return False, None
@@ -2201,7 +2205,7 @@ def _report_phones(fix: bool = False) -> tuple[bool, bool | None]:
         return True, None
     checked, repaired = True, None
     for udid, name, version in found:
-        state = asyncio.run(phone_readiness.readiness(udid))
+        state = await phone_readiness.readiness(udid)
         label = f"{state.name or name or udid[:8]} (iOS {state.os_version or version or '?'})"
         if state.errors:
             checked = False
@@ -2211,16 +2215,16 @@ def _report_phones(fix: bool = False) -> tuple[bool, bool | None]:
             print(f"  ✗ {label}: Developer Mode is off. Turn it on in Settings > Privacy & "
                   "Security > Developer Mode; the phone restarts to apply it.")
             if fix:
-                repaired = _reveal_developer_mode(udid) and repaired is not False
+                repaired = await _reveal_developer_mode(udid) and repaired is not False
         elif state.developer_mode:
             print(f"  ✓ {label}: Developer Mode on")
         if state.image_mounted is False:
-            print(f"  ✗ {label}: no developer disk image mounted; screenshots and app "
+            print(f"  ✗ {label}: no developer disk image mounted; taps, typing and app "
                   "control need one. `quern doctor --fix` mounts it: "
                   f"{phone_readiness.IMAGE_SOURCE}.")
             if fix:
                 try:
-                    asyncio.run(phone_readiness.mount_image(udid, state.os_version))
+                    await phone_readiness.mount_image(udid, state.os_version)
                     print(f"    ✓ mounted ({phone_readiness.IMAGE_SOURCE})")
                     repaired = repaired is not False
                 except Exception as e:  # noqa: BLE001 -- the repair's outcome is said
@@ -2234,18 +2238,13 @@ def _report_phones(fix: bool = False) -> tuple[bool, bool | None]:
     return checked, repaired
 
 
-def _reveal_developer_mode(udid: str) -> bool:
+async def _reveal_developer_mode(udid: str) -> bool:
     """Show the Developer Mode switch in the phone's Settings, which iOS
     hides until a developer tool asks."""
-    import asyncio
+    from server.device.ios.phone_readiness import reveal_developer_mode
 
-    async def reveal() -> None:
-        from pymobiledevice3.services.amfi import AmfiService
-
-        from server.device.ios.phone_readiness import _lockdown
-        await AmfiService(await _lockdown(udid)).reveal_developer_mode_option_in_ui()
     try:
-        asyncio.run(reveal())
+        await reveal_developer_mode(udid)
     except Exception as e:  # noqa: BLE001
         print(f"    ✗ could not show the Developer Mode switch — {e}")
         return False
