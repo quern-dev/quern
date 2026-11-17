@@ -2179,7 +2179,7 @@ def _report_iphone_control() -> None:
 
 def _report_phones(fix: bool = False) -> tuple[bool, bool | None]:
     """Each iPhone on USB: Developer Mode, and the developer disk image that
-    screenshots and app control need (#706). Xcode mounts the image when it
+    input and app control need (#706). Xcode mounts the image when it
     first meets a phone; with no Xcode, `--fix` mounts it with
     pymobiledevice3, and says where the image comes from, and reveals the
     Developer Mode switch in Settings.
@@ -2219,7 +2219,7 @@ async def _report_phones_async(fix: bool) -> tuple[bool, bool | None]:
         elif state.developer_mode:
             print(f"  ✓ {label}: Developer Mode on")
         if state.image_mounted is False:
-            print(f"  ✗ {label}: no developer disk image mounted; screenshots and app "
+            print(f"  ✗ {label}: no developer disk image mounted; taps, typing and app "
                   "control need one. `quern doctor --fix` mounts it: "
                   f"{phone_readiness.IMAGE_SOURCE}.")
             if fix:

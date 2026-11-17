@@ -106,6 +106,11 @@ class CoreDeviceApps(DevicectlBackend):
                    "same; check before doing it again" if write else ""),
                 tool=TOOL) from e
         except Exception as e:  # noqa: BLE001 -- pymobiledevice3 raises its own kinds
+            from server.device.ios.phone_readiness import NO_IMAGE_FIX, missing_image
+
+            if missing_image(e):
+                raise DeviceError(f"{what} on {uuid[:8]} failed. {NO_IMAGE_FIX}.",
+                                  tool=TOOL) from e
             raise DeviceError(f"{what} on {uuid[:8]} failed: {e}", tool=TOOL) from e
 
     async def open_url(self, uuid: str, url: str, bundle_id: str) -> None:

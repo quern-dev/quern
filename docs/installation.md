@@ -10,13 +10,13 @@ This downloads the latest release to `~/.local/share/quern`, creates a virtualen
 
 ### Without Xcode
 
-Setup works on a Mac without Xcode, and without the Command Line Tools too: Homebrew installs what setup asks of it from prebuilt bottles. It skips what needs Xcode -- iOS simulators, and the simulator certificate -- and, without the Command Line Tools, Screen Mirror and the simulator preview, which are built from source until they ship prebuilt (#662, #663). It still sets up what a physical iPhone needs: pymobiledevice3 and its `tunneld` LaunchDaemon, which asks for your password. An iPhone on iOS 27 or later is then read, tapped, typed into, screenshotted, and has apps installed, launched and stopped, all without Xcode.
+Setup works on a Mac without Xcode. On Apple Silicon it works without the Command Line Tools too: Homebrew installs what setup asks of it from prebuilt bottles. On an Intel Mac Homebrew needs them, so install them first with `xcode-select --install`. It skips what needs Xcode -- iOS simulators, and the simulator certificate -- and, without the Command Line Tools, Screen Mirror and the simulator preview, which are built from source until they ship prebuilt (#662, #663). It still sets up what a physical iPhone needs: pymobiledevice3 and its `tunneld` LaunchDaemon, which asks for your password. An iPhone on iOS 27 or later is then read, tapped, typed into, screenshotted, and has apps installed, launched and stopped, all without Xcode.
 
 For each iPhone plugged in over USB, setup then checks three things, and says what to do about each:
 
 - **Trust:** whether the phone trusts this Mac. If not, unlock it and tap **Trust** when it asks.
 - **Developer Mode** (iOS 16 and later): in Settings > Privacy & Security > Developer Mode. iOS hides the switch until a developer tool asks for it, so setup offers to show it. Turning it on restarts the phone.
-- **The developer disk image:** screenshots and app control need it. Xcode mounts it when it first meets a phone, and on iOS 27 it stays mounted across restarts. With no Xcode, setup offers to mount it with pymobiledevice3, which downloads Apple's image from its GitHub repository and has Apple's signing server personalize it for the phone.
+- **The developer disk image:** taps, typing and app control need it; screen reads and screenshots do not. Xcode mounts it when it first meets a phone, and on iOS 27 it stays mounted across restarts. With no Xcode, setup offers to mount it with pymobiledevice3, which downloads Apple's image from its GitHub repository and has Apple's signing server personalize it for the phone.
 
 `quern doctor` reports the same three for any phone plugged in later, and `quern doctor --fix` mounts a missing image and shows the Developer Mode switch.
 

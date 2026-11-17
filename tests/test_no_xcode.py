@@ -346,6 +346,7 @@ class TestReadiness:
         class Lockdown:
             all_values = {"DeviceName": "iPhone 11"}
             product_version = "27.2.1"
+            paired = True
 
             async def get_developer_mode_status(self):
                 raise OSError("amfi said no")
@@ -562,6 +563,7 @@ class TestReviewFixes:
         class Lockdown:
             all_values = {"DeviceName": "Phone"}
             product_version = version
+            paired = True
 
             async def get_developer_mode_status(self):
                 asked.append("mode")
@@ -632,3 +634,131 @@ async def test_the_url_check_s_read_is_remembered_for_a_late_crash(monkeypatch):
     await ctrl._front_bundle_over_coredevice(PHONE, "com.quern.probe")
 
     assert noted == [(PHONE, 711, "Probe")]
+
+
+class TestAMissingImageIsNamed:
+    """Measured on an iPhone 11 with its image removed: HID and the app
+    service failed, and the error named WDA and Xcode instead (#664 phase 5)."""
+
+    class DeveloperDiskImageServiceError(Exception):
+        """pymobiledevice3's, by name: what `missing_image` recognises."""
+
+    def test_it_is_recognised_through_the_cause_chain(self):
+        from server.device.ios.phone_readiness import missing_image
+
+        try:
+            try:
+                raise self.DeveloperDiskImageServiceError("no hid service")
+            except Exception as inner:
+                raise RuntimeError("the HID service could not be opened") from inner
+        except RuntimeError as outer:
+            assert missing_image(outer)
+        assert not missing_image(OSError("no tunnel"))
+
+    async def test_input_that_falls_back_to_no_wda_names_the_image(self):
+        from server.device.ios.coredevice_input import CoreDeviceInput, NotSent
+
+        cdi = CoreDeviceInput.__new__(CoreDeviceInput)
+        cdi._fallback = type("Wda", (), {"TOOL_NAME": "wda"})()
+
+        async def send(*a, **k):
+            raise NotSent("the HID service could not be opened") from \
+                self.DeveloperDiskImageServiceError("The device does not offer ... "
+                                                   "which its DeveloperDiskImage provides")
+        cdi._send = send
+
+        async def wda():
+            raise DeviceError("This needs WebDriverAgent ... Xcode is not installed", tool="wda")
+
+        with pytest.raises(DeviceError, match="no developer disk image.*doctor --fix") as e:
+            await cdi._or_fallback(PHONE, "HOME button", None, wda)
+        assert "WebDriverAgent could not send it instead" in str(e.value)
+
+    async def test_another_hid_failure_keeps_wda_s_own_error(self):
+        from server.device.ios.coredevice_input import CoreDeviceInput, NotSent
+
+        cdi = CoreDeviceInput.__new__(CoreDeviceInput)
+        cdi._fallback = type("Wda", (), {"TOOL_NAME": "wda"})()
+
+        async def send(*a, **k):
+            raise NotSent("no tunnel to 00008030")
+        cdi._send = send
+
+        async def wda():
+            raise DeviceError("WDA said no", tool="wda")
+        with pytest.raises(DeviceError, match="^.*WDA said no$"):
+            await cdi._or_fallback(PHONE, "tap", None, wda)
+
+    async def test_the_app_service_names_it_too(self):
+        backend = CoreDeviceApps()
+
+        @contextlib.asynccontextmanager
+        async def no_image(uuid):
+            raise self.DeveloperDiskImageServiceError(
+                "The device does not offer the com.apple.coredevice.appservice service")
+            yield
+        backend._apps = no_image
+        with pytest.raises(DeviceError, match="listing apps on 00008030 failed. The phone "
+                                              "has no developer disk image.*doctor --fix"):
+            await backend.list_apps(PHONE)
+
+
+
+class TestTrustAndDeadlines:
+    """CodeRabbit on #711."""
+
+    async def test_an_unpaired_phone_is_told_to_trust_and_asked_nothing_else(self, monkeypatch):
+        from server.device.ios import phone_readiness as r
+
+        class Lockdown:
+            all_values = {"DeviceName": "iPhone 11"}
+            product_version = "27.2.1"
+            paired = False
+
+            async def get_developer_mode_status(self):
+                raise AssertionError("asked an unpaired phone")
+        monkeypatch.setattr(r, "_lockdown", AsyncMock(return_value=Lockdown()))
+
+        state = await r.readiness(PHONE)
+
+        assert state.paired is False and state.os_version == "27.2.1"
+        assert (state.developer_mode, state.image_mounted) == (None, None)
+        assert "tap Trust" in state.errors[0]
+
+    async def test_a_read_that_never_finishes_is_given_up(self, monkeypatch):
+        import asyncio
+
+        from server.device.ios import phone_readiness as r
+
+        async def hang(udid):
+            await asyncio.sleep(60)
+        monkeypatch.setattr(r, "_lockdown", hang)
+        monkeypatch.setattr(r, "READ_TIMEOUT_S", 0.05)
+
+        state = await r.readiness(PHONE)
+        assert "did not answer" in state.errors[0]
+
+    async def test_listing_is_bounded_too(self, monkeypatch):
+        import asyncio
+
+        from server.device.ios import phone_readiness as r
+
+        async def hang():
+            await asyncio.sleep(60)
+        monkeypatch.setattr(r, "_phones", hang)
+        monkeypatch.setattr(r, "LIST_TIMEOUT_S", 0.05)
+        with pytest.raises(TimeoutError):
+            await r.phones()
+
+    async def test_a_mount_that_never_finishes_says_so(self, monkeypatch):
+        import asyncio
+
+        from server.device.ios import phone_readiness as r
+
+        async def hang(provider):
+            await asyncio.sleep(60)
+        monkeypatch.setattr("pymobiledevice3.services.mobile_image_mounter.auto_mount", hang)
+        monkeypatch.setattr(r, "_lockdown", AsyncMock(return_value="lockdown"))
+        monkeypatch.setattr(r, "MOUNT_TIMEOUT_S", 0.05)
+        with pytest.raises(DeviceError, match="took over"):
+            await r.mount_image(PHONE, "16.7")

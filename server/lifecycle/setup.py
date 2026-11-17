@@ -1956,14 +1956,26 @@ def _diagnose_developer_dir() -> str | None:
 
 
 def _no_developer_tools() -> CheckResult:
-    """No Command Line Tools, and no Xcode: skipped, not failed (#664 phase
-    5). Measured on a Mac with neither, Homebrew installed everything setup
-    asks of it from bottles, and an iPhone on iOS 27+ was set up in full.
+    """No Command Line Tools, and no Xcode: skipped, not failed, on Apple
+    Silicon (#664 phase 5). Measured on such a Mac with neither, Homebrew
+    installed everything setup asks of it from bottles, and an iPhone on iOS
+    27+ was set up in full. On an Intel Mac Homebrew needs the tools to
+    install bottles, so there they are still required (CodeRabbit on #711).
 
     What does need the tools says so in its own line, and only there: today
     Screen Mirror and the simulator preview, which are built from source.
     Naming them here would go stale when they ship pre-built (#662, #663).
     """
+    if not _is_apple_silicon():
+        return CheckResult(
+            name="Xcode CLI Tools",
+            status=CheckStatus.MISSING,
+            message="Not installed",
+            detail=(
+                "On an Intel Mac, Homebrew needs them to install what setup asks of it. "
+                "Install with: xcode-select --install, then run setup again."
+            ),
+        )
     return CheckResult(
         name="Xcode CLI Tools",
         status=CheckStatus.SKIPPED,
@@ -2992,9 +3004,11 @@ async def _check_iphones() -> CheckResult:
     for udid, name, version in found:
         state = await phone_readiness.readiness(udid)
         label = state.name or name or udid[:8]
-        if state.errors and state.os_version == "":
-            problems.append(f"{label}: unlock it and tap Trust when it asks whether to "
-                            "trust this computer, then run setup again")
+        if state.paired is False or (state.errors and not state.os_version):
+            # Not trusted, or not answering: nothing else can be asked of it,
+            # and its errors say what to do (CodeRabbit on #711).
+            problems.extend(f"{label}: {error}, then run setup again"
+                            for error in state.errors or [])
             continue
         if state.developer_mode is False:
             print(f"    {label}: Developer Mode is off. It is in Settings > Privacy & "
@@ -3008,7 +3022,7 @@ async def _check_iphones() -> CheckResult:
             problems.append(f"{label}: turn on Developer Mode (Settings > Privacy & "
                             "Security > Developer Mode)")
         if state.image_mounted is False:
-            print(f"    {label}: no developer disk image. Screenshots and app control "
+            print(f"    {label}: no developer disk image. Taps, typing and app control "
                   f"need one: {phone_readiness.IMAGE_SOURCE}.")
             if not _prompt_yn("    Download and mount it now?"):
                 problems.append(f"{label}: no developer disk image; `{quern_cmd()} doctor "

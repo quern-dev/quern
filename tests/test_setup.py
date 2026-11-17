@@ -509,10 +509,23 @@ class TestCheckXcodeCliTools:
             assert "simctl" in result.message
 
     def test_not_installed(self):
-        with _patch_which({"xcrun": None}):
+        with (
+            _patch_which({"xcrun": None}),
+            patch("server.lifecycle.setup._is_apple_silicon", return_value=True),
+        ):
             result = check_xcode_cli_tools()
             assert result.status == CheckStatus.SKIPPED
             assert "xcode-select" in result.detail
+
+    def test_on_an_intel_mac_they_are_still_required(self):
+        """Homebrew needs them to install bottles there (CodeRabbit on #711)."""
+        with (
+            _patch_which({"xcrun": "/usr/bin/xcrun"}),
+            patch("server.lifecycle.setup.xcode_available", return_value=False),
+            patch("server.lifecycle.setup._is_apple_silicon", return_value=False),
+        ):
+            result = check_xcode_cli_tools()
+        assert result.status == CheckStatus.MISSING and "Intel" in result.detail
 
     def test_no_developer_directory_is_not_a_failure(self):
         """#664 phase 5: measured on a Mac with no developer tools, Homebrew
@@ -521,6 +534,7 @@ class TestCheckXcodeCliTools:
         with (
             _patch_which({"xcrun": "/usr/bin/xcrun"}),
             patch("server.lifecycle.setup.xcode_available", return_value=False),
+            patch("server.lifecycle.setup._is_apple_silicon", return_value=True),
         ):
             result = check_xcode_cli_tools()
         assert result.status == CheckStatus.SKIPPED
@@ -1806,6 +1820,7 @@ class TestXcodeGate:
             "server.lifecycle.setup._which",
             lambda name: "/usr/bin/xcrun" if name == "xcrun" else None,
         )
+        monkeypatch.setattr(setup_mod, "_is_apple_silicon", lambda: True)
         with patch.object(setup_mod, "_run") as run_mock:
             result = setup_mod.check_xcode_cli_tools()
         # Skipped, not failed, since #664 phase 5 -- but never run either way.
@@ -3882,12 +3897,15 @@ class TestCheckIphones:
         assert "Privacy & Security > Developer Mode" in result.detail
 
     def test_an_untrusted_mac_says_how_to_trust_it(self, monkeypatch, capsys):
-        from server.device.ios.phone_readiness import Readiness
+        """An unpaired phone answers with its version (CodeRabbit on #711)."""
+        from server.device.ios.phone_readiness import TRUST, Readiness
 
-        setup = self._phones(monkeypatch, found=[("P1", "", "")], states={
-            "P1": Readiness("P1", "", "", errors=["could not connect (not paired)"])})
+        setup = self._phones(monkeypatch, found=[("P1", "iPhone 11", "27.2.1")], states={
+            "P1": Readiness("P1", "iPhone 11", "27.2.1", paired=False,
+                            errors=[f"it does not trust this Mac yet: {TRUST}"])})
         result = setup.check_iphones()
         assert result.status == CheckStatus.WARNING and "tap Trust" in result.detail
+        assert self.mounted == [] and self.revealed == []
 
 
 def _async(value):

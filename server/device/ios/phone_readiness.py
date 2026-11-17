@@ -1,7 +1,9 @@
 """What a physical iPhone needs before quern can drive it without Xcode (#706).
 
-Developer Mode, and the developer disk image: screenshots and the CoreDevice
-app service need the image mounted. Xcode mounts it when it first meets a
+Developer Mode, and the developer disk image: input (taps, typing, buttons)
+and the CoreDevice app service need the image mounted. Screen reads,
+screenshots and crash reports do not (measured on an iPhone 11 with it
+removed). Xcode mounts it when it first meets a
 phone, and on iOS 27 it stays: measured on an iPhone 11, it came back mounted
 after a restart with Xcode hidden, from the cryptex iOS keeps
 (`com.apple.MobileAsset.DDI`). A phone that has never met Xcode has none, and
@@ -15,12 +17,34 @@ wherever it happens (`IMAGE_SOURCE`).
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 IMAGE_SOURCE = (
     "pymobiledevice3 downloads Apple's developer disk image from its "
     "DeveloperDiskImage repository on GitHub, and Apple's signing server "
     "personalizes it for the phone")
+
+
+#: What to do about a missing image, said where its absence shows.
+NO_IMAGE_FIX = (
+    "The phone has no developer disk image mounted, which its HID and app services "
+    "need: `quern doctor --fix` mounts it")
+
+
+def missing_image(error: BaseException) -> bool:
+    """Whether `error`, or what caused it, is the phone lacking its developer
+    disk image: pymobiledevice3 says so in the error it raises when a service
+    the image provides is asked for. Measured on an iPhone 11 (iOS 27.2.1)
+    with the image removed: the HID and app services both failed this way,
+    while the screen read, screenshots and crash reports still worked."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if "DeveloperDiskImage" in type(error).__name__ or "DeveloperDiskImage" in str(error):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
 
 
 @dataclass
@@ -30,13 +54,29 @@ class Readiness:
     udid: str
     name: str
     os_version: str
+    paired: bool | None = None
     developer_mode: bool | None = None
     image_mounted: bool | None = None
     errors: list[str] | None = None
 
 
+#: How long the read-only checks may take: a phone that stops answering a
+#: lockdown request would otherwise hold setup and doctor for ever, since
+#: pymobiledevice3 waits on its reply with no deadline (CodeRabbit on #711).
+LIST_TIMEOUT_S = 15.0
+READ_TIMEOUT_S = 20.0
+#: The mount downloads the image the first time, so it is given longer.
+MOUNT_TIMEOUT_S = 300.0
+
+
 async def phones() -> list[tuple[str, str, str]]:
-    """(udid, name, iOS version) of each iPhone on USB, every version."""
+    """(udid, name, iOS version) of each iPhone on USB, every version.
+    Raises TimeoutError past `LIST_TIMEOUT_S`."""
+    async with asyncio.timeout(LIST_TIMEOUT_S):
+        return await _phones()
+
+
+async def _phones() -> list[tuple[str, str, str]]:
     from pymobiledevice3.usbmux import list_devices
 
     found = []
@@ -55,8 +95,8 @@ async def phones() -> list[tuple[str, str, str]]:
 
 async def _lockdown(udid: str):
     """A lockdown client over USB that never pairs: a doctor check must not
-    wait on, or create, a Trust prompt. An unpaired phone raises, and is
-    reported as such (CodeRabbit on #710)."""
+    wait on, or create, a Trust prompt (CodeRabbit on #710). An unpaired
+    phone does not raise: the client comes back with `paired` False."""
     from pymobiledevice3.lockdown import create_using_usbmux
 
     return await create_using_usbmux(serial=udid, autopair=False)
@@ -69,9 +109,24 @@ def _major(version: str) -> int:
         return 0
 
 
+TRUST = ("unlock it and tap Trust when it asks whether to trust this computer "
+         "(unplug and plug it in again if it does not ask)")
+
+
 async def readiness(udid: str) -> Readiness:
-    """Developer Mode and the mounted image, each asked on its own, so one
-    that cannot be read does not hide the other."""
+    """Whether it trusts this Mac, Developer Mode and the mounted image,
+    each asked on its own, so one that cannot be read does not hide the
+    other. A read that does not finish in `READ_TIMEOUT_S` is said as such."""
+    try:
+        async with asyncio.timeout(READ_TIMEOUT_S):
+            return await _readiness(udid)
+    except TimeoutError:
+        return Readiness(udid, "", "", errors=[
+            f"did not answer within {READ_TIMEOUT_S:.0f} s; unplug it, plug it in again "
+            "and unlock it"])
+
+
+async def _readiness(udid: str) -> Readiness:
     from pymobiledevice3.services.mobile_image_mounter import MobileImageMounterService
 
     errors: list[str] = []
@@ -79,10 +134,13 @@ async def readiness(udid: str) -> Readiness:
         lockdown = await _lockdown(udid)
     except Exception as e:  # noqa: BLE001 -- said, not raised
         return Readiness(udid, "", "", errors=[
-            f"could not connect ({e}); if the phone has not trusted this Mac, unlock it "
-            "and tap Trust when it asks"])
+            f"could not connect ({e}); if the phone has not trusted this Mac, {TRUST}"])
     state = Readiness(udid, lockdown.all_values.get("DeviceName", ""),
-                      lockdown.product_version, errors=errors)
+                      lockdown.product_version, paired=bool(lockdown.paired), errors=errors)
+    if not state.paired:
+        # Nothing else can be asked of a phone that has not trusted this Mac.
+        errors.append(f"it does not trust this Mac yet: {TRUST}")
+        return state
     major = _major(state.os_version)
     # Developer Mode came with iOS 16: before it there is nothing to turn on,
     # which is neither on nor off.
@@ -115,14 +173,18 @@ async def mount_image(udid: str, os_version: str) -> None:
 
     rsd = None
     try:
-        if _major(os_version) >= 17:
-            rsd = RemoteServiceDiscoveryService(await _device_address(udid))
-            await rsd.connect()
-            await auto_mount(rsd)
-        else:
-            await auto_mount(await _lockdown(udid))
+        async with asyncio.timeout(MOUNT_TIMEOUT_S):
+            if _major(os_version) >= 17:
+                rsd = RemoteServiceDiscoveryService(await _device_address(udid))
+                await rsd.connect()
+                await auto_mount(rsd)
+            else:
+                await auto_mount(await _lockdown(udid))
     except DeviceError:
         raise
+    except TimeoutError as e:
+        raise DeviceError(f"mounting the developer disk image on {udid[:8]} took over "
+                          f"{MOUNT_TIMEOUT_S:.0f} s", tool="pymobiledevice3") from e
     except Exception as e:  # noqa: BLE001 -- pymobiledevice3 raises its own kinds
         raise DeviceError(f"mounting the developer disk image on {udid[:8]} failed: {e}",
                           tool="pymobiledevice3") from e

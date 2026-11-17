@@ -416,7 +416,19 @@ class CoreDeviceInput:
             await self._send(udid, what, send, needs_screen)
         except NotSent as e:
             logger.info("[coredevice] %s on %s through WDA: %s", what, udid[:8], e)
-            await fallback()
+            from server.device.ios.phone_readiness import NO_IMAGE_FIX, missing_image
+
+            try:
+                await fallback()
+            except DeviceError as wda:
+                # WDA's refusal alone named WDA and Xcode, when what was
+                # missing is the image HID needs (#664 phase 5).
+                if missing_image(e):
+                    raise DeviceError(
+                        f"{what} on {udid[:8]} was not sent. {NO_IMAGE_FIX}. "
+                        f"WebDriverAgent could not send it instead: {wda}",
+                        tool=self.TOOL_NAME) from wda
+                raise
             return getattr(self._fallback, "TOOL_NAME", "wda")
         return self.TOOL_NAME
 
