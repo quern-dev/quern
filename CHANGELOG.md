@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0-beta.5] - 2026-11-16
+
 ### Changed
 - **`quern setup` sets up iPhones on a Mac without Xcode (#664 phase 5).** Setup gated its whole iOS section on Xcode's `simctl`. On a Mac with only the Command Line Tools it skipped pymobiledevice3 and `tunneld` too, so no phone could be driven. It also reported the Xcode line as an error, "No iOS or Android tools found", and "Some required dependencies are missing".
   - **What changed:** only the simulator tools (sim-bridge, idb, the simulator certificate) stay behind Xcode. The Xcode line reads "Command Line Tools only -- iOS simulators need Xcode", skipped rather than failed. With no Command Line Tools at all it is skipped too on Apple Silicon, where Homebrew installed everything setup asks of it from bottles without them; on an Intel Mac, where Homebrew needs them, it is still required. What needs them says so in its own line. A renamed or moved Xcode is still the error it was, with its fix.
@@ -1145,7 +1147,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.4...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.5...main
+[0.26.0-beta.5]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.5
 [0.26.0-beta.4]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.4
 [0.26.0-beta.3]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.3
 [0.26.0-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.2
