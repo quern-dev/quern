@@ -4,7 +4,7 @@
 
 You need two things before installing:
 
-- **Xcode** — Full Xcode from the App Store, not just the Command Line Tools. You need it for simulators, `xcodebuild` (app and WDA builds), signing, and provisioning. Sign in to your Apple Developer account in Xcode > Settings > Accounts to manage signing identities.
+- **Xcode** — Full Xcode from the App Store, not just the Command Line Tools. You need it for simulators, `xcodebuild` (app and WDA builds), signing, and provisioning. A physical iPhone on iOS 27 or later is driven without it: if that is all you need, you can skip Xcode. Sign in to your Apple Developer account in Xcode > Settings > Accounts to manage signing identities.
 - **Homebrew** — [brew.sh](https://brew.sh). Quern uses Homebrew to install most of its dependencies (idb, mitmproxy, libimobiledevice, etc.). Setup will not install Homebrew itself — if it's missing, you'll be told.
 - **Android Studio** (optional) — Only needed if you're working with Android. Provides `adb`, `emulator`, and the SDK tools. Quern auto-discovers these from your PATH or the standard SDK install locations.
 

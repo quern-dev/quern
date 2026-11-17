@@ -5,7 +5,7 @@ The first time you connect a physical iPhone to work with Quern, there are sever
 ## Prerequisites
 
 - iPhone or iPad connected to your Mac via **USB** (Lightning or USB-C)
-- **Xcode** installed with your Apple Developer account signed in
+- **Xcode** installed with your Apple Developer account signed in -- only for an iPhone before iOS 27. On iOS 27 and later quern drives the phone without Xcode or WDA, so skip Step 4.
 - **Quern** running (`quern start`)
 - **tunneld** installed for iOS 17+ devices (done automatically by `quern setup`)
 
@@ -30,7 +30,7 @@ Your agent should show the physical device in the list. If it doesn't appear:
 - Make sure you tapped Trust
 - On iOS 17+, check that tunneld is running: `quern tunneld status`
 
-## Step 4: Set Up WDA (Quern Driver)
+## Step 4: Set Up WDA (Quern Driver) -- before iOS 27 only
 
 > "Set up WDA on my iPhone"
 
@@ -47,7 +47,7 @@ Your agent will:
 
 > "Take a screenshot of my iPhone and show me in Preview"
 
-If you get a screenshot, WDA is working. Your agent can now tap, swipe, type, and read the screen.
+If you get a screenshot, the phone is ready (WDA, before iOS 27). Your agent can now tap, swipe, type, and read the screen. The first tap on a phone with no Xcode may take a couple of seconds longer: quern mounts the developer disk image it needs then.
 
 > "What's on the screen right now?"
 

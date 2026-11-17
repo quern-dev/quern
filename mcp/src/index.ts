@@ -86,7 +86,7 @@ const BASE_INSTRUCTIONS = [
   "- System proxy: configure_system_proxy to start, unconfigure_system_proxy when done. Always unconfigure when finished.",
   "- If no flows captured: verify certs with verify_proxy_setup, fix with install_proxy_cert",
   "",
-  "PHYSICAL DEVICES: Call setup_wda once for first-time setup. After that, WDA auto-starts on first interaction. You have full UI control — use launch_app, tap_element, type_text, swipe, get_screen_summary to navigate iOS Settings, install certs, configure Wi-Fi, or perform any multi-step task on the device yourself. Use start_device_logging / stop_device_logging for logs. get_latest_crash with udid for crash reports.",
+  "PHYSICAL DEVICES: On iOS 27 and later, an iPhone is driven without WDA by default, so no setup_wda is needed (nor Xcode). Before iOS 27, or for a call that asks for WDA (snapshot_depth), call setup_wda once; after that WDA auto-starts on first interaction. You have full UI control — use launch_app, tap_element, type_text, swipe, get_screen_summary to navigate iOS Settings, install certs, configure Wi-Fi, or perform any multi-step task on the device yourself. Use start_device_logging / stop_device_logging for logs. get_latest_crash with udid for crash reports.",
   "",
   "TROUBLESHOOTING: If tools fail with connection errors, call ensure_server to check/restart the server.",
   "",
