@@ -796,9 +796,31 @@ def _footer(elements: list[UIElement], screen_height: float,
             rows.setdefault(round(f["y"]), []).append(e)
     bars = {y: row for y, row in rows.items()
             if len({round(e.frame["x"]) for e in row}) >= 2}
-    if not bars:
+    # A search field floating over the list's bottom, as iOS 26 and 27
+    # Settings' is: one wide field, so no bar by the rule above. It takes
+    # touches well above its own frame (`_FIELD_REACH`), and a sweep whose
+    # drags started there moved nothing and gave up "nothing scrollable"
+    # from Settings' top (#709).
+    fields = [e for e in elements
+              if e.frame and e.type in _FLOATING_FIELDS and e.frame["y"] >= low
+              and e.frame["height"] < screen_height * 0.15]
+    tops = [float(y) for y in bars] + [e.frame["y"] - _FIELD_REACH for e in fields]
+    if not tops:
         return screen_height, set()
-    return float(min(bars)), {_footer_key(e) for row in bars.values() for e in row}
+    items = {_footer_key(e) for row in bars.values() for e in row}
+    items |= {_footer_key(e) for e in fields}
+    return min(tops), items
+
+
+#: Fields that float over a list's bottom rather than scroll with it.
+_FLOATING_FIELDS = frozenset({"TextField", "SearchField"})
+#: How far above its own frame a floating field takes touches. Measured on an
+#: iPhone 11 (iOS 27.2.1), Settings' top level: the search field's frame
+#: starts at y=830 (its glass capsule is drawn from about 820), and a drag
+#: moved the list from y=770 and below, never from 775 and above.
+_FIELD_REACH = 48.0
+#: How far above the bottom chrome a drag starts.
+_FOOTER_DRAG_MARGIN = 16.0
 
 
 def _footer_key(e: UIElement) -> tuple:
@@ -2263,7 +2285,8 @@ class DeviceControllerUI:
         # enough: see _TOP_CHROME_CLEARANCE.
         y_near = max(y_near, self._TOP_CHROME_CLEARANCE,
                      _header_bottom(screen_els, self._TOP_CHROME_CLEARANCE, screen_height))
-        y_far = min(y_far, screen_height - self._BOTTOM_CHROME_CLEARANCE)
+        y_far = min(y_far, screen_height - self._BOTTOM_CHROME_CLEARANCE,
+                    footer_top - _FOOTER_DRAG_MARGIN)
         step = y_far - y_near
         budget_scale = 1 if controlled else 3
         # WDA's swipe returns only once the app is idle, so the first read

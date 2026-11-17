@@ -1034,6 +1034,7 @@ class PushedListScreen(ListScreen):
         self.header = header or []      # the bar's controls, as the push lists them
         self.footer = footer or []      # a tab bar's items: Buttons, in the push
         self.durations: list[float] = []
+        self.starts: list[float] = []
         self.reads: list[dict] = []
         self.merged = merged            # appended to each row's label: ", Detail"
         self.fails_at = fails_at        # this read (1-based) falls back to WDA
@@ -1053,6 +1054,7 @@ class PushedListScreen(ListScreen):
 
         async def timed(*a, **k):
             self.durations.append(a[5])
+            self.starts.append(a[2])            # where each drag began
             return await swipe(*a, **k)
 
         backend.swipe = AsyncMock(side_effect=timed)
@@ -1327,3 +1329,35 @@ async def test_a_tab_itself_is_found_where_it_is():
     found = await _sweep(screen, "tab_0", pushed=True)
     assert found is not None and found.identifier == "tab_0"
     assert screen.swipes() == []
+
+
+# -- a search field floating over the list (#709) --------------------------------
+
+#: iOS 27 Settings' top level on an iPhone 11 (896 pt): the search field and
+#: its dictation button, floating over the last rows.
+SEARCH = [UIElement(type="TextField", identifier="", label="", value="Search",
+                    frame={"x": 28, "y": 830, "width": 358, "height": 28}),
+          UIElement(type="Button", identifier="", label="Dictate",
+                    frame={"x": 353, "y": 833, "width": 18, "height": 22.5})]
+
+
+def test_a_floating_search_field_is_bottom_chrome_from_above_its_frame():
+    """Drags moved the list from y=770 and below, never from 775: the field
+    takes touches well above its frame (measured, iPhone 11)."""
+    from server.device.controller_ui import _FIELD_REACH, _footer_top
+
+    assert _footer_top(SEARCH, 896, 414) == 830 - _FIELD_REACH
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_does_not_start_its_drags_on_a_floating_search_field():
+    # On the double's 852 pt screen, with the field where its reach puts the
+    # usual drag start (852 - 100 = 752) inside the dead zone.
+    field = UIElement(type="TextField", identifier="", label="", value="Search",
+                      frame={"x": 28, "y": 800, "width": 337, "height": 28})
+    screen = PushedListScreen(footer=[field])
+    await _sweep(screen, "row_150", pushed=True)
+    from server.device.controller_ui import _FIELD_REACH, _FOOTER_DRAG_MARGIN
+
+    assert screen.starts
+    assert max(screen.starts) <= 800 - _FIELD_REACH - _FOOTER_DRAG_MARGIN + 0.5
