@@ -61,6 +61,11 @@ class PhoneWebInspector:
             await self._close()
             raise DeviceError(f"could not reach the phone's Web Inspector: {e}",
                               tool=TOOL) from e
+        except asyncio.CancelledError:
+            # `bounded` giving up mid-connect: `__aexit__` does not run after a
+            # failed entry, so the service would stay open (CodeRabbit on #715).
+            await self._close()
+            raise
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -97,8 +102,15 @@ class PhoneWebInspector:
         if entry is None or self._service is None:
             return None
         session = await self._service.inspector_session(entry.application, entry.page)
-        await session.runtime_enable()
-        return await session.runtime_evaluate(script, return_by_value=True)
+        try:
+            await session.runtime_enable()
+            return await session.runtime_evaluate(script, return_by_value=True)
+        finally:
+            # A session starts a receive loop that never ends by itself, and
+            # pymobiledevice3 (11.55) has no call that ends it (CodeRabbit on #715).
+            task = getattr(session, "_receive_task", None)
+            if task is not None:
+                task.cancel()
 
     async def page_contents(self, application_id: str, page_id: int) -> dict | None:
         """The page's elements in page space, by `_COLLECT_JS`."""

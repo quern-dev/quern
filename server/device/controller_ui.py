@@ -9,6 +9,7 @@ import logging
 import math
 import re
 import time
+from typing import TYPE_CHECKING, TypeVar
 
 from server.config import get_device_ui_reader
 from server.device import gestures
@@ -37,6 +38,13 @@ from server.models import (
     UIElement,
     WaitCondition,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from server.device.web.phone_webinspector import PhoneWebInspector
+
+_T = TypeVar("_T")
 
 #: The longest press a tap can hold, as for the timed gestures (#252).
 MAX_HOLD_SECONDS = 10.0
@@ -237,7 +245,10 @@ def _natively_there(web: UIElement, native: list[UIElement]) -> bool:
     sees them: the probe's button is 24,276 86x21 there, 36,279 61x14 in the
     DOM. Not the same frame, so the exact match above missed it, and a tap by
     label was refused as ambiguous between the two. Same label, and the web
-    element's centre inside the native one, is the same element.
+    element's centre inside the native one, is the same element -- of the
+    same type, so a container that says what a control in it says, such as a
+    web view labelled with the page title its heading carries, does not hide
+    the control (CodeRabbit on #715).
     """
     from server.device.web.web_content import normalise
 
@@ -248,7 +259,7 @@ def _natively_there(web: UIElement, native: list[UIElement]) -> bool:
     cy = web.frame["y"] + web.frame["height"] / 2
     for e in native:
         f = e.frame
-        if (f and normalise(e.label) == label
+        if (f and e.type == web.type and normalise(e.label) == label
                 and f["x"] <= cx <= f["x"] + f["width"] and f["y"] <= cy <= f["y"] + f["height"]):
             return True
     return False
@@ -5182,7 +5193,7 @@ class DeviceControllerUI:
             # web content, so nothing here can speak to what is on screen.
             return None
         if self._is_physical(udid):
-            async def urls(inspector) -> list[dict]:
+            async def urls(inspector: PhoneWebInspector) -> list[dict]:
                 return await inspector.page_urls()
             return await self._on_phone_inspector(udid, urls, None)
         booted = await self._booted_simulator_count()
@@ -5354,7 +5365,9 @@ class DeviceControllerUI:
         self._store_web_overlay(resolved, result.get("elements") or [])
         return result
 
-    async def _on_phone_inspector(self, udid: str, use, failed):
+    async def _on_phone_inspector(
+            self, udid: str, use: Callable[[PhoneWebInspector], Awaitable[_T]],
+            failed: _T) -> _T:
         """`use(inspector)` on the phone's Web Inspector (#708), or `failed`
         when it cannot be asked: a phone WDA reads, or one whose Inspector is
         off or not answering. Silent, as these callers' simulator paths are --
@@ -5365,7 +5378,7 @@ class DeviceControllerUI:
             return failed
         usb = await self.get_libimobiledevice_udid(udid) or udid
 
-        async def run():
+        async def run() -> _T:
             async with PhoneWebInspector(usb) as inspector:
                 return await use(inspector)
         try:
@@ -5375,7 +5388,7 @@ class DeviceControllerUI:
             return failed
 
     @staticmethod
-    async def _clear_on_phone(inspector) -> bool:
+    async def _clear_on_phone(inspector: PhoneWebInspector) -> bool:
         """Every page asked; only the one with an input focused acts."""
         from server.device.web.web_content import _is_app
 
@@ -5406,7 +5419,9 @@ class DeviceControllerUI:
                 "This iPhone's screen is read through WebDriverAgent, and its "
                 "get_ui_tree already includes web content -- XCUITest enumerates web "
                 "views itself. Use get_ui_tree.", tool="web-content")
-        elements, resolved = await self._native_ui_elements(resolved)
+        # The whole screen, so the push answers it: any other read goes to
+        # WDA, which a phone read without it has none of (CodeRabbit on #715).
+        elements, resolved = await self._native_ui_elements(resolved, whole_screen=True)
         native = [{"type": e.type, "AXLabel": e.label, "frame": e.frame}
                   for e in elements if e.frame]
         # The Web Inspector is a lockdown service, reached by the phone's own

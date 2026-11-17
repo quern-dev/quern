@@ -289,3 +289,78 @@ async def test_where_the_inspector_cannot_be_asked_both_say_so_quietly(monkeypat
     assert await ctrl._clear_web_input(PHONE) is False
     wda = _phone(monkeypatch, pushed=False)
     assert await wda.web_page_urls(PHONE) is None
+
+
+# -- CodeRabbit on #715 ----------------------------------------------------------------
+
+
+def test_a_container_that_says_what_a_control_says_does_not_hide_it():
+    """A web view labelled with the page's title, around the heading that
+    carries it: a different element, so the heading is still added."""
+    from server.models import UIElement
+
+    ctrl = DeviceController()
+    native = [UIElement(type="WebView", label="Probe Web Heading",
+                        frame={"x": 0, "y": 156, "width": 414, "height": 657})]
+    ctrl._store_web_overlay(PHONE, [
+        {"type": "Heading", "AXLabel": "Probe Web Heading", "source": "web-inspector",
+         "frame": {"x": 24, "y": 180, "width": 294.2, "height": 39}}])
+
+    merged = ctrl._merge_web_overlay(PHONE, native)
+
+    assert [e.type for e in merged] == ["WebView", "Heading"]
+
+
+async def test_the_screen_under_a_phone_s_web_view_is_read_from_the_push(monkeypatch):
+    """Through the real `_native_ui_elements`: a read that is not the whole
+    screen goes to WDA, which a phone read without it does not have."""
+    from tests.test_coredevice_ax import _phone_controller
+
+    ctrl = _phone_controller(monkeypatch=monkeypatch)
+    ctrl.get_libimobiledevice_udid = AsyncMock(return_value=USB)
+    _patch(monkeypatch, FakeService([_entry()]))
+
+    await ctrl.get_web_content(udid=PHONE)
+
+    ctrl.coredevice_ax.describe_all.assert_awaited()
+    ctrl.wda_client.describe_all.assert_not_awaited()
+
+
+async def test_a_connect_given_up_on_closes_the_service(monkeypatch):
+    import asyncio
+
+    class Hanging(FakeService):
+        async def connect(self):
+            await asyncio.sleep(5)
+
+    service = Hanging([])
+    _patch(monkeypatch, service)
+    monkeypatch.setattr(phone_webinspector, "CALL_TIMEOUT_S", 0.05)
+
+    async def enter():
+        async with PhoneWebInspector(USB):
+            pass
+    with pytest.raises(DeviceError, match="did not answer"):
+        await phone_webinspector.bounded(enter())
+    assert service.closed
+
+
+async def test_each_evaluation_ends_its_session_s_receive_loop(monkeypatch):
+    """pymobiledevice3's InspectorSession starts a loop that never ends by
+    itself; left running, every read added one."""
+    import asyncio
+
+    loops = []
+
+    class Looping(FakeService):
+        async def inspector_session(self, app, page):
+            session = await super().inspector_session(app, page)
+            session._receive_task = asyncio.create_task(asyncio.sleep(60))
+            loops.append(session._receive_task)
+            return session
+
+    _patch(monkeypatch, Looping([_entry()]))
+    async with PhoneWebInspector(USB) as inspector:
+        await inspector.page_contents("PID:748", 1)
+        await asyncio.sleep(0)
+        assert len(loops) == 1 and loops[0].cancelled()
