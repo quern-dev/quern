@@ -761,8 +761,14 @@ class SimulatorWebInspector:
                 break
             if message is None:
                 break
-            if message.get("__selector") == "_rpc_applicationSentListing:":
-                listing = (message.get("__argument") or {}).get("WIRListingKey") or {}
+            argument = message.get("__argument") or {}
+            # Only this application's listing. The daemon also sends listings
+            # nobody asked for -- measured, Safari's twice as it navigated --
+            # and taking the first that came made another app's pages this
+            # one's, or this app's pages none.
+            if (message.get("__selector") == "_rpc_applicationSentListing:"
+                    and argument.get("WIRApplicationIdentifierKey") in (None, application_id)):
+                listing = argument.get("WIRListingKey") or {}
                 return [
                     {
                         "page_id": info.get("WIRPageIdentifierKey"),
