@@ -52,6 +52,8 @@ class FakeService:
         self.closed = False
         self.is_connected = True
         self.connects = 0
+        #: pymobiledevice3's listing cache, which a kept connection empties.
+        self.application_pages: dict = {}
         #: (session id, application id, page id) for every page released.
         self.torn_down: list[tuple[str, str, int]] = []
 
@@ -95,9 +97,13 @@ def _patch(monkeypatch, service):
         return "lockdown"
     monkeypatch.setattr(lockdown, "create_using_usbmux", connect)
     monkeypatch.setattr(webinspector, "WebinspectorService", lambda lockdown: service)
+    _stamp(service)
+    return seen
 
-    # Every session handed out carries the id its page is released by, as
-    # pymobiledevice3's does, whichever fake made it.
+
+def _stamp(service):
+    """Every session `service` hands out carries the id its page is released
+    by, as pymobiledevice3's does, whichever fake made it."""
     made = service.inspector_session
     count = iter(range(1, 1000))
 
@@ -106,7 +112,7 @@ def _patch(monkeypatch, service):
         session.protocol = SimpleNamespace(id_=f"S{next(count)}")
         return session
     service.inspector_session = inspector_session
-    return seen
+    return service
 
 
 # -- the adapter ------------------------------------------------------------------
@@ -524,23 +530,156 @@ async def test_an_idle_connection_is_closed(monkeypatch):
     assert await phone_webinspector.POOL.take(USB) is None
 
 
-async def test_calls_on_one_phone_take_turns(monkeypatch):
+async def test_a_call_while_the_phone_is_busy_gets_a_connection_of_its_own(monkeypatch):
     """Two at once on one connection could each open a session on the same
-    page, and the second of those never answers."""
-    inside = []
+    page, and the second of those never answers. Waiting its turn instead
+    spent the second call's budget behind a long script and then reported
+    the phone as not answering (review on #718), so it connects alone, as
+    every call did before, and that connection is not kept."""
+    import pymobiledevice3.lockdown as lockdown
+    import pymobiledevice3.services.webinspector as webinspector
 
-    class Watched(FakeService):
+    services = []
+
+    class Slow(FakeService):
         async def get_open_application_pages(self, timeout):
-            inside.append("in")
             await asyncio.sleep(0.05)
-            inside.append("out")
             return self.entries
 
-    service = Watched([_entry()])
-    _patch(monkeypatch, service)
+    def make(lockdown):
+        services.append(_stamp(Slow([_entry()])))
+        return services[-1]
+
+    async def connect(**kw):
+        return "lockdown"
+    monkeypatch.setattr(lockdown, "create_using_usbmux", connect)
+    monkeypatch.setattr(webinspector, "WebinspectorService", make)
     await asyncio.gather(_one_call(), _one_call())
-    assert inside == ["in", "out", "in", "out"]
-    assert service.connects == 1
+    assert len(services) == 2
+    assert sorted(s.closed for s in services) == [False, True]   # one kept, one closed
+    kept = await phone_webinspector.POOL.take(USB)
+    assert kept is not None and not kept.closed
+
+
+async def test_a_call_inside_the_idle_window_restarts_it(monkeypatch):
+    monkeypatch.setattr(phone_webinspector, "IDLE_S", 0.2)
+    service = FakeService([_entry()])
+    _patch(monkeypatch, service)
+    await _one_call()
+    await asyncio.sleep(0.15)
+    await _one_call()                                    # in use: the clock restarts
+    await asyncio.sleep(0.15)                            # 0.3 s after the first keep
+    assert not service.closed
+    await asyncio.sleep(0.2)
+    assert service.closed
+
+
+async def test_a_stale_expiry_does_not_close_the_connection_kept_since(monkeypatch):
+    """The timer fired, then a call took the connection and put the same
+    object back before the expiry ran (review on #718)."""
+    service = FakeService([_entry()])
+    _patch(monkeypatch, service)
+    pool = phone_webinspector.POOL
+    await _one_call()
+    stale = pool._keeps[USB]
+    await _one_call()                                    # taken and kept again
+    await pool._expire(USB, stale)
+    assert not service.closed
+    await pool._expire(USB, pool._keeps[USB])            # the current keep does
+    assert service.closed
+
+
+async def test_a_cancel_during_the_close_still_hands_the_phone_on(monkeypatch):
+    """The lock was released after the close, so a cancel inside the close
+    left the phone's turn held for good, and the connection open (review on
+    #718)."""
+    class SlowClose(FakeService):
+        async def close(self):
+            await asyncio.sleep(0.2)
+            self.closed = True
+
+    service = SlowClose([_entry()])
+    _patch(monkeypatch, service)
+
+    async def failing_call():
+        async with PhoneWebInspector(USB) as inspector:
+            await inspector.page_contents("PID:748", 1)
+            raise RuntimeError("fails, so the connection is closed")
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(failing_call(), 0.1)        # cancelled mid-close
+    assert not phone_webinspector.POOL.lock(USB).locked()
+    await asyncio.sleep(0.3)
+    assert service.closed                                # the shielded close finished
+
+
+async def test_a_cancel_mid_release_still_ends_every_receive_loop(monkeypatch):
+    """pymobiledevice3's receive loop polls every 1 ms and never ends by
+    itself; cancelled per page, a cancel during the first release left the
+    rest running (review on #718)."""
+    loops = []
+
+    class Looping(FakeService):
+        async def inspector_session(self, app, page):
+            session = await super().inspector_session(app, page)
+            session._receive_task = asyncio.ensure_future(asyncio.sleep(60))
+            loops.append(session._receive_task)
+            return session
+
+        async def teardown_inspector_socket(self, *args):
+            await asyncio.sleep(1)
+
+    service = Looping([_entry(), _entry(page_id=2)])
+    _patch(monkeypatch, service)
+
+    async def call():
+        async with PhoneWebInspector(USB) as inspector:
+            await inspector.page_contents("PID:748", 1)
+            await inspector.page_contents("PID:748", 2)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(call(), 0.2)
+    await asyncio.sleep(0)
+    assert len(loops) == 2 and all(t.cancelled() for t in loops)
+
+
+async def test_a_kept_connection_whose_reader_died_is_not_used(monkeypatch):
+    """pymobiledevice3 marks only a lost connection; a receive task that died
+    of anything else leaves is_connected True while nothing is read."""
+    first = FakeService([_entry()])
+    _patch(monkeypatch, first)
+    await _one_call()
+    dead = asyncio.get_running_loop().create_future()
+    dead.set_result(None)
+    first._recv_task = dead
+    second = FakeService([_entry()])
+    _patch(monkeypatch, second)
+    await _one_call()
+    assert first.closed and second.connects == 1
+
+
+async def test_a_kept_connection_that_fails_its_listing_is_replaced(monkeypatch):
+    class Broken(FakeService):
+        async def get_open_application_pages(self, timeout):
+            if getattr(self, "broken", False):
+                raise OSError("connection reset")
+            return self.entries
+
+    first = Broken([_entry()])
+    _patch(monkeypatch, first)
+    await _one_call()
+    first.broken = True
+    second = FakeService([_entry()])
+    _patch(monkeypatch, second)
+    assert await _one_call() is not None                 # not "could not reach"
+    assert first.closed and second.connects == 1
+
+
+async def test_a_kept_connection_lists_afresh_not_from_its_cache(monkeypatch):
+    service = FakeService([_entry()])
+    _patch(monkeypatch, service)
+    await _one_call()
+    service.application_pages["PID:748"] = {"1": "the last call's"}
+    await _one_call()
+    assert service.application_pages == {}
 
 
 async def test_the_server_stopping_closes_the_kept_connection(monkeypatch):
