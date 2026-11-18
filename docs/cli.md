@@ -18,7 +18,7 @@ quern status                 # Show PID, URL, uptime, tool availability, disk us
 quern url                    # Print the server's base URL, for scripts
 quern env                    # Print shell exports: eval "$(quern env)"
 quern doctor                 # Diagnostics: device tools, venv, tool versions, service health, MCP clients, disk use
-quern doctor --fix           # ...and reconcile the venv with pyproject.toml (venv only)
+quern doctor --fix           # ...and repair: the venv, the Quern app, Screen Mirror, quern-media, a phone's disk image
 quern capture-env            # Write an environment report to attach to a bug report
 quern help                   # Show the command list
 quern version                # Print the installed version
