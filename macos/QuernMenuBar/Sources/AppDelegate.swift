@@ -170,7 +170,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func refreshStatusButton() {
         guard let button = statusItem.button else { return }
         let running = snapshot.server.running
-        let updateAvailable = snapshot.update.updateAvailable
+        // The update mark also stands for one the last update left unfinished:
+        // a required tool upgrade still owed is update work to do (#725).
+        let updateAvailable = snapshot.update.updateAvailable || !snapshot.pendingTools.isEmpty
         button.image = Self.statusImage(running: running, updateAvailable: updateAvailable)
         // Text beside the icon, not instead of it: the silhouette is how the
         // item is found in a crowded menu bar.
@@ -321,6 +323,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(action("Restart Server", #selector(restartServer)))
         } else {
             menu.addItem(action("Start Server", #selector(startServer)))
+        }
+
+        // Owed by the last update rather than offered by the next: a required
+        // tool upgrade it could not finish -- sudo with no terminal, or one that
+        // ran and is still behind (#725).
+        if let title = PendingToolsMenu.title(snapshot.pendingTools) {
+            menu.addItem(action(title, #selector(finishToolUpgradesInTerminal)))
         }
 
         // The Ollama parallel: only appears once an update is staged.
@@ -559,6 +568,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         TerminalUpdate.open(reason: reason) { [weak self] error in
             guard let error else { return }
             self?.reportFailure("Could not open Terminal to update",
+                                detail: error,
+                                guidance: "Run `quern update` in a terminal instead.")
+        }
+    }
+
+    @objc private func finishToolUpgradesInTerminal() {
+        let names = snapshot.pendingTools.map(\.name)
+        TerminalUpdate.open(reason: .requiredTools(names)) { [weak self] error in
+            guard let error else { return }
+            self?.reportFailure("Could not open Terminal to finish the update",
                                 detail: error,
                                 guidance: "Run `quern update` in a terminal instead.")
         }
