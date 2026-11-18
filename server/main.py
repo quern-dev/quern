@@ -3049,12 +3049,17 @@ def cli() -> None:
 
     # doctor
     doctor_parser = subparsers.add_parser(
-        "doctor", help="Report device-tool availability (read-only diagnostics)"
+        "doctor",
+        help="Diagnose device tools, the venv, tool versions, the apps and services "
+             "(--fix repairs what it can)",
     )
     doctor_parser.add_argument(
         "--fix",
         action="store_true",
-        help="Reconcile Python dependencies if they are stale (same action as server startup)",
+        help=("Also repair what it can: reconcile stale Python dependencies, bring the "
+              "Quern app, Screen Mirror and quern-media up to date, and mount a phone's "
+              "developer disk image. Never upgrades external tools "
+              "(quern update --tools does)"),
     )
 
     # setup
