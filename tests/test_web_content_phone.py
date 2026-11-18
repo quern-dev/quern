@@ -562,15 +562,15 @@ async def test_a_call_while_the_phone_is_busy_gets_a_connection_of_its_own(monke
 
 
 async def test_a_call_inside_the_idle_window_restarts_it(monkeypatch):
-    monkeypatch.setattr(phone_webinspector, "IDLE_S", 0.2)
+    monkeypatch.setattr(phone_webinspector, "IDLE_S", 0.6)
     service = FakeService([_entry()])
     _patch(monkeypatch, service)
     await _one_call()
-    await asyncio.sleep(0.15)
+    await asyncio.sleep(0.4)
     await _one_call()                                    # in use: the clock restarts
-    await asyncio.sleep(0.15)                            # 0.3 s after the first keep
+    await asyncio.sleep(0.4)                             # 0.8 s after the first keep
     assert not service.closed
-    await asyncio.sleep(0.2)
+    await asyncio.sleep(0.6)
     assert service.closed
 
 
@@ -674,12 +674,34 @@ async def test_a_kept_connection_that_fails_its_listing_is_replaced(monkeypatch)
 
 
 async def test_a_kept_connection_lists_afresh_not_from_its_cache(monkeypatch):
-    service = FakeService([_entry()])
+    """pymobiledevice3 lists from its cache, which the phone's reply refills.
+    A reply that does not come in time left the last call's pages there; on
+    a new connection it would have left none."""
+    class Cached(FakeService):
+        async def get_open_application_pages(self, timeout):
+            if not self.application_pages:                # the reply refills it
+                self.application_pages["PID:748"] = list(self.entries)
+            return [e for pages in self.application_pages.values() for e in pages]
+
+    service = Cached([_entry()])
     _patch(monkeypatch, service)
     await _one_call()
-    service.application_pages["PID:748"] = {"1": "the last call's"}
+    service.entries = [_entry(page_id=7)]                 # navigated since
+    assert await _one_call(7) is not None                 # page 7, not the cached 1
+
+
+async def test_a_kept_connection_that_lists_nothing_is_replaced(monkeypatch):
+    """One sending into silence lists nothing, call after call; only a new
+    connection's handshake proves the phone is answering (review on #718)."""
+    first = FakeService([_entry()])
+    _patch(monkeypatch, first)
     await _one_call()
-    assert service.application_pages == {}
+    first.entries = []                                    # nothing comes back
+    second = FakeService([])
+    _patch(monkeypatch, second)
+    async with PhoneWebInspector(USB) as inspector:
+        assert await inspector.connected_applications() == []
+    assert first.closed and second.connects == 1
 
 
 async def test_the_server_stopping_closes_the_kept_connection(monkeypatch):

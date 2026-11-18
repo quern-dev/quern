@@ -196,7 +196,10 @@ class PhoneWebInspector:
         # did before #718, rather than a wait: a call queued behind a long
         # `evaluate_web_js` would spend its own budget waiting and then be
         # reported as the phone not answering (review on #718). Checked and
-        # taken in one step -- an unheld lock is acquired without yielding.
+        # taken in one step: a free lock is acquired without yielding. The one
+        # exception is the moment a release has just woken a waiter (an idle
+        # expiry, or `close_all`), when `locked()` reads False and `acquire`
+        # queues; that call then waits for one short holder, and cannot hang.
         lock = POOL.lock(self.udid)
         if not lock.locked():
             await lock.acquire()
@@ -213,6 +216,14 @@ class PhoneWebInspector:
                     self._service = kept
                     self._pages = await kept.get_open_application_pages(timeout=LISTING_S)
                 except Exception:  # noqa: BLE001 -- a new connection is tried
+                    self._pages = []
+                if not self._pages:
+                    # Replaced, failed or empty alike. Nothing in an empty
+                    # listing proves a kept connection is still answered --
+                    # one sending into silence lists nothing, call after call
+                    # -- while a new one's handshake does. So "no pages" is
+                    # always a proven connection's answer; it costs the gate,
+                    # which is what every call cost before #718 (review).
                     self._service = None
                     await close_quietly(kept)
                     kept = None
