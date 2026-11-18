@@ -57,9 +57,11 @@ class PhoneConnections:
     kept only from a call that ended cleanly; anything else closes it, which
     leaves the next call paying the gate, as before.
 
-    Calls on one phone take turns: two at once on one connection could both
-    open a session on the same page. The connection closes after `IDLE_S`
-    unused, when it drops, and when the server stops (`close_all`).
+    One call at a time has the kept connection: two at once on it could both
+    open a session on the same page. A call that arrives while it is out
+    connects on its own instead (`PhoneWebInspector.__aenter__`). The kept
+    connection closes after `IDLE_S` unused, when it drops or stops reading,
+    and when the server stops (`close_all`).
     """
 
     def __init__(self) -> None:
