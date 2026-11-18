@@ -85,6 +85,7 @@ enum TerminalUpdate {
         switch reason {
         case .gitInstall: why = "git install"
         case .nodeManagedElsewhere(let manager): why = "Node is managed by \(manager)"
+        case .requiredTools(let names): why = "\(names.joined(separator: ", ")) below quern's minimum"
         }
         return TerminalScript.wrap(title: "update quern (\(why))", body: [
             "echo \"Updating Quern (\(why))...\"",
@@ -198,11 +199,16 @@ enum NodeVisibility: Equatable {
 enum TerminalReason: Equatable {
     case gitInstall
     case nodeManagedElsewhere(String)
+    /// A required tool upgrade the last update could not finish (#725). A
+    /// plain `quern update` in a terminal runs it -- asking sudo for the
+    /// password where it needs one -- and clears the record once it is done.
+    case requiredTools([String])
 
     var menuTitle: String {
         switch self {
         case .gitInstall: return "Why Terminal? (git install)"
         case .nodeManagedElsewhere(let manager): return "Why Terminal? (Node is managed by \(manager))"
+        case .requiredTools: return "Why Terminal? (it asks for your password)"
         }
     }
 }
@@ -248,5 +254,20 @@ enum UpdateMenuItem: Equatable {
         if failed { return "Quern could not start — open the menu" }
         if updateAvailable { return "Quern — update available" }
         return running ? "Quern is running" : "Quern is stopped"
+    }
+}
+
+
+/// The menu item for required tool upgrades an update could not finish (#725).
+/// Pure, so the wording is tested; the item itself opens `quern update` in
+/// Terminal.
+enum PendingToolsMenu {
+    /// nil when nothing is owed, so there is no item at all.
+    static func title(_ pending: [PendingTool]) -> String? {
+        guard let first = pending.first else { return nil }
+        let what = pending.count == 1 ? first.name : "\(pending.count) tools"
+        let verb = pending.count == 1 ? "needs" : "need"
+        let why = pending.allSatisfy(\.needsRoot) ? "\(verb) sudo" : "still below quern's minimum"
+        return "Finish Update in Terminal… (\(what) \(why))"
     }
 }

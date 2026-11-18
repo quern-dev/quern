@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { z } from "zod";
-import { currentRemote, discoverServer, readStateFile } from "../config.js";
+import { currentRemote, discoverServer, readStateFile, stateServer } from "../config.js";
 import { apiRequest, SESSION_ID, serverFetch } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
 import { type LogQueryAnswer, tailLogsResult } from "./log-responses.js";
@@ -17,9 +17,48 @@ export const includeRaw = z
   .optional()
   .describe("Include each entry's raw, the original unparsed line. Off by default: for simulator and oslog entries it is the whole JSON record, about 2 KB, several times message. Ask for it only to see a field quern does not parse.");
 
+/**
+ * Required tool upgrades the last update could not finish (#725) -- one
+ * needing sudo with no terminal -- as fields for an ensure_server answer.
+ * Said so the agent can tell its user what to run, before a tool too old for
+ * quern shows up as a failure somewhere else.
+ *
+ * On every answer that found a server up: running, just started, or a
+ * remote. Only the running one carried it at first, so the first call of a
+ * session -- the one that starts the server -- said nothing. Best-effort: an
+ * older server or a transient failure omits the fields, and never fails the
+ * health check it rides on.
+ */
+async function pendingUpgradeFields(
+  target: ReturnType<typeof discoverServer> | ReturnType<typeof stateServer>,
+): Promise<Record<string, unknown>> {
+  try {
+    const upd = await apiRequest(
+      "GET", "/api/v1/system/update-status", undefined, undefined, 2000, target,
+    );
+    return pendingUpgradeFieldsFrom(upd, target.source === "remote");
+  } catch {
+    return {};  // Older server or transient failure -- skip silently.
+  }
+}
+
+/** The same, from an update-status answer already in hand. */
+export function pendingUpgradeFieldsFrom(
+  upd: unknown, remote = false,
+): Record<string, unknown> {
+  const raw = (upd as { pending_tool_upgrades?: unknown } | null)?.pending_tool_upgrades;
+  if (!Array.isArray(raw) || !raw.length) return {};
+  return {
+    pending_tool_upgrades: raw,
+    pending_tool_upgrades_note: remote
+      ? "A required tool upgrade the remote's last update could not finish. It is run on that machine: ask its owner to run `quern update` in a terminal there (it may ask for their password), or the listed command."
+      : "A required tool upgrade the last update could not finish. Ask the user to run `quern update` in a terminal (it may ask for their password), or the listed command.",
+  };
+}
+
 export function registerLogTools(server: McpServer): void {
   server.registerTool("ensure_server", {
-    description: `Ensure Quern is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key. Pointed at a remote (QUERN_REMOTE, or use_remote), it only health-checks that remote over the pinned connection and never starts anything; the answer has server_url and version, not proxy or key details.`,
+    description: `Ensure Quern is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key. Pointed at a remote (QUERN_REMOTE, or use_remote), it only health-checks that remote over the pinned connection and never starts anything; the answer has server_url and version, not proxy or key details. Whenever the server answers -- running, just started, or a remote -- the answer may carry pending_tool_upgrades with pending_tool_upgrades_note: a tool upgrade quern requires that the last update could not finish (usually one needing sudo). Tell the user to run \`quern update\` in a terminal (on the remote's own machine for a remote), or the listed command. It is read best-effort and omitted when it cannot be.`,
     inputSchema: strictParams({}),
   }, async () => {
       // A remote quern (QUERN_REMOTE, #254 phase 3): checked over the pinned
@@ -36,6 +75,7 @@ export function registerLogTools(server: McpServer): void {
             status: resp.ok ? "running" : "unhealthy", remote: currentRemote(),
             server_url: target.url, version: health.version,
             note: "a remote quern: it is started on its own machine, never from here",
+            ...(resp.ok ? await pendingUpgradeFields(target) : {}),
           }, null, 2) }] };
         } catch (e) {
           return { content: [{ type: "text" as const, text:
@@ -64,6 +104,7 @@ export function registerLogTools(server: McpServer): void {
                 // field. update_available=false is intentionally elided
                 // to keep the response quiet on the happy path.
                 let updateAvailable: unknown = undefined;
+                let pendingFields: Record<string, unknown> = {};
                 try {
                   const upd = (await apiRequest(
                     "GET",
@@ -71,10 +112,15 @@ export function registerLogTools(server: McpServer): void {
                     undefined,
                     undefined,
                     2000,
+                    // The server whose health check just passed, not whatever
+                    // discovery names: QUERN_SERVER_URL is read before the
+                    // state file (CodeRabbit on #727).
+                    stateServer(state),
                   )) as { update_available?: boolean } | null;
                   if (upd && upd.update_available) {
                     updateAvailable = upd;
                   }
+                  pendingFields = pendingUpgradeFieldsFrom(upd);
                 } catch {
                   // Older server or transient failure — skip silently.
                 }
@@ -95,6 +141,7 @@ export function registerLogTools(server: McpServer): void {
                           ...(updateAvailable
                             ? { update_available: updateAvailable }
                             : {}),
+                          ...pendingFields,
                         },
                         null,
                         2
@@ -213,6 +260,7 @@ export function registerLogTools(server: McpServer): void {
                     api_key: newState.api_key,
                     started_at: newState.started_at,
                     pid: newState.pid,
+                    ...(await pendingUpgradeFields(stateServer(newState))),
                   },
                   null,
                   2
