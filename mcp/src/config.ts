@@ -67,6 +67,23 @@ export function selectedServer(): string | undefined {
 
 /** Where requests go: the remote `remoteName` names -- by default the one this
  * MCP uses now -- or, for an empty name, this Mac's server. */
+/**
+ * The server a state file describes, with the key discovery would use for it.
+ * For a caller that has just health-checked that server and must ask it --
+ * not whatever discovery names by the time the next request goes out.
+ */
+export function stateServer(state: NonNullable<ReturnType<typeof readStateFile>>): {
+  url: string;
+  apiKey: string;
+  source: "state";
+} {
+  return {
+    url: `http://127.0.0.1:${state.server_port}`,
+    apiKey: explicitKey() ?? (state.api_key || loadApiKey()),
+    source: "state",
+  };
+}
+
 export function discoverServer(remoteName: string | undefined = currentRemote()): {
   url: string;
   apiKey: string;
@@ -105,11 +122,7 @@ export function discoverServer(remoteName: string | undefined = currentRemote())
   // Priority 2: State file
   const state = readStateFile();
   if (state) {
-    return {
-      url: `http://127.0.0.1:${state.server_port}`,
-      apiKey: explicitKey() ?? (state.api_key || loadApiKey()),
-      source: "state",
-    };
+    return stateServer(state);
   }
 
   // Priority 3: a guess, flagged as one. Reaching here means no server has

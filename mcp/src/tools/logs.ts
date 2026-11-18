@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { z } from "zod";
-import { currentRemote, discoverServer, readStateFile } from "../config.js";
+import { currentRemote, discoverServer, readStateFile, stateServer } from "../config.js";
 import { apiRequest, SESSION_ID, serverFetch } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
 import { type LogQueryAnswer, tailLogsResult } from "./log-responses.js";
@@ -30,13 +30,13 @@ export const includeRaw = z
  * health check it rides on.
  */
 async function pendingUpgradeFields(
-  target?: ReturnType<typeof discoverServer>,
+  target: ReturnType<typeof discoverServer> | ReturnType<typeof stateServer>,
 ): Promise<Record<string, unknown>> {
   try {
     const upd = await apiRequest(
       "GET", "/api/v1/system/update-status", undefined, undefined, 2000, target,
     );
-    return pendingUpgradeFieldsFrom(upd, target?.source === "remote");
+    return pendingUpgradeFieldsFrom(upd, target.source === "remote");
   } catch {
     return {};  // Older server or transient failure -- skip silently.
   }
@@ -58,7 +58,7 @@ export function pendingUpgradeFieldsFrom(
 
 export function registerLogTools(server: McpServer): void {
   server.registerTool("ensure_server", {
-    description: `Ensure Quern is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key. Pointed at a remote (QUERN_REMOTE, or use_remote), it only health-checks that remote over the pinned connection and never starts anything; the answer has server_url and version, not proxy or key details.`,
+    description: `Ensure Quern is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key. Pointed at a remote (QUERN_REMOTE, or use_remote), it only health-checks that remote over the pinned connection and never starts anything; the answer has server_url and version, not proxy or key details. Whenever the server answers -- running, just started, or a remote -- the answer may carry pending_tool_upgrades with pending_tool_upgrades_note: a tool upgrade quern requires that the last update could not finish (usually one needing sudo). Tell the user to run \`quern update\` in a terminal (on the remote's own machine for a remote), or the listed command. It is read best-effort and omitted when it cannot be.`,
     inputSchema: strictParams({}),
   }, async () => {
       // A remote quern (QUERN_REMOTE, #254 phase 3): checked over the pinned
@@ -112,6 +112,10 @@ export function registerLogTools(server: McpServer): void {
                     undefined,
                     undefined,
                     2000,
+                    // The server whose health check just passed, not whatever
+                    // discovery names: QUERN_SERVER_URL is read before the
+                    // state file (CodeRabbit on #727).
+                    stateServer(state),
                   )) as { update_available?: boolean } | null;
                   if (upd && upd.update_available) {
                     updateAvailable = upd;
@@ -256,7 +260,7 @@ export function registerLogTools(server: McpServer): void {
                     api_key: newState.api_key,
                     started_at: newState.started_at,
                     pid: newState.pid,
-                    ...(await pendingUpgradeFields()),
+                    ...(await pendingUpgradeFields(stateServer(newState))),
                   },
                   null,
                   2
