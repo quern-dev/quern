@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0-beta.6] - 2026-11-17
+
 ### Changed
 - **pymobiledevice3 11.55.0 is now the minimum, for quern's own copy and the one tunneld runs (#725).** The phone's Web Inspector features -- `get_web_content`, `evaluate_web_js` and `get_web_console` on an iPhone -- were built and tested on 11.55.0 only, and pymobiledevice3 reworked its Web Inspector service since the old 11.20.0 floor. tunneld's command-line copy had no minimum at all: Romulus ran it at 11.14.0 with nothing saying so.
 - **An update upgrades a tool below quern's minimum, with or without `--tools` (#725).** A menu-bar update never passes `--tools`, so such a tool was only ever reported, in output nobody saw. Now it is upgraded on every update. When the upgrade needs `sudo` (a `pipx --global` install) and there is no terminal to ask for the password, it is recorded in `~/.quern/pending-tool-upgrades.json`, and `quern status` names it with the command to run, server running or not. A required upgrade that failed, or that exited 0 without moving the version (pipx skips a pinned package), is recorded and fails the update: versions are checked again afterwards, not inferred from exit codes. The record clears itself once nothing is left. Merely newer versions stay opt-in. In a terminal, `quern update` now runs a required `sudo` upgrade itself, so it may ask for your password. Measured live: pymobiledevice3 11.14.0 in a pipx home first on PATH, with the updater run as the menu bar runs it (no `--tools`, no terminal), was upgraded to 11.58.0, and nothing was left pending.
@@ -1165,7 +1167,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.5...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.6...main
+[0.26.0-beta.6]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.6
 [0.26.0-beta.5]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.5
 [0.26.0-beta.4]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.4
 [0.26.0-beta.3]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.3
