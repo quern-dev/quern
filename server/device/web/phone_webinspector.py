@@ -33,13 +33,138 @@ LISTING_S = 1.0
 CALL_TIMEOUT_S = 30.0
 
 SWITCH = "Settings > Apps > Safari > Advanced > Web Inspector"
+#: How long a phone's connection is kept after its last call (#718).
+IDLE_S = 30.0
+#: How long one page's teardown may take before the connection is given up.
+TEARDOWN_S = 2.0
+
+
+class PhoneConnections:
+    """One Web Inspector connection per phone, kept between calls (#718).
+
+    The phone's webinspectord admits a new connection only about 10 s after
+    the last one began, so a call that opened its own paid 7-9 s whenever it
+    followed another inside that window -- `get_web_content`, then the clear
+    a tap makes. Measured on an iPhone 11 (iOS 27.2.1, pmd3 11.55): a second
+    connection took 7.15 s where the first took 0.13 s, and three calls on one
+    kept connection opened their page's session in 0.02-0.03 s each.
+
+    What makes keeping it safe is the teardown at the end of every call.
+    WebKit serves one session per page, and a page whose socket was not torn
+    down never answers a later session on the same connection: measured, the
+    second and third calls each waited 15 s for nothing. So a call releases
+    every page it opened before its connection is kept, and a connection is
+    kept only from a call that ended cleanly; anything else closes it, which
+    leaves the next call paying the gate, as before.
+
+    One call at a time has the kept connection: two at once on it could both
+    open a session on the same page. A call that arrives while it is out
+    connects on its own instead (`PhoneWebInspector.__aenter__`). The kept
+    connection closes after `IDLE_S` unused, when it drops or stops reading,
+    and when the server stops (`close_all`).
+    """
+
+    def __init__(self) -> None:
+        self._services: dict[str, Any] = {}
+        #: Which keep of a phone's connection its idle timer belongs to. A
+        #: timer can fire while a call has the connection out and puts it
+        #: back; the service is the same object then, so only this tells the
+        #: stale expiry from the current keep (review on #718).
+        self._keeps: dict[str, object] = {}
+        self._timers: dict[str, asyncio.TimerHandle] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        #: Expiries in flight, held so they are not collected mid-close.
+        self._expiring: set[asyncio.Task] = set()
+
+    def lock(self, udid: str) -> asyncio.Lock:
+        return self._locks.setdefault(udid, asyncio.Lock())
+
+    async def take(self, udid: str) -> Any:
+        """The phone's kept connection, now the caller's; None when there is
+        none, or the one there was is no use."""
+        timer = self._timers.pop(udid, None)
+        if timer is not None:
+            timer.cancel()
+        self._keeps.pop(udid, None)
+        service = self._services.pop(udid, None)
+        if service is not None and not healthy(service):
+            await close_quietly(service)
+            return None
+        return service
+
+    def put(self, udid: str, service: Any) -> None:
+        """Keep `service` for the phone's next call, for `IDLE_S`."""
+        old = self._timers.pop(udid, None)
+        if old is not None:
+            old.cancel()
+        keep = object()
+        self._services[udid] = service
+        self._keeps[udid] = keep
+        loop = asyncio.get_running_loop()
+
+        def fire() -> None:
+            task = loop.create_task(self._expire(udid, keep))
+            self._expiring.add(task)
+            task.add_done_callback(self._expiring.discard)
+        self._timers[udid] = loop.call_later(IDLE_S, fire)
+
+    async def _expire(self, udid: str, keep: object) -> None:
+        async with self.lock(udid):
+            if self._keeps.get(udid) is keep:
+                service = await self.take(udid)
+                if service is not None:
+                    await close_quietly(service)
+
+    async def close_all(self) -> None:
+        """Close every kept connection: the server is stopping."""
+        for udid in list(self._services):
+            async with self.lock(udid):
+                service = await self.take(udid)
+                if service is not None:
+                    await close_quietly(service)
+
+    def forget(self) -> None:
+        """Drop everything without closing it -- for tests, whose event loop
+        each kept connection belonged to has gone."""
+        for timer in self._timers.values():
+            timer.cancel()
+        self._services.clear()
+        self._keeps.clear()
+        self._timers.clear()
+        self._locks.clear()
+        self._expiring.clear()
+
+
+POOL = PhoneConnections()
+
+
+def healthy(service: Any) -> bool:
+    """Whether a kept connection can serve another call. pymobiledevice3 marks
+    a lost connection (`is_connected`), but a receive task that died of
+    anything else leaves it True while nothing is read any more: the next
+    listing would quietly be the last call's, and no session would answer."""
+    task = getattr(service, "_recv_task", None)
+    return service.is_connected and not (task is not None and task.done())
+
+
+async def close_quietly(service: Any) -> None:
+    """Close `service`, whatever it says. Shielded, so a call given up on
+    while closing still finishes the close rather than leaving it open."""
+    async def close() -> None:
+        try:
+            await service.close()
+        except Exception:  # noqa: BLE001 -- closing what failed or dropped
+            pass
+    await asyncio.shield(close())
 
 
 class PhoneWebInspector:
     """`InspectorLike` over a phone's Web Inspector service, for one call.
 
-    `async with PhoneWebInspector(udid) as inspector:` connects, and the
-    listing taken then answers `connected_applications` and `pages`.
+    `async with PhoneWebInspector(udid) as inspector:` takes the phone's kept
+    connection or opens one (`PhoneConnections`), and the listing taken then
+    answers `connected_applications` and `pages`. Leaving releases every page
+    the call opened, and keeps the connection only when the call ended cleanly.
     """
 
     def __init__(self, udid: str) -> None:
@@ -54,17 +179,59 @@ class PhoneWebInspector:
         #: Pages whose session never got going: asked again, a new session
         #: would not answer either, so they answer None (CodeRabbit on #715).
         self._silent: set[tuple[str, int]] = set()
+        self._lock: asyncio.Lock | None = None
+        #: Whether this call has the phone's kept connection, or one of its own
+        #: because another call has that (see `__aenter__`).
+        self._pooled = False
+        #: A session whose setup did not finish: the phone may hold its page
+        #: with nothing here to release it, so the connection is not kept.
+        self._unreleasable = False
 
     async def __aenter__(self) -> PhoneWebInspector:
         from pymobiledevice3.exceptions import WebInspectorNotEnabledError
         from pymobiledevice3.lockdown import create_using_usbmux
         from pymobiledevice3.services.webinspector import WebinspectorService
 
+        # A phone already in use gets a connection of its own, as every call
+        # did before #718, rather than a wait: a call queued behind a long
+        # `evaluate_web_js` would spend its own budget waiting and then be
+        # reported as the phone not answering (review on #718). Checked and
+        # taken in one step: a free lock is acquired without yielding. The one
+        # exception is the moment a release has just woken a waiter (an idle
+        # expiry, or `close_all`), when `locked()` reads False and `acquire`
+        # queues; that call then waits for one short holder, and cannot hang.
+        lock = POOL.lock(self.udid)
+        if not lock.locked():
+            await lock.acquire()
+            self._lock, self._pooled = lock, True
         try:
-            lockdown = await create_using_usbmux(serial=self.udid, autopair=False)
-            self._service = WebinspectorService(lockdown=lockdown)
-            await self._service.connect()
-            self._pages = await self._service.get_open_application_pages(timeout=LISTING_S)
+            kept = await POOL.take(self.udid) if self._pooled else None
+            if kept is not None:
+                try:
+                    # Every call lists afresh: pages come and go between calls.
+                    # Emptied first, so a listing that does not arrive in time
+                    # reads as none, as on a new connection, not as the last
+                    # call's pages.
+                    kept.application_pages.clear()
+                    self._service = kept
+                    self._pages = await kept.get_open_application_pages(timeout=LISTING_S)
+                except Exception:  # noqa: BLE001 -- a new connection is tried
+                    self._pages = []
+                if not self._pages:
+                    # Replaced, failed or empty alike. Nothing in an empty
+                    # listing proves a kept connection is still answered --
+                    # one sending into silence lists nothing, call after call
+                    # -- while a new one's handshake does. So "no pages" is
+                    # always a proven connection's answer; it costs the gate,
+                    # which is what every call cost before #718 (review).
+                    self._service = None
+                    await close_quietly(kept)
+                    kept = None
+            if kept is None:
+                lockdown = await create_using_usbmux(serial=self.udid, autopair=False)
+                self._service = WebinspectorService(lockdown=lockdown)
+                await self._service.connect()
+                self._pages = await self._service.get_open_application_pages(timeout=LISTING_S)
         except WebInspectorNotEnabledError as e:
             await self._close()
             raise DeviceError(
@@ -81,23 +248,57 @@ class PhoneWebInspector:
             raise
         return self
 
-    async def __aexit__(self, *exc: object) -> None:
-        await self._close()
+    async def __aexit__(self, exc_type: object, *exc: object) -> None:
+        await self._close(keep=exc_type is None)
 
-    async def _close(self) -> None:
-        # A session starts a receive loop that never ends by itself, and
-        # pymobiledevice3 (11.55) has no call that ends it (CodeRabbit on #715).
-        for session in self._sessions.values():
+    async def _close(self, keep: bool = False) -> None:
+        """End the call: release its pages, then keep the connection for the
+        phone's next call if `keep` and every release went through, and close
+        it otherwise. The phone's turn is handed on whatever happens."""
+        service, self._service = self._service, None
+        try:
+            try:
+                released = await self._release_pages(service)
+                if (service is not None and keep and self._pooled and released
+                        and not self._unreleasable and healthy(service)):
+                    POOL.put(self.udid, service)
+                    service = None
+            finally:
+                # Also when cancelled mid-release: a connection whose pages may
+                # still be held must not be kept, and must not be left open.
+                if service is not None:
+                    await close_quietly(service)
+        finally:
+            # Its own `finally`: a cancel arriving during the close above must
+            # not keep the phone's turn, or every later call waits on it.
+            if self._lock is not None:
+                self._lock.release()
+                self._lock = None
+
+    async def _release_pages(self, service: Any) -> bool:
+        """Release every page this call opened a session on. True when each
+        release was sent; a page left held would never answer the next
+        call's session on this connection."""
+        sessions, self._sessions = self._sessions, {}
+        # Every receive loop first, before anything that can be cancelled: a
+        # session starts one that never ends by itself, polling every 1 ms,
+        # and pymobiledevice3 (11.55) has no call that ends it (CodeRabbit on
+        # #715). Cancelled one page at a time, a cancel during the first
+        # page's release left the others' running (review on #718).
+        for session in sessions.values():
             task = getattr(session, "_receive_task", None)
             if task is not None:
                 task.cancel()
-        self._sessions.clear()
-        if self._service is not None:
+        if service is None:
+            return True
+        released = True
+        for (application_id, page_id), session in sessions.items():
             try:
-                await self._service.close()
-            except Exception:  # noqa: BLE001 -- closing what failed to open
-                pass
-            self._service = None
+                await asyncio.wait_for(service.teardown_inspector_socket(
+                    session.protocol.id_, application_id, page_id), TEARDOWN_S)
+            except Exception:  # noqa: BLE001 -- the connection is closed instead
+                released = False
+        return released
 
     async def connected_applications(self) -> list[dict]:
         seen: dict[str, dict] = {}
@@ -215,7 +416,11 @@ class PhoneWebInspector:
             return None
         session = self._sessions.get(key)
         if session is None:
-            session = await self._service.inspector_session(entry.application, entry.page)
+            try:
+                session = await self._service.inspector_session(entry.application, entry.page)
+            except BaseException:
+                self._unreleasable = True
+                raise
             self._sessions[key] = session
             try:
                 await session.runtime_enable()

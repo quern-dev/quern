@@ -1071,6 +1071,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await device_controller._close_web_inspector()
         except Exception:
             logger.debug("closing the Web Inspector connection failed", exc_info=True)
+        # The phones' kept Web Inspector connections (#718).
+        try:
+            from server.device.web.phone_webinspector import POOL as phone_inspectors
+
+            await phone_inspectors.close_all()
+        except Exception:
+            logger.debug("closing the phones' Web Inspector connections failed", exc_info=True)
 
     if (session_proxies := getattr(app.state, "session_proxies", None)) is not None:
         try:
