@@ -620,6 +620,25 @@ class TestLaunching:
         ctrl.wda_client.launch_app.assert_not_called()
         ctrl.wda_client.app_state.assert_not_called()
 
+    async def test_a_daemon_restart_during_the_check_is_said_on_the_launch(
+            self, monkeypatch):
+        """The check is the read the restart rescued (#734): said on its
+        answer, and not left for the next read to claim."""
+        from server.device.ios import coredevice_ax
+
+        async def front(*_a, **_k):
+            coredevice_ax._notes[PHONE] = "axauditd had stopped answering; restarted"
+            return (1583, "QuernProbeScene")
+
+        ctrl = self._ctrl(monkeypatch, [])
+        monkeypatch.setattr("server.device.ios.coredevice_ax.front_app", front)
+        monkeypatch.setattr(coredevice_ax, "_notes", {})
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert "restarted" in info.get("warning", "")
+        assert coredevice_ax.take_note(PHONE) is None
+
     async def test_the_check_is_remembered_as_a_read(self, monkeypatch):
         """A push read like any other: a crash it causes after it answers is
         looked for at the next read (#669 review)."""

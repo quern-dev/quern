@@ -991,8 +991,8 @@ async def _connect_service(uuid: str, lib: SimpleNamespace, conn: SimpleNamespac
                 raise
         else:
             _notes[uuid] = (
-                f"The accessibility daemon on {uuid[:8]} had stopped answering and was "
-                "restarted; this read is from the restarted daemon.")
+                f"The accessibility daemon on {uuid[:8]} had stopped answering a new "
+                "connection, so quern restarted it (#734).")
             return
     if outcome == TOO_SOON:
         raise PushNotAnswering(

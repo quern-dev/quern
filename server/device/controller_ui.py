@@ -3559,7 +3559,10 @@ class DeviceControllerUI:
             # The push may have recovered the phone's accessibility daemon on
             # its own (#734): said on the answer, as everything is that
             # changes what a read means.
-            if (restarted := coredevice_ax.take_note(resolved)) and failed is None:
+            # Taken whether or not the read then failed, so a later read never
+            # claims a restart that was this one's.
+            restarted = coredevice_ax.take_note(resolved)
+            if restarted and failed is None:
                 _READ_NOTE.set(restarted)
             # A read the push cannot make is made through WDA, and `backend`
             # on the answer says which one served it -- where there is a WDA.
@@ -3611,7 +3614,8 @@ class DeviceControllerUI:
                     # the answer looked like the push's with `backend` changed.
                     _READ_NOTE.set(
                         f"The accessibility push could not read this screen: {e}. "
-                        "This read is WDA's.")
+                        + (f"{restarted} " if restarted else "")
+                        + "This read is WDA's.")
                 reader = None
                 if lookup and snapshot_depth is None:
                     # A lookup asked for no depth because the push needs none;
