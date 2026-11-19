@@ -12,6 +12,7 @@ while. pymobiledevice3 is faked; nothing here reaches a phone.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import signal
 import time
 from types import SimpleNamespace
@@ -47,7 +48,6 @@ def fresh_state(monkeypatch):
     monkeypatch.setattr(coredevice_ax._Turn, "_locks", {})
     monkeypatch.setattr(coredevice_ax, "_restarted_at", {})
     monkeypatch.setattr(coredevice_ax, "_down_until", {})
-    monkeypatch.setattr(coredevice_ax, "_notes", {})
     monkeypatch.setattr(coredevice_ax, "HANDSHAKE_S", 0.1)
     # The settle waits are the reader's, measured on phones; these tests are
     # about subscriptions, not settling.
@@ -197,18 +197,133 @@ class TestOneSubscriptionAtATime:
         assert state.opened == 1
 
 
+class _SlowClose:
+    """Wraps a `_lib` so closing a provider takes `seconds`: a sick
+    connection's close is the slow one."""
+
+    def __init__(self, lib, seconds):
+        base = lib.RemoteAX
+
+        class RemoteAX(base):
+            async def close(self_inner):
+                await asyncio.sleep(seconds)
+                await base.close(self_inner)
+
+        lib.RemoteAX = RemoteAX
+
+
+class TestTheTurnSurvivesACancelledClose:
+    """`_close` swallows Exception, not CancelledError: a cancellation in the
+    close skipped the release, and every later read of the phone failed
+    until the server restarted (review)."""
+
+    async def test_a_deadline_during_front_apps_close(self, monkeypatch, phone_address):
+        lib, _ = _lib()
+        _SlowClose(lib, 1.0)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        monkeypatch.setattr(coredevice_ax, "CLOSE_S", 2.0)
+
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(coredevice_ax.front_app(PHONE, timeout=5), 0.4)
+        lib2, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib2)
+        assert len(await asyncio.wait_for(read_tree(PHONE, timeout=2), 3)) == 14
+
+    async def test_front_apps_own_deadline_does_not_cut_its_close(
+            self, monkeypatch, phone_address):
+        """The close is outside the deadline, as read_tree's is: the deadline
+        firing during it left the connection half-closed."""
+        lib, state = _lib(push_delay=0.25)
+        _SlowClose(lib, 0.3)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        assert await coredevice_ax.front_app(PHONE, timeout=0.5)
+        assert state.open == 0, "the close was cut short"
+
+    async def test_a_cancel_during_read_trees_close(self, monkeypatch, phone_address):
+        lib, _ = _lib()
+        _SlowClose(lib, 1.0)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(read_tree(PHONE, timeout=5), 0.4)
+        lib2, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib2)
+        assert len(await asyncio.wait_for(read_tree(PHONE, timeout=2), 3)) == 14
+
+    async def test_a_cancel_during_element_ats_close(self, monkeypatch, phone_address):
+        lib, _ = _lib()
+        _SlowClose(lib, 1.0)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        monkeypatch.setattr(coredevice_ax, "_answer", AsyncMock(return_value=None))
+
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(coredevice_ax.element_at(PHONE, 1, 1), 0.3)
+        lib2, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib2)
+        assert len(await asyncio.wait_for(read_tree(PHONE, timeout=2), 3)) == 14
+
+
+class TestEverySiteTakesItsTurn:
+    async def test_a_hit_test_waits_for_a_read_in_flight(self, monkeypatch, phone_address):
+        lib, state = _lib(push_delay=0.1)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        monkeypatch.setattr(coredevice_ax, "_answer", AsyncMock(return_value=None))
+
+        await asyncio.gather(read_tree(PHONE, timeout=5), coredevice_ax.element_at(PHONE, 1, 1))
+
+        assert state.max_open == 1
+
+    async def test_a_hit_test_gives_the_turn_back(self, monkeypatch, phone_address):
+        lib, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        monkeypatch.setattr(coredevice_ax, "_answer", AsyncMock(return_value=None))
+
+        await coredevice_ax.element_at(PHONE, 1, 1)
+
+        assert len(await asyncio.wait_for(read_tree(PHONE, timeout=2), 3)) == 14
+
+    async def test_a_launch_check_on_a_phone_that_is_down_fails_at_once(
+            self, monkeypatch, phone_address):
+        coredevice_ax._down_until[PHONE] = time.monotonic() + 30
+        lib, state = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        with pytest.raises(PushNotAnswering):
+            await coredevice_ax.front_app(PHONE, timeout=5)
+        assert state.connects == 0
+
+
 class TestAWedgedDaemon:
     async def test_it_is_restarted_and_the_read_answers(self, monkeypatch, phone_address):
         lib, state = _lib(wedged=True)
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
 
+        restarts = coredevice_ax.collect_restarts()
+
         elements = await asyncio.wait_for(read_tree(PHONE, timeout=5), 3)
 
         assert len(elements) == 14
         assert state.signals == [(DAEMON_PID, signal.SIGKILL)], "only axauditd, only SIGKILL"
-        note = coredevice_ax.take_note(PHONE)
-        assert note and "restarted" in note
-        assert coredevice_ax.take_note(PHONE) is None, "said once"
+        assert len(restarts) == 1 and "restarted" in restarts[0]
+
+    async def test_a_restart_nobody_collects_goes_nowhere(self, monkeypatch, phone_address):
+        """Kept per phone, a restart made by a call whose answer never says so
+        -- typing's correction -- was claimed by the next answer on that
+        phone, minutes later (review). With no list asked for, it is only
+        logged."""
+        lib, _ = _lib(wedged=True)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        async def a_call_nobody_reports():
+            # Its own task, as a request is: the list it would fill is none.
+            coredevice_ax._RESTARTS.set(None)
+            await read_tree(PHONE, timeout=5)
+
+        await asyncio.create_task(a_call_nobody_reports())
+        later = coredevice_ax.collect_restarts()
+        await read_tree(PHONE, timeout=5)
+        assert later == []
 
     async def test_pymobiledevice3s_own_handshake_error_counts_as_one(
             self, monkeypatch, phone_address):
@@ -220,6 +335,20 @@ class TestAWedgedDaemon:
             await read_tree(PHONE, timeout=5)
 
         assert state.signals == [(DAEMON_PID, signal.SIGKILL)]
+
+    async def test_a_reader_cancelled_mid_handshake_is_not_a_wedge(
+            self, monkeypatch, phone_address):
+        """pymobiledevice3 says "DTX reader cancelled before handshake
+        completed" for a connection that was ended, not a daemon wedged."""
+        lib, state = _lib(connect_error=ConnectionResetError(
+            "DTX reader cancelled before handshake completed"))
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        with pytest.raises(DeviceError) as caught:
+            await read_tree(PHONE, timeout=5)
+
+        assert not isinstance(caught.value, PushNotAnswering)
+        assert state.signals == []
 
     async def test_another_connect_error_is_not_taken_for_a_wedge(
             self, monkeypatch, phone_address):
@@ -282,7 +411,6 @@ class TestAWedgedDaemon:
 
         assert state.signals == []
         assert state.connects == 1, "connected again after a restart that never happened"
-        assert coredevice_ax.take_note(PHONE) is None
 
     async def test_a_hit_test_on_a_phone_that_is_down_cannot_tell(
             self, monkeypatch, phone_address):
@@ -320,11 +448,13 @@ class TestWhenThePhoneIsMarkedDown:
             self, monkeypatch, phone_address):
         lib, state = _lib(wedged=True, kill_cures=False)
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        restarts = coredevice_ax.collect_restarts()
 
         with pytest.raises(PushNotAnswering, match="could not be restarted"):
             await read_tree(PHONE, timeout=5)
 
         assert state.signals == [(DAEMON_PID, signal.SIGKILL)]
+        assert restarts == [], "a restart that did not bring it back was reported as one"
         with pytest.raises(PushNotAnswering, match="not asked again"):
             await read_tree(PHONE, timeout=5)
 
@@ -357,11 +487,63 @@ class TestTheAnswerSaysSo:
         note = ctrl.read_note()
         assert note and "did not answer" in note and "WDA's" in note
 
+    @staticmethod
+    def _restarting(result=None, error=None):
+        """A describe_all that restarts the daemon on its way to `result` or
+        `error`, as `_connect_service` does: one sentence on the request's list."""
+        async def describe_all(*_a, **_k):
+            coredevice_ax._RESTARTS.get().append("axauditd had stopped answering; restarted")
+            if error:
+                raise error
+            return result
+        return describe_all
+
     async def test_a_restart_is_said_on_the_read_it_rescued(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
-        coredevice_ax._notes[PHONE] = ("The accessibility daemon on 48CF8DD9 had stopped "
-                                       "answering and was restarted")
+        ctrl.coredevice_ax.describe_all = self._restarting(
+            result=await ctrl.coredevice_ax.describe_all(PHONE))
 
         await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
 
         assert "restarted" in (ctrl.read_note() or "")
+
+    async def test_a_restart_is_said_when_the_read_then_falls_back(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = self._restarting(
+            error=PushNotAnswering("not answering", tool="coredevice"))
+
+        await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+
+        note = ctrl.read_note() or ""
+        assert "restarted" in note and "WDA's" in note
+
+    async def test_a_restart_is_said_on_a_bare_tree_fallback_too(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = self._restarting(
+            error=coredevice_ax.BareAppTree(PHONE))
+
+        await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+
+        note = ctrl.read_note() or ""
+        assert "restarted" in note and "empty tree" in note
+
+    async def test_a_restart_is_added_to_a_note_already_there(self, monkeypatch):
+        """A single note value: the restart overwrote the reader-overruled note."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = self._restarting(
+            result=await ctrl.coredevice_ax.describe_all(PHONE))
+        monkeypatch.setattr(ctrl, "_wda_overruled", lambda: "no Xcode")
+
+        await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+
+        note = ctrl.read_note() or ""
+        assert "no Xcode" in note and "restarted" in note
+
+    async def test_a_restart_is_said_when_there_is_no_wda_to_fall_back_on(self, monkeypatch):
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = self._restarting(
+            error=PushNotAnswering("not answering", tool="coredevice"))
+        monkeypatch.setattr(ctrl, "_no_wda_fallback", AsyncMock(return_value="no WDA built"))
+
+        with pytest.raises(DeviceError, match="restarted"):
+            await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)

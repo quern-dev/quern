@@ -1618,15 +1618,19 @@ class DeviceController(DeviceControllerUI):
         launch_env = {"QUERN_AUTOMATION": "YES", **(env or {})}
         pid = await (await self._apps()).launch_app(
             udid, bundle_id, env=launch_env, terminate_existing=bool(env))
+        # A restart of the phone's accessibility daemon during the check is
+        # this answer's to say, whichever way the check ends (#734).
+        from server.device.ios import coredevice_ax
+        restarts = coredevice_ax.collect_restarts()
         try:
             confirmed = await self._confirm_in_front_over_coredevice(udid, bundle_id, pid)
-        finally:
-            # A restart of the phone's accessibility daemon during the check
-            # is this answer's to say, not the next read's (#734).
-            from server.device.ios import coredevice_ax
-            restarted = coredevice_ax.take_note(udid)
-        if restarted:
-            confirmed = {**confirmed, "warning": restarted}
+        except DeviceError as e:
+            if restarts:
+                # The same error, its type and status kept, with the restart said.
+                e.args = (f"{e} {' '.join(restarts)}",)
+            raise
+        if restarts:
+            confirmed = {**confirmed, "warning": " ".join(restarts)}
         if env:
             return {"env_applied": True, "restarted": None, **confirmed}
         return confirmed

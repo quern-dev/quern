@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 import plistlib
 import re
@@ -167,11 +168,15 @@ FIRST_PUSH_S = 3.0
 #: up, or change its outcome.
 CLOSE_S = 2.0
 
-#: How long the service's DTX capability handshake may take before the
-#: phone's accessibility daemon is taken to have stopped answering (#734).
-#: Measured on an iPhone 12: 10-20 ms healthy, ten in ten; pymobiledevice3's
-#: own bound is 15 s, which every read paid while the daemon was wedged.
-HANDSHAKE_S = 3.0
+#: How long opening the accessibility service -- its DTX connection, which
+#: may start `axauditd`, and the capability handshake -- may take before the
+#: daemon is taken to have stopped answering (#734). Measured on an iPhone
+#: 12: 10-20 ms with the daemon running, ten in ten; a read just after a
+#: restart, which starts it, about 0.4 s more than a warm one.
+#: pymobiledevice3's own bound is 15 s, which every read paid while the
+#: daemon was wedged. Generous, so a slow daemon is not killed for a dead
+#: one: a wedge is cleared when first found, so this is paid about once each.
+HANDSHAKE_S = 5.0
 
 #: How often a phone's `axauditd` may be restarted to recover it (#734): a
 #: phone whose daemon does not come back is not killed in a loop.
@@ -682,8 +687,13 @@ async def element_at(uuid: str, x: float, y: float, *,
         # Outside the deadline, as every close is: cancelled inside it, the
         # close stopped part-way and left the connection open (CodeRabbit on
         # #705). `_close` bounds each step itself.
-        await _close(conn.provider, conn.rsd)
-        turn.give_back()
+        try:
+            await _close(conn.provider, conn.rsd)
+        finally:
+            # Given back even when the close is cancelled: `_close` swallows
+            # Exception, not CancelledError, and a turn kept is every later
+            # read of this phone failing until the server restarts (review).
+            turn.give_back()
     traits = values[ATTR_TRAITS] if isinstance(values[ATTR_TRAITS], int) else 0
     return {"type": _element_type(traits, is_root=False),
             "AXLabel": _text(values[ATTR_LABEL]) or "",
@@ -885,15 +895,22 @@ class _Turn:
 #: whose push could not be recovered is skipped (time.monotonic()).
 _restarted_at: dict[str, float] = {}
 _down_until: dict[str, float] = {}
-#: What happened to a phone's push that the next answer should say (#734):
-#: taken by `take_note`.
-_notes: dict[str, str] = {}
+
+#: The daemon restarts made since the current request asked (#734). Per
+#: request, not per phone: kept per phone, a restart made by a call whose
+#: answer never says so -- typing's correction, a front-app check -- was
+#: claimed by whichever answer on that phone asked next, minutes later
+#: (review). A restart with no list to go in is logged and nothing else.
+_RESTARTS: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "coredevice_restarts", default=None)
 
 
-def take_note(uuid: str) -> str | None:
-    """What the push did on its own that the answer should say: a restart of
-    the phone's accessibility daemon. Once."""
-    return _notes.pop(uuid, None)
+def collect_restarts() -> list[str]:
+    """A fresh list that this task's push calls from here on, and the tasks
+    they start, add a sentence to for each daemon restart they make."""
+    restarts: list[str] = []
+    _RESTARTS.set(restarts)
+    return restarts
 
 
 def _refuse_if_down(uuid: str) -> None:
@@ -905,10 +922,12 @@ def _refuse_if_down(uuid: str) -> None:
 
 
 def _handshake_failed(e: BaseException) -> bool:
-    """Whether a connect failed at the DTX handshake: quern's own bound, or
-    pymobiledevice3's."""
+    """Whether opening the service went unanswered: quern's own bound, or
+    pymobiledevice3's "DTX capability handshake timed out". Not a reader
+    cancelled mid-handshake (a ConnectionResetError that also says
+    "handshake"), which is a connection ended, not a daemon wedged (review)."""
     return isinstance(e, TimeoutError) or (
-        isinstance(e, ConnectionError) and "handshake" in str(e))
+        isinstance(e, ConnectionError) and "capability handshake timed out" in str(e))
 
 
 def _executable(process: dict) -> str:
@@ -967,6 +986,7 @@ async def _connect_service(uuid: str, lib: SimpleNamespace, conn: SimpleNamespac
     over one skipped every read for 26 s while the daemon was fine.
     """
     conn.provider = lib.RemoteAX(conn.rsd)
+    started = time.monotonic()
     try:
         await asyncio.wait_for(conn.provider.connect(), HANDSHAKE_S)
         return
@@ -974,6 +994,10 @@ async def _connect_service(uuid: str, lib: SimpleNamespace, conn: SimpleNamespac
         if not _handshake_failed(e):
             raise
         first = e
+    # Logged before anything is done about it: a slow daemon taken for a dead
+    # one would show here as a time just over the bound (review).
+    logger.warning("[coredevice] the accessibility service on %s did not open in %.1fs: %r",
+                   uuid[:8], time.monotonic() - started, first)
     await _close(conn.provider, None)
     conn.provider = None
     if spare:
@@ -990,9 +1014,10 @@ async def _connect_service(uuid: str, lib: SimpleNamespace, conn: SimpleNamespac
             if not _handshake_failed(e):
                 raise
         else:
-            _notes[uuid] = (
-                f"The accessibility daemon on {uuid[:8]} had stopped answering a new "
-                "connection, so quern restarted it (#734).")
+            if (restarts := _RESTARTS.get()) is not None:
+                restarts.append(
+                    f"The accessibility daemon on {uuid[:8]} had stopped answering a "
+                    "new connection, so quern restarted it (#734).")
             return
     if outcome == TOO_SOON:
         raise PushNotAnswering(
@@ -1136,8 +1161,8 @@ async def _with_settled_tree(uuid: str, timeout: float, what: str,
     conn = SimpleNamespace(rsd=None, provider=None)
     turn = _Turn(uuid)
     try:
-        async with asyncio.timeout(timeout):
-            try:
+        try:
+            async with asyncio.timeout(timeout):
                 _refuse_if_down(uuid)
                 await turn.take()
                 address = await _device_address(uuid)
@@ -1148,8 +1173,12 @@ async def _with_settled_tree(uuid: str, timeout: float, what: str,
                     # it, so the caller can stop reading this device's push.
                     raise AppExitedDuringRead(first.elements[0]["AXLabel"], first.app_pid)
                 return await use(conn.provider, tree, first, newest)
-            finally:
+        finally:
+            # Outside the deadline, as read_tree's is: the deadline firing in
+            # the close left it half-done (review on #734).
+            try:
                 await _close(conn.provider, conn.rsd)
+            finally:
                 turn.give_back()
     except DeviceError:
         raise
@@ -1258,8 +1287,10 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
                     if others:
                         seen["alive"] = await _alive(conn.rsd, lib, others)
         finally:
-            await _close(conn.provider, conn.rsd)
-            turn.give_back()
+            try:
+                await _close(conn.provider, conn.rsd)
+            finally:
+                turn.give_back()
     except TimeoutError as e:
         if deadline.expired() and held.get("latest") is not None:
             # The caller's deadline (a short `source_timeout`) ended a wait for
