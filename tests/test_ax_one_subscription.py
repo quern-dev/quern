@@ -56,7 +56,7 @@ def fresh_state(monkeypatch):
 
 
 def _lib(*, wedged=False, connect_error=None, signal_error=None, daemon_running=True,
-         push_delay=0.0):
+         push_delay=0.0, kill_cures=True, wedge_after=None):
     """A pymobiledevice3 stand-in that counts open subscriptions, can hang the
     handshake until `axauditd` is killed, and records the signals sent."""
     state = SimpleNamespace(open=0, max_open=0, opened=0, wedged=wedged, signals=[],
@@ -93,6 +93,8 @@ def _lib(*, wedged=False, connect_error=None, signal_error=None, daemon_running=
             state.connects += 1
             if connect_error:
                 raise connect_error
+            if wedge_after is not None and state.connects > wedge_after:
+                state.wedged = True
             if state.wedged:
                 await asyncio.sleep(3600)
             self._counted = True
@@ -128,7 +130,7 @@ def _lib(*, wedged=False, connect_error=None, signal_error=None, daemon_running=
             if signal_error:
                 raise signal_error
             state.signals.append((pid, sig))
-            if pid == DAEMON_PID and sig == signal.SIGKILL:
+            if pid == DAEMON_PID and sig == signal.SIGKILL and kill_cures:
                 state.wedged = False      # launchd's fresh daemon answers
             return {"signal": sig}
 
@@ -292,6 +294,54 @@ class TestAWedgedDaemon:
 
         assert await coredevice_ax.element_at(PHONE, 10, 10) is None
         assert state.connects == 0
+
+
+class TestWhenThePhoneIsMarkedDown:
+    """Only when it cannot be recovered. Marking it down over a spare
+    connection skipped every read for 26 s in a soak while the daemon was
+    fine (#734)."""
+
+    async def test_a_restart_too_recent_fails_the_read_but_not_the_phone(
+            self, monkeypatch, phone_address):
+        lib, state = _lib(wedged=True)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        await read_tree(PHONE, timeout=5)              # restarted once
+        state.wedged = True
+
+        with pytest.raises(PushNotAnswering, match="not again yet"):
+            await read_tree(PHONE, timeout=5)
+
+        state.wedged = False
+        connects = state.connects
+        assert len(await read_tree(PHONE, timeout=5)) == 14
+        assert state.connects > connects, "the next read was skipped"
+
+    async def test_a_fresh_daemon_that_does_not_answer_either_marks_it_down(
+            self, monkeypatch, phone_address):
+        lib, state = _lib(wedged=True, kill_cures=False)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        with pytest.raises(PushNotAnswering, match="could not be restarted"):
+            await read_tree(PHONE, timeout=5)
+
+        assert state.signals == [(DAEMON_PID, signal.SIGKILL)]
+        with pytest.raises(PushNotAnswering, match="not asked again"):
+            await read_tree(PHONE, timeout=5)
+
+    async def test_a_spare_connection_that_cannot_connect_neither_kills_nor_marks(
+            self, monkeypatch, phone_address):
+        """The spare opens beside a first subscription that is silent (#684);
+        killing the daemon would end the first, which may yet answer."""
+        monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 0.05)
+        # The first subscription answers late; every later connect hangs.
+        lib, state = _lib(push_delay=0.3, wedge_after=1)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        elements = await asyncio.wait_for(read_tree(PHONE, timeout=5), 3)
+
+        assert len(elements) == 14, "the first subscription's answer was not waited for"
+        assert state.signals == []
+        assert PHONE not in coredevice_ax._down_until
 
 
 class TestTheAnswerSaysSo:

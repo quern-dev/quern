@@ -920,14 +920,19 @@ def _executable(process: dict) -> str:
     return url if isinstance(url, str) else ""
 
 
-async def _restart_daemon(uuid: str, rsd: Any, lib: SimpleNamespace) -> bool:
+#: What `_restart_daemon` did.
+RESTARTED, TOO_SOON, NOT_RESTARTED = "restarted", "too soon", "not restarted"
+
+
+async def _restart_daemon(uuid: str, rsd: Any, lib: SimpleNamespace) -> str:
     """SIGKILL the phone's `axauditd`, which launchd starts again on the next
-    connection. Whether it was killed; never twice within RESTART_EVERY_S."""
+    connection: RESTARTED; TOO_SOON within RESTART_EVERY_S of the last; or
+    NOT_RESTARTED when the phone refused, or ran none."""
     import signal
 
     now = time.monotonic()
     if now - _restarted_at.get(uuid, -RESTART_EVERY_S) < RESTART_EVERY_S:
-        return False
+        return TOO_SOON
     _restarted_at[uuid] = now
     try:
         async with lib.AppService(rsd) as apps:
@@ -939,19 +944,28 @@ async def _restart_daemon(uuid: str, rsd: Any, lib: SimpleNamespace) -> bool:
                 await asyncio.wait_for(apps.send_signal_to_process(pid, signal.SIGKILL), CLOSE_S)
     except Exception as e:  # noqa: BLE001 -- could not restart is reported as such
         logger.warning("[coredevice] could not restart %s on %s: %r", DAEMON, uuid[:8], e)
-        return False
+        return NOT_RESTARTED
     if not pids:
         logger.warning("[coredevice] no %s running on %s to restart", DAEMON, uuid[:8])
-        return False
+        return NOT_RESTARTED
     logger.warning("[coredevice] %s on %s stopped answering; restarted it (pid %s)",
                    DAEMON, uuid[:8], ", ".join(map(str, pids)))
-    return True
+    return RESTARTED
 
 
-async def _connect_service(uuid: str, lib: SimpleNamespace, conn: SimpleNamespace) -> None:
+async def _connect_service(uuid: str, lib: SimpleNamespace, conn: SimpleNamespace, *,
+                           spare: bool = False) -> None:
     """Open the accessibility service on `conn.rsd`, recovering a daemon that
     no longer completes the handshake (#734): one restart, then one more try.
-    Raises PushNotAnswering, and skips the phone for DOWN_S, when that fails."""
+    Raises PushNotAnswering when that fails.
+
+    The phone is skipped for DOWN_S only when it cannot be recovered: the
+    restart refused, or the fresh daemon not answering either. Not when the
+    last restart was too recent -- that read fails, the next tries again --
+    and never over a `spare` connection, which opens beside a first that is
+    merely silent (#684) and may yet answer: measured, marking the phone down
+    over one skipped every read for 26 s while the daemon was fine.
+    """
     conn.provider = lib.RemoteAX(conn.rsd)
     try:
         await asyncio.wait_for(conn.provider.connect(), HANDSHAKE_S)
@@ -962,7 +976,13 @@ async def _connect_service(uuid: str, lib: SimpleNamespace, conn: SimpleNamespac
         first = e
     await _close(conn.provider, None)
     conn.provider = None
-    if await _restart_daemon(uuid, conn.rsd, lib):
+    if spare:
+        # Killing the daemon would end the first subscription too.
+        raise PushNotAnswering(
+            f"a second connection to the accessibility daemon on {uuid[:8]} did not "
+            f"answer within {HANDSHAKE_S:g}s ({first!r})", tool="coredevice") from first
+    outcome = await _restart_daemon(uuid, conn.rsd, lib)
+    if outcome == RESTARTED:
         conn.provider = lib.RemoteAX(conn.rsd)
         try:
             await asyncio.wait_for(conn.provider.connect(), HANDSHAKE_S)
@@ -974,6 +994,11 @@ async def _connect_service(uuid: str, lib: SimpleNamespace, conn: SimpleNamespac
                 f"The accessibility daemon on {uuid[:8]} had stopped answering and was "
                 "restarted; this read is from the restarted daemon.")
             return
+    if outcome == TOO_SOON:
+        raise PushNotAnswering(
+            f"the accessibility daemon on {uuid[:8]} did not answer a connection within "
+            f"{HANDSHAKE_S:g}s ({first!r}); it was restarted less than "
+            f"{RESTART_EVERY_S:g}s ago, so not again yet", tool="coredevice") from first
     _down_until[uuid] = time.monotonic() + DOWN_S
     raise PushNotAnswering(
         f"the accessibility daemon on {uuid[:8]} did not answer a connection within "
@@ -982,13 +1007,13 @@ async def _connect_service(uuid: str, lib: SimpleNamespace, conn: SimpleNamespac
 
 
 async def _subscribe(lib: SimpleNamespace, address: Any, conn: SimpleNamespace,
-                     uuid: str) -> asyncio.Queue:
+                     uuid: str, *, spare: bool = False) -> asyncio.Queue:
     """Connect and subscribe to the tree push, filling `conn.rsd` and
     `conn.provider` as each opens, so the caller's cleanup closes whatever
-    did."""
+    did. `spare`: opened beside a subscription still open (#684)."""
     conn.rsd = lib.RemoteServiceDiscoveryService(address)
     await conn.rsd.connect()
-    await _connect_service(uuid, lib, conn)
+    await _connect_service(uuid, lib, conn, spare=spare)
     queue: asyncio.Queue = asyncio.Queue()
     conn.provider.dtx.ctx["control_dispatch_queue"] = queue
     await conn.provider.dtx._ctrl_channel.invoke(
@@ -1026,7 +1051,7 @@ async def _subscribed(uuid: str, lib: SimpleNamespace, address: Any,
     spare = SimpleNamespace(rsd=None, provider=None)
     try:
         try:
-            spare_queue = await _subscribe(lib, address, spare, uuid)
+            spare_queue = await _subscribe(lib, address, spare, uuid, spare=True)
         except Exception as e:  # noqa: BLE001 - the first may still answer
             logger.info("[coredevice] the fresh connection to %s failed (%r); "
                         "waiting on the first", uuid[:8], e)
