@@ -279,6 +279,7 @@ class TestAWedgedDaemon:
             await read_tree(PHONE, timeout=5)
 
         assert state.signals == []
+        assert state.connects == 1, "connected again after a restart that never happened"
         assert coredevice_ax.take_note(PHONE) is None
 
     async def test_a_hit_test_on_a_phone_that_is_down_cannot_tell(
