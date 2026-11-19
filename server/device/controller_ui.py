@@ -3556,6 +3556,11 @@ class DeviceControllerUI:
                 )
             except DeviceError as caught:
                 failed = caught
+            # The push may have recovered the phone's accessibility daemon on
+            # its own (#734): said on the answer, as everything is that
+            # changes what a read means.
+            if (restarted := coredevice_ax.take_note(resolved)) and failed is None:
+                _READ_NOTE.set(restarted)
             # A read the push cannot make is made through WDA, and `backend`
             # on the answer says which one served it -- where there is a WDA.
             # Where there is none (no Xcode, or none built), the answer says so
@@ -3600,6 +3605,13 @@ class DeviceControllerUI:
                     # and the answer says why (#664).
                     bare = e
                     _READ_NOTE.set(f"{e}. This read is WDA's.")
+                elif not isinstance(e, AppExitedDuringRead):
+                    # Any other failure too (#734): a read WDA served, and a
+                    # WDA it may have started, were said only in the log, so
+                    # the answer looked like the push's with `backend` changed.
+                    _READ_NOTE.set(
+                        f"The accessibility push could not read this screen: {e}. "
+                        "This read is WDA's.")
                 reader = None
                 if lookup and snapshot_depth is None:
                     # A lookup asked for no depth because the push needs none;

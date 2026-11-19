@@ -167,6 +167,24 @@ FIRST_PUSH_S = 3.0
 #: up, or change its outcome.
 CLOSE_S = 2.0
 
+#: How long the service's DTX capability handshake may take before the
+#: phone's accessibility daemon is taken to have stopped answering (#734).
+#: Measured on an iPhone 12: 10-20 ms healthy, ten in ten; pymobiledevice3's
+#: own bound is 15 s, which every read paid while the daemon was wedged.
+HANDSHAKE_S = 3.0
+
+#: How often a phone's `axauditd` may be restarted to recover it (#734): a
+#: phone whose daemon does not come back is not killed in a loop.
+RESTART_EVERY_S = 60.0
+
+#: How long a phone whose push could not be recovered is not asked again
+#: (#734): a call in that time fails or falls back at once, rather than each
+#: paying the handshake's wait.
+DOWN_S = 30.0
+
+#: The daemon behind `SERVICE`.
+DAEMON = "axauditd"
+
 _NUMBER = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
 
 
@@ -195,6 +213,18 @@ class AppExitedDuringRead(DeviceError):
             tool="coredevice")
         self.app = app
         self.pid = pid
+
+
+class PushNotAnswering(DeviceError):
+    """The phone's accessibility daemon no longer completes a new connection's
+    handshake, and could not be recovered (#734).
+
+    Measured on an iPhone 12 on iOS 27.2.1: under overlapping subscriptions
+    `axauditd` stopped answering new connections and stayed that way for
+    10 minutes and more, through Home and an app relaunch, while a screenshot
+    over the same tunnel still worked. It ignores SIGTERM; a SIGKILL brought
+    it back at once.
+    """
 
 
 class PushStalled(DeviceError):
@@ -624,9 +654,12 @@ async def element_at(uuid: str, x: float, y: float, *,
 
     lib = _pmd3()
     conn = SimpleNamespace(rsd=None, provider=None)
+    turn = _Turn(uuid)
     try:
         async with asyncio.timeout(timeout):
-            queue = await _subscribe(lib, await _device_address(uuid), conn)
+            _refuse_if_down(uuid)
+            await turn.take()
+            queue = await _subscribe(lib, await _device_address(uuid), conn, uuid)
             hit = await _answer(conn.provider, queue,
                                 _request(REQUEST_HIT_TEST, 0, 0, point=(x, y)),
                                 REQUEST_HIT_TEST)
@@ -650,6 +683,7 @@ async def element_at(uuid: str, x: float, y: float, *,
         # close stopped part-way and left the connection open (CodeRabbit on
         # #705). `_close` bounds each step itself.
         await _close(conn.provider, conn.rsd)
+        turn.give_back()
     traits = values[ATTR_TRAITS] if isinstance(values[ATTR_TRAITS], int) else 0
     return {"type": _element_type(traits, is_root=False),
             "AXLabel": _text(values[ATTR_LABEL]) or "",
@@ -816,14 +850,145 @@ async def _alive(rsd: Any, lib: SimpleNamespace, pids: list[int]) -> dict[int, b
     return {pid: pid in running for pid in pids}
 
 
-async def _subscribe(lib: SimpleNamespace, address: Any, conn: SimpleNamespace) -> asyncio.Queue:
+class _Turn:
+    """A phone's one subscription at a time (#734).
+
+    Every failure measured needed more than one subscription open at once:
+    two readers alone failed 14% of reads -- stalled pushes, streams the
+    phone reset, handshakes unanswered -- and with app switches and reads
+    abandoned on top, wedged `axauditd` within minutes, twice in two runs.
+    One reader abandoning connections failed none of 146.
+
+    Taken inside the caller's deadline, so waiting for another read counts
+    against it, and given back only after the connection is closed, which
+    happens outside it: the next subscription never overlaps a closing one.
+    """
+
+    _locks: dict[tuple[int, str], asyncio.Lock] = {}
+
+    def __init__(self, uuid: str) -> None:
+        key = (id(asyncio.get_running_loop()), uuid)
+        self._lock = self._locks.setdefault(key, asyncio.Lock())
+        self._held = False
+
+    async def take(self) -> None:
+        await self._lock.acquire()
+        self._held = True
+
+    def give_back(self) -> None:
+        if self._held:
+            self._held = False
+            self._lock.release()
+
+
+#: When each phone's `axauditd` was last restarted, and until when a phone
+#: whose push could not be recovered is skipped (time.monotonic()).
+_restarted_at: dict[str, float] = {}
+_down_until: dict[str, float] = {}
+#: What happened to a phone's push that the next answer should say (#734):
+#: taken by `take_note`.
+_notes: dict[str, str] = {}
+
+
+def take_note(uuid: str) -> str | None:
+    """What the push did on its own that the answer should say: a restart of
+    the phone's accessibility daemon. Once."""
+    return _notes.pop(uuid, None)
+
+
+def _refuse_if_down(uuid: str) -> None:
+    left = _down_until.get(uuid, 0.0) - time.monotonic()
+    if left > 0:
+        raise PushNotAnswering(
+            f"the accessibility daemon on {uuid[:8]} is not answering and could not be "
+            f"restarted; the push is not asked again for {left:.0f}s", tool="coredevice")
+
+
+def _handshake_failed(e: BaseException) -> bool:
+    """Whether a connect failed at the DTX handshake: quern's own bound, or
+    pymobiledevice3's."""
+    return isinstance(e, TimeoutError) or (
+        isinstance(e, ConnectionError) and "handshake" in str(e))
+
+
+def _executable(process: dict) -> str:
+    """A process listing entry's executable path or URL: CoreDevice gives it
+    as ``{"relative": "file:///..."}``."""
+    url = process.get("executableURL")
+    if isinstance(url, dict):
+        url = url.get("relative")
+    return url if isinstance(url, str) else ""
+
+
+async def _restart_daemon(uuid: str, rsd: Any, lib: SimpleNamespace) -> bool:
+    """SIGKILL the phone's `axauditd`, which launchd starts again on the next
+    connection. Whether it was killed; never twice within RESTART_EVERY_S."""
+    import signal
+
+    now = time.monotonic()
+    if now - _restarted_at.get(uuid, -RESTART_EVERY_S) < RESTART_EVERY_S:
+        return False
+    _restarted_at[uuid] = now
+    try:
+        async with lib.AppService(rsd) as apps:
+            processes = await asyncio.wait_for(apps.list_processes(), CLOSE_S)
+            pids = [p["processIdentifier"] for p in processes
+                    if isinstance(p, dict) and isinstance(p.get("processIdentifier"), int)
+                    and _executable(p).endswith("/" + DAEMON)]
+            for pid in pids:
+                await asyncio.wait_for(apps.send_signal_to_process(pid, signal.SIGKILL), CLOSE_S)
+    except Exception as e:  # noqa: BLE001 -- could not restart is reported as such
+        logger.warning("[coredevice] could not restart %s on %s: %r", DAEMON, uuid[:8], e)
+        return False
+    if not pids:
+        logger.warning("[coredevice] no %s running on %s to restart", DAEMON, uuid[:8])
+        return False
+    logger.warning("[coredevice] %s on %s stopped answering; restarted it (pid %s)",
+                   DAEMON, uuid[:8], ", ".join(map(str, pids)))
+    return True
+
+
+async def _connect_service(uuid: str, lib: SimpleNamespace, conn: SimpleNamespace) -> None:
+    """Open the accessibility service on `conn.rsd`, recovering a daemon that
+    no longer completes the handshake (#734): one restart, then one more try.
+    Raises PushNotAnswering, and skips the phone for DOWN_S, when that fails."""
+    conn.provider = lib.RemoteAX(conn.rsd)
+    try:
+        await asyncio.wait_for(conn.provider.connect(), HANDSHAKE_S)
+        return
+    except (TimeoutError, ConnectionError) as e:
+        if not _handshake_failed(e):
+            raise
+        first = e
+    await _close(conn.provider, None)
+    conn.provider = None
+    if await _restart_daemon(uuid, conn.rsd, lib):
+        conn.provider = lib.RemoteAX(conn.rsd)
+        try:
+            await asyncio.wait_for(conn.provider.connect(), HANDSHAKE_S)
+        except (TimeoutError, ConnectionError) as e:
+            if not _handshake_failed(e):
+                raise
+        else:
+            _notes[uuid] = (
+                f"The accessibility daemon on {uuid[:8]} had stopped answering and was "
+                "restarted; this read is from the restarted daemon.")
+            return
+    _down_until[uuid] = time.monotonic() + DOWN_S
+    raise PushNotAnswering(
+        f"the accessibility daemon on {uuid[:8]} did not answer a connection within "
+        f"{HANDSHAKE_S:g}s ({first!r}) and could not be restarted; the push is not "
+        f"asked again for {DOWN_S:g}s", tool="coredevice") from first
+
+
+async def _subscribe(lib: SimpleNamespace, address: Any, conn: SimpleNamespace,
+                     uuid: str) -> asyncio.Queue:
     """Connect and subscribe to the tree push, filling `conn.rsd` and
     `conn.provider` as each opens, so the caller's cleanup closes whatever
     did."""
     conn.rsd = lib.RemoteServiceDiscoveryService(address)
     await conn.rsd.connect()
-    conn.provider = lib.RemoteAX(conn.rsd)
-    await conn.provider.connect()
+    await _connect_service(uuid, lib, conn)
     queue: asyncio.Queue = asyncio.Queue()
     conn.provider.dtx.ctx["control_dispatch_queue"] = queue
     await conn.provider.dtx._ctrl_channel.invoke(
@@ -853,7 +1018,7 @@ async def _subscribed(uuid: str, lib: SimpleNamespace, address: Any,
     caller's deadline ends both, and `conn` -- which the caller closes -- holds
     the first until the second has won, the spare is closed on any way out.
     """
-    queue = await _subscribe(lib, address, conn)
+    queue = await _subscribe(lib, address, conn, uuid)
     if await _first_push(queue, FIRST_PUSH_S):
         return queue
     logger.info("[coredevice] no push from %s in %gs: subscribing on a fresh "
@@ -861,7 +1026,7 @@ async def _subscribed(uuid: str, lib: SimpleNamespace, address: Any,
     spare = SimpleNamespace(rsd=None, provider=None)
     try:
         try:
-            spare_queue = await _subscribe(lib, address, spare)
+            spare_queue = await _subscribe(lib, address, spare, uuid)
         except Exception as e:  # noqa: BLE001 - the first may still answer
             logger.info("[coredevice] the fresh connection to %s failed (%r); "
                         "waiting on the first", uuid[:8], e)
@@ -944,9 +1109,12 @@ async def _with_settled_tree(uuid: str, timeout: float, what: str,
 
     lib = _pmd3()
     conn = SimpleNamespace(rsd=None, provider=None)
+    turn = _Turn(uuid)
     try:
         async with asyncio.timeout(timeout):
             try:
+                _refuse_if_down(uuid)
+                await turn.take()
                 address = await _device_address(uuid)
                 tree, first, newest = await _settled(uuid, lib, address, conn, {})
                 if (first.app_pid is not None and newest.app_pid != first.app_pid
@@ -957,6 +1125,7 @@ async def _with_settled_tree(uuid: str, timeout: float, what: str,
                 return await use(conn.provider, tree, first, newest)
             finally:
                 await _close(conn.provider, conn.rsd)
+                turn.give_back()
     except DeviceError:
         raise
     except TimeoutError as e:
@@ -1036,11 +1205,14 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
     conn = SimpleNamespace(rsd=None, provider=None)
     held: dict = {}
     deadline = asyncio.timeout(timeout)
+    turn = _Turn(uuid)
     try:
         try:
             # The address lookup is inside the deadline too: on a cache miss it
             # asks devicectl, and a read must not outlast the time it was given.
             async with deadline:
+                _refuse_if_down(uuid)
+                await turn.take()
                 address = await _device_address(uuid)
                 tree, first, newest = await _settled(uuid, lib, address, conn, held)
                 elements = tree.elements
@@ -1062,6 +1234,7 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
                         seen["alive"] = await _alive(conn.rsd, lib, others)
         finally:
             await _close(conn.provider, conn.rsd)
+            turn.give_back()
     except TimeoutError as e:
         if deadline.expired() and held.get("latest") is not None:
             # The caller's deadline (a short `source_timeout`) ended a wait for
