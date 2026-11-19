@@ -3576,8 +3576,18 @@ class DeviceControllerUI:
             no_wda = await self._no_wda_fallback(resolved) if failed is not None else None
             if failed is not None and no_wda is not None:
                 if isinstance(failed, AppExitedDuringRead) and not lookup:
-                    pushed_raw = await self._push_after_a_crash(
-                        reader, resolved, failed, no_wda, source_timeout, probe_containers)
+                    # Restarts said after the follow-up read too, which may make
+                    # one of its own: it fills the same list (CodeRabbit on #735).
+                    try:
+                        pushed_raw = await self._push_after_a_crash(
+                            reader, resolved, failed, no_wda, source_timeout,
+                            probe_containers)
+                    except DeviceError as again:
+                        if restarts:
+                            again.args = (f"{again} {' '.join(restarts)}",)
+                        raise
+                    if restarts:
+                        _READ_NOTE.set(_joined(_READ_NOTE.get(), " ".join(restarts)))
                 else:
                     if isinstance(failed, AppExitedDuringRead):
                         self._record_push_crash(resolved, failed.app)

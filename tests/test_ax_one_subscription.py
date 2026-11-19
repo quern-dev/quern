@@ -264,6 +264,30 @@ class TestTheTurnSurvivesACancelledClose:
         assert len(await asyncio.wait_for(read_tree(PHONE, timeout=2), 3)) == 14
 
 
+class TestTheCloseFinishes:
+    async def test_a_cancel_during_the_unsubscribe_still_closes_the_rest(self):
+        """The turn is given back after the close: a step skipped by the
+        cancel could leave a transport open beside the next subscription
+        (CodeRabbit on #735)."""
+        closed = []
+
+        class Control:
+            async def invoke(self, *_a, **_k):
+                await asyncio.sleep(1)
+
+        provider = SimpleNamespace(dtx=SimpleNamespace(_ctrl_channel=Control()),
+                                   close=AsyncMock(side_effect=lambda: closed.append("provider")))
+        rsd = SimpleNamespace(close=AsyncMock(side_effect=lambda: closed.append("rsd")))
+
+        task = asyncio.create_task(coredevice_ax._close(provider, rsd))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert closed == ["provider", "rsd"]
+
+
 class TestEverySiteTakesItsTurn:
     async def test_a_hit_test_waits_for_a_read_in_flight(self, monkeypatch, phone_address):
         lib, state = _lib(push_delay=0.1)
@@ -282,6 +306,25 @@ class TestEverySiteTakesItsTurn:
         await coredevice_ax.element_at(PHONE, 1, 1)
 
         assert len(await asyncio.wait_for(read_tree(PHONE, timeout=2), 3)) == 14
+
+    async def test_a_read_queued_behind_a_failed_recovery_does_not_connect(
+            self, monkeypatch, phone_address):
+        """It passed the down check before waiting its turn; the read ahead of
+        it then marked the phone down (CodeRabbit on #735)."""
+        lib, state = _lib(wedged=True, signal_error=PermissionError("not permitted"))
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        first = asyncio.create_task(read_tree(PHONE, timeout=5))
+        await asyncio.sleep(0.01)
+        queued = asyncio.create_task(read_tree(PHONE, timeout=5))
+        with pytest.raises(PushNotAnswering):
+            await first
+        connects = state.connects
+        started = time.monotonic()
+        with pytest.raises(PushNotAnswering, match="not asked again"):
+            await queued
+        assert time.monotonic() - started < 0.05
+        assert state.connects == connects, "the queued read connected to a phone marked down"
 
     async def test_a_launch_check_on_a_phone_that_is_down_fails_at_once(
             self, monkeypatch, phone_address):
@@ -538,6 +581,28 @@ class TestTheAnswerSaysSo:
 
         note = ctrl.read_note() or ""
         assert "no Xcode" in note and "restarted" in note
+
+    async def test_a_restart_is_said_through_a_crash_read_again_with_no_wda(self, monkeypatch):
+        """With no WDA, a read that crashed an app is read again through the
+        push: the restart was lost there (CodeRabbit on #735)."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        elements = await ctrl.coredevice_ax.describe_all(PHONE)
+        calls = []
+
+        async def describe_all(*_a, **_k):
+            calls.append(1)
+            if len(calls) == 1:
+                coredevice_ax._RESTARTS.get().append("axauditd had stopped answering; restarted")
+                raise coredevice_ax.AppExitedDuringRead("Demo", 711)
+            return elements
+
+        ctrl.coredevice_ax.describe_all = describe_all
+        monkeypatch.setattr(ctrl, "_no_wda_fallback", AsyncMock(return_value="no WDA built"))
+
+        await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+
+        note = ctrl.read_note() or ""
+        assert "restarted" in note and "exited" in note
 
     async def test_a_restart_is_said_when_there_is_no_wda_to_fall_back_on(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)

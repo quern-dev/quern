@@ -33,7 +33,6 @@ process like any other.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import contextvars
 import logging
 import plistlib
@@ -664,6 +663,9 @@ async def element_at(uuid: str, x: float, y: float, *,
         async with asyncio.timeout(timeout):
             _refuse_if_down(uuid)
             await turn.take()
+            # Again: the read ahead of this one may have marked it down while
+            # this one waited (CodeRabbit on #735).
+            _refuse_if_down(uuid)
             queue = await _subscribe(lib, await _device_address(uuid), conn, uuid)
             hit = await _answer(conn.provider, queue,
                                 _request(REQUEST_HIT_TEST, 0, 0, point=(x, y)),
@@ -1141,9 +1143,20 @@ async def _close(provider: Any, rsd: Any) -> None:
         steps.append(provider.close)
     if rsd is not None:
         steps.append(rsd.close)
+    # Every step runs even when the caller is cancelled during one: the turn
+    # is given back after this, and a step skipped could leave a transport
+    # open beside the next subscription (CodeRabbit on #735). The
+    # cancellation is raised again once they have.
+    cancelled: BaseException | None = None
     for step in steps:
-        with contextlib.suppress(Exception):
+        try:
             await asyncio.wait_for(step(), CLOSE_S)
+        except asyncio.CancelledError as e:
+            cancelled = e
+        except Exception:  # noqa: BLE001 -- a close that fails changes nothing
+            pass
+    if cancelled is not None:
+        raise cancelled
 
 
 async def _with_settled_tree(uuid: str, timeout: float, what: str,
@@ -1165,6 +1178,7 @@ async def _with_settled_tree(uuid: str, timeout: float, what: str,
             async with asyncio.timeout(timeout):
                 _refuse_if_down(uuid)
                 await turn.take()
+                _refuse_if_down(uuid)    # again, after waiting (CodeRabbit on #735)
                 address = await _device_address(uuid)
                 tree, first, newest = await _settled(uuid, lib, address, conn, {})
                 if (first.app_pid is not None and newest.app_pid != first.app_pid
@@ -1267,6 +1281,7 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
             async with deadline:
                 _refuse_if_down(uuid)
                 await turn.take()
+                _refuse_if_down(uuid)    # again, after waiting (CodeRabbit on #735)
                 address = await _device_address(uuid)
                 tree, first, newest = await _settled(uuid, lib, address, conn, held)
                 elements = tree.elements
