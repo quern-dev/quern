@@ -3554,7 +3554,7 @@ class DeviceControllerUI:
                     f"here ({overruled}), so this device is read without it. "
                     "`quern set-device-reader no-wda` makes that the setting.")
             failed: DeviceError | None = None
-            restarts = coredevice_ax.collect_restarts()
+            notes = coredevice_ax.collect_notes()
             try:
                 pushed_raw = await reader.describe_all(
                     resolved, snapshot_depth=None,
@@ -3566,7 +3566,7 @@ class DeviceControllerUI:
             # its own (#734): said on this answer, whether the read then
             # answered, fell back or failed -- added to any note already
             # there, never over it.
-            restarted = " ".join(restarts)
+            restarted = " ".join(notes)
             if restarted and failed is None:
                 _READ_NOTE.set(_joined(_READ_NOTE.get(), restarted))
             # A read the push cannot make is made through WDA, and `backend`
@@ -3583,11 +3583,11 @@ class DeviceControllerUI:
                             reader, resolved, failed, no_wda, source_timeout,
                             probe_containers)
                     except DeviceError as again:
-                        if restarts:
-                            again.args = (f"{again} {' '.join(restarts)}",)
+                        if notes:
+                            again.args = (f"{again} {' '.join(notes)}",)
                         raise
-                    if restarts:
-                        _READ_NOTE.set(_joined(_READ_NOTE.get(), " ".join(restarts)))
+                    if notes:
+                        _READ_NOTE.set(_joined(_READ_NOTE.get(), " ".join(notes)))
                 else:
                     if isinstance(failed, AppExitedDuringRead):
                         self._record_push_crash(resolved, failed.app)

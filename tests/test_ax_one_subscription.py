@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import pathlib
 import signal
 import time
 from types import SimpleNamespace
@@ -344,7 +345,7 @@ class TestAWedgedDaemon:
         lib, state = _lib(wedged=True)
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
 
-        restarts = coredevice_ax.collect_restarts()
+        restarts = coredevice_ax.collect_notes()
 
         elements = await asyncio.wait_for(read_tree(PHONE, timeout=5), 3)
 
@@ -362,11 +363,11 @@ class TestAWedgedDaemon:
 
         async def a_call_nobody_reports():
             # Its own task, as a request is: the list it would fill is none.
-            coredevice_ax._RESTARTS.set(None)
+            coredevice_ax._NOTES.set(None)
             await read_tree(PHONE, timeout=5)
 
         await asyncio.create_task(a_call_nobody_reports())
-        later = coredevice_ax.collect_restarts()
+        later = coredevice_ax.collect_notes()
         await read_tree(PHONE, timeout=5)
         assert later == []
 
@@ -493,7 +494,7 @@ class TestWhenThePhoneIsMarkedDown:
             self, monkeypatch, phone_address):
         lib, state = _lib(wedged=True, kill_cures=False)
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
-        restarts = coredevice_ax.collect_restarts()
+        restarts = coredevice_ax.collect_notes()
 
         with pytest.raises(PushNotAnswering, match="could not be restarted"):
             await read_tree(PHONE, timeout=5)
@@ -537,7 +538,7 @@ class TestTheAnswerSaysSo:
         """A describe_all that restarts the daemon on its way to `result` or
         `error`, as `_connect_service` does: one sentence on the request's list."""
         async def describe_all(*_a, **_k):
-            coredevice_ax._RESTARTS.get().append("axauditd had stopped answering; restarted")
+            coredevice_ax._NOTES.get().append("axauditd had stopped answering; restarted")
             if error:
                 raise error
             return result
@@ -594,7 +595,7 @@ class TestTheAnswerSaysSo:
         async def describe_all(*_a, **_k):
             calls.append(1)
             if len(calls) == 1:
-                coredevice_ax._RESTARTS.get().append("axauditd had stopped answering; restarted")
+                coredevice_ax._NOTES.get().append("axauditd had stopped answering; restarted")
                 raise coredevice_ax.AppExitedDuringRead("Demo", 711)
             return elements
 
@@ -640,6 +641,10 @@ def _hold_turn_elsewhere(lock_dir, uuid, seconds):
     return proc
 
 
+async def _never(*a, **k):
+    await asyncio.sleep(60)
+
+
 class TestATimeoutSaysWhoseItWas:
     """The turn is taken inside the deadline: a read that never got it was
     blamed on the phone, which sent an agent looking at the app (review)."""
@@ -657,6 +662,18 @@ class TestATimeoutSaysWhoseItWas:
 
         assert "the phone was not asked" in str(caught.value)
         assert "sent no complete" not in str(caught.value)
+
+    async def test_a_read_that_had_its_turn_at_once_says_nothing_of_waiting(
+            self, monkeypatch, phone_address):
+        lib, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        monkeypatch.setattr(coredevice_ax, "_newest_tree", _never)
+
+        with pytest.raises(DeviceError) as caught:
+            await read_tree(PHONE, timeout=0.6)
+
+        assert "sent no complete" in str(caught.value)
+        assert "waiting" not in str(caught.value)
 
     async def test_a_late_turn_says_how_much_of_the_deadline_went_waiting(
             self, monkeypatch, phone_address):
@@ -761,6 +778,132 @@ class TestTheTurnAcrossServers:
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
 
         assert len(await asyncio.wait_for(read_tree(PHONE, timeout=5), 3)) == 14
+
+    async def test_a_turn_it_gave_up_waiting_for_is_not_kept(self, monkeypatch, phone_address):
+        """A read that ran out waiting for another server must let go of this
+        server's own lock too, or every read after it waits forever."""
+        import os
+        lib, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        other = _hold_turn_elsewhere(os.environ["QUERN_AX_LOCK_DIR"], PHONE, 0.5)
+        try:
+            with pytest.raises(DeviceError, match="the phone was not asked"):
+                await read_tree(PHONE, timeout=0.2)
+        finally:
+            other.wait(5)
+        assert len(await asyncio.wait_for(read_tree(PHONE, timeout=5), 3)) == 14
+
+    async def test_a_lock_directory_not_made_yet_is_made(
+            self, monkeypatch, phone_address, tmp_path):
+        turns = tmp_path / "not" / "yet"
+        monkeypatch.setenv("QUERN_AX_LOCK_DIR", str(turns))
+        lib, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        notes = coredevice_ax.collect_notes()
+
+        await read_tree(PHONE, timeout=5)
+
+        assert (turns / f"coredevice-ax-{PHONE}.lock").is_file()
+        assert (turns.stat().st_mode & 0o777) == 0o700
+        assert notes == []
+
+    async def test_no_descriptor_is_left_open(self, monkeypatch, phone_address):
+        import os
+        lib, _ = _lib(push_delay=0.3)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        await read_tree(PHONE, timeout=5)                   # whatever opens once
+        before = len(os.listdir("/dev/fd"))
+
+        await asyncio.gather(*(read_tree(PHONE, timeout=5) for _ in range(3)))
+        other = _hold_turn_elsewhere(os.environ["QUERN_AX_LOCK_DIR"], PHONE, 0.5)
+        try:
+            with pytest.raises(DeviceError):
+                await read_tree(PHONE, timeout=0.2)         # gave up waiting
+        finally:
+            other.wait(5)
+            other.stdout.close()
+
+        assert len(os.listdir("/dev/fd")) == before
+
+    async def test_a_lock_that_fails_otherwise_is_said_and_skipped(
+            self, monkeypatch, phone_address):
+        import errno
+        import fcntl
+        lib, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        def broken(fd, op):
+            raise OSError(errno.ENOLCK, "No locks available")
+
+        monkeypatch.setattr(fcntl, "flock", broken)
+        notes = coredevice_ax.collect_notes()
+
+        assert len(await asyncio.wait_for(read_tree(PHONE, timeout=5), 3)) == 14
+        assert len(notes) == 1 and "another quern server may have read it" in notes[0]
+
+    async def test_a_symlink_at_the_lock_is_not_followed(
+            self, monkeypatch, phone_address, tmp_path):
+        """/tmp is shared: a link another user left at the lock's name would
+        have had this server create and lock a file of their choosing."""
+        import os
+        target = tmp_path / "theirs"
+        turns = pathlib.Path(os.environ["QUERN_AX_LOCK_DIR"])
+        (turns / f"coredevice-ax-{PHONE}.lock").symlink_to(target)
+        lib, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        notes = coredevice_ax.collect_notes()
+
+        assert len(await read_tree(PHONE, timeout=5)) == 14
+        assert not target.exists()
+        assert len(notes) == 1
+
+    async def test_a_shared_lock_directory_is_made_private(
+            self, monkeypatch, phone_address):
+        import os
+        turns = pathlib.Path(os.environ["QUERN_AX_LOCK_DIR"])
+        turns.chmod(0o777)
+        lib, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        await read_tree(PHONE, timeout=5)
+
+        assert (turns.stat().st_mode & 0o777) == 0o700
+
+    async def test_a_server_reading_back_to_back_gives_another_a_turn(
+            self, monkeypatch, phone_address):
+        """Measured before the fix: a server handing the turn from read to
+        read took it back before the other's next poll, 0 tries in 3."""
+        import os
+        import subprocess
+        import sys
+        lib, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        code = (
+            "import asyncio, time\n"
+            "from server.device.ios.coredevice_ax import _Turn\n"
+            "async def main():\n"
+            "    end = time.monotonic() + 3\n"
+            "    first = True\n"
+            "    while time.monotonic() < end:\n"
+            f"        turn = _Turn({PHONE!r})\n"
+            "        await turn.take()\n"
+            "        if first:\n"
+            "            print('held', flush=True); first = False\n"
+            "        await asyncio.sleep(0.15)\n"
+            "        turn.give_back()\n"
+            "asyncio.run(main())\n"
+        )
+        root = str(pathlib.Path(__file__).resolve().parents[1])
+        other = subprocess.Popen(
+            [sys.executable, "-c", code], stdout=subprocess.PIPE, text=True,
+            env={**os.environ, "PYTHONPATH": root}, cwd=root)
+        try:
+            assert other.stdout.readline().strip() == "held"
+            assert len(await read_tree(PHONE, timeout=2)) == 14
+        finally:
+            other.kill()
+            other.wait(5)
+            other.stdout.close()
 
 
 def test_a_finished_loops_locks_are_let_go():

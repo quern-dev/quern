@@ -33,12 +33,14 @@ process like any other.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import fcntl
 import logging
 import os
 import plistlib
 import re
+import stat
 import time
 import weakref
 from collections.abc import Awaitable, Callable
@@ -877,6 +879,36 @@ def _turn_dir() -> Path:
 #: How often a turn held by another quern server is asked for again.
 TURN_POLL_S = 0.05
 
+#: When a lock file that could not be used was last logged, by path.
+_skip_logged: dict[str, float] = {}
+
+
+def _open_own(path: Path) -> int:
+    """`path` opened, made if missing, without following a symlink, and only
+    if it is a regular file this user owns. OSError otherwise."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            raise PermissionError(f"{path} is not a file this user owns: not using it")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _another_server_waiting(want: int) -> bool:
+    """Whether another server holds the `.want` lock: waiting for this phone's
+    turn. An answer it cannot get is no."""
+    try:
+        fcntl.flock(want, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    fcntl.flock(want, fcntl.LOCK_UN)
+    return False
+
 
 class _Turn:
     """A phone's one subscription at a time (#734).
@@ -899,6 +931,9 @@ class _Turn:
     made or locked, for any reason but another server holding it, is logged
     and this server goes on with its own lock alone: a lock quern cannot take
     must not stop every read.
+
+    Only the turn is shared: the restart limit and the down window are each
+    server's own, so two servers may each restart the daemon within a minute.
     """
 
     #: Per event loop, by the loop itself: keyed by `id()`, a loop that has
@@ -931,31 +966,63 @@ class _Turn:
         self.waited = time.monotonic() - self._asked
 
     async def _take_across_servers(self) -> None:
+        from server.screenshots import private_dir
+
         name = re.sub(r"[^A-Za-z0-9-]", "_", self._uuid)
-        path = _turn_dir() / f"coredevice-ax-{name}.lock"
+        directory = _turn_dir()
+        path = directory / f"coredevice-ax-{name}.lock"
         try:
-            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            # /tmp is shared: a directory another user made first, or a
+            # symlink at the lock's name, was theirs to hold or swap (review).
+            directory.parent.mkdir(parents=True, exist_ok=True)
+            private_dir(directory, directory)
+            fd: int | None = _open_own(path)
         except OSError as e:
-            logger.warning("[coredevice] no turn across servers for %s (%s): %r",
-                           self._uuid[:8], path, e)
+            self._skipped(path, e)
             return
+        want: int | None = None
         try:
+            with contextlib.suppress(OSError):
+                want = _open_own(path.with_suffix(".want"))
+            # Another server waiting: give way first. A server handing its
+            # turn from task to task took it back before the other's next
+            # poll, every time -- measured, 0 of 3 tries got through (review).
+            if want is not None and _another_server_waiting(want):
+                await asyncio.sleep(2 * TURN_POLL_S)
+            announced = False
             while True:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    self._fd = fd
+                    self._fd, fd = fd, None
                     return
                 except BlockingIOError:
+                    if want is not None and not announced:
+                        # Held while this one waits, so the holder gives way.
+                        with contextlib.suppress(OSError):
+                            fcntl.flock(want, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                            announced = True
                     await asyncio.sleep(TURN_POLL_S)    # another server's read
                 except OSError as e:
-                    logger.warning("[coredevice] no turn across servers for %s (%s): %r",
-                                   self._uuid[:8], path, e)
-                    os.close(fd)
+                    self._skipped(path, e)
                     return
-        except BaseException:
-            os.close(fd)
-            raise
+        finally:
+            if fd is not None:
+                os.close(fd)
+            if want is not None:
+                os.close(want)                          # and with it, the announcement
+
+    def _skipped(self, path: Path, e: OSError) -> None:
+        """No turn across servers this time: this server's lock alone. Said
+        on the answer, and logged at most once a minute a file (review)."""
+        now = time.monotonic()
+        if now - _skip_logged.get(str(path), -60.0) >= 60.0:
+            _skip_logged[str(path)] = now
+            logger.warning("[coredevice] no turn across servers for %s (%s): %r",
+                           self._uuid[:8], path, e)
+        if (notes := _NOTES.get()) is not None:
+            notes.append(f"quern could not take {self._uuid[:8]}'s turn across quern "
+                         f"servers ({e}), so another quern server may have read it at "
+                         "the same time (#734).")
 
     def give_back(self) -> None:
         if not self._held:
@@ -988,20 +1055,21 @@ class _Turn:
 _restarted_at: dict[str, float] = {}
 _down_until: dict[str, float] = {}
 
-#: The daemon restarts made since the current request asked (#734). Per
-#: request, not per phone: kept per phone, a restart made by a call whose
-#: answer never says so -- typing's correction, a front-app check -- was
-#: claimed by whichever answer on that phone asked next, minutes later
-#: (review). A restart with no list to go in is logged and nothing else.
-_RESTARTS: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
-    "coredevice_restarts", default=None)
+#: What the push did that the current request's answer should say (#734):
+#: a daemon restart, a turn it could not take across servers. Per request,
+#: not per phone: kept per phone, a restart made by a call whose answer never
+#: says so -- typing's correction, a front-app check -- was claimed by
+#: whichever answer on that phone asked next, minutes later (review). A note
+#: with no list to go in is logged and nothing else.
+_NOTES: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "coredevice_notes", default=None)
 
 
-def collect_restarts() -> list[str]:
+def collect_notes() -> list[str]:
     """A fresh list that this task's push calls from here on, and the tasks
-    they start, add a sentence to for each daemon restart they make."""
+    they start, add a sentence to for what the answer should say."""
     restarts: list[str] = []
-    _RESTARTS.set(restarts)
+    _NOTES.set(restarts)
     return restarts
 
 
@@ -1106,7 +1174,7 @@ async def _connect_service(uuid: str, lib: SimpleNamespace, conn: SimpleNamespac
             if not _handshake_failed(e):
                 raise
         else:
-            if (restarts := _RESTARTS.get()) is not None:
+            if (restarts := _NOTES.get()) is not None:
                 restarts.append(
                     f"The accessibility daemon on {uuid[:8]} had stopped answering a "
                     "new connection, so quern restarted it (#734).")
