@@ -251,6 +251,14 @@ def _wda_available_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _own_turn_locks(monkeypatch, tmp_path_factory):
+    """Take a phone's cross-server turn (#734) in a directory of the test's
+    own: the real one is shared by every quern server this user runs, so a
+    test would contend with a live server's reads -- and leave files there."""
+    monkeypatch.setenv("QUERN_AX_LOCK_DIR", str(tmp_path_factory.mktemp("ax-turns")))
+
+
+@pytest.fixture(autouse=True)
 def _no_image_mounts(monkeypatch):
     """Never mount a developer disk image from a test (#664 phase 5): the
     real `ensure_image` connects to the phone over USB, and a test's UDID can

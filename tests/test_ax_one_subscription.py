@@ -45,7 +45,9 @@ def phone_address(monkeypatch):
 def fresh_state(monkeypatch):
     """Module state is per phone and lives for the server's life: each test
     starts from none, with bounds short enough to run in milliseconds."""
-    monkeypatch.setattr(coredevice_ax._Turn, "_locks", {})
+    # A fresh container of the kind production uses, so a test of how it
+    # lets go of a loop tests production's choice, not one of its own.
+    monkeypatch.setattr(coredevice_ax._Turn, "_locks", type(coredevice_ax._Turn._locks)())
     monkeypatch.setattr(coredevice_ax, "_restarted_at", {})
     monkeypatch.setattr(coredevice_ax, "_down_until", {})
     monkeypatch.setattr(coredevice_ax, "HANDSHAKE_S", 0.1)
@@ -612,3 +614,173 @@ class TestTheAnswerSaysSo:
 
         with pytest.raises(DeviceError, match="restarted"):
             await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+
+
+# -- review on #734, after #735 ------------------------------------------------
+
+
+def _hold_turn_elsewhere(lock_dir, uuid, seconds):
+    """Another quern server, as far as the lock can tell: a separate process
+    holding the phone's turn file for `seconds`. Returns once it holds it."""
+    import subprocess
+    import sys
+
+    name = coredevice_ax.re.sub(r"[^A-Za-z0-9-]", "_", uuid)
+    path = f"{lock_dir}/coredevice-ax-{name}.lock"
+    code = (
+        "import fcntl, os, sys, time\n"
+        f"os.makedirs({str(lock_dir)!r}, exist_ok=True)\n"
+        f"fd = os.open({path!r}, os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "print('held', flush=True)\n"
+        f"time.sleep({seconds})\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    assert proc.stdout.readline().strip() == "held"
+    return proc
+
+
+class TestATimeoutSaysWhoseItWas:
+    """The turn is taken inside the deadline: a read that never got it was
+    blamed on the phone, which sent an agent looking at the app (review)."""
+
+    async def test_a_read_that_never_got_its_turn_says_the_phone_was_not_asked(
+            self, monkeypatch, phone_address):
+        lib, _ = _lib(push_delay=1.0)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        long_read = asyncio.create_task(read_tree(PHONE, timeout=5))
+        await asyncio.sleep(0.05)
+        with pytest.raises(DeviceError) as caught:
+            await read_tree(PHONE, timeout=0.2)
+        await long_read
+
+        assert "the phone was not asked" in str(caught.value)
+        assert "sent no complete" not in str(caught.value)
+
+    async def test_a_late_turn_says_how_much_of_the_deadline_went_waiting(
+            self, monkeypatch, phone_address):
+        lib, _ = _lib(push_delay=0.7)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        # The first read settles; the second's pushes never complete, so its
+        # deadline ends it after it has waited 0.7 s for its turn.
+        real, calls = coredevice_ax._newest_tree, []
+
+        async def newest(*a, **k):
+            calls.append(1)
+            if len(calls) == 1:
+                return await real(*a, **k)
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(coredevice_ax, "_newest_tree", newest)
+        long_read = asyncio.create_task(read_tree(PHONE, timeout=5))
+        await asyncio.sleep(0.05)
+
+        with pytest.raises(DeviceError) as caught:
+            await read_tree(PHONE, timeout=1.2)
+        await long_read
+
+        assert "sent no complete" in str(caught.value)
+        assert "waiting for another read of this phone" in str(caught.value)
+
+    async def test_a_value_never_set_says_nothing_was_set(self, monkeypatch, phone_address):
+        lib, _ = _lib(push_delay=1.0)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        long_read = asyncio.create_task(read_tree(PHONE, timeout=5))
+        await asyncio.sleep(0.05)
+        with pytest.raises(DeviceError) as caught:
+            await coredevice_ax.set_value(PHONE, lambda e: True, "x", timeout=0.2)
+        await long_read
+
+        assert "nothing was set" in str(caught.value)
+        assert "may or may not" not in str(caught.value)
+
+    async def test_a_launch_check_that_never_got_its_turn_says_so(
+            self, monkeypatch, phone_address):
+        lib, _ = _lib(push_delay=1.0)
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        long_read = asyncio.create_task(read_tree(PHONE, timeout=5))
+        await asyncio.sleep(0.05)
+        with pytest.raises(DeviceError, match="the phone was not asked"):
+            await coredevice_ax.front_app(PHONE, timeout=0.2)
+        await long_read
+
+
+class TestTheTurnAcrossServers:
+    """`_Turn`'s lock was this server's alone: a scratch or branch server
+    reading the same phone overlapped it, which is how live tests run."""
+
+    async def test_a_read_waits_for_another_servers_turn(self, monkeypatch, phone_address):
+        import os
+        lib, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        other = _hold_turn_elsewhere(os.environ["QUERN_AX_LOCK_DIR"], PHONE, 0.6)
+        try:
+            started = time.monotonic()
+            assert len(await read_tree(PHONE, timeout=5)) == 14
+            assert time.monotonic() - started >= 0.4, "it did not wait for the other server"
+        finally:
+            other.wait(5)
+
+    async def test_another_servers_turn_held_past_the_deadline_is_not_the_phones_fault(
+            self, monkeypatch, phone_address):
+        import os
+        lib, state = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        other = _hold_turn_elsewhere(os.environ["QUERN_AX_LOCK_DIR"], PHONE, 1.0)
+        try:
+            with pytest.raises(DeviceError, match="the phone was not asked"):
+                await read_tree(PHONE, timeout=0.3)
+            assert state.connects == 0
+        finally:
+            other.wait(5)
+
+    async def test_a_read_gives_the_other_servers_turn_back(self, monkeypatch, phone_address):
+        import fcntl
+        import os
+        lib, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        await read_tree(PHONE, timeout=5)
+
+        path = coredevice_ax._turn_dir() / f"coredevice-ax-{PHONE}.lock"
+        fd = os.open(path, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)   # raises if still held
+        finally:
+            os.close(fd)
+
+    async def test_a_lock_it_cannot_take_does_not_stop_the_read(
+            self, monkeypatch, phone_address, tmp_path):
+        """Logged, and the read goes on with this server's lock alone."""
+        blocker = tmp_path / "a-file"
+        blocker.write_text("not a directory")
+        monkeypatch.setenv("QUERN_AX_LOCK_DIR", str(blocker / "turns"))
+        lib, _ = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+
+        assert len(await asyncio.wait_for(read_tree(PHONE, timeout=5), 3)) == 14
+
+
+def test_a_finished_loops_locks_are_let_go():
+    """Keyed by `id()`, a loop that had gone could hand its locks to a new
+    loop given its id (review)."""
+    import gc
+    import threading
+
+    locks = coredevice_ax._Turn._locks       # the fixture's: production's kind
+    seen = []
+
+    def run():
+        async def make():
+            coredevice_ax._Turn(PHONE)
+            seen.append(len(locks))
+        asyncio.run(make())
+
+    t = threading.Thread(target=run)
+    t.start()
+    t.join()
+    gc.collect()
+    assert seen == [1]
+    assert len(locks) == 0, "a finished loop's locks were kept"

@@ -34,12 +34,16 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import fcntl
 import logging
+import os
 import plistlib
 import re
 import time
+import weakref
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -862,6 +866,18 @@ async def _alive(rsd: Any, lib: SimpleNamespace, pids: list[int]) -> dict[int, b
     return {pid: pid in running for pid in pids}
 
 
+def _turn_dir() -> Path:
+    """Where every quern server this user runs takes a phone's turn across
+    servers: one per user, whatever a server's QUERN_STATE_DIR or HOME, so a
+    scratch or branch server and the user's own share it. QUERN_AX_LOCK_DIR
+    moves it, for tests."""
+    return Path(os.environ.get("QUERN_AX_LOCK_DIR") or f"/tmp/quern-{os.getuid()}")
+
+
+#: How often a turn held by another quern server is asked for again.
+TURN_POLL_S = 0.05
+
+
 class _Turn:
     """A phone's one subscription at a time (#734).
 
@@ -874,23 +890,97 @@ class _Turn:
     Taken inside the caller's deadline, so waiting for another read counts
     against it, and given back only after the connection is closed, which
     happens outside it: the next subscription never overlaps a closing one.
+
+    Two locks, in order: this server's, then a `flock` every quern server
+    this user runs shares (`_turn_dir`), since a second server -- a scratch
+    or branch one, which is how live tests run -- read the same phone at the
+    same time (review). The kernel lets go of a `flock` when its process
+    dies, so a server that crashed holds nothing. A lock file that cannot be
+    made or locked, for any reason but another server holding it, is logged
+    and this server goes on with its own lock alone: a lock quern cannot take
+    must not stop every read.
     """
 
-    _locks: dict[tuple[int, str], asyncio.Lock] = {}
+    #: Per event loop, by the loop itself: keyed by `id()`, a loop that has
+    #: gone could hand its locks to a new one given its id (review).
+    _locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+        weakref.WeakKeyDictionary())
 
     def __init__(self, uuid: str) -> None:
-        key = (id(asyncio.get_running_loop()), uuid)
-        self._lock = self._locks.setdefault(key, asyncio.Lock())
+        loop = asyncio.get_running_loop()
+        self._uuid = uuid
+        self._lock = self._locks.setdefault(loop, {}).setdefault(uuid, asyncio.Lock())
         self._held = False
+        self._fd: int | None = None
+        self._asked = time.monotonic()
+        #: Seconds spent waiting for the turn, once it was taken; None until.
+        self.waited: float | None = None
+
+    @property
+    def taken(self) -> bool:
+        return self.waited is not None
 
     async def take(self) -> None:
         await self._lock.acquire()
+        try:
+            await self._take_across_servers()
+        except BaseException:
+            self._lock.release()
+            raise
         self._held = True
+        self.waited = time.monotonic() - self._asked
+
+    async def _take_across_servers(self) -> None:
+        name = re.sub(r"[^A-Za-z0-9-]", "_", self._uuid)
+        path = _turn_dir() / f"coredevice-ax-{name}.lock"
+        try:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as e:
+            logger.warning("[coredevice] no turn across servers for %s (%s): %r",
+                           self._uuid[:8], path, e)
+            return
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self._fd = fd
+                    return
+                except BlockingIOError:
+                    await asyncio.sleep(TURN_POLL_S)    # another server's read
+                except OSError as e:
+                    logger.warning("[coredevice] no turn across servers for %s (%s): %r",
+                                   self._uuid[:8], path, e)
+                    os.close(fd)
+                    return
+        except BaseException:
+            os.close(fd)
+            raise
 
     def give_back(self) -> None:
-        if self._held:
-            self._held = False
+        if not self._held:
+            return
+        self._held = False
+        try:
+            if self._fd is not None:
+                fd, self._fd = self._fd, None
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
+        finally:
             self._lock.release()
+
+    def timed_out(self, timeout: float, what: str) -> str:
+        """Why a deadline ended, as the caller should hear it: the phone never
+        asked when the turn did not come, or how much of it went waiting."""
+        if not self.taken:
+            return (f"waited {timeout:g}s for another accessibility read of "
+                    f"{self._uuid[:8]} to finish; the phone was not asked")
+        if self.waited and self.waited >= 0.5:
+            return (f"{what} ({self.waited:.1f}s of the {timeout:g}s waiting for another "
+                    "read of this phone)")
+        return what
 
 
 #: When each phone's `axauditd` was last restarted, and until when a phone
@@ -1160,7 +1250,8 @@ async def _close(provider: Any, rsd: Any) -> None:
 
 
 async def _with_settled_tree(uuid: str, timeout: float, what: str,
-                             use: Callable[[Any, Tree, Tree, Tree], Any]) -> Any:
+                             use: Callable[[Any, Tree, Tree, Tree], Any], *,
+                             unasked: str = "") -> Any:
     """Connect, subscribe, take the settled tree, and hand it to `use` with the
     provider, then close: `use(provider, tree, first, newest)`'s answer.
 
@@ -1197,8 +1288,13 @@ async def _with_settled_tree(uuid: str, timeout: float, what: str,
     except DeviceError:
         raise
     except TimeoutError as e:
-        raise DeviceError(f"{what} on {uuid[:8]} timed out after {timeout:g}s",
-                          tool="coredevice") from e
+        if not turn.taken:
+            # `what` may say it might have happened; it did not (review).
+            raise DeviceError(turn.timed_out(timeout, "") + (f"; {unasked}" if unasked else ""),
+                              tool="coredevice") from e
+        raise DeviceError(turn.timed_out(
+            timeout, f"{what} on {uuid[:8]} timed out after {timeout:g}s"),
+            tool="coredevice") from e
     except Exception as e:  # pymobiledevice3 raises its own hierarchy
         raise DeviceError(f"accessibility service on {uuid[:8]} failed: {e!r}",
                           tool="coredevice") from e
@@ -1241,7 +1337,8 @@ async def set_value(uuid: str, match: Callable[[dict], bool], value: str, *,
             "processDataFromHost:", set_value_request(*ref, value), expects_reply=True)
 
     await _with_settled_tree(
-        uuid, timeout, "setting a value (it may or may not have been set)", use)
+        uuid, timeout, "setting a value (it may or may not have been set)", use,
+        unasked="nothing was set")
 
 
 async def front_app(uuid: str, *, timeout: float = READ_TIMEOUT_S) -> tuple[int | None, str]:
@@ -1323,8 +1420,11 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
                 seen["app"] = latest.elements[0]["AXLabel"] if latest.elements else ""
             return _refuse_bare(latest.elements, uuid)
         if deadline.expired():
-            raise DeviceError(
-                f"{uuid[:8]} sent no complete accessibility tree within {timeout:g}s",
+            # The phone was never asked when the deadline came while this
+            # read waited its turn: said as such, not as the phone's fault,
+            # which sent an agent looking at the app (review).
+            raise DeviceError(turn.timed_out(
+                timeout, f"{uuid[:8]} sent no complete accessibility tree within {timeout:g}s"),
                 tool="coredevice") from None
         raise DeviceError(f"accessibility service on {uuid[:8]} timed out: {e!r}",
                           tool="coredevice") from e
