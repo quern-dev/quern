@@ -620,6 +620,38 @@ class TestLaunching:
         ctrl.wda_client.launch_app.assert_not_called()
         ctrl.wda_client.app_state.assert_not_called()
 
+    async def test_a_daemon_restart_during_the_check_is_said_on_the_launch(
+            self, monkeypatch):
+        """The check is the read the restart rescued (#734): said on its
+        answer, and not left for the next read to claim."""
+        from server.device.ios import coredevice_ax
+
+        async def front(*_a, **_k):
+            coredevice_ax._RESTARTS.get().append("axauditd had stopped answering; restarted")
+            return (1583, "QuernProbeScene")
+
+        ctrl = self._ctrl(monkeypatch, [])
+        monkeypatch.setattr("server.device.ios.coredevice_ax.front_app", front)
+
+        _, info = await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
+        assert "restarted" in info.get("warning", "")
+
+    async def test_a_daemon_restart_is_said_on_a_launch_that_then_fails(self, monkeypatch):
+        """Said whichever way the check ends: here the app is not in front."""
+        from server.device.ios import coredevice_ax
+
+        async def front(*_a, **_k):
+            coredevice_ax._RESTARTS.get().append("axauditd had stopped answering; restarted")
+            return (37, "SpringBoard")
+
+        ctrl = self._ctrl(monkeypatch, [])
+        monkeypatch.setattr("server.device.ios.coredevice_ax.front_app", front)
+        monkeypatch.setattr(ctrl, "_PUSH_FRONT_GRACE_S", 0.0)
+
+        with pytest.raises(DeviceError, match="restarted"):
+            await ctrl.launch_app("com.quern.probe.scene", udid=PHONE)
+
     async def test_the_check_is_remembered_as_a_read(self, monkeypatch):
         """A push read like any other: a crash it causes after it answers is
         looked for at the next read (#669 review)."""

@@ -824,6 +824,11 @@ def _covering_element(target: UIElement, hit: dict | None, *,
 _READ_NOTE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "quern_read_note", default=None)
 
+
+def _joined(*notes: str | None) -> str:
+    """Notes said together, none lost to the one after it."""
+    return " ".join(n for n in notes if n)
+
 #: Which reader made this request's latest element read. Per request, for the
 #: reason `_last_read_backend` is not enough: that is shared per device, and a
 #: concurrent read rewrites it while a lookup is still deciding what its
@@ -3549,6 +3554,7 @@ class DeviceControllerUI:
                     f"here ({overruled}), so this device is read without it. "
                     "`quern set-device-reader no-wda` makes that the setting.")
             failed: DeviceError | None = None
+            restarts = coredevice_ax.collect_restarts()
             try:
                 pushed_raw = await reader.describe_all(
                     resolved, snapshot_depth=None,
@@ -3556,6 +3562,13 @@ class DeviceControllerUI:
                 )
             except DeviceError as caught:
                 failed = caught
+            # The push may have recovered the phone's accessibility daemon on
+            # its own (#734): said on this answer, whether the read then
+            # answered, fell back or failed -- added to any note already
+            # there, never over it.
+            restarted = " ".join(restarts)
+            if restarted and failed is None:
+                _READ_NOTE.set(_joined(_READ_NOTE.get(), restarted))
             # A read the push cannot make is made through WDA, and `backend`
             # on the answer says which one served it -- where there is a WDA.
             # Where there is none (no Xcode, or none built), the answer says so
@@ -3563,8 +3576,18 @@ class DeviceControllerUI:
             no_wda = await self._no_wda_fallback(resolved) if failed is not None else None
             if failed is not None and no_wda is not None:
                 if isinstance(failed, AppExitedDuringRead) and not lookup:
-                    pushed_raw = await self._push_after_a_crash(
-                        reader, resolved, failed, no_wda, source_timeout, probe_containers)
+                    # Restarts said after the follow-up read too, which may make
+                    # one of its own: it fills the same list (CodeRabbit on #735).
+                    try:
+                        pushed_raw = await self._push_after_a_crash(
+                            reader, resolved, failed, no_wda, source_timeout,
+                            probe_containers)
+                    except DeviceError as again:
+                        if restarts:
+                            again.args = (f"{again} {' '.join(restarts)}",)
+                        raise
+                    if restarts:
+                        _READ_NOTE.set(_joined(_READ_NOTE.get(), " ".join(restarts)))
                 else:
                     if isinstance(failed, AppExitedDuringRead):
                         self._record_push_crash(resolved, failed.app)
@@ -3574,7 +3597,8 @@ class DeviceControllerUI:
                                          if isinstance(failed, AppExitedDuringRead) else "")
                         + "There is no WebDriverAgent to read it through instead: "
                         f"{no_wda}. This device stays on the accessibility push; "
-                        "read the screen again.", tool=self.coredevice_ax.TOOL_NAME) from failed
+                        "read the screen again." + (f" {restarted}" if restarted else ""),
+                        tool=self.coredevice_ax.TOOL_NAME) from failed
             elif failed is not None:
                 e = failed
                 logger.warning("[coredevice] read of %s failed, using WDA: %s",
@@ -3591,7 +3615,8 @@ class DeviceControllerUI:
                             f"{e}. Nothing was looked up: the screen this lookup was "
                             "for is gone. This device's screens will be read through "
                             "WDA until the server restarts; read the screen again "
-                            "before acting.", tool=self.coredevice_ax.TOOL_NAME) from e
+                            "before acting." + (f" {restarted}" if restarted else ""),
+                            tool=self.coredevice_ax.TOOL_NAME) from e
                     _READ_NOTE.set(
                         f"{e}. This read is WDA's, and this device's screens will be "
                         "read through WDA until the server restarts.")
@@ -3600,6 +3625,15 @@ class DeviceControllerUI:
                     # and the answer says why (#664).
                     bare = e
                     _READ_NOTE.set(f"{e}. This read is WDA's.")
+                elif not isinstance(e, AppExitedDuringRead):
+                    # Any other failure too (#734): a read WDA served, and a
+                    # WDA it may have started, were said only in the log, so
+                    # the answer looked like the push's with `backend` changed.
+                    _READ_NOTE.set(
+                        f"The accessibility push could not read this screen: {e}. "
+                        "This read is WDA's.")
+                if restarted:
+                    _READ_NOTE.set(_joined(_READ_NOTE.get(), restarted))
                 reader = None
                 if lookup and snapshot_depth is None:
                     # A lookup asked for no depth because the push needs none;
