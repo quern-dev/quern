@@ -249,9 +249,12 @@ async def _map_through_devicectl(devices: dict[str, list[dict]]) -> None:
         return
     if not await asyncio.to_thread(xcode_available):
         return
-    with tempfile.TemporaryDirectory(prefix="quern-devicectl-") as tmp:
-        listing = Path(tmp) / "devices.json"
-        try:
+    try:
+        # Created and removed inside the `try`: a full or unwritable temp
+        # directory is a failure to ask, as devicectl's own would be, not an
+        # OSError for every caller (review on #737).
+        with tempfile.TemporaryDirectory(prefix="quern-devicectl-") as tmp:
+            listing = Path(tmp) / "devices.json"
             rc, _, err = await _run(
                 XCRUN, "devicectl", "list", "devices", "--json-output", str(listing),
                 timeout=DEVICECTL_LIST_S)
@@ -259,21 +262,24 @@ async def _map_through_devicectl(devices: dict[str, list[dict]]) -> None:
                 raise DeviceError(f"devicectl failed: {err.strip() or f'exit {rc}'}",
                                   tool="devicectl")
             data = json.loads(listing.read_text())
-        except (DeviceError, OSError, ValueError) as e:
-            _devicectl_failed_at = time.monotonic()
-            logger.info("[tunneld] devicectl could not map CoreDevice UUIDs, not asked "
-                        "again for %gs: %s", DEVICECTL_RETRY_S, e)
-            return
+    except (DeviceError, OSError, ValueError) as e:
+        _devicectl_failed_at = time.monotonic()
+        logger.warning("[tunneld] devicectl could not map CoreDevice UUIDs, not asked "
+                       "again for %gs: %s", DEVICECTL_RETRY_S, e)
+        return
     _devicectl_failed_at = None
     result = data.get("result") if isinstance(data, dict) else None
     found = result.get("devices") if isinstance(result, dict) else None
     for dev in found if isinstance(found, list) else []:
         if not isinstance(dev, dict):
             continue
-        cd_uuid = dev.get("identifier", "")
+        cd_uuid = dev.get("identifier")
         hardware = dev.get("hardwareProperties")
-        hw_udid = hardware.get("udid", "") if isinstance(hardware, dict) else ""
-        if cd_uuid and hw_udid and hw_udid in devices:
+        hw_udid = hardware.get("udid") if isinstance(hardware, dict) else None
+        # Strings only: a list or dict there raised TypeError out of every
+        # caller, where the code before #737 caught everything (review).
+        if (isinstance(cd_uuid, str) and isinstance(hw_udid, str)
+                and cd_uuid and hw_udid in devices):
             _tunnel_udid_cache[cd_uuid] = hw_udid
 
 

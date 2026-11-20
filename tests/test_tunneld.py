@@ -247,6 +247,20 @@ PHONES = {"00008130-AAAA": [{"tunnel-address": "fd35::1"}]}
 LISTED = {"result": {"devices": [
     {"identifier": "53DA57AA-1234", "hardwareProperties": {"udid": "00008130-AAAA"}}]}}
 
+#: Listings devicectl did not write, each of which must map nothing. The last
+#: two are unhashable where a string is looked up, which raised TypeError out
+#: of every caller (review on #737).
+OTHER_SHAPES = [
+    [],
+    {"result": []},
+    {"result": {"devices": {}}},
+    {"result": {"devices": [7, {"identifier": "x", "hardwareProperties": []}]}},
+    {"result": {"devices": [
+        {"identifier": "53DA57AA-1234", "hardwareProperties": {"udid": ["x"]}}]}},
+    {"result": {"devices": [
+        {"identifier": ["53DA57AA-1234"], "hardwareProperties": {"udid": "00008130-AAAA"}}]}},
+]
+
 _FAKE_XCRUN = """#!{python}
 import json, os, sys, time
 # xcrun devicectl list devices --json-output <path>
@@ -314,7 +328,8 @@ class TestDevicectlIsBounded:
     async def test_it_maps_a_phone(self, devicectl):
         assert await resolve_tunnel_udid("53DA57AA-1234") == "00008130-AAAA"
         (_, listing), = devicectl()
-        assert not listing.parent.exists(), "its JSON was left behind"
+        assert not listing.exists(), "its JSON was left behind"
+        assert not listing.parent.exists(), "its directory was left behind"
 
     async def test_a_cancelled_caller_kills_and_reaps_it(self, monkeypatch, devicectl):
         monkeypatch.setenv("FAKE_DEVICECTL_MODE", "hang")
@@ -331,21 +346,28 @@ class TestDevicectlIsBounded:
     async def test_a_caller_deadline_kills_and_reaps_it(self, monkeypatch, devicectl):
         monkeypatch.setenv("FAKE_DEVICECTL_MODE", "hang")
 
-        with pytest.raises(TimeoutError):
+        async def bounded():
             async with asyncio.timeout(1.0):
                 await resolve_tunnel_udid("53DA57AA-1234")
 
-        (pid, listing), = devicectl()
+        lookup = asyncio.create_task(bounded())
+        # Started before the deadline matters: a slow runner's Python
+        # start-up is not what this tests (review).
+        pid, listing = await self._started(devicectl)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(lookup, 5)
+
         assert self._gone(pid)
         assert not listing.parent.exists()
 
     async def test_a_hung_devicectl_is_bounded_and_not_run_again_at_once(
             self, monkeypatch, devicectl):
         monkeypatch.setenv("FAKE_DEVICECTL_MODE", "hang")
-        monkeypatch.setattr(tunneld_module, "DEVICECTL_LIST_S", 0.5)
+        monkeypatch.setattr(tunneld_module, "DEVICECTL_LIST_S", 2.0)
 
-        assert await asyncio.wait_for(resolve_tunnel_udid("53DA57AA-1234"), 5) is None
-        (pid, _), = devicectl()
+        lookup = asyncio.create_task(resolve_tunnel_udid("53DA57AA-1234"))
+        pid, _ = await self._started(devicectl)
+        assert await asyncio.wait_for(lookup, 10) is None
         assert self._gone(pid)
 
         assert await asyncio.wait_for(resolve_tunnel_udid("53DA57AA-1234"), 5) is None
@@ -370,12 +392,20 @@ class TestDevicectlIsBounded:
         assert await resolve_tunnel_udid("53DA57AA-1234") == "00008130-AAAA"
         assert len(devicectl()) == 2
 
-    @pytest.mark.parametrize("listing", [[], {"result": []}, {"result": {"devices": {}}},
-                                         {"result": {"devices": [7, {"identifier": "x",
-                                                                     "hardwareProperties": []}]}}])
+    @pytest.mark.parametrize("listing", OTHER_SHAPES)
     async def test_a_listing_of_another_shape_maps_nothing(self, monkeypatch, devicectl, listing):
         monkeypatch.setenv("FAKE_DEVICECTL_JSON", json.dumps(listing))
         assert await resolve_tunnel_udid("53DA57AA-1234") is None
+
+    async def test_a_temp_directory_it_cannot_make_is_a_failure_to_ask(
+            self, monkeypatch, devicectl):
+        """Not an OSError out of every caller (review)."""
+        def unwritable(*a, **k):
+            raise PermissionError("temp directory not writable")
+
+        monkeypatch.setattr(tunneld_module.tempfile, "TemporaryDirectory", unwritable)
+        assert await resolve_tunnel_udid("53DA57AA-1234") is None
+        assert tunneld_module._devicectl_failed_at is not None, "not remembered"
 
     async def test_with_no_xcode_it_is_not_run(self, monkeypatch, devicectl):
         """`devicectl` comes with Xcode; without developer tools `xcrun` may
