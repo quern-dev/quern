@@ -366,6 +366,25 @@ class TestDevicectlIsBounded:
         assert found == ["00008130-AAAA"] * 3
         assert len(devicectl()) == 1
 
+    async def test_a_caller_that_joins_brings_its_own_tunnels(self, monkeypatch, devicectl):
+        """Joined with a phone that connected after the run began, it came back
+        None: the run filtered by the first caller's tunnels (CodeRabbit on #739)."""
+        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "slow")
+        monkeypatch.setenv("FAKE_DEVICECTL_JSON", json.dumps({"result": {"devices": [
+            {"identifier": "53DA57AA-1234", "hardwareProperties": {"udid": "00008130-AAAA"}},
+            {"identifier": "53DA57AA-5678", "hardwareProperties": {"udid": "00008130-BBBB"}},
+        ]}}))
+        first = asyncio.create_task(resolve_tunnel_udid("53DA57AA-1234"))
+        await self._started(devicectl)
+        both = {**PHONES, "00008130-BBBB": [{"tunnel-address": "fd35::2"}]}
+        monkeypatch.setattr(tunneld_module, "get_tunneld_devices", AsyncMock(return_value=both))
+
+        later = await asyncio.wait_for(resolve_tunnel_udid("53DA57AA-5678"), 5)
+
+        assert later == "00008130-BBBB"
+        assert await first == "00008130-AAAA"
+        assert len(devicectl()) == 1, "it started a second run instead of joining"
+
     async def test_a_hung_run_no_one_waits_for_is_killed_at_its_bound(
             self, monkeypatch, devicectl):
         monkeypatch.setenv("FAKE_DEVICECTL_MODE", "hang")

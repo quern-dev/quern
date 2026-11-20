@@ -249,17 +249,23 @@ async def _map_through_devicectl(devices: dict[str, list[dict]]) -> None:
     if not await asyncio.to_thread(xcode_available):
         return
     loop = asyncio.get_running_loop()
-    run = _devicectl_runs.get(loop)
-    if run is None:
-        run = loop.create_task(_list_and_map(devices))
-        _devicectl_runs[loop] = run
+    joined = _devicectl_runs.get(loop)
+    if joined is None:
+        tunnels = set(devices)
+        run = loop.create_task(_list_and_map(tunnels))
+        _devicectl_runs[loop] = (run, tunnels)
         run.add_done_callback(_devicectl_run_ended)
+    else:
+        run, tunnels = joined
+        # This caller's tunnels count too: a phone that connected after the
+        # run began was left out of the listing it was in (CodeRabbit on #739).
+        tunnels.update(devices)
     await asyncio.shield(run)
 
 
 #: The devicectl run in progress, per event loop; gone once it ends, so the
 #: run never holds its loop past its own life.
-_devicectl_runs: dict[asyncio.AbstractEventLoop, asyncio.Task] = {}
+_devicectl_runs: dict[asyncio.AbstractEventLoop, tuple[asyncio.Task, set[str]]] = {}
 
 
 def _devicectl_run_ended(run: asyncio.Task) -> None:
@@ -270,7 +276,7 @@ def _devicectl_run_ended(run: asyncio.Task) -> None:
         logger.warning("[tunneld] devicectl lookup failed: %r", run.exception())
 
 
-async def _list_and_map(devices: dict[str, list[dict]]) -> None:
+async def _list_and_map(tunnels: set[str]) -> None:
     """Run `devicectl list devices`, bounded, and cache what it maps. Killed
     and reaped at the bound before its JSON file is removed, as on a cancel
     (#737). A failure to run is remembered for `DEVICECTL_RETRY_S`."""
@@ -308,7 +314,7 @@ async def _list_and_map(devices: dict[str, list[dict]]) -> None:
         # Strings only: a list or dict there raised TypeError out of every
         # caller, where the code before #737 caught everything (review).
         if (isinstance(cd_uuid, str) and isinstance(hw_udid, str)
-                and cd_uuid and hw_udid in devices):
+                and cd_uuid and hw_udid in tunnels):
             _tunnel_udid_cache[cd_uuid] = hw_udid
 
 
