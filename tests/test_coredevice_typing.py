@@ -627,7 +627,7 @@ class TestLaunching:
         from server.device.ios import coredevice_ax
 
         async def front(*_a, **_k):
-            coredevice_ax._RESTARTS.get().append("axauditd had stopped answering; restarted")
+            coredevice_ax._NOTES.get().append("axauditd had stopped answering; restarted")
             return (1583, "QuernProbeScene")
 
         ctrl = self._ctrl(monkeypatch, [])
@@ -642,7 +642,7 @@ class TestLaunching:
         from server.device.ios import coredevice_ax
 
         async def front(*_a, **_k):
-            coredevice_ax._RESTARTS.get().append("axauditd had stopped answering; restarted")
+            coredevice_ax._NOTES.get().append("axauditd had stopped answering; restarted")
             return (37, "SpringBoard")
 
         ctrl = self._ctrl(monkeypatch, [])

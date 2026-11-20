@@ -706,8 +706,10 @@ class TestReadingADevice:
         lib, _ = _fake_lib([SETTINGS])
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
 
-        with pytest.raises(DeviceError, match="within 0.3s"):
+        with pytest.raises(DeviceError, match="within 0.3s") as caught:
             await asyncio.wait_for(read_tree(PHONE, timeout=0.3), 2)
+        # Before the turn, not waiting for it: no other read was there (#736).
+        assert not isinstance(caught.value, coredevice_ax.TurnNotTaken)
 
     async def test_any_failure_finding_the_device_is_a_device_error(self, monkeypatch):
         monkeypatch.setattr("server.device.performance._device_address",
