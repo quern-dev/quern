@@ -55,6 +55,17 @@ def xcode_available() -> bool:
 def needs_xcode(what: str) -> str:
     """What a caller is told when `what` cannot run because there is no
     Xcode: said on the answer, since an agent sees nothing else (#738)."""
-    return (f"{what} needs Xcode, and no Xcode or developer tools are installed on "
-            "this Mac, so it was not run. An iPhone on iOS 27 or later is driven "
+    return (f"{what} needs Xcode, and no Xcode or developer tools were installed on "
+            "this Mac when quern started, so it was not run (restart quern if Xcode "
+            "has been installed since). An iPhone on iOS 27 or later is driven "
             "without Xcode; this one feature is not.")
+
+
+def require_xcode(what: str, tool: str) -> None:
+    """Refuse `what` where there is no Xcode, before `xcrun` can show the
+    install dialog: a 400, as an operation this Mac cannot do, not a 500
+    that reads as quern having broken (review on #738)."""
+    if not xcode_available():
+        from server.models import DeviceOperationUnsupportedError
+
+        raise DeviceOperationUnsupportedError(needs_xcode(what), tool=tool)

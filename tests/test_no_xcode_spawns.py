@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from server.device.ios import _xcode
-from server.models import DeviceError
+from server.models import DeviceOperationUnsupportedError
 
 NO_XCODE = functools.lru_cache(maxsize=1)(lambda: False)
 
@@ -66,27 +66,86 @@ class TestServerStart:
         assert m._fix_developer_dir() is None
         assert no_spawns == []
 
+    def test_an_xcode_found_in_applications_clears_the_cached_answer(
+            self, monkeypatch, tmp_path):
+        """DEVELOPER_DIR set to an Xcode in /Applications: the cached "no
+        Xcode" from before it would go on refusing everything (review)."""
+        import os
+        import pathlib
+        import subprocess
+
+        import server.main as m
+
+        app = tmp_path / "Xcode.app"
+        (app / "Contents" / "Developer").mkdir(parents=True)
+        cleared = []
+        answer = functools.lru_cache(maxsize=1)(lambda: False)
+        monkeypatch.setattr(answer, "cache_clear", lambda: cleared.append(1))
+        monkeypatch.setattr(_xcode, "xcode_available", answer)
+        monkeypatch.delenv("DEVELOPER_DIR", raising=False)
+        monkeypatch.setattr(pathlib.Path, "glob", lambda self, pattern: iter([app]))
+        ran = []
+
+        def run(argv, *a, **k):
+            ran.append((argv[0], os.environ.get("DEVELOPER_DIR")))
+            return subprocess.CompletedProcess(argv, 0 if argv[0] == "xcrun" else 2, "", "")
+
+        monkeypatch.setattr(subprocess, "run", run)
+
+        assert "Using" in (m._fix_developer_dir() or "")
+        assert os.environ["DEVELOPER_DIR"] == str(app / "Contents" / "Developer")
+        assert cleared, "the cached answer from before DEVELOPER_DIR was kept"
+        # xcrun only ever ran with a developer directory named: no dialog.
+        assert all(dev for tool, dev in ran if tool == "xcrun")
+
 
 class TestTheRunners:
     async def test_devicectl_names_xcode_and_runs_nothing(self, monkeypatch, no_spawns):
         from server.device.ios import devicectl
 
-        monkeypatch.setattr(devicectl, "xcode_available", NO_XCODE)
-        with pytest.raises(DeviceError, match="needs Xcode") as caught:
+        monkeypatch.setattr(_xcode, "xcode_available", NO_XCODE)
+        with pytest.raises(DeviceOperationUnsupportedError, match="needs Xcode") as caught:
             await devicectl.DevicectlBackend()._run_devicectl("device", "info", "details")
-        assert "devicectl device" in str(caught.value)
+        assert "devicectl device info details" in str(caught.value), "the operation unnamed"
         assert no_spawns == []
+
+    async def test_a_launch_is_not_told_to_sign_the_app(self, monkeypatch, no_spawns):
+        """Wrapped, the refusal said "Physical devices require the app to be
+        signed and installed", which is not why (review)."""
+        from server.device.ios import devicectl
+
+        monkeypatch.setattr(_xcode, "xcode_available", NO_XCODE)
+        with pytest.raises(DeviceOperationUnsupportedError) as caught:
+            await devicectl.DevicectlBackend().launch_app("UUID", "com.example.app")
+        assert "needs Xcode" in str(caught.value)
+        assert "signed" not in str(caught.value)
 
     async def test_simctl_names_xcode_and_runs_nothing(self, monkeypatch, no_spawns):
         """A phone whose type was not known yet fell into the simulator branch."""
         from server.device.ios import simctl
 
-        monkeypatch.setattr(simctl, "xcode_available", NO_XCODE)
+        monkeypatch.setattr(_xcode, "xcode_available", NO_XCODE)
         backend = simctl.SimctlBackend()
-        with pytest.raises(DeviceError, match="needs Xcode"):
+        with pytest.raises(DeviceOperationUnsupportedError, match="needs Xcode"):
             await backend._run_simctl("io", "UDID", "screenshot", "/dev/null")
-        with pytest.raises(DeviceError, match="needs Xcode"):
+        with pytest.raises(DeviceOperationUnsupportedError, match="needs Xcode"):
             await backend._run_shell("xcrun simctl listapps UDID | plutil -convert json -o - -")
+        assert no_spawns == []
+
+    @pytest.mark.parametrize("call", [
+        lambda b: b.wait_until_booted("UDID", timeout=1),
+        lambda b: b.launch_app("UDID", "com.example.app"),
+        lambda b: b.terminate_app("UDID", "com.example.app"),
+        lambda b: b.is_installed("UDID", "com.example.app"),
+    ], ids=["bootstatus", "launch", "terminate", "get_app_container"])
+    async def test_simctls_own_spawns_are_gated_too(self, monkeypatch, no_spawns, call):
+        """Four methods start `xcrun simctl` themselves, not through
+        `_run_simctl`, and a phone not yet identified reached them (review)."""
+        from server.device.ios import simctl
+
+        monkeypatch.setattr(_xcode, "xcode_available", NO_XCODE)
+        with pytest.raises(DeviceOperationUnsupportedError, match="needs Xcode"):
+            await call(simctl.SimctlBackend())
         assert no_spawns == []
 
 
@@ -156,10 +215,13 @@ class TestWdaRoutes:
         app.state.device_controller = controller
         monkeypatch.setattr(wda_availability, "wda_unavailable_reason",
                             AsyncMock(return_value=wda_availability.NO_XCODE))
-        self.start_driver = AsyncMock()
-        self.setup_wda = AsyncMock()
-        monkeypatch.setattr(wda, "start_driver", self.start_driver)
-        monkeypatch.setattr(wda, "setup_wda", self.setup_wda)
+        # Answers that serialise, so a missing gate fails on the call, not
+        # on encoding a mock (review).
+        self.start_driver = AsyncMock(return_value={"status": "ok"})
+        self.setup_wda = AsyncMock(return_value={"status": "ok"})
+        # The work behind the gate, so the gate tested is the real one.
+        monkeypatch.setattr(wda, "_setup_wda", self.setup_wda)
+        monkeypatch.setattr(wda, "_start_driver", self.start_driver)
 
         async def post(path: str):
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:

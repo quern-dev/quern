@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 from server.device._subprocess import communicate
-from server.device.ios._xcode import needs_xcode, xcode_available
+from server.device.ios._xcode import require_xcode, xcode_available
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 from server.tooling.tool_probe import probe_command
 
@@ -68,12 +68,10 @@ class SimctlBackend:
 
         Raises DeviceError on non-zero exit code.
         """
-        if not xcode_available():
-            # Every caller, gated or not: a phone whose type was not known yet
-            # fell into the simulator branch, and `xcrun` would have shown the
-            # install dialog (#738).
-            raise DeviceError(needs_xcode(f"simctl {args[0] if args else ''}".strip()),
-                              tool="simctl")
+        # Every caller, gated or not: a phone whose type was not known yet
+        # fell into the simulator branch, and `xcrun` would have shown the
+        # install dialog (#738).
+        require_xcode(" ".join(("simctl", *args[:1])), "simctl")
         proc = await asyncio.create_subprocess_exec(
             "xcrun", "simctl", *args,
             stdout=asyncio.subprocess.PIPE,
@@ -93,8 +91,8 @@ class SimctlBackend:
         Used for commands that require piping (e.g. listapps | plutil).
         Raises DeviceError on non-zero exit code.
         """
-        if "xcrun" in cmd and not xcode_available():
-            raise DeviceError(needs_xcode("simctl"), tool="simctl")
+        if "xcrun" in cmd:
+            require_xcode("simctl", "simctl")
         proc = await asyncio.create_subprocess_exec(
             "sh", "-c", cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -242,6 +240,7 @@ class SimctlBackend:
         waits for the system to be up. Unbounded, a simulator that never
         finishes would hang the request that asked for the boot.
         """
+        require_xcode("simctl bootstatus", "simctl")    # not via _run_simctl (#738)
         try:
             proc = await asyncio.create_subprocess_exec(
                 "xcrun", "simctl", "bootstatus", udid, "-b",
@@ -295,6 +294,7 @@ class SimctlBackend:
             for key, value in env.items():
                 launch_env[f"SIMCTL_CHILD_{key}"] = value
         flags = ["--terminate-running-process"] if restart else []
+        require_xcode("simctl launch", "simctl")    # not via _run_simctl (#738)
         proc = await asyncio.create_subprocess_exec(
             "xcrun", "simctl", "launch", *flags, udid, bundle_id,
             stdout=asyncio.subprocess.PIPE,
@@ -456,6 +456,7 @@ class SimctlBackend:
         does not tell apart. Callers that need the difference ask
         `is_installed`. Any other failure raises.
         """
+        require_xcode("simctl terminate", "simctl")    # not via _run_simctl (#738)
         proc = await asyncio.create_subprocess_exec(
             "xcrun", "simctl", "terminate", udid, bundle_id,
             stdout=asyncio.subprocess.PIPE,
@@ -472,6 +473,7 @@ class SimctlBackend:
     async def is_installed(self, udid: str, bundle_id: str) -> bool:
         """Whether bundle_id is installed. Raises when simctl cannot say:
         only its "no such file" answer means not installed."""
+        require_xcode("simctl get_app_container", "simctl")    # not via _run_simctl (#738)
         proc = await asyncio.create_subprocess_exec(
             "xcrun", "simctl", "get_app_container", udid, bundle_id, "app",
             stdout=asyncio.subprocess.PIPE,
