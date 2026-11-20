@@ -271,6 +271,12 @@ if mode == "hang":
     time.sleep(30)          # then writes the file it was given, as devicectl would
 if mode == "slow":
     time.sleep(0.6)         # slow, but answers
+if mode == "gated":         # answers once the test says so, at most 10 s on
+    gate = os.environ["FAKE_DEVICECTL_GATE"]
+    for _ in range(400):
+        if os.path.exists(gate):
+            break
+        time.sleep(0.025)
 if mode == "fail":
     sys.stderr.write("devicectl: boom")
     sys.exit(1)
@@ -366,10 +372,13 @@ class TestDevicectlIsBounded:
         assert found == ["00008130-AAAA"] * 3
         assert len(devicectl()) == 1
 
-    async def test_a_caller_that_joins_brings_its_own_tunnels(self, monkeypatch, devicectl):
+    async def test_a_caller_that_joins_brings_its_own_tunnels(
+            self, monkeypatch, devicectl, tmp_path):
         """Joined with a phone that connected after the run began, it came back
         None: the run filtered by the first caller's tunnels (CodeRabbit on #739)."""
-        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "slow")
+        gate = tmp_path / "release"
+        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "gated")
+        monkeypatch.setenv("FAKE_DEVICECTL_GATE", str(gate))
         monkeypatch.setenv("FAKE_DEVICECTL_JSON", json.dumps({"result": {"devices": [
             {"identifier": "53DA57AA-1234", "hardwareProperties": {"udid": "00008130-AAAA"}},
             {"identifier": "53DA57AA-5678", "hardwareProperties": {"udid": "00008130-BBBB"}},
@@ -379,11 +388,43 @@ class TestDevicectlIsBounded:
         both = {**PHONES, "00008130-BBBB": [{"tunnel-address": "fd35::2"}]}
         monkeypatch.setattr(tunneld_module, "get_tunneld_devices", AsyncMock(return_value=both))
 
-        later = await asyncio.wait_for(resolve_tunnel_udid("53DA57AA-5678"), 5)
+        later = asyncio.create_task(resolve_tunnel_udid("53DA57AA-5678"))
+        # Released only once it has joined: a fixed sleep let a stalled runner
+        # end the first run before the second caller arrived (CodeRabbit).
+        for _ in range(200):
+            entries = list(tunneld_module._devicectl_runs.values())
+            if entries and "00008130-BBBB" in entries[0][1]:
+                break
+            await asyncio.sleep(0.025)
+        else:
+            pytest.fail("the second caller never joined the run")
+        gate.touch()
 
-        assert later == "00008130-BBBB"
-        assert await first == "00008130-AAAA"
+        assert await asyncio.wait_for(later, 5) == "00008130-BBBB"
+        assert await asyncio.wait_for(first, 5) == "00008130-AAAA"
         assert len(devicectl()) == 1, "it started a second run instead of joining"
+
+    async def test_a_run_that_has_finished_is_not_joined(self, monkeypatch, devicectl):
+        """Its entry outlives it until a callback runs; joined then, a new
+        phone's tunnels were added after the filtering (CodeRabbit on #739)."""
+        loop = asyncio.get_running_loop()
+        done = loop.create_future()
+        done.set_result(None)
+        tunneld_module._devicectl_runs[loop] = (done, set())
+
+        assert await asyncio.wait_for(resolve_tunnel_udid("53DA57AA-1234"), 5) == "00008130-AAAA"
+        assert len(devicectl()) == 1, "it joined a finished run instead of starting one"
+
+    async def test_a_finished_run_leaves_a_newer_run_in_place(self):
+        loop = asyncio.get_running_loop()
+        old, new = loop.create_future(), loop.create_future()
+        old.set_result(None)
+        tunneld_module._devicectl_runs[loop] = (new, set())
+
+        tunneld_module._devicectl_run_ended(old)
+
+        assert tunneld_module._devicectl_runs[loop][0] is new
+        new.cancel()
 
     async def test_a_hung_run_no_one_waits_for_is_killed_at_its_bound(
             self, monkeypatch, devicectl):

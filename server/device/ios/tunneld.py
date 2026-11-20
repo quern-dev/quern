@@ -250,7 +250,10 @@ async def _map_through_devicectl(devices: dict[str, list[dict]]) -> None:
         return
     loop = asyncio.get_running_loop()
     joined = _devicectl_runs.get(loop)
-    if joined is None:
+    # A run already done is not joined: its entry is dropped by a callback
+    # that has not run yet, and tunnels added now would be added after the
+    # listing was filtered (CodeRabbit on #739).
+    if joined is None or joined[0].done():
         tunnels = set(devices)
         run = loop.create_task(_list_and_map(tunnels))
         _devicectl_runs[loop] = (run, tunnels)
@@ -269,7 +272,10 @@ _devicectl_runs: dict[asyncio.AbstractEventLoop, tuple[asyncio.Task, set[str]]] 
 
 
 def _devicectl_run_ended(run: asyncio.Task) -> None:
-    _devicectl_runs.pop(run.get_loop(), None)
+    loop = run.get_loop()
+    # Only its own entry: one started after it finished has replaced it.
+    if (entry := _devicectl_runs.get(loop)) is not None and entry[0] is run:
+        del _devicectl_runs[loop]
     if not run.cancelled() and run.exception() is not None:
         # Retrieved here, so a run every caller gave up on is not reported
         # as an exception nobody read; it is a bug in the mapping if it fires.
