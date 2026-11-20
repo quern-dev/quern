@@ -101,6 +101,11 @@ async def setup_wda(request: Request, body: SetupWdaRequest):
             team_id=body.team_id,
             force=body.force,
         )
+    except DeviceError as e:
+        # Typed refusals -- no Xcode (#738) -- keep their status and message.
+        from server.api.device import _handle_device_error
+
+        raise _handle_device_error(e) from e
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 

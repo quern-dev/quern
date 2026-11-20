@@ -458,6 +458,17 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Before anything runs `xcodebuild`, which with no developer tools is a
+    # stub that shows the install dialog: found on a clean VM (#738 review).
+    # Gradle builds returned above and need no Xcode.
+    from server.device.ios._xcode import require_xcode
+    from server.models import DeviceOperationUnsupportedError
+
+    try:
+        require_xcode("Building an Xcode project (xcodebuild)", "xcodebuild")
+    except DeviceOperationUnsupportedError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
     # 2. Scheme discovery
     if not body.scheme:
         schemes = await _list_schemes(proj_flag, proj_path)

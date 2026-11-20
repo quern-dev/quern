@@ -1241,6 +1241,22 @@ async def _runner_ready(udid: str, os_version: str, log_path: Path,
         f"WDA did not announce its server within {DRIVER_START_TIMEOUT}s")
 
 
+async def refuse_without_xcode(udid: str) -> None:
+    """Refused, naming why, on a Mac with no Xcode: WDA is built and started
+    with `xcodebuild`, which there is a stub that shows the install dialog.
+    Here rather than at each caller -- the routes, the auto-start, and a
+    hung runner's restart, which a build left from an earlier Xcode reached
+    (#738)."""
+    from server.models import WdaNotSetUpError
+    from server.tooling.wda_availability import NO_XCODE, wda_unavailable_reason
+
+    if await wda_unavailable_reason() == NO_XCODE:
+        raise WdaNotSetUpError(
+            f"WebDriverAgent cannot be built or started on {udid[:8]}: {NO_XCODE}. "
+            "An iPhone on iOS 27 or later is driven without it; an earlier one needs "
+            "Xcode installed first.", tool="wda")
+
+
 async def start_driver(udid: str, os_version: str) -> dict:
     """Start WDA on a physical device via xcodebuild test-without-building.
 
@@ -1254,6 +1270,7 @@ async def start_driver(udid: str, os_version: str) -> dict:
 
     Returns dict with {status, udid, pid, ready}.
     """
+    await refuse_without_xcode(udid)
     task = start_in_flight(udid)
     if task is None:
         task = asyncio.ensure_future(_start_driver(udid, os_version))
@@ -2002,6 +2019,7 @@ async def setup_wda(
     can run here (#664): a build may just have made it possible."""
     from server.tooling.wda_availability import forget
 
+    await refuse_without_xcode(udid)
     try:
         return await _setup_wda(udid, os_version, team_id, force)
     finally:

@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from server.builds import build_records
+from server.device.ios._xcode import needs_xcode, xcode_available
 from server.models import CrashFrame, CrashImage, CrashReport, ImageSymbols
 from server.sources import crash_frames, symbolicate_android
 
@@ -56,6 +57,11 @@ _UUID = re.compile(r"^[0-9A-Fa-f]{8}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f
 
 
 async def _run(argv: list[str]) -> tuple[int, str, str]:
+    if argv[0] == "xcrun" and not xcode_available():
+        # `atos` comes with Xcode; with no developer tools `xcrun` shows the
+        # install dialog, once per image of every read (#738). Raised as
+        # "could not run", which both callers put on the image's note.
+        raise OSError(needs_xcode("Symbolicating with atos"))
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
