@@ -921,6 +921,12 @@ class TestTheTurnAcrossServers:
             # A wide give-way, ten of this side's polls, so a loaded runner
             # still lands one in it; with none, the gap is microseconds.
             "ax.TURN_POLL_S = 0.25\n"
+            # Named by the id given, as this side's are: resolving asks
+            # tunneld, which is the real machine, and its time between turns
+            # let this side in with no give-way at all.
+            "async def as_given(uuid):\n"
+            "    return uuid\n"
+            "ax._lock_identity = as_given\n"
             "async def main():\n"
             "    end = time.monotonic() + 5\n"
             "    first = True\n"
