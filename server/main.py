@@ -632,7 +632,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Warn about missing tools
     if not tools.get("simctl"):
         logger.warning(
-            "simctl not available — device management and screenshots disabled. "
+            "simctl not available — simulators are disabled; iPhones on iOS 27 and "
+            "later are driven without Xcode. "
             "If Xcode is installed, check 'xcode-select -p' points to a valid path. "
             "Fix with: sudo xcode-select -s /path/to/Xcode.app/Contents/Developer  "
             "Otherwise install Xcode Command Line Tools: xcode-select --install"

@@ -240,3 +240,38 @@ class TestWdaRoutes:
         assert r.status_code == 400, r.text
         assert "Xcode is not installed" in r.json()["detail"]
         self.setup_wda.assert_not_called()
+
+
+class TestBuildAndInstall:
+    """It ran `xcodebuild -list -json`, then the build, for any Xcode project:
+    on a clean VM the install dialog opened (#738 review)."""
+
+    @pytest.mark.parametrize("scheme", [None, "Internal"], ids=["listing schemes", "building"])
+    async def test_an_xcode_project_is_refused_naming_xcode(
+            self, monkeypatch, tmp_path, no_spawns, scheme):
+        from httpx import ASGITransport, AsyncClient
+
+        from server.api import build_app as route
+        from server.config import ServerConfig
+        from server.main import create_app
+        from tests.test_build_records import HEADERS, FakeController
+
+        monkeypatch.setattr(_xcode, "xcode_available", NO_XCODE)
+        build = AsyncMock()
+        monkeypatch.setattr(route, "_build", build)
+        app = create_app(config=ServerConfig(api_key="test-key-12345"),
+                         enable_oslog=False, enable_crash=False, enable_proxy=False)
+        app.state.build_adapter = object()
+        app.state.device_controller = FakeController({"SIM-UDID": "simulator"})
+        project = tmp_path / "MyApp.xcodeproj"
+        project.mkdir()
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post("/api/v1/device/build-and-install", headers=HEADERS,
+                             json={"project_path": str(project), "scheme": scheme,
+                                   "udids": ["SIM-UDID"]})
+
+        assert r.status_code == 400, r.text
+        assert "needs Xcode" in r.json()["detail"]
+        build.assert_not_called()
+        assert no_spawns == []
