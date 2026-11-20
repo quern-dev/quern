@@ -976,6 +976,42 @@ class TestTheTurnAcrossServers:
             other.wait(5)
             other.stdout.close()
 
+    async def test_an_id_resolved_only_by_the_address_lookup_still_names_the_turn(
+            self, monkeypatch):
+        """Resolution failed for the turn and then succeeded for the address,
+        after recovering tunneld: the read connected holding the CoreDevice
+        UUID's file while another server held the hardware UDID's
+        (CodeRabbit on #736)."""
+        import os
+
+        from server.device.ios import tunneld
+        monkeypatch.setattr(coredevice_ax, "_lock_identity", _REAL_LOCK_IDENTITY)
+        hardware = "00008101-000A1B2C3D4E5F60"
+        asked = []
+
+        async def resolve(uuid):
+            asked.append(uuid)
+            return None if len(asked) == 1 else hardware    # tunneld wedged, once
+
+        async def device_address(uuid):
+            # As the real one does: a failed lookup recovers tunneld and asks again.
+            if await tunneld.resolve_tunnel_udid(uuid) is None:
+                await tunneld.resolve_tunnel_udid(uuid)
+            return ("fd00::1", 51000)
+
+        monkeypatch.setattr(tunneld, "resolve_tunnel_udid", resolve)
+        monkeypatch.setattr("server.device.performance._device_address", device_address)
+        lib, state = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        other = _hold_turn_elsewhere(os.environ["QUERN_AX_LOCK_DIR"], hardware, 1.0)
+        try:
+            with pytest.raises(TurnNotTaken):
+                await read_tree(PHONE, timeout=0.3)
+            assert state.connects == 0
+        finally:
+            other.wait(5)
+            other.stdout.close()
+
     async def test_an_id_it_cannot_resolve_is_the_id_given(self, monkeypatch, phone_address):
         from server.device.ios import tunneld
 

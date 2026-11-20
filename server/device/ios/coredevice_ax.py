@@ -679,6 +679,7 @@ async def element_at(uuid: str, x: float, y: float, *,
     try:
         async with asyncio.timeout(timeout):
             _refuse_if_down(uuid)
+            await _device_address(uuid)    # the id the turn is named by: `_Turn`
             await turn.take()
             # Again: the read ahead of this one may have marked it down while
             # this one waited (CodeRabbit on #735).
@@ -961,6 +962,15 @@ class _Turn:
 
     Only the turn is shared: the restart limit and the down window are each
     server's own, so two servers may each restart the daemon within a minute.
+
+    The `flock` is named by the phone's tunnel UDID (`_lock_identity`), so
+    every caller looks the phone's address up before taking the turn: that
+    resolves the id, and a read that cannot resolve it has no tunnel to
+    connect through. Resolved only inside the turn, an id that failed to
+    resolve named the file by the id given, and the address lookup after it
+    could recover tunneld and connect under that other name (CodeRabbit on
+    #736). The address is looked up again once the turn is taken, since the
+    tunnel may have changed while it waited.
     """
 
     #: Per event loop, by the loop itself: keyed by `id()`, a loop that has
@@ -980,7 +990,8 @@ class _Turn:
         self._lock = locks.setdefault(uuid, asyncio.Lock())
         self._held = False
         self._fd: int | None = None
-        self._asked = time.monotonic()
+        #: When this read began waiting for the turn; None until it did.
+        self._asked: float | None = None
         #: Seconds spent waiting for the turn, once it was taken; None until.
         self.waited: float | None = None
 
@@ -988,7 +999,15 @@ class _Turn:
     def taken(self) -> bool:
         return self.waited is not None
 
+    @property
+    def missed(self) -> bool:
+        """Waited for the turn and never got it: the phone was not asked.
+        Not a deadline that ran out before the wait began -- in the address
+        lookup, which is the push's own trouble (review on #736)."""
+        return self._asked is not None and self.waited is None
+
     async def take(self) -> None:
+        self._asked = time.monotonic()
         await self._lock.acquire()
         try:
             await self._take_across_servers()
@@ -996,7 +1015,7 @@ class _Turn:
             self._lock.release()
             raise
         self._held = True
-        self.waited = time.monotonic() - self._asked
+        self.waited = time.monotonic() - (self._asked or 0.0)
 
     async def _take_across_servers(self) -> None:
         from server.screenshots import private_dir
@@ -1074,7 +1093,7 @@ class _Turn:
     def timed_out(self, timeout: float, what: str) -> str:
         """Why a deadline ended, as the caller should hear it: the phone never
         asked when the turn did not come, or how much of it went waiting."""
-        if not self.taken:
+        if self.missed:
             return (f"waited {timeout:g}s for another accessibility read of "
                     f"{self._uuid[:8]} to finish; the phone was not asked")
         if self.waited and self.waited >= 0.5:
@@ -1369,6 +1388,7 @@ async def _with_settled_tree(uuid: str, timeout: float, what: str,
         try:
             async with asyncio.timeout(timeout):
                 _refuse_if_down(uuid)
+                await _device_address(uuid)    # the id the turn is named by: `_Turn`
                 await turn.take()
                 _refuse_if_down(uuid)    # again, after waiting (CodeRabbit on #735)
                 address = await _device_address(uuid)
@@ -1389,7 +1409,7 @@ async def _with_settled_tree(uuid: str, timeout: float, what: str,
     except DeviceError:
         raise
     except TimeoutError as e:
-        if not turn.taken:
+        if turn.missed:
             # `what` may say it might have happened; it did not (review).
             raise TurnNotTaken(turn.timed_out(timeout, "") + (f"; {unasked}" if unasked else ""),
                                tool="coredevice") from e
@@ -1478,6 +1498,7 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
             # asks devicectl, and a read must not outlast the time it was given.
             async with deadline:
                 _refuse_if_down(uuid)
+                await _device_address(uuid)    # the id the turn is named by: `_Turn`
                 await turn.take()
                 _refuse_if_down(uuid)    # again, after waiting (CodeRabbit on #735)
                 address = await _device_address(uuid)
@@ -1524,7 +1545,7 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
             # The phone was never asked when the deadline came while this
             # read waited its turn: said as such, not as the phone's fault,
             # which sent an agent looking at the app (review).
-            raise (DeviceError if turn.taken else TurnNotTaken)(turn.timed_out(
+            raise (TurnNotTaken if turn.missed else DeviceError)(turn.timed_out(
                 timeout, f"{uuid[:8]} sent no complete accessibility tree within {timeout:g}s"),
                 tool="coredevice") from None
         raise DeviceError(f"accessibility service on {uuid[:8]} timed out: {e!r}",
