@@ -32,6 +32,7 @@ from pathlib import Path
 import httpx
 
 from server.config import quern_cmd
+from server.device.ios._xcode import xcode_available
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,20 @@ SUDOERS_PATH = Path("/etc/sudoers.d/quern-tunneld")
 
 # Cache: CoreDevice UUID → pymobiledevice3 UDID
 _tunnel_udid_cache: dict[str, str] = {}
+
+#: How long `devicectl list devices` may run before it is killed (#737).
+#: Measured at 0.14 s on a Mac with a phone attached; the bound is for a
+#: devicectl that hangs, not for one that is slow.
+DEVICECTL_LIST_S = 10.0
+#: The `xcrun` that runs it: a test points this at a stand-in.
+XCRUN = "xcrun"
+#: How long a devicectl that could not answer is not run again. Every phone
+#: path resolves its UDID here, so with failures forgotten one hung devicectl
+#: was paid -- up to the bound -- on every call (#737). Only a failure to run
+#: is remembered: a list that answered without the phone is not, since a
+#: phone plugged in a moment later has to resolve.
+DEVICECTL_RETRY_S = 15.0
+_devicectl_failed_at: float | None = None
 
 
 def _is_inside(path: Path, root: Path) -> bool:
@@ -214,6 +229,54 @@ async def get_tunneld_devices() -> dict[str, list[dict]]:
         return {}
 
 
+async def _map_through_devicectl(devices: dict[str, list[dict]]) -> None:
+    """Cache the tunnel UDID of each CoreDevice UUID devicectl lists among
+    `devices`: its JSON carries both, the UUID and `hardwareProperties.udid`.
+
+    Bounded, and killed and reaped however the call ends, the caller's
+    cancel included, before its JSON file is removed: a push read's short
+    deadline cancelled the wait and left devicectl running, to write the
+    file again after it was deleted (#737). Not run where there is no Xcode:
+    `devicectl` comes with it, and without developer tools `xcrun` may ask to
+    install them -- on every call, since a failure was not remembered.
+    """
+    global _devicectl_failed_at
+    from server.device.performance import _run
+    from server.models import DeviceError
+
+    if (_devicectl_failed_at is not None
+            and time.monotonic() - _devicectl_failed_at < DEVICECTL_RETRY_S):
+        return
+    if not await asyncio.to_thread(xcode_available):
+        return
+    with tempfile.TemporaryDirectory(prefix="quern-devicectl-") as tmp:
+        listing = Path(tmp) / "devices.json"
+        try:
+            rc, _, err = await _run(
+                XCRUN, "devicectl", "list", "devices", "--json-output", str(listing),
+                timeout=DEVICECTL_LIST_S)
+            if rc != 0:
+                raise DeviceError(f"devicectl failed: {err.strip() or f'exit {rc}'}",
+                                  tool="devicectl")
+            data = json.loads(listing.read_text())
+        except (DeviceError, OSError, ValueError) as e:
+            _devicectl_failed_at = time.monotonic()
+            logger.info("[tunneld] devicectl could not map CoreDevice UUIDs, not asked "
+                        "again for %gs: %s", DEVICECTL_RETRY_S, e)
+            return
+    _devicectl_failed_at = None
+    result = data.get("result") if isinstance(data, dict) else None
+    found = result.get("devices") if isinstance(result, dict) else None
+    for dev in found if isinstance(found, list) else []:
+        if not isinstance(dev, dict):
+            continue
+        cd_uuid = dev.get("identifier", "")
+        hardware = dev.get("hardwareProperties")
+        hw_udid = hardware.get("udid", "") if isinstance(hardware, dict) else ""
+        if cd_uuid and hw_udid and hw_udid in devices:
+            _tunnel_udid_cache[cd_uuid] = hw_udid
+
+
 async def resolve_tunnel_udid(coredevice_uuid: str) -> str | None:
     """Map a CoreDevice UUID to the pymobiledevice3 tunnel UDID.
 
@@ -236,34 +299,7 @@ async def resolve_tunnel_udid(coredevice_uuid: str) -> str | None:
         _tunnel_udid_cache[coredevice_uuid] = coredevice_uuid
         return coredevice_uuid
 
-    # Map CoreDevice UUIDs to tunnel UDIDs via devicectl JSON which includes
-    # both the CoreDevice UUID and the hardwareProperties.udid
-    tmp_path = None
-    try:
-        tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
-        tmp_path = tmp.name
-        tmp.close()
-
-        proc = await asyncio.create_subprocess_exec(
-            "xcrun", "devicectl", "list", "devices",
-            "--json-output", tmp_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
-        if proc.returncode == 0:
-            data = json.loads(Path(tmp_path).read_text())
-            for dev in data.get("result", {}).get("devices", []):
-                cd_uuid = dev.get("identifier", "")
-                hw_udid = dev.get("hardwareProperties", {}).get("udid", "")
-                if cd_uuid and hw_udid and hw_udid in devices:
-                    _tunnel_udid_cache[cd_uuid] = hw_udid
-    except Exception:
-        logger.debug("Failed to map CoreDevice UUIDs via devicectl")
-    finally:
-        if tmp_path:
-            Path(tmp_path).unlink(missing_ok=True)
-
+    await _map_through_devicectl(devices)
     return _tunnel_udid_cache.get(coredevice_uuid)
 
 
