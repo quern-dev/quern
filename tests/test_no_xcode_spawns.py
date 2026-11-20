@@ -49,7 +49,11 @@ class TestServerStart:
 
         import server.main as m
 
-        monkeypatch.delenv("DEVELOPER_DIR", raising=False)
+        # Set first, so the undo is registered: delenv of an absent variable
+        # records none, and a DEVELOPER_DIR the fix sets would outlive the
+        # test (CodeRabbit on #740).
+        monkeypatch.setenv("DEVELOPER_DIR", "")
+        monkeypatch.delenv("DEVELOPER_DIR")
         monkeypatch.setattr(_xcode, "xcode_available", NO_XCODE)
         monkeypatch.setattr(pathlib.Path, "glob", lambda self, pattern: iter(()))
         # xcode-select itself never shows the dialog; let it answer.
@@ -82,7 +86,11 @@ class TestServerStart:
         answer = functools.lru_cache(maxsize=1)(lambda: False)
         monkeypatch.setattr(answer, "cache_clear", lambda: cleared.append(1))
         monkeypatch.setattr(_xcode, "xcode_available", answer)
-        monkeypatch.delenv("DEVELOPER_DIR", raising=False)
+        # Set first, so the undo is registered: delenv of an absent variable
+        # records none, and a DEVELOPER_DIR the fix sets would outlive the
+        # test (CodeRabbit on #740).
+        monkeypatch.setenv("DEVELOPER_DIR", "")
+        monkeypatch.delenv("DEVELOPER_DIR")
         monkeypatch.setattr(pathlib.Path, "glob", lambda self, pattern: iter([app]))
         ran = []
 
@@ -189,6 +197,25 @@ class TestProfiling:
         assert caught.value.status == 503
         warm_up.assert_not_called()
         assert m._active == {}, "the refused start kept the device"
+        assert no_spawns == []
+
+
+    async def test_a_resumed_profile_is_not_read_and_says_why(self, monkeypatch, no_spawns):
+        """A profile recorded before Xcode went is summarised when the server
+        starts again: `xctrace export` there showed the dialog (CodeRabbit)."""
+        from server.profiling import manager as pm
+        from server.profiling import xctrace as xt
+
+        monkeypatch.setattr(pm, "xcode_available", NO_XCODE)
+        m = pm.ProfileManager(settings=lambda: {"max_bytes": 2**31})
+        profile = pm.Profile(id="prof_000000000001", udid="00008101-0000000000000001",
+                             device="00008101-0000000000000001", platform="device",
+                             bundle_id="com.example.app", preset=next(iter(xt.PRESETS)),
+                             time_limit_s=10, started_at="2026-11-20T00:00:00+00:00")
+
+        summary = await m.summarize(profile)
+
+        assert "needs Xcode" in summary["unavailable"]["trace"]
         assert no_spawns == []
 
 

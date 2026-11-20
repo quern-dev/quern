@@ -694,6 +694,11 @@ class ProfileManager:
     async def _run_xctrace(self, cmd: list[str]) -> str:
         """One xctrace reading command: its output, or ProfileError with its words."""
         verb = f"xctrace {cmd[len(self.xctrace)]}"
+        if not await asyncio.to_thread(xcode_available):
+            # A profile resumed at start-up, recorded before Xcode went, is
+            # read here too: refused, so it ends failed saying why, without
+            # `xcrun` showing the install dialog (CodeRabbit on #740).
+            raise ProfileError(needs_xcode(f"Reading an iOS profile ({verb})"), 503)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
