@@ -269,6 +269,8 @@ with open(os.environ["FAKE_DEVICECTL_LOG"], "a") as log:
 mode = os.environ["FAKE_DEVICECTL_MODE"]
 if mode == "hang":
     time.sleep(30)          # then writes the file it was given, as devicectl would
+if mode == "slow":
+    time.sleep(0.6)         # slow, but answers
 if mode == "fail":
     sys.stderr.write("devicectl: boom")
     sys.exit(1)
@@ -331,34 +333,62 @@ class TestDevicectlIsBounded:
         assert not listing.exists(), "its JSON was left behind"
         assert not listing.parent.exists(), "its directory was left behind"
 
-    async def test_a_cancelled_caller_kills_and_reaps_it(self, monkeypatch, devicectl):
-        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "hang")
+    @staticmethod
+    async def _run_ended() -> None:
+        for _ in range(400):
+            if not tunneld_module._devicectl_runs:
+                return
+            await asyncio.sleep(0.025)
+        pytest.fail("the devicectl run never ended")
+
+    async def test_a_caller_that_gives_up_leaves_the_run_to_answer(
+            self, monkeypatch, devicectl):
+        """Killed with each caller that gave up, a slow devicectl never
+        answered, and the next caller started another (CodeRabbit on #739)."""
+        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "slow")
         lookup = asyncio.create_task(resolve_tunnel_udid("53DA57AA-1234"))
         pid, listing = await self._started(devicectl)
 
         lookup.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(lookup, 5)
+            await asyncio.wait_for(lookup, 0.3)          # the caller is let go at once
 
-        assert self._gone(pid), "devicectl outlived the caller that gave up"
-        assert not listing.parent.exists(), "its JSON directory was left behind"
-
-    async def test_a_caller_deadline_kills_and_reaps_it(self, monkeypatch, devicectl):
-        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "hang")
-
-        async def bounded():
-            async with asyncio.timeout(1.0):
-                await resolve_tunnel_udid("53DA57AA-1234")
-
-        lookup = asyncio.create_task(bounded())
-        # Started before the deadline matters: a slow runner's Python
-        # start-up is not what this tests (review).
-        pid, listing = await self._started(devicectl)
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(lookup, 5)
-
+        assert await asyncio.wait_for(resolve_tunnel_udid("53DA57AA-1234"), 5) == "00008130-AAAA"
+        assert len(devicectl()) == 1, "a second devicectl was started beside the first"
         assert self._gone(pid)
         assert not listing.parent.exists()
+        assert tunneld_module._devicectl_runs == {}, "the ended run was kept"
+
+    async def test_callers_at_once_share_one_run(self, monkeypatch, devicectl):
+        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "slow")
+        found = await asyncio.wait_for(asyncio.gather(
+            *(resolve_tunnel_udid("53DA57AA-1234") for _ in range(3))), 5)
+        assert found == ["00008130-AAAA"] * 3
+        assert len(devicectl()) == 1
+
+    async def test_a_hung_run_no_one_waits_for_is_killed_at_its_bound(
+            self, monkeypatch, devicectl):
+        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "hang")
+        monkeypatch.setattr(tunneld_module, "DEVICECTL_LIST_S", 1.0)
+
+        async def bounded():
+            async with asyncio.timeout(None) as deadline:
+                lookup = asyncio.ensure_future(resolve_tunnel_udid("53DA57AA-1234"))
+                await self._started(devicectl)
+                # From here: the stand-in's start-up is not the caller's
+                # deadline (CodeRabbit on #739).
+                deadline.reschedule(asyncio.get_running_loop().time() + 0.2)
+                await lookup
+
+        with pytest.raises(TimeoutError):
+            await bounded()
+        await self._run_ended()
+
+        (pid, listing), = devicectl()
+        assert self._gone(pid), "the run outlived its own bound"
+        assert not listing.parent.exists()
+        assert await resolve_tunnel_udid("53DA57AA-1234") is None
+        assert len(devicectl()) == 1, "a devicectl that had just hung was run again"
 
     async def test_a_hung_devicectl_is_bounded_and_not_run_again_at_once(
             self, monkeypatch, devicectl):

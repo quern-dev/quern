@@ -315,6 +315,7 @@ def _devicectl_failures_forgotten(monkeypatch):
     from server.device.ios import tunneld
 
     monkeypatch.setattr(tunneld, "_devicectl_failed_at", None)
+    monkeypatch.setattr(tunneld, "_devicectl_runs", {})
 
 
 @pytest.fixture(autouse=True)

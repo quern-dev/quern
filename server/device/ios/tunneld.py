@@ -233,22 +233,51 @@ async def _map_through_devicectl(devices: dict[str, list[dict]]) -> None:
     """Cache the tunnel UDID of each CoreDevice UUID devicectl lists among
     `devices`: its JSON carries both, the UUID and `hardwareProperties.udid`.
 
-    Bounded, and killed and reaped however the call ends, the caller's
-    cancel included, before its JSON file is removed: a push read's short
-    deadline cancelled the wait and left devicectl running, to write the
-    file again after it was deleted (#737). Not run where there is no Xcode:
-    `devicectl` comes with it, and without developer tools `xcrun` may ask to
-    install them -- on every call, since a failure was not remembered.
+    One run at a time per event loop, which every caller waits on and none
+    owns: a caller that gives up -- a push read's short deadline -- stops
+    waiting, and the run goes on to its own bound and caches what it found.
+    Tied to its caller, each such read killed devicectl and the next started
+    another, paying the cost the remembered failure exists to stop, and a
+    slow devicectl that would have answered never could (CodeRabbit on
+    #739). Not run where there is no Xcode: `devicectl` comes with it, and
+    without developer tools `xcrun` may ask to install them -- on every
+    call, since a failure was not remembered (#737).
     """
-    global _devicectl_failed_at
-    from server.device.performance import _run
-    from server.models import DeviceError
-
     if (_devicectl_failed_at is not None
             and time.monotonic() - _devicectl_failed_at < DEVICECTL_RETRY_S):
         return
     if not await asyncio.to_thread(xcode_available):
         return
+    loop = asyncio.get_running_loop()
+    run = _devicectl_runs.get(loop)
+    if run is None:
+        run = loop.create_task(_list_and_map(devices))
+        _devicectl_runs[loop] = run
+        run.add_done_callback(_devicectl_run_ended)
+    await asyncio.shield(run)
+
+
+#: The devicectl run in progress, per event loop; gone once it ends, so the
+#: run never holds its loop past its own life.
+_devicectl_runs: dict[asyncio.AbstractEventLoop, asyncio.Task] = {}
+
+
+def _devicectl_run_ended(run: asyncio.Task) -> None:
+    _devicectl_runs.pop(run.get_loop(), None)
+    if not run.cancelled() and run.exception() is not None:
+        # Retrieved here, so a run every caller gave up on is not reported
+        # as an exception nobody read; it is a bug in the mapping if it fires.
+        logger.warning("[tunneld] devicectl lookup failed: %r", run.exception())
+
+
+async def _list_and_map(devices: dict[str, list[dict]]) -> None:
+    """Run `devicectl list devices`, bounded, and cache what it maps. Killed
+    and reaped at the bound before its JSON file is removed, as on a cancel
+    (#737). A failure to run is remembered for `DEVICECTL_RETRY_S`."""
+    global _devicectl_failed_at
+    from server.device.performance import _run
+    from server.models import DeviceError
+
     try:
         # Created and removed inside the `try`: a full or unwritable temp
         # directory is a failure to ask, as devicectl's own would be, not an
