@@ -40,6 +40,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from server import config as config_mod
+from server.device.ios._xcode import needs_xcode, xcode_available
 from server.profiling import android as ad
 from server.profiling import xctrace as xt
 from server.profiling.trace_processor import TraceProcessor
@@ -323,6 +324,11 @@ class ProfileManager:
             raise ProfileError(f"the {preset!r} preset is not available on "
                                f"{'Android' if platform == 'android' else 'iOS'}; one of "
                                f"{', '.join(presets)}")
+        if platform != "android" and not await asyncio.to_thread(xcode_available):
+            # Refused before anything runs: the warm-up's `devicectl` and the
+            # recording's `xctrace` both come with Xcode, and with no developer
+            # tools `xcrun` shows the install dialog, twice an attempt (#738).
+            raise ProfileError(needs_xcode("Profiling an iOS app (xctrace)"), 503)
         if platform == "android" and self.adb is None:
             raise ProfileError("Android profiles cannot be recorded on this server: adb is "
                                "not available", 503)

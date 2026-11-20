@@ -301,6 +301,8 @@ def _default_xcode_available(monkeypatch):
         "server.device.ios.simctl.xcode_available",
         "server.device.ios.devicectl.xcode_available",
         "server.device.ios.tunneld.xcode_available",
+        "server.sources.symbolicate.xcode_available",
+        "server.profiling.manager.xcode_available",
         "server.lifecycle.setup.xcode_available",
         "server.device.media.preview.xcode_available",
         "server.device.media.media_engine.xcode_available",

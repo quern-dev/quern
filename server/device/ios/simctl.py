@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 from server.device._subprocess import communicate
-from server.device.ios._xcode import xcode_available
+from server.device.ios._xcode import needs_xcode, xcode_available
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 from server.tooling.tool_probe import probe_command
 
@@ -68,6 +68,12 @@ class SimctlBackend:
 
         Raises DeviceError on non-zero exit code.
         """
+        if not xcode_available():
+            # Every caller, gated or not: a phone whose type was not known yet
+            # fell into the simulator branch, and `xcrun` would have shown the
+            # install dialog (#738).
+            raise DeviceError(needs_xcode(f"simctl {args[0] if args else ''}".strip()),
+                              tool="simctl")
         proc = await asyncio.create_subprocess_exec(
             "xcrun", "simctl", *args,
             stdout=asyncio.subprocess.PIPE,
@@ -87,6 +93,8 @@ class SimctlBackend:
         Used for commands that require piping (e.g. listapps | plutil).
         Raises DeviceError on non-zero exit code.
         """
+        if "xcrun" in cmd and not xcode_available():
+            raise DeviceError(needs_xcode("simctl"), tool="simctl")
         proc = await asyncio.create_subprocess_exec(
             "sh", "-c", cmd,
             stdout=asyncio.subprocess.PIPE,

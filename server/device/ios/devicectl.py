@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from server.device._subprocess import communicate
-from server.device.ios._xcode import xcode_available
+from server.device.ios._xcode import needs_xcode, xcode_available
 from server.models import (
     AppInfo,
     DeviceError,
@@ -134,6 +134,11 @@ class DevicectlBackend:
 
         Raises DeviceError on non-zero exit code.
         """
+        if not xcode_available():
+            # Every caller, gated or not: no `xcrun` where it would show the
+            # install dialog (#738).
+            raise DeviceError(needs_xcode(f"devicectl {args[0] if args else ''}".strip()),
+                              tool="devicectl")
         cmd_args = ["xcrun", "devicectl"]
 
         if json_output:

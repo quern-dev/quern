@@ -92,6 +92,7 @@ async def setup_wda(request: Request, body: SetupWdaRequest):
             detail=f"Device {body.udid} has no OS version info. Is it connected?",
         )
 
+    await _refuse_without_xcode(body.udid)
     from server.device.ios.wda import setup_wda as _setup_wda
 
     try:
@@ -105,6 +106,23 @@ async def setup_wda(request: Request, body: SetupWdaRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
     return result
+
+
+async def _refuse_without_xcode(udid: str) -> None:
+    """Refused, naming why, on a Mac with no Xcode: WDA is built and started
+    with `xcodebuild`, and these routes ran it anyway when a build or signing
+    profile was left from an earlier Xcode -- where `xcodebuild` is a stub
+    that shows the install dialog (#738). The auto-start already refused."""
+    from server.tooling.wda_availability import NO_XCODE, wda_unavailable_reason
+
+    if await wda_unavailable_reason() == NO_XCODE:
+        from server.api.device import _handle_device_error
+        from server.models import WdaNotSetUpError
+
+        raise _handle_device_error(WdaNotSetUpError(
+            f"WebDriverAgent cannot be built or started on {udid[:8]}: {NO_XCODE}. "
+            "An iPhone on iOS 27 or later is driven without it; an earlier one needs "
+            "Xcode installed first.", tool="wda"))
 
 
 async def _validate_ios_device(controller, udid: str):
@@ -170,6 +188,7 @@ async def start_wda_driver(request: Request, body: StartDriverRequest):
             detail=f"Device {body.udid} has no OS version info. Is it connected?",
         )
 
+    await _refuse_without_xcode(body.udid)
     from server.device.ios.wda import start_driver
 
     try:

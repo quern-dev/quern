@@ -129,7 +129,12 @@ def _fix_developer_dir() -> str | None:
         except Exception:
             return False
 
-    if _simctl_works():
+    from server.device.ios._xcode import xcode_available
+
+    # Only probed where developer tools are installed: with none, `xcrun`
+    # shows the install dialog -- at every start, where `setup` already
+    # skipped it (#738).
+    if xcode_available() and _simctl_works():
         return None  # Everything is fine
 
     # simctl doesn't work — try to find an Xcode installation and set DEVELOPER_DIR
@@ -146,6 +151,8 @@ def _fix_developer_dir() -> str | None:
             candidate = xcode_app / "Contents" / "Developer"
             if candidate.exists():
                 os.environ["DEVELOPER_DIR"] = str(candidate)
+                # The cached answer was from before DEVELOPER_DIR.
+                xcode_available.cache_clear()
                 # Verify this actually fixes simctl
                 if _simctl_works():
                     msg = (
@@ -157,6 +164,7 @@ def _fix_developer_dir() -> str | None:
                     return msg
                 # Didn't help — undo and try next
                 del os.environ["DEVELOPER_DIR"]
+                xcode_available.cache_clear()
 
         logger.warning(
             "simctl not available (xcode-select points to '%s'). "

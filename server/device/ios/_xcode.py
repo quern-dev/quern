@@ -50,3 +50,11 @@ def xcode_available() -> bool:
     # still prints its old path, and the stubs then show the dialog (#659).
     path = result.stdout.strip()
     return result.returncode == 0 and bool(path) and os.path.isdir(path)
+
+
+def needs_xcode(what: str) -> str:
+    """What a caller is told when `what` cannot run because there is no
+    Xcode: said on the answer, since an agent sees nothing else (#738)."""
+    return (f"{what} needs Xcode, and no Xcode or developer tools are installed on "
+            "this Mac, so it was not run. An iPhone on iOS 27 or later is driven "
+            "without Xcode; this one feature is not.")
