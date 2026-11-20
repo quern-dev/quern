@@ -998,25 +998,32 @@ def test_a_finished_loops_locks_are_let_go():
     import threading
 
     locks = coredevice_ax._Turn._locks       # the fixture's: production's kind
-    seen = []
+    seen, failed = [], []
 
     def run():
         async def make():
             # Contended: a lock that has been waited on holds its loop
             # (CodeRabbit on #736).
             first, second = coredevice_ax._Turn(PHONE), coredevice_ax._Turn(PHONE)
-            await first.take()
+            await asyncio.wait_for(first.take(), 5)
             waiting = asyncio.create_task(second.take())
             await asyncio.sleep(0.05)
             first.give_back()
-            await waiting
+            await asyncio.wait_for(waiting, 5)   # bounded: a turn never given back
             second.give_back()
             seen.append(len(locks))
-        asyncio.run(make())
+        try:
+            asyncio.run(make())
+        except BaseException as e:  # noqa: BLE001 -- said by the test, not lost in the thread
+            failed.append(e)
 
-    t = threading.Thread(target=run)
+    # A daemon thread, so one stuck past the join cannot hold the run open.
+    t = threading.Thread(target=run, daemon=True)
     t.start()
-    t.join()
+    t.join(10)
+    assert not t.is_alive(), "the loop's turns did not finish"
+    if failed:
+        raise failed[0]
     gc.collect()
     assert seen == [1]
     assert len(locks) == 0, "a finished loop's locks were kept"
