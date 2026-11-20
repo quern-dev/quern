@@ -945,7 +945,7 @@ class TestTheTurnAcrossServers:
             env={**os.environ, "PYTHONPATH": root}, cwd=root)
         _ready(other)
         try:
-            assert len(await read_tree(PHONE, timeout=3)) == 14
+            assert len(await read_tree(PHONE, timeout=1)) == 14
         finally:
             other.kill()
             other.wait(5)
