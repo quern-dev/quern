@@ -243,10 +243,13 @@ async def _map_through_devicectl(devices: dict[str, list[dict]]) -> None:
     without developer tools `xcrun` may ask to install them -- on every
     call, since a failure was not remembered (#737).
     """
+    if not await asyncio.to_thread(xcode_available):
+        return
+    # After the await, with none between it and starting a run: checked
+    # before it, a run that failed while this caller waited was replaced
+    # inside its own cooldown (CodeRabbit on #739).
     if (_devicectl_failed_at is not None
             and time.monotonic() - _devicectl_failed_at < DEVICECTL_RETRY_S):
-        return
-    if not await asyncio.to_thread(xcode_available):
         return
     loop = asyncio.get_running_loop()
     joined = _devicectl_runs.get(loop)

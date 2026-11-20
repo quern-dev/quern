@@ -426,6 +426,18 @@ class TestDevicectlIsBounded:
         assert tunneld_module._devicectl_runs[loop][0] is new
         new.cancel()
 
+    async def test_a_failure_while_a_caller_waited_still_holds_it_off(
+            self, monkeypatch, devicectl):
+        """It passed the cooldown, waited on the Xcode check while another
+        run failed, then started a run inside the cooldown (CodeRabbit)."""
+        def failing_meanwhile():
+            tunneld_module._devicectl_failed_at = tunneld_module.time.monotonic()
+            return True
+
+        monkeypatch.setattr(tunneld_module, "xcode_available", failing_meanwhile)
+        assert await resolve_tunnel_udid("53DA57AA-1234") is None
+        assert devicectl() == [], "a devicectl was started inside the cooldown"
+
     async def test_a_hung_run_no_one_waits_for_is_killed_at_its_bound(
             self, monkeypatch, devicectl):
         monkeypatch.setenv("FAKE_DEVICECTL_MODE", "hang")
