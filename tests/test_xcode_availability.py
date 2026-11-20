@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from server.device.ios._xcode import xcode_available as _REAL_XCODE_AVAILABLE
+
 #: The developer directories these tests treat as present. The check also
 #: asks that the directory exist (#659), and the real filesystem differs
 #: between a Mac with Xcode and the Linux CI runner.
@@ -17,6 +19,9 @@ def _clear_xcode_cache(monkeypatch):
     """Clear the lru_cache between tests and bypass the autouse conftest
     fixture so we exercise the real implementation."""
     from server.device.ios import _xcode
+    # The conftest stubs it on the module too, for `require_xcode` (#738):
+    # the real one back, taken at import, before any stub.
+    monkeypatch.setattr(_xcode, "xcode_available", _REAL_XCODE_AVAILABLE)
     _xcode.xcode_available.cache_clear()
     # Clear DEVELOPER_DIR so its presence doesn't shortcut the check.
     monkeypatch.delenv("DEVELOPER_DIR", raising=False)
