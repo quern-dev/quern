@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from server.device.ios import coredevice_ax
-from server.device.ios.coredevice_ax import PushNotAnswering, read_tree
+from server.device.ios.coredevice_ax import PushNotAnswering, TurnNotTaken, read_tree
 from server.models import DeviceError
 from tests.test_coredevice_ax import (
     PHONE,
@@ -31,6 +31,9 @@ from tests.test_coredevice_ax import (
     _as,
     _phone_controller,
 )
+
+#: Before the suite's fixture names every turn file by the id given.
+_REAL_LOCK_IDENTITY = coredevice_ax._lock_identity
 
 OTHER_PHONE = "00008101-0000000000000002"
 DAEMON_PID = 2039
@@ -607,6 +610,20 @@ class TestTheAnswerSaysSo:
         note = ctrl.read_note() or ""
         assert "restarted" in note and "exited" in note
 
+    async def test_a_read_that_never_got_its_turn_does_not_fall_back(self, monkeypatch):
+        """The push was busy, not broken: read through WDA instead, it started
+        WDA beside it for every short read queued behind a long one (review
+        on #736)."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        ctrl.coredevice_ax.describe_all = self._restarting(error=TurnNotTaken(
+            "waited 1s for another accessibility read of 48CF8DD9 to finish; "
+            "the phone was not asked", tool="coredevice"))
+
+        with pytest.raises(TurnNotTaken, match="the phone was not asked") as caught:
+            await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
+
+        assert "restarted" in str(caught.value)
+
     async def test_a_restart_is_said_when_there_is_no_wda_to_fall_back_on(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl.coredevice_ax.describe_all = self._restarting(
@@ -637,8 +654,22 @@ def _hold_turn_elsewhere(lock_dir, uuid, seconds):
         f"time.sleep({seconds})\n"
     )
     proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
-    assert proc.stdout.readline().strip() == "held"
+    _ready(proc)
     return proc
+
+
+def _ready(proc, seconds=15.0):
+    """Wait, bounded, for `proc` to say it holds the turn; on a timeout or
+    anything else it is killed, reaped and its pipe closed (CodeRabbit on #736)."""
+    import select
+
+    ready, _, _ = select.select([proc.stdout], [], [], seconds)
+    line = proc.stdout.readline().strip() if ready else ""
+    if line != "held":
+        proc.kill()
+        proc.wait(5)
+        proc.stdout.close()
+        pytest.fail(f"the other server never took the turn ({line!r})")
 
 
 async def _never(*a, **k):
@@ -662,6 +693,7 @@ class TestATimeoutSaysWhoseItWas:
 
         assert "the phone was not asked" in str(caught.value)
         assert "sent no complete" not in str(caught.value)
+        assert isinstance(caught.value, TurnNotTaken)
 
     async def test_a_read_that_had_its_turn_at_once_says_nothing_of_waiting(
             self, monkeypatch, phone_address):
@@ -699,6 +731,7 @@ class TestATimeoutSaysWhoseItWas:
 
         assert "sent no complete" in str(caught.value)
         assert "waiting for another read of this phone" in str(caught.value)
+        assert not isinstance(caught.value, TurnNotTaken), "its turn came: the phone was asked"
 
     async def test_a_value_never_set_says_nothing_was_set(self, monkeypatch, phone_address):
         lib, _ = _lib(push_delay=1.0)
@@ -711,6 +744,7 @@ class TestATimeoutSaysWhoseItWas:
         await long_read
 
         assert "nothing was set" in str(caught.value)
+        assert isinstance(caught.value, TurnNotTaken)
         assert "may or may not" not in str(caught.value)
 
     async def test_a_launch_check_that_never_got_its_turn_says_so(
@@ -845,9 +879,10 @@ class TestTheTurnAcrossServers:
             self, monkeypatch, phone_address, tmp_path):
         """/tmp is shared: a link another user left at the lock's name would
         have had this server create and lock a file of their choosing."""
-        import os
         target = tmp_path / "theirs"
-        turns = pathlib.Path(os.environ["QUERN_AX_LOCK_DIR"])
+        turns = tmp_path / "turns"
+        turns.mkdir(mode=0o700)
+        monkeypatch.setenv("QUERN_AX_LOCK_DIR", str(turns))
         (turns / f"coredevice-ax-{PHONE}.lock").symlink_to(target)
         lib, _ = _lib()
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
@@ -858,10 +893,11 @@ class TestTheTurnAcrossServers:
         assert len(notes) == 1
 
     async def test_a_shared_lock_directory_is_made_private(
-            self, monkeypatch, phone_address):
-        import os
-        turns = pathlib.Path(os.environ["QUERN_AX_LOCK_DIR"])
+            self, monkeypatch, phone_address, tmp_path):
+        turns = tmp_path / "turns"
+        turns.mkdir()
         turns.chmod(0o777)
+        monkeypatch.setenv("QUERN_AX_LOCK_DIR", str(turns))
         lib, _ = _lib()
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
 
@@ -880,9 +916,13 @@ class TestTheTurnAcrossServers:
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
         code = (
             "import asyncio, time\n"
+            "import server.device.ios.coredevice_ax as ax\n"
             "from server.device.ios.coredevice_ax import _Turn\n"
+            # A wide give-way, ten of this side's polls, so a loaded runner
+            # still lands one in it; with none, the gap is microseconds.
+            "ax.TURN_POLL_S = 0.25\n"
             "async def main():\n"
-            "    end = time.monotonic() + 3\n"
+            "    end = time.monotonic() + 5\n"
             "    first = True\n"
             "    while time.monotonic() < end:\n"
             f"        turn = _Turn({PHONE!r})\n"
@@ -897,14 +937,53 @@ class TestTheTurnAcrossServers:
         other = subprocess.Popen(
             [sys.executable, "-c", code], stdout=subprocess.PIPE, text=True,
             env={**os.environ, "PYTHONPATH": root}, cwd=root)
+        _ready(other)
         try:
-            assert other.stdout.readline().strip() == "held"
-            assert len(await read_tree(PHONE, timeout=2)) == 14
+            assert len(await read_tree(PHONE, timeout=3)) == 14
         finally:
             other.kill()
             other.wait(5)
             other.stdout.close()
 
+
+    async def test_both_ids_of_a_phone_take_one_turn(self, monkeypatch, phone_address):
+        """One server given the hardware UDID, another the CoreDevice UUID,
+        took two files and overlapped (CodeRabbit on #736)."""
+        import os
+
+        from server.device.ios import tunneld
+        monkeypatch.setattr(coredevice_ax, "_lock_identity", _REAL_LOCK_IDENTITY)
+        hardware = "00008101-000A1B2C3D4E5F60"
+
+        async def resolve(uuid):
+            return hardware
+
+        monkeypatch.setattr(tunneld, "resolve_tunnel_udid", resolve)
+        lib, state = _lib()
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
+        other = _hold_turn_elsewhere(os.environ["QUERN_AX_LOCK_DIR"], hardware, 1.0)
+        try:
+            with pytest.raises(TurnNotTaken):
+                await read_tree(PHONE, timeout=0.3)
+            assert state.connects == 0
+        finally:
+            other.wait(5)
+            other.stdout.close()
+
+    async def test_an_id_it_cannot_resolve_is_the_id_given(self, monkeypatch, phone_address):
+        from server.device.ios import tunneld
+
+        async def broken(uuid):
+            raise OSError("tunneld is not answering")
+
+        monkeypatch.setattr(tunneld, "resolve_tunnel_udid", broken)
+        assert await _REAL_LOCK_IDENTITY(PHONE) == PHONE
+
+        async def unknown(uuid):
+            return None
+
+        monkeypatch.setattr(tunneld, "resolve_tunnel_udid", unknown)
+        assert await _REAL_LOCK_IDENTITY(PHONE) == PHONE
 
 def test_a_finished_loops_locks_are_let_go():
     """Keyed by `id()`, a loop that had gone could hand its locks to a new
@@ -917,7 +996,15 @@ def test_a_finished_loops_locks_are_let_go():
 
     def run():
         async def make():
-            coredevice_ax._Turn(PHONE)
+            # Contended: a lock that has been waited on holds its loop
+            # (CodeRabbit on #736).
+            first, second = coredevice_ax._Turn(PHONE), coredevice_ax._Turn(PHONE)
+            await first.take()
+            waiting = asyncio.create_task(second.take())
+            await asyncio.sleep(0.05)
+            first.give_back()
+            await waiting
+            second.give_back()
             seen.append(len(locks))
         asyncio.run(make())
 

@@ -225,6 +225,17 @@ class AppExitedDuringRead(DeviceError):
         self.pid = pid
 
 
+class TurnNotTaken(DeviceError):
+    """A read whose deadline ran out while another read of the same phone had
+    its turn: the phone was never asked (#734).
+
+    Not a failure of the push, which is busy rather than broken, so nothing
+    falls back to WDA over it: a fallback started WDA beside a healthy push,
+    the overlap #734 removed, for every short read queued behind a long one
+    (review on #736). The caller only needs more time.
+    """
+
+
 class PushNotAnswering(DeviceError):
     """The phone's accessibility daemon no longer completes a new connection's
     handshake, and could not be recovered (#734).
@@ -883,6 +894,22 @@ TURN_POLL_S = 0.05
 _skip_logged: dict[str, float] = {}
 
 
+async def _lock_identity(uuid: str) -> str:
+    """The id every server names a phone's turn file by: its tunnel UDID,
+    which either of the phone's ids resolves to through tunneld and
+    devicectl, the same for every process on the Mac. Named by the id each
+    server was given, a hardware UDID at one server and a CoreDevice UUID at
+    another took two files for one phone (CodeRabbit on #736). The read's
+    own address lookup resolves it next, so this costs no more. Unresolved,
+    the id given: with no tunnel there is no read to overlap."""
+    from server.device.ios.tunneld import resolve_tunnel_udid
+
+    try:
+        return await resolve_tunnel_udid(uuid) or uuid
+    except Exception:  # noqa: BLE001 -- could not tell is the id given
+        return uuid
+
+
 def _open_own(path: Path) -> int:
     """`path` opened, made if missing, without following a symlink, and only
     if it is a regular file this user owns. OSError otherwise."""
@@ -937,14 +964,20 @@ class _Turn:
     """
 
     #: Per event loop, by the loop itself: keyed by `id()`, a loop that has
-    #: gone could hand its locks to a new one given its id (review).
-    _locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+    #: gone could hand its locks to a new one given its id (review). Each lock
+    #: is kept only while a turn holds it: a lock that has been waited on
+    #: holds its loop, so kept for good it kept every finished loop alive
+    #: through the weak key (CodeRabbit on #736). One nobody holds has no
+    #: one waiting on it, so a new one in its place loses nothing.
+    _locks: weakref.WeakKeyDictionary[
+        asyncio.AbstractEventLoop, weakref.WeakValueDictionary[str, asyncio.Lock]] = (
         weakref.WeakKeyDictionary())
 
     def __init__(self, uuid: str) -> None:
         loop = asyncio.get_running_loop()
         self._uuid = uuid
-        self._lock = self._locks.setdefault(loop, {}).setdefault(uuid, asyncio.Lock())
+        locks = self._locks.setdefault(loop, weakref.WeakValueDictionary())
+        self._lock = locks.setdefault(uuid, asyncio.Lock())
         self._held = False
         self._fd: int | None = None
         self._asked = time.monotonic()
@@ -968,7 +1001,7 @@ class _Turn:
     async def _take_across_servers(self) -> None:
         from server.screenshots import private_dir
 
-        name = re.sub(r"[^A-Za-z0-9-]", "_", self._uuid)
+        name = re.sub(r"[^A-Za-z0-9-]", "_", await _lock_identity(self._uuid))
         directory = _turn_dir()
         path = directory / f"coredevice-ax-{name}.lock"
         try:
@@ -1358,8 +1391,8 @@ async def _with_settled_tree(uuid: str, timeout: float, what: str,
     except TimeoutError as e:
         if not turn.taken:
             # `what` may say it might have happened; it did not (review).
-            raise DeviceError(turn.timed_out(timeout, "") + (f"; {unasked}" if unasked else ""),
-                              tool="coredevice") from e
+            raise TurnNotTaken(turn.timed_out(timeout, "") + (f"; {unasked}" if unasked else ""),
+                               tool="coredevice") from e
         raise DeviceError(turn.timed_out(
             timeout, f"{what} on {uuid[:8]} timed out after {timeout:g}s"),
             tool="coredevice") from e
@@ -1491,7 +1524,7 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
             # The phone was never asked when the deadline came while this
             # read waited its turn: said as such, not as the phone's fault,
             # which sent an agent looking at the app (review).
-            raise DeviceError(turn.timed_out(
+            raise (DeviceError if turn.taken else TurnNotTaken)(turn.timed_out(
                 timeout, f"{uuid[:8]} sent no complete accessibility tree within {timeout:g}s"),
                 tool="coredevice") from None
         raise DeviceError(f"accessibility service on {uuid[:8]} timed out: {e!r}",

@@ -15,7 +15,12 @@ from server.config import get_device_ui_reader
 from server.device import gestures
 from server.device.element_types import equivalence, related_type_names
 from server.device.ios import coredevice_ax
-from server.device.ios.coredevice_ax import COREDEVICE_MIN_IOS, AppExitedDuringRead, BareAppTree
+from server.device.ios.coredevice_ax import (
+    COREDEVICE_MIN_IOS,
+    AppExitedDuringRead,
+    BareAppTree,
+    TurnNotTaken,
+)
 from server.device.ios.coredevice_input import types_on_us_keys
 from server.device.ios.hinge import DEFAULT_SWEEP_MS, POSES
 from server.device.media.screenshots import annotate_screenshot
@@ -3566,9 +3571,17 @@ class DeviceControllerUI:
             # its own (#734): said on this answer, whether the read then
             # answered, fell back or failed -- added to any note already
             # there, never over it.
-            restarted = " ".join(notes)
-            if restarted and failed is None:
-                _READ_NOTE.set(_joined(_READ_NOTE.get(), restarted))
+            said = " ".join(notes)
+            if said and failed is None:
+                _READ_NOTE.set(_joined(_READ_NOTE.get(), said))
+            if isinstance(failed, TurnNotTaken):
+                # Busy, not broken: the deadline ran out while another read of
+                # this phone had its turn. Read through WDA, it started WDA
+                # beside a healthy push for every short read queued behind a
+                # long one -- the overlap #734 removed (review on #736).
+                if said:
+                    failed.args = (f"{failed} {said}",)
+                raise failed
             # A read the push cannot make is made through WDA, and `backend`
             # on the answer says which one served it -- where there is a WDA.
             # Where there is none (no Xcode, or none built), the answer says so
@@ -3597,7 +3610,7 @@ class DeviceControllerUI:
                                          if isinstance(failed, AppExitedDuringRead) else "")
                         + "There is no WebDriverAgent to read it through instead: "
                         f"{no_wda}. This device stays on the accessibility push; "
-                        "read the screen again." + (f" {restarted}" if restarted else ""),
+                        "read the screen again." + (f" {said}" if said else ""),
                         tool=self.coredevice_ax.TOOL_NAME) from failed
             elif failed is not None:
                 e = failed
@@ -3615,7 +3628,7 @@ class DeviceControllerUI:
                             f"{e}. Nothing was looked up: the screen this lookup was "
                             "for is gone. This device's screens will be read through "
                             "WDA until the server restarts; read the screen again "
-                            "before acting." + (f" {restarted}" if restarted else ""),
+                            "before acting." + (f" {said}" if said else ""),
                             tool=self.coredevice_ax.TOOL_NAME) from e
                     _READ_NOTE.set(
                         f"{e}. This read is WDA's, and this device's screens will be "
@@ -3632,8 +3645,8 @@ class DeviceControllerUI:
                     _READ_NOTE.set(
                         f"The accessibility push could not read this screen: {e}. "
                         "This read is WDA's.")
-                if restarted:
-                    _READ_NOTE.set(_joined(_READ_NOTE.get(), restarted))
+                if said:
+                    _READ_NOTE.set(_joined(_READ_NOTE.get(), said))
                 reader = None
                 if lookup and snapshot_depth is None:
                     # A lookup asked for no depth because the push needs none;
