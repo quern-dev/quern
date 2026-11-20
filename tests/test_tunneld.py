@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 
 import server.device.ios.tunneld as tunneld_module
 from server.device.ios.tunneld import (
@@ -239,6 +241,280 @@ class TestResolveTunnelUdid:
             result = await resolve_tunnel_udid("53DA57AA-1111")
             assert result is None
 
+
+
+PHONES = {"00008130-AAAA": [{"tunnel-address": "fd35::1"}]}
+LISTED = {"result": {"devices": [
+    {"identifier": "53DA57AA-1234", "hardwareProperties": {"udid": "00008130-AAAA"}}]}}
+
+#: Listings devicectl did not write, each of which must map nothing. The last
+#: two are unhashable where a string is looked up, which raised TypeError out
+#: of every caller (review on #737).
+OTHER_SHAPES = [
+    [],
+    {"result": []},
+    {"result": {"devices": {}}},
+    {"result": {"devices": [7, {"identifier": "x", "hardwareProperties": []}]}},
+    {"result": {"devices": [
+        {"identifier": "53DA57AA-1234", "hardwareProperties": {"udid": ["x"]}}]}},
+    {"result": {"devices": [
+        {"identifier": ["53DA57AA-1234"], "hardwareProperties": {"udid": "00008130-AAAA"}}]}},
+]
+
+_FAKE_XCRUN = """#!{python}
+import json, os, sys, time
+# xcrun devicectl list devices --json-output <path>
+with open(os.environ["FAKE_DEVICECTL_LOG"], "a") as log:
+    log.write(f"{{os.getpid()}} {{sys.argv[5]}}\\n")
+mode = os.environ["FAKE_DEVICECTL_MODE"]
+if mode == "hang":
+    time.sleep(30)          # then writes the file it was given, as devicectl would
+if mode == "slow":
+    time.sleep(0.6)         # slow, but answers
+if mode == "gated":         # answers once the test says so, at most 10 s on
+    gate = os.environ["FAKE_DEVICECTL_GATE"]
+    for _ in range(400):
+        if os.path.exists(gate):
+            break
+        time.sleep(0.025)
+if mode == "fail":
+    sys.stderr.write("devicectl: boom")
+    sys.exit(1)
+with open(sys.argv[5], "w") as out:
+    out.write(os.environ.get("FAKE_DEVICECTL_JSON", "{{}}"))
+"""
+
+
+class TestDevicectlIsBounded:
+    """`resolve_tunnel_udid`'s devicectl had no bound, outlived a caller that
+    gave up, and was run again on every call after failing (#737). A real
+    process stands in for it, so killed and reaped can be checked."""
+
+    @pytest.fixture
+    def devicectl(self, monkeypatch, tmp_path):
+        import sys
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        xcrun = bin_dir / "xcrun"
+        xcrun.write_text(_FAKE_XCRUN.format(python=sys.executable))
+        xcrun.chmod(0o755)
+        log = tmp_path / "devicectl.log"
+        log.touch()
+        monkeypatch.setattr(tunneld_module, "XCRUN", str(xcrun))
+        monkeypatch.setenv("FAKE_DEVICECTL_LOG", str(log))
+        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "ok")
+        monkeypatch.setenv("FAKE_DEVICECTL_JSON", json.dumps(LISTED))
+        monkeypatch.setattr(tunneld_module, "get_tunneld_devices", AsyncMock(return_value=PHONES))
+        _tunnel_udid_cache.clear()
+
+        def runs() -> list[tuple[int, Path]]:
+            return [(int(pid), Path(path)) for pid, path in
+                    (line.split(" ", 1) for line in log.read_text().splitlines())]
+        yield runs
+        _tunnel_udid_cache.clear()
+
+    @staticmethod
+    def _gone(pid: int) -> bool:
+        """Killed and reaped: a zombie still answers signal 0."""
+        import os
+
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+
+    @staticmethod
+    async def _started(runs) -> tuple[int, Path]:
+        for _ in range(200):
+            if runs():
+                return runs()[0]
+            await asyncio.sleep(0.025)
+        pytest.fail("devicectl never started")
+
+    async def test_it_maps_a_phone(self, devicectl):
+        assert await resolve_tunnel_udid("53DA57AA-1234") == "00008130-AAAA"
+        (_, listing), = devicectl()
+        assert not listing.exists(), "its JSON was left behind"
+        assert not listing.parent.exists(), "its directory was left behind"
+
+    @staticmethod
+    async def _run_ended() -> None:
+        for _ in range(400):
+            if not tunneld_module._devicectl_runs:
+                return
+            await asyncio.sleep(0.025)
+        pytest.fail("the devicectl run never ended")
+
+    async def test_a_caller_that_gives_up_leaves_the_run_to_answer(
+            self, monkeypatch, devicectl):
+        """Killed with each caller that gave up, a slow devicectl never
+        answered, and the next caller started another (CodeRabbit on #739)."""
+        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "slow")
+        lookup = asyncio.create_task(resolve_tunnel_udid("53DA57AA-1234"))
+        pid, listing = await self._started(devicectl)
+
+        lookup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(lookup, 0.3)          # the caller is let go at once
+
+        assert await asyncio.wait_for(resolve_tunnel_udid("53DA57AA-1234"), 5) == "00008130-AAAA"
+        assert len(devicectl()) == 1, "a second devicectl was started beside the first"
+        assert self._gone(pid)
+        assert not listing.parent.exists()
+        assert tunneld_module._devicectl_runs == {}, "the ended run was kept"
+
+    async def test_callers_at_once_share_one_run(self, monkeypatch, devicectl):
+        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "slow")
+        found = await asyncio.wait_for(asyncio.gather(
+            *(resolve_tunnel_udid("53DA57AA-1234") for _ in range(3))), 5)
+        assert found == ["00008130-AAAA"] * 3
+        assert len(devicectl()) == 1
+
+    async def test_a_caller_that_joins_brings_its_own_tunnels(
+            self, monkeypatch, devicectl, tmp_path):
+        """Joined with a phone that connected after the run began, it came back
+        None: the run filtered by the first caller's tunnels (CodeRabbit on #739)."""
+        gate = tmp_path / "release"
+        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "gated")
+        monkeypatch.setenv("FAKE_DEVICECTL_GATE", str(gate))
+        monkeypatch.setenv("FAKE_DEVICECTL_JSON", json.dumps({"result": {"devices": [
+            {"identifier": "53DA57AA-1234", "hardwareProperties": {"udid": "00008130-AAAA"}},
+            {"identifier": "53DA57AA-5678", "hardwareProperties": {"udid": "00008130-BBBB"}},
+        ]}}))
+        first = asyncio.create_task(resolve_tunnel_udid("53DA57AA-1234"))
+        await self._started(devicectl)
+        both = {**PHONES, "00008130-BBBB": [{"tunnel-address": "fd35::2"}]}
+        monkeypatch.setattr(tunneld_module, "get_tunneld_devices", AsyncMock(return_value=both))
+
+        later = asyncio.create_task(resolve_tunnel_udid("53DA57AA-5678"))
+        # Released only once it has joined: a fixed sleep let a stalled runner
+        # end the first run before the second caller arrived (CodeRabbit).
+        for _ in range(200):
+            entries = list(tunneld_module._devicectl_runs.values())
+            if entries and "00008130-BBBB" in entries[0][1]:
+                break
+            await asyncio.sleep(0.025)
+        else:
+            pytest.fail("the second caller never joined the run")
+        gate.touch()
+
+        assert await asyncio.wait_for(later, 5) == "00008130-BBBB"
+        assert await asyncio.wait_for(first, 5) == "00008130-AAAA"
+        assert len(devicectl()) == 1, "it started a second run instead of joining"
+
+    async def test_a_run_that_has_finished_is_not_joined(self, monkeypatch, devicectl):
+        """Its entry outlives it until a callback runs; joined then, a new
+        phone's tunnels were added after the filtering (CodeRabbit on #739)."""
+        loop = asyncio.get_running_loop()
+        done = loop.create_future()
+        done.set_result(None)
+        tunneld_module._devicectl_runs[loop] = (done, set())
+
+        assert await asyncio.wait_for(resolve_tunnel_udid("53DA57AA-1234"), 5) == "00008130-AAAA"
+        assert len(devicectl()) == 1, "it joined a finished run instead of starting one"
+
+    async def test_a_finished_run_leaves_a_newer_run_in_place(self):
+        loop = asyncio.get_running_loop()
+        old, new = loop.create_future(), loop.create_future()
+        old.set_result(None)
+        tunneld_module._devicectl_runs[loop] = (new, set())
+
+        tunneld_module._devicectl_run_ended(old)
+
+        assert tunneld_module._devicectl_runs[loop][0] is new
+        new.cancel()
+
+    async def test_a_failure_while_a_caller_waited_still_holds_it_off(
+            self, monkeypatch, devicectl):
+        """It passed the cooldown, waited on the Xcode check while another
+        run failed, then started a run inside the cooldown (CodeRabbit)."""
+        def failing_meanwhile():
+            tunneld_module._devicectl_failed_at = tunneld_module.time.monotonic()
+            return True
+
+        monkeypatch.setattr(tunneld_module, "xcode_available", failing_meanwhile)
+        assert await resolve_tunnel_udid("53DA57AA-1234") is None
+        assert devicectl() == [], "a devicectl was started inside the cooldown"
+
+    async def test_a_hung_run_no_one_waits_for_is_killed_at_its_bound(
+            self, monkeypatch, devicectl):
+        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "hang")
+        monkeypatch.setattr(tunneld_module, "DEVICECTL_LIST_S", 1.0)
+
+        async def bounded():
+            async with asyncio.timeout(None) as deadline:
+                lookup = asyncio.ensure_future(resolve_tunnel_udid("53DA57AA-1234"))
+                await self._started(devicectl)
+                # From here: the stand-in's start-up is not the caller's
+                # deadline (CodeRabbit on #739).
+                deadline.reschedule(asyncio.get_running_loop().time() + 0.2)
+                await lookup
+
+        with pytest.raises(TimeoutError):
+            await bounded()
+        await self._run_ended()
+
+        (pid, listing), = devicectl()
+        assert self._gone(pid), "the run outlived its own bound"
+        assert not listing.parent.exists()
+        assert await resolve_tunnel_udid("53DA57AA-1234") is None
+        assert len(devicectl()) == 1, "a devicectl that had just hung was run again"
+
+    async def test_a_hung_devicectl_is_bounded_and_not_run_again_at_once(
+            self, monkeypatch, devicectl):
+        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "hang")
+        monkeypatch.setattr(tunneld_module, "DEVICECTL_LIST_S", 2.0)
+
+        lookup = asyncio.create_task(resolve_tunnel_udid("53DA57AA-1234"))
+        pid, _ = await self._started(devicectl)
+        assert await asyncio.wait_for(lookup, 10) is None
+        assert self._gone(pid)
+
+        assert await asyncio.wait_for(resolve_tunnel_udid("53DA57AA-1234"), 5) is None
+        assert len(devicectl()) == 1, "a devicectl that had just hung was run again"
+
+    async def test_a_failed_devicectl_is_asked_again_after_a_while(
+            self, monkeypatch, devicectl):
+        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "fail")
+        assert await resolve_tunnel_udid("53DA57AA-1234") is None
+
+        monkeypatch.setattr(tunneld_module, "DEVICECTL_RETRY_S", 0.0)
+        monkeypatch.setenv("FAKE_DEVICECTL_MODE", "ok")
+        assert await resolve_tunnel_udid("53DA57AA-1234") == "00008130-AAAA"
+        assert len(devicectl()) == 2
+
+    async def test_a_list_without_the_phone_is_not_remembered(self, monkeypatch, devicectl):
+        """A phone plugged in a moment later has to resolve."""
+        monkeypatch.setenv("FAKE_DEVICECTL_JSON", json.dumps({"result": {"devices": []}}))
+        assert await resolve_tunnel_udid("53DA57AA-1234") is None
+
+        monkeypatch.setenv("FAKE_DEVICECTL_JSON", json.dumps(LISTED))
+        assert await resolve_tunnel_udid("53DA57AA-1234") == "00008130-AAAA"
+        assert len(devicectl()) == 2
+
+    @pytest.mark.parametrize("listing", OTHER_SHAPES)
+    async def test_a_listing_of_another_shape_maps_nothing(self, monkeypatch, devicectl, listing):
+        monkeypatch.setenv("FAKE_DEVICECTL_JSON", json.dumps(listing))
+        assert await resolve_tunnel_udid("53DA57AA-1234") is None
+
+    async def test_a_temp_directory_it_cannot_make_is_a_failure_to_ask(
+            self, monkeypatch, devicectl):
+        """Not an OSError out of every caller (review)."""
+        def unwritable(*a, **k):
+            raise PermissionError("temp directory not writable")
+
+        monkeypatch.setattr(tunneld_module.tempfile, "TemporaryDirectory", unwritable)
+        assert await resolve_tunnel_udid("53DA57AA-1234") is None
+        assert tunneld_module._devicectl_failed_at is not None, "not remembered"
+
+    async def test_with_no_xcode_it_is_not_run(self, monkeypatch, devicectl):
+        """`devicectl` comes with Xcode; without developer tools `xcrun` may
+        ask to install them, on every call."""
+        monkeypatch.setattr(tunneld_module, "xcode_available", lambda: False)
+        assert await resolve_tunnel_udid("53DA57AA-1234") is None
+        assert devicectl() == []
 
 # ---------------------------------------------------------------------------
 # generate_plist

@@ -300,11 +300,22 @@ def _default_xcode_available(monkeypatch):
     for path in (
         "server.device.ios.simctl.xcode_available",
         "server.device.ios.devicectl.xcode_available",
+        "server.device.ios.tunneld.xcode_available",
         "server.lifecycle.setup.xcode_available",
         "server.device.media.preview.xcode_available",
         "server.device.media.media_engine.xcode_available",
     ):
         monkeypatch.setattr(path, _make_stub())
+
+
+@pytest.fixture(autouse=True)
+def _devicectl_failures_forgotten(monkeypatch):
+    """A devicectl failure is remembered for a while (#737): per test, so
+    one test's failed lookup does not skip the next test's."""
+    from server.device.ios import tunneld
+
+    monkeypatch.setattr(tunneld, "_devicectl_failed_at", None)
+    monkeypatch.setattr(tunneld, "_devicectl_runs", {})
 
 
 @pytest.fixture(autouse=True)
