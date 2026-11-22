@@ -56,6 +56,7 @@ From there, use the right tool for your task. If any tool fails with a connectio
 | See network traffic | `get_flow_summary`, `query_flows`, `get_flow_detail`; bracket an action with `start_capture_session`; capture an app by process name with `add_session_capture` (every simulator's, so filter by `simulator_udid`) | `quern://guide/network/capture` |
 | Capture a physical iPhone's traffic | `proxy_setup_guide`, `record_device_proxy_config`, then `wait_for_flow` (ask before installing the CA) | `quern://guide/devices/physical-proxy` |
 | Fake a response | `set_mock`, `update_mock` | `quern://guide/network/mocks` |
+| See a redacted token or cookie (secrets are redacted in what is shown) | `reveal` on `get_flow_detail`, `query_flows`, `wait_for_flow`, `list_held_flows`; placeholders passed back are sent as the real value | `quern://guide/network/secrets` |
 | Hold or change a live request | `set_intercept`, `list_held_flows`, `release_flow`, `clear_intercept` | `quern://guide/network/intercept` |
 | Read app logs | `get_log_summary`, `query_logs`, `tail_logs`, `get_errors` | `quern://guide/logs/reading` |
 | Read a web page's console and JS errors | `get_web_console` | `quern://guide/logs/web-console` |
