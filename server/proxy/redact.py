@@ -21,7 +21,10 @@ agent copying the headers it was shown into `release_flow`'s modifications --
 is put back to its real value (`restore`), since sending the placeholder
 would fail auth in a way that looks like the app's own bug.
 
-Bodies are not redacted (#749): answers say so, so nobody assumes they are.
+Bodies (#749): secret-named fields in JSON and form bodies are redacted the
+same way, edited in place by `server.proxy.redact_body` so the rest of a body
+stays exactly as captured. Other bodies -- multipart, binary, HTML -- are shown
+as captured, and the answer names them, so nobody assumes they were redacted.
 """
 
 from __future__ import annotations
@@ -36,6 +39,8 @@ import threading
 from collections import OrderedDict
 from typing import Any
 from urllib.parse import unquote_plus
+
+from server.proxy import redact_body as body_mod
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +58,19 @@ PARAMS = frozenset({
 })
 
 #: What a flow answer says when it redacted anything.
-NOTE = ("Secret headers and query-string parameters are redacted: pass reveal "
-        "(names, or true) to see them. Bodies are not redacted (#749).")
+NOTE = ("Secret headers, query-string parameters and JSON or form body fields are "
+        "redacted: pass reveal (names, or true) to see them.")
+
+
+def note(names: list[str] | None, unscanned: list[str] | None) -> str | None:
+    """An answer's redaction_note: said when anything was redacted, and when a
+    body that could hold secrets was shown as captured -- multipart, binary,
+    HTML -- since only JSON and form bodies are scanned (#749)."""
+    parts = [NOTE] if names else []
+    if unscanned:
+        parts.append(f"Not redacted, shown as captured: {', '.join(unscanned)} -- only "
+                     "JSON and form bodies are scanned.")
+    return " ".join(parts) or None
 
 #: How many redacted values are remembered for `restore`. Bounded: each is a
 #: secret held in memory, though the FlowStore holds the same ones anyway.
@@ -70,7 +86,11 @@ _SET_COOKIE = re.compile(r"(^|,\s*)([^=;,\s]+)=([^;,]*)")
 _lock = threading.Lock()
 _seen: OrderedDict[str, str] = OrderedDict()
 _key_cache: bytes | None = None
-_settings_cache: tuple[tuple, tuple[bool, frozenset[str], frozenset[str]]] | None = None
+_settings_cache: tuple[tuple, tuple[bool, frozenset[str], frozenset[str], frozenset[str]]
+                       ] | None = None
+#: The ids of placeholders that stand for a JSON literal (`1234`, `true`), not
+#: a string: a body's way back puts them back without quotes.
+_literal_ids: set[str] = set()
 
 
 class UnknownPlaceholder(ValueError):
@@ -81,13 +101,13 @@ class UnknownPlaceholder(ValueError):
 # -- settings -----------------------------------------------------------------
 
 
-def settings() -> tuple[bool, frozenset[str], frozenset[str]]:
-    """(on, headers, params) from config.json's `proxy` object:
+def settings() -> tuple[bool, frozenset[str], frozenset[str], frozenset[str]]:
+    """(on, headers, params, body fields) from config.json's `proxy` object:
 
         {"proxy": {"redact": false, "redact_headers": ["X-Shazam-Token"],
-                   "redact_params": ["session"]}}
+                   "redact_params": ["session"], "redact_fields": ["pin"]}}
 
-    `redact_headers` and `redact_params` *add* to the defaults rather than
+    `redact_headers`, `redact_params` and `redact_fields` *add* to the defaults rather than
     replacing them: a list that replaced them, written to add one header,
     would quietly stop redacting Authorization. `redact: false` -- a literal
     false, nothing else -- is the one way to turn it off on this Mac.
@@ -116,7 +136,7 @@ def settings() -> tuple[bool, frozenset[str], frozenset[str]]:
         return frozenset(n.strip().lower() for n in names if isinstance(n, str) and n.strip())
 
     result = (raw.get("redact") is not False, HEADERS | extra("redact_headers"),
-              PARAMS | extra("redact_params"))
+              PARAMS | extra("redact_params"), body_mod.FIELDS | extra("redact_fields"))
     _settings_cache = (stamp, result)
     return result
 
@@ -163,14 +183,20 @@ def fingerprint(value: str) -> str:
                     hashlib.sha256).hexdigest()[:12]
 
 
-def placeholder(value: str) -> str:
-    """`value` as shown, remembered so `restore` can put it back."""
-    vid = fingerprint(value)
+def placeholder(value: str, *, literal: bool = False) -> str:
+    """`value` as shown, remembered so `restore` can put it back. A `literal`
+    -- a JSON number or true/false/null -- is fingerprinted apart from the
+    string with the same text, so `1234` and `"1234"` never share an id and
+    the way back never changes a body's types."""
+    vid = fingerprint(f"\x00literal:{value}" if literal else value)
     with _lock:
         _seen[vid] = value
         _seen.move_to_end(vid)
+        if literal:
+            _literal_ids.add(vid)
         while len(_seen) > SEEN_MAX:
-            _seen.popitem(last=False)
+            gone, _ = _seen.popitem(last=False)
+            _literal_ids.discard(gone)
     return f"‹redacted, {len(value):,} chars, id {vid}›"
 
 
@@ -213,14 +239,17 @@ def _header_value(name: str, value: str) -> str:
     return _hide(value)
 
 
-def _query(text: str, params: frozenset[str], reveal: frozenset[str]) -> tuple[str, set[str]]:
+def _query(text: str, params: frozenset[str], reveal: frozenset[str], *,
+           fragment_ok: bool = True) -> tuple[str, set[str]]:
     """`text` -- a URL or a path -- with secret query parameters' values
     redacted, and the names redacted. Only the values change, character for
-    character elsewhere: the URL is shown, not re-encoded."""
+    character elsewhere: the URL is shown, not re-encoded. `fragment_ok`
+    false for a form body, where a `#` is data: read as a fragment, it hid
+    every field after it (#753 review)."""
     before, sep, rest = text.partition("?")
     if not sep:
         return text, set()
-    query, hashsep, fragment = rest.partition("#")
+    query, hashsep, fragment = rest.partition("#") if fragment_ok else (rest, "", "")
     names: set[str] = set()
     out = []
     for part in query.split("&"):
@@ -255,7 +284,7 @@ def redact_text(text: str) -> str:
     """A free-text line -- a log message's `METHOD path` -- with secret query
     parameters redacted. Always applied: a log line has no reveal, and the
     flow it came from keeps the real values."""
-    on, _, params = settings()
+    on, _, params, _ = settings()
     if not on or not text or "?" not in text:
         return text
     return _query(text, params, frozenset())[0]
@@ -275,14 +304,26 @@ def redact_flows(flows: list[Any], reveal: Any = None, *, force: bool = False
                  ) -> tuple[list[Any], list[str]]:
     """Copies of `flows` as shown, and every name redacted in any of them.
     The settings are read once for the lot, not once a flow."""
-    on, headers, params = settings()
+    out, names, _ = shown_flows(flows, reveal, force=force)
+    return out, names
+
+
+def shown_flows(flows: list[Any], reveal: Any = None, *, force: bool = False
+                ) -> tuple[list[Any], list[str], list[str]]:
+    """`redact_flows`, and the bodies shown as captured that could hold a
+    secret -- named for the answer's note (`note`)."""
+    on, headers, params, fields = settings()
     shown = reveal_set(reveal)
     if (not on and not force) or shown is ALL:
-        return list(flows), []
+        return list(flows), [], []
     shown = shown or frozenset()
     names: set[str] = set()
-    out = [_redact_one(f, headers, params, shown, names) for f in flows]
-    return out, sorted(names)
+    unscanned: set[str] = set()
+    out = [_redact_one(f, (headers, params, fields), shown, names, unscanned) for f in flows]
+    return out, sorted(names), sorted(unscanned)
+
+
+Lists = tuple[frozenset[str], frozenset[str], frozenset[str]]
 
 
 def _head(h: dict[str, str], headers: frozenset[str], shown: frozenset[str],
@@ -298,52 +339,114 @@ def _head(h: dict[str, str], headers: frozenset[str], shown: frozenset[str],
     return out
 
 
-def _redact_request(request: Any, headers: frozenset[str], params: frozenset[str],
-                    shown: frozenset[str], names: set[str]) -> Any:
+def _content_type(h: dict[str, str]) -> str:
+    for k, v in (h or {}).items():
+        if k.lower() == "content-type" and isinstance(v, str):
+            return v
+    return ""
+
+
+def _body_update(part: Any, side: str, fields: frozenset[str], shown: frozenset[str],
+                 names: set[str], unscanned: set[str]) -> dict[str, Any]:
+    """The `body` update for a request or response, or nothing (#749). The
+    body is edited in place: JSON by a scanner, form bodies as a query
+    string, each up to a truncation cut. A body neither JSON nor form is left
+    as captured and named in `unscanned`, unless it is an image, video, audio
+    or font. `body_size` stays the real size."""
+    body = getattr(part, "body", None)
+    if not isinstance(body, str) or not body:
+        return {}
+    ctype = _content_type(part.headers)
+    encoding = getattr(part, "body_encoding", "utf-8") or "utf-8"
+    kind = body_mod.kind_of(body, ctype, encoding)
+    if kind is None:
+        if body_mod.worth_naming(ctype, encoding):
+            label = ctype.split(";", 1)[0].strip().lower() or "untyped"
+            unscanned.add(f"{side} body ({'binary' if encoding != 'utf-8' else label})")
+        return {}
+    if kind == "form":
+        text, found = _query("?" + body, fields, shown, fragment_ok=False)
+        names |= found
+        return {"body": text[1:]} if found else {}
+    found: set[str] = set()
+    text = body_mod.redact_json(body, fields, shown, _hide,
+                                lambda tok: placeholder(tok, literal=True), found)
+    names |= found
+    return {"body": text} if found else {}
+
+
+def _redact_request(request: Any, lists: Lists, shown: frozenset[str],
+                    names: set[str], unscanned: set[str]) -> Any:
+    headers, params, fields = lists
     url, in_url = _query(request.url, params, shown)
     path, in_path = _query(request.path, params, shown)
     names |= in_url | in_path
     return request.model_copy(update={
-        "url": url, "path": path, "headers": _head(request.headers, headers, shown, names)})
+        "url": url, "path": path, "headers": _head(request.headers, headers, shown, names),
+        **_body_update(request, "request", fields, shown, names, unscanned)})
 
 
-def _redact_one(flow: Any, headers: frozenset[str], params: frozenset[str],
-                shown: frozenset[str], names: set[str]) -> Any:
+def _redact_one(flow: Any, lists: Lists, shown: frozenset[str],
+                names: set[str], unscanned: set[str]) -> Any:
+    headers, _, fields = lists
     update: dict[str, Any] = {
-        "request": _redact_request(flow.request, headers, params, shown, names)}
+        "request": _redact_request(flow.request, lists, shown, names, unscanned)}
     if flow.response is not None:
-        update["response"] = flow.response.model_copy(
-            update={"headers": _head(flow.response.headers, headers, shown, names)})
+        update["response"] = flow.response.model_copy(update={
+            "headers": _head(flow.response.headers, headers, shown, names),
+            **_body_update(flow.response, "response", fields, shown, names, unscanned)})
     return flow.model_copy(update=update)
 
 
 def redact_requests(requests: list[Any], reveal: Any = None) -> tuple[list[Any], list[str]]:
     """Copies of FlowRequests -- a held flow's -- as shown, and the names
     redacted in any of them."""
-    on, headers, params = settings()
+    out, names, _ = shown_requests(requests, reveal)
+    return out, names
+
+
+def shown_requests(requests: list[Any], reveal: Any = None
+                   ) -> tuple[list[Any], list[str], list[str]]:
+    """`redact_requests`, and the bodies shown as captured (see `shown_flows`)."""
+    on, headers, params, fields = settings()
     shown = reveal_set(reveal)
     if not on or shown is ALL:
-        return list(requests), []
+        return list(requests), [], []
     shown = shown or frozenset()
     names: set[str] = set()
-    out = [_redact_request(r, headers, params, shown, names) for r in requests]
-    return out, sorted(names)
+    unscanned: set[str] = set()
+    out = [_redact_request(r, (headers, params, fields), shown, names, unscanned)
+           for r in requests]
+    return out, sorted(names), sorted(unscanned)
 
 
 def redact_headers(h: dict[str, str]) -> dict[str, str]:
     """Header values as shown, for headers quern holds rather than captured
     -- a mock's. A mock set from placeholders holds the real values (see
     `restore`), so listing it must not show them either."""
-    on, headers, _ = settings()
+    on, headers, _, _ = settings()
     if not on or not h:
         return h
     return _head(h, headers, frozenset(), set())
 
 
+def redact_body_text(body: str | None, headers: dict[str, str] | None) -> str | None:
+    """A body quern holds rather than captured -- a mock's -- as shown, its
+    secret fields redacted (#749). A mock set from placeholders holds the
+    real values, as its headers do (`redact_headers`)."""
+    on, _, _, fields = settings()
+    if not on or not body:
+        return body
+    from types import SimpleNamespace
+
+    part = SimpleNamespace(body=body, headers=headers or {}, body_encoding="utf-8")
+    return _body_update(part, "mock", fields, frozenset(), set(), set()).get("body", body)
+
+
 def redact_urls(item: Any, reveal: Any = None) -> Any:
     """A copy of anything with `url` and `path` -- a FlowEvent on the stream
     -- with secret query parameters redacted, as `redact_flow` shows them."""
-    on, _, params = settings()
+    on, _, params, _ = settings()
     shown = reveal_set(reveal)
     if not on or shown is ALL:
         return item
@@ -356,7 +459,7 @@ def redact_summaries(items: list[Any], reveal: Any = None) -> tuple[list[Any], l
     """Copies of flow summary rows (`url`, `path`) as shown, and the names
     redacted in them: a capture stopped with detail "summary" returns rows,
     not flows (review)."""
-    on, _, params = settings()
+    on, _, params, _ = settings()
     shown = reveal_set(reveal)
     if not on or shown is ALL:
         return list(items), []
@@ -395,6 +498,44 @@ def restore(text: str) -> tuple[str, int]:
     return _PLACEHOLDER.sub(back, text), count
 
 
+_QUOTED_PLACEHOLDER = re.compile(r'"(‹redacted, [\d,]+ chars, id ([0-9a-f]{12})›)"')
+
+
+_ESCAPED_PLACEHOLDER = re.compile(
+    r"\\u2039(redacted, [\d,]+ chars, id [0-9a-f]{12})\\u203[aA]")
+
+
+def restore_body(text: str | None) -> tuple[str | None, int]:
+    """A body sent back -- a replay's `modify_body`, a release's or a mock's
+    -- with each placeholder put back (#749), and how many were. A quoted
+    placeholder that stands for a JSON literal loses its quotes again, so
+    `"pin": 1234`, redacted to a string, goes back as the number it was.
+    UnknownPlaceholder as `restore`."""
+    if not text:
+        return text, 0
+    # A JSON body re-encoded with ASCII escapes -- json.dumps' default --
+    # carries `\u2039...\u203a` for the delimiters: read as a placeholder
+    # too, or a known one would be sent as text and an unknown one would
+    # skip its refusal (#753 review).
+    text = _ESCAPED_PLACEHOLDER.sub(r"‹\1›", text)
+    if "‹redacted" not in text:
+        return text, 0
+    count = 0
+
+    def literal(m: re.Match) -> str:
+        nonlocal count
+        with _lock:
+            value = _seen.get(m.group(2)) if m.group(2) in _literal_ids else None
+        if value is None:
+            return m.group(0)                     # a string's: `restore` below
+        count += 1
+        return value
+
+    text = _QUOTED_PLACEHOLDER.sub(literal, text)
+    text, more = restore(text)
+    return text, count + more
+
+
 def restore_headers(headers: dict[str, str] | None) -> tuple[dict[str, str] | None, list[str]]:
     """Headers with placeholders put back, and the names that had one."""
     if not headers:
@@ -414,12 +555,13 @@ def restored_note(names: list[str]) -> str | None:
     if not names:
         return None
     return (f"{', '.join(names)} carried a redacted placeholder; quern sent the real "
-            "value it stands for (#742).")
+            "value it stands for (#742, #749).")
 
 
 def _forget_for_tests() -> None:
     global _key_cache, _settings_cache
     with _lock:
         _seen.clear()
+        _literal_ids.clear()
     _key_cache = None
     _settings_cache = None

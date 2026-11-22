@@ -846,7 +846,8 @@ class Redaction(BaseModel):
     redacted: list[str] | None = None
     #: What `reveal` asked to be shown: names, or ["*"] for everything.
     revealed: list[str] | None = None
-    #: Said when anything was redacted: how to see it, and that bodies are not.
+    #: Said when anything was redacted -- how to see it -- and when a body that
+    #: could hold a secret (not JSON or form) was shown as captured (#749).
     redaction_note: str | None = None
 
 
@@ -1023,10 +1024,10 @@ class RecordingStartRequest(BaseModel):
         "Drop bodies whose Content-Type starts with any of these, e.g. `image/`, "
         "`text/html`. The flow itself is kept."))
     redact: bool = Field(default=True, description=(
-        "Redact secret headers and query-string parameters in the recorded flows "
-        "(#742), as every flow answer does: a recording is often shared, and a redacted "
-        "one cannot be un-redacted later. `false` records the real values, and the "
-        "manifest says so (`filters.redact`). Bodies are not redacted either way."))
+        "Redact secret headers, query-string parameters and JSON or form body fields "
+        "in the recorded flows (#742, #749), as every flow answer does: a recording is "
+        "often shared, and a redacted one cannot be un-redacted later. `false` records "
+        "the real values, and the manifest says so (`filters.redact`)."))
     #: Stripped before its length is checked, as the recorder stores it.
     requested_by: Annotated[
         str, StringConstraints(strip_whitespace=True, max_length=200),

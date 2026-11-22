@@ -315,7 +315,7 @@ Use this after triggering a UI action to observe the resulting network request w
   });
 
   server.registerTool("get_flow_detail", {
-    description: `Get full request/response detail for a single captured HTTP flow, including headers and bodies. Secret headers and token-like query parameters are redacted (see reveal); bodies are not. A 404 on an id from an earlier query may mean the flow was evicted; the error says so when the store has evicted anything.`,
+    description: `Get full request/response detail for a single captured HTTP flow, including headers and bodies. Secret headers, token-like query parameters, and secret fields in JSON and form bodies (password, access_token, client_secret...) are redacted (see reveal); other bodies are shown as captured, and redaction_note names them. A 404 on an id from an earlier query may mean the flow was evicted; the error says so when the store has evicted anything.`,
     inputSchema: strictParams({
       flow_id: z.string().describe("The flow ID to retrieve"),
       reveal: revealParam,
