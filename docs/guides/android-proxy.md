@@ -104,6 +104,10 @@ The simplest route for your own app on a phone or a Google Play image: the debug
 </manifest>
 ```
 
+   **If your main manifest already sets `android:networkSecurityConfig`**, the debug manifest above conflicts with it when the manifests merge. Two ways out:
+   - **Same resource name, no manifest change:** skip the debug manifest. Name the debug file after the one your main manifest points at, for example `app/src/debug/res/xml/production_network_security_config.xml`. The debug build's resource then replaces the main one. Copy your main config's rules into it (its `<domain-config>`s) and add `@raw/quern_ca` to its trust anchors, so the debug build keeps your policy and trusts quern too. A `<pin-set>` you copy still refuses quern for its domains, so leave it out of the debug copy if you need to see their traffic.
+   - **A different name:** in the debug manifest, declare `xmlns:tools="http://schemas.android.com/tools"` on `<manifest>`, and add `tools:replace="android:networkSecurityConfig"` to `<application>`. The debug build then uses your debug file instead of the main one, so carry over any rules from the main config that you still want.
+
 4. **Rebuild the debug APK and install it over the old one.** `install_app` upgrades in place; no clean install is needed. Then route the device with `record_device_proxy_config` and `apply=true`.
 
 Measured on a Pixel 3 XL on Android 10, with adb over Wi-Fi: the app's HTTPS showed up as decrypted flows straight away. Two limits: an app or SDK that **pins certificates** still refuses the proxy, since this only adds a trust anchor; and if quern's CA changes (a new `~/.mitmproxy`), copy it in again and rebuild.

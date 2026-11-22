@@ -645,6 +645,7 @@ def _bound_loopback_only(adapter) -> bool:
 
 def _reattach_hint(
     reattached: bool | None, *, cleared: bool = False, networked: bool = False,
+    verified: bool | None = True, restored: str | None = None,
 ) -> str | None:
     """What to do when the bounce did not bring the network back.
 
@@ -655,9 +656,43 @@ def _reattach_hint(
     configured but not yet capturing, and it has no working network until it
     rejoins. Saying so is the difference between a caller that fixes it and
     one that reports the proxy as broken.
+
+    For a clear, `verified` is the clear's read-back and `restored` the proxy
+    it put back, if any: "unset" and "go direct" are said only when the device
+    confirmed it and nothing was put back (CodeRabbit on #744).
     """
     if reattached is not False:
         return None
+    rejoin = ("which also drops this adb connection, so it has to be connected "
+              "again afterwards")
+    if cleared:
+        # No "call clear" here: that is what just happened, and advising it
+        # again would send a caller round a loop that cannot help.
+        if verified is True:
+            done = (f"The device's previous proxy, {restored}, is back" if restored
+                    else "quern's proxy is unset")
+        else:
+            # An unconfirmed clear stays for the release to retry; saying
+            # "unset" would claim what the device did not confirm.
+            done = ((f"quern put the device's previous proxy, {restored}, back"
+                     if restored else "quern cleared its proxy")
+                    + ", but the device did not confirm it: read its proxy again "
+                    "before relying on it")
+        if networked:
+            # See below: nothing was attempted, on purpose (#741).
+            where = (f"New connections may already use {restored}; if traffic still "
+                     "reaches quern's proxy, it moves" if restored else
+                     "New connections may already go direct; if traffic still "
+                     "reaches the proxy, it stops")
+            return (
+                f"{done}. quern did not bounce Wi-Fi: adb reaches this device over "
+                "the network, and the bounce would cut that connection. "
+                f"{where} once the device rejoins Wi-Fi, {rejoin}."
+            )
+        return (
+            f"{done}, and the Wi-Fi bounce did not bring the network back. "
+            "Reconnect the device (Settings > Wi-Fi, tap the network) to restore it."
+        )
     if networked:
         # A different fact entirely from "the bounce failed": nothing was
         # attempted, on purpose. Telling this caller to retry would invite
@@ -669,29 +704,12 @@ def _reattach_hint(
         # reconnect, where the measurement behind the bounce (#265) saw none
         # until the network re-attached. Which one a device does is not
         # known here, so the caller is told how to find out.
-        rejoin = ("which also drops this adb connection, so it has to be connected "
-                  "again afterwards")
-        if cleared:
-            return (
-                "quern's proxy is unset, but quern did not bounce Wi-Fi: adb reaches "
-                "this device over the network, and the bounce would cut that "
-                "connection. New connections may already go direct; if traffic still "
-                f"reaches the proxy, it stops once the device rejoins Wi-Fi, {rejoin}."
-            )
         return (
             "The setting is written, but quern did not bounce Wi-Fi: adb reaches "
             "this device over the network, and the bounce would cut that "
             "connection. It may already be in effect -- on some devices it is at "
             "once -- so look for flows from this device. If none arrive, it takes "
             f"effect once the device rejoins Wi-Fi, {rejoin}."
-        )
-    if cleared:
-        # No "call clear" here: that is what just happened, and advising it
-        # again would send a caller round a loop that cannot help.
-        return (
-            "quern's proxy is undone, but the Wi-Fi bounce did not bring the "
-            "network back. Reconnect the device (Settings > Wi-Fi, tap the "
-            "network) to restore it."
         )
     return (
         "The Wi-Fi bounce did not bring the network back. The setting is "
@@ -1101,6 +1119,7 @@ async def record_device_proxy_config_endpoint(
             "hint": _reattach_hint(
                 reattached, cleared=True,
                 networked=controller.adb.is_network_transport(body.udid),
+                verified=cleared["proxy_verified"], restored=cleared["restored_proxy"],
             ),
             #: Read back from the device rather than inferred from the call
             #: returning: the proxy it uses, Android's own copy where it keeps

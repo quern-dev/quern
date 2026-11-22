@@ -557,6 +557,24 @@ class TestItWillNotStrandADeviceItCannotReach:
         assert "would cut" in hint and "drops this adb connection" in hint
         assert "Settings > Wi-Fi" not in hint
 
+    async def test_a_clear_the_device_did_not_confirm_is_not_called_unset(self):
+        """The endpoint keeps an unconfirmed clear for the release to retry, so
+        the hint must not say it is done (CodeRabbit on #744)."""
+        ctrl = _android("192.168.1.9:5555")
+        ctrl.adb.is_network_transport = MagicMock(return_value=True)
+        ctrl.adb.reattach_network = AsyncMock(return_value=False)
+        ctrl.adb.get_http_proxy = AsyncMock(return_value="192.168.1.189:9177")
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="192.168.1.9:5555", clear=True),
+                _request(ctrl),
+            )
+
+        assert out["proxy_verified"] is False
+        assert "did not confirm" in out["hint"]
+        assert "is unset" not in out["hint"]
+
     def test_the_transport_shape_is_the_test(self):
         from server.device.android.adb import AdbBackend
 
@@ -1923,3 +1941,40 @@ class TestAResetToNoProxy:
             release.set()                            # nothing left waiting, pass or fail
         await asyncio.wait_for(asyncio.gather(restoring, resetting), 5)
         assert dev.value is None                     # the reset is what lasts
+
+
+class TestTheClearHintSaysWhatTheClearDid:
+    """`_reattach_hint` for a clear, from the read-back and the proxy it put
+    back (CodeRabbit on #744): "unset" and "go direct" only when the device
+    confirmed it and nothing was restored."""
+
+    def test_a_restored_proxy_is_named_and_not_called_direct(self):
+        from server.api.proxy_certs import _reattach_hint
+
+        hint = _reattach_hint(False, cleared=True, networked=True, verified=True,
+                              restored="10.0.0.5:3128")
+        assert "previous proxy, 10.0.0.5:3128, is back" in hint
+        assert "may already use 10.0.0.5:3128" in hint
+        assert "go direct" not in hint and "is unset" not in hint
+
+    def test_a_confirmed_removal_is_unset_and_direct(self):
+        from server.api.proxy_certs import _reattach_hint
+
+        hint = _reattach_hint(False, cleared=True, networked=True, verified=True)
+        assert hint.startswith("quern's proxy is unset") and "go direct" in hint
+
+    @pytest.mark.parametrize("verified", [False, None])
+    @pytest.mark.parametrize("networked", [True, False])
+    def test_an_unconfirmed_clear_claims_nothing(self, verified, networked):
+        from server.api.proxy_certs import _reattach_hint
+
+        hint = _reattach_hint(False, cleared=True, networked=networked, verified=verified)
+        assert "did not confirm" in hint
+        assert "is unset" not in hint and "undone" not in hint
+        assert "clear=true" not in hint                 # no loop back to the call just made
+
+    def test_a_bounced_clear_that_lost_the_network_still_says_reconnect(self):
+        from server.api.proxy_certs import _reattach_hint
+
+        hint = _reattach_hint(False, cleared=True, networked=False, verified=True)
+        assert hint.startswith("quern's proxy is unset") and "Settings > Wi-Fi" in hint
