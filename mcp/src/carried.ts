@@ -492,6 +492,18 @@ const REDACTED = /‹redacted, [\d,]+ chars, id [0-9a-f]{12}›/;
 /** A whole value the listing replaced with a placeholder (#749). */
 const WHOLE_PLACEHOLDER = /^‹redacted, [\d,]+ chars, id [0-9a-f]{12}›$/;
 
+/** A JSON number as written: two that differ past a float's precision
+ * (9007199254740992 and ...993) must not compare equal (#756 review). */
+class JsonNumber {
+  constructor(readonly source: string) {}
+}
+
+/** JSON.parse, keeping each number's source text (Node 22's reviver gets it). */
+function parseExact(text: string): unknown {
+  return JSON.parse(text, (_key, value, context?: { source?: string }) =>
+    typeof value === "number" ? new JsonNumber(context?.source ?? String(value)) : value);
+}
+
 /** Whether a wanted JSON value is what the listed one shows: equal, except
  * that a placeholder stands for exactly one scalar -- a string, a number,
  * true, false or null, which is what the server's body scanner replaces --
@@ -499,7 +511,10 @@ const WHOLE_PLACEHOLDER = /^‹redacted, [\d,]+ chars, id [0-9a-f]{12}›$/;
  * the same keys, arrays the same length. Linear in the size of the values. */
 function sameShown(listed: unknown, wanted: unknown): boolean {
   if (typeof listed === "string" && WHOLE_PLACEHOLDER.test(listed)) {
-    return wanted === null || typeof wanted !== "object";
+    return wanted === null || typeof wanted !== "object" || wanted instanceof JsonNumber;
+  }
+  if (listed instanceof JsonNumber) {
+    return wanted instanceof JsonNumber && listed.source === wanted.source;
   }
   if (Array.isArray(listed)) {
     return Array.isArray(wanted) && listed.length === wanted.length &&
@@ -521,7 +536,7 @@ function sameShown(listed: unknown, wanted: unknown): boolean {
  * Anything else -- a body cut off, plain text -- only if equal. */
 function sameShownBody(listed: string, wanted: string): boolean {
   try {
-    return sameShown(JSON.parse(listed), JSON.parse(wanted));
+    return sameShown(parseExact(listed), parseExact(wanted));
   } catch {
     // not JSON: a form body, or no match
   }

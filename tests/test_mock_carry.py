@@ -153,3 +153,58 @@ def test_a_blind_client_cannot_restore_a_placeholder_from_a_device_it_cannot_see
         assert "alice-secret-c00kie" not in again.text
     finally:
         gen.close()
+
+
+def test_a_blind_client_releases_its_own_held_flow_with_the_placeholders_it_was_shown(tmp_path):
+    """A held request has no stored flow to attribute it to a device by: its
+    placeholders are the principal's whose intercept holds it -- the one
+    that may release it (#756 review). Another client's are refused."""
+    from tests.test_blind_mode import SIM_A, _h, world  # noqa: F401
+
+    gen = world.__wrapped__(tmp_path)
+    w = next(gen)
+    try:
+        adapter = _blind_world(w)
+        adapter._intercept_rules = [{"rule_id": "ir-alice", "pattern": "~d e.com",
+                                     "simulator_udid": SIM_A}]
+        w.app.state.intercept_owners = {"ir-alice": "client:alice"}
+        adapter._held_flows["h1"] = {
+            "id": "h1", "held_at": datetime.now(UTC), "rule_id": "ir-alice",
+            "request": {"method": "GET", "url": "https://e.com/me", "host": "e.com",
+                        "path": "/me", "headers": {"Authorization": "Bearer held-t0k3n"}}}
+        held = w.client.get("/api/v1/proxy/intercept/held", headers=_h(w.alice)).json()
+        shown = held["held_flows"][0]["request"]["headers"]["Authorization"]
+        assert "held-t0k3n" not in shown
+        # bob, holding nothing of alice's, cannot have it put back anywhere.
+        bob = w.client.post("/api/v1/proxy/mocks", headers=_h(w.bob), json={
+            "pattern": "~d e.com", "return_restored": True,
+            "response": {"status_code": 200, "body": "", "headers": {"Authorization": shown}}})
+        assert "held-t0k3n" not in bob.text
+        resp = w.client.post("/api/v1/proxy/intercept/release", headers=_h(w.alice), json={
+            "flow_id": "h1", "modifications": {"headers": {"Authorization": shown}}})
+        assert resp.status_code == 200, resp.text
+        (sent,) = [c.args[0] for c in adapter.send_command.call_args_list
+                   if c.args[0].get("action") == "modify_and_release"]
+        assert sent["modifications"]["headers"]["Authorization"] == "Bearer held-t0k3n"
+    finally:
+        gen.close()
+
+
+def test_a_reused_secrets_sources_stay_one_entry_a_device(monkeypatch):
+    """A cookie sent on every request must not grow without bound (#756 review)."""
+    from datetime import timedelta
+
+    from server import visibility
+    from server.proxy import redact
+
+    monkeypatch.setattr(visibility, "MODE", "blind")
+    base = datetime.now(UTC)
+    flows = []
+    for i in range(50):
+        flow = _flow()
+        flow.simulator_udid, flow.timestamp = "SIM-X", base + timedelta(seconds=i)
+        flows.append(flow)
+    redact.redact_flows(flows)
+    entries = [v for v in redact._sources.values() if "SIM-X" in v]
+    assert entries and all(len(v) == 1 for v in entries)
+    assert all(v["SIM-X"] == base + timedelta(seconds=49) for v in entries)   # the latest

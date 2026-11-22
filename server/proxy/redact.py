@@ -97,9 +97,14 @@ _literal_ids: set[str] = set()
 #: view still shows one of them (#756 review). Without it a client key could
 #: pass a placeholder from a device it never held, or no longer holds, and
 #: read the real value back from `restored_response` -- or send it on.
-_sources: dict[str, set[tuple[str, Any]]] = {}
-#: The flow being redacted, as (device, time), while `_redact_one` runs.
-_source: contextvars.ContextVar[tuple[str, Any] | None] = contextvars.ContextVar(
+#: Per placeholder, its sources and the latest time each was seen: a device's
+#: udid, or ("principal", P) for a held request P's intercept holds. Only the
+#: latest time per source matters -- `View.allows` compares it with a
+#: reservation's start -- so a cookie on every request stays one entry.
+_sources: dict[str, dict[Any, Any]] = {}
+#: Where the value being redacted comes from, as (source, time), while a flow
+#: or held request is being redacted under blind sharing.
+_source: contextvars.ContextVar[tuple[Any, Any] | None] = contextvars.ContextVar(
     "quern_redact_source", default=None)
 
 
@@ -205,7 +210,10 @@ def placeholder(value: str, *, literal: bool = False) -> str:
         if literal:
             _literal_ids.add(vid)
         if (source := _source.get()) is not None:
-            _sources.setdefault(vid, set()).add(source)
+            key, when = source
+            seen = _sources.setdefault(vid, {})
+            if key not in seen or (when is not None and (seen[key] is None or when > seen[key])):
+                seen[key] = when
         while len(_seen) > SEEN_MAX:
             gone, _ = _seen.popitem(last=False)
             _literal_ids.discard(gone)
@@ -440,8 +448,14 @@ def _may_restore(vid: str) -> bool:
         return True
     view = visibility.data_view(caller)
     with _lock:
-        sources = list(_sources.get(vid, ()))
-    return any(view.allows(udid, when) for udid, when in sources)
+        sources = list(_sources.get(vid, {}).items())
+    for key, when in sources:
+        if isinstance(key, tuple):                # ("principal", P): a held request
+            if key == ("principal", caller.principal):
+                return True
+        elif view.allows(key, when):
+            return True
+    return False
 
 
 def _redact_one_in(flow: Any, lists: Lists, shown: frozenset[str],
@@ -465,7 +479,25 @@ def redact_requests(requests: list[Any], reveal: Any = None) -> tuple[list[Any],
 
 def shown_requests(requests: list[Any], reveal: Any = None
                    ) -> tuple[list[Any], list[str], list[str]]:
-    """`redact_requests`, and the bodies shown as captured (see `shown_flows`)."""
+    """`redact_requests`, and the bodies shown as captured (see `shown_flows`).
+
+    Held requests: under blind sharing a caller is shown only those its own
+    intercepts hold (`list_held_flows`), and may release only those, so their
+    placeholders are the caller's principal's to put back (#756 review) --
+    a held request has no stored flow to attribute it to a device by."""
+    from server import visibility
+
+    # (source, time): the source is the principal itself, and no time.
+    token = _source.set((("principal", visibility.current_caller().principal), None)
+                        if visibility.MODE == "blind" else None)
+    try:
+        return _shown_requests_in(requests, reveal)
+    finally:
+        _source.reset(token)
+
+
+def _shown_requests_in(requests: list[Any], reveal: Any = None
+                       ) -> tuple[list[Any], list[str], list[str]]:
     on, headers, params, fields = settings()
     shown = reveal_set(reveal)
     if not on or shown is ALL:

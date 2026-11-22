@@ -57,3 +57,14 @@ test("many repeated redacted fields compare quickly and exactly", () => {
   assert.ok(!same(comparable(listed, json(wanted))));
   assert.ok(Date.now() - t0 < 500, `took ${Date.now() - t0} ms`);
 });
+
+test("numbers are compared as written, past a float's precision", () => {
+  const listed = { status_code: 200, headers: {}, body: `{"password":"${ph(1)}","id":9007199254740992}` };
+  const exact = { status_code: 200, headers: {}, body: '{"password":"x","id":9007199254740992}' };
+  const next = { status_code: 200, headers: {}, body: '{"password":"x","id":9007199254740993}' };
+  assert.ok(same(comparable(listed, exact)));
+  assert.ok(!same(comparable(listed, next)));
+  // A placeholder still stands for a number.
+  assert.ok(same(comparable({ status_code: 200, headers: {}, body: `{"pin":"${ph(4)}"}` },
+    { status_code: 200, headers: {}, body: '{"pin":1234}' })));
+});
