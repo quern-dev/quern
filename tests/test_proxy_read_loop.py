@@ -516,3 +516,28 @@ class TestASignalToAProcessAlreadyGone:
             await a._read_loop()
         assert a.status().status == "error"
         state.assert_called_once_with(proxy_status="stopped")
+
+
+class TestTheLogKeepsSecretsOut:
+    """#742 review: these lines go to the server log, and the events they
+    quote are captured flows."""
+
+    async def test_a_failed_handler_names_the_event_without_quoting_it(self, caplog):
+        line = json.dumps({"type": "flow", "id": "f9", "request": {
+            "method": "GET", "host": "e.com", "path": "/?token=t0k3n",
+            "headers": {"Authorization": "Bearer s3cr3t"},
+            "url": "https://e.com/?token=t0k3n"}}).encode() + b"\n"
+        adapter = _adapter_reading(line)
+        with patch.object(adapter, "_dispatch", side_effect=RuntimeError("boom")), \
+                caplog.at_level(logging.ERROR, logger="server.sources.proxy"):
+            await adapter._read_loop()
+        logged = " ".join(r.getMessage() for r in caplog.records)
+        assert "type='flow' id='f9' host='e.com' method='GET'" in logged   # named
+        assert "s3cr3t" not in logged and "t0k3n" not in logged
+
+    async def test_a_line_that_is_not_json_has_its_query_redacted(self, caplog):
+        adapter = _adapter_reading(b"GET https://e.com/a?access_token=t0k3n&page=2 failed\n")
+        with caplog.at_level(logging.WARNING, logger="server.sources.proxy"):
+            await adapter._read_loop()
+        logged = " ".join(r.getMessage() for r in caplog.records)
+        assert "access_token=" in logged and "t0k3n" not in logged

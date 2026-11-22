@@ -182,6 +182,25 @@ def _rules_locked(method):
     return locked
 
 
+#: An event's fields that say which one it was and hold no secret.
+_LABEL_FIELDS = ("type", "id", "flow_id", "sni", "host", "client_ip", "method")
+
+
+def _event_label(data: dict) -> str:
+    """Which event a log line is about, without quoting it: an event is a
+    captured flow, headers and all, and the server log is not redacted
+    (#742 review). The path is shown with its secret parameters redacted."""
+    from server.proxy import redact
+
+    request = data.get("request") if isinstance(data.get("request"), dict) else {}
+    parts = [f"{k}={v!r}" for k in _LABEL_FIELDS
+             for v in [data.get(k, request.get(k))] if isinstance(v, (str, int))]
+    path = request.get("path") or data.get("path")
+    if isinstance(path, str):
+        parts.append(f"path={redact.redact_text(path)[:200]!r}")
+    return " ".join(parts) or "(no identifying fields)"
+
+
 class ProxyAdapter(BaseSourceAdapter):
     """Captures HTTP traffic via mitmdump subprocess."""
 
@@ -1259,6 +1278,9 @@ class ProxyAdapter(BaseSourceAdapter):
         self._bad_lines += 1
         if self._bad_lines <= BAD_LINES_LOGGED or self._bad_lines % 100 == 0:
             text = line.decode("utf-8", errors="replace") if isinstance(line, bytes) else line
+            from server.proxy import redact
+
+            text = redact.redact_text(text)                 # a URL's token, if it has one
             logger.warning(
                 "mitmdump: %s (%d so far): %r", what, self._bad_lines, text[:500],
             )
@@ -1316,7 +1338,8 @@ class ProxyAdapter(BaseSourceAdapter):
                     await self._dispatch(data)
                 except Exception:
                     logger.exception(
-                        "Proxy event handler failed; skipping the event: %r", line[:500],
+                        "Proxy event handler failed; skipping the event: %s",
+                        _event_label(data),
                     )
         except asyncio.CancelledError:
             raise

@@ -486,6 +486,31 @@ function canonical(value: unknown): string {
     ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v);
 }
 
+/** The redacted placeholder a mock listing shows for a secret header (#742). */
+const REDACTED = /‹redacted, [\d,]+ chars, id [0-9a-f]{12}›/;
+
+/** A listed response and the one wanted, comparable: a header the server
+ * lists redacted cannot be compared by value here -- the fingerprint key is
+ * the server's -- so it matches on its name alone (#742 review). Without
+ * this a mock with a literal secret header never matches its own rule, and
+ * a retry posts a second one. */
+export function comparable(listed: unknown, wanted: Record<string, unknown>): [string, string] {
+  const have = (listed ?? {}) as Record<string, unknown>;
+  const headersOf = (r: Record<string, unknown>) =>
+    r.headers && typeof r.headers === "object" ? r.headers as Record<string, unknown> : null;
+  const hidden = Object.entries(headersOf(have) ?? {})
+    .filter(([, v]) => typeof v === "string" && REDACTED.test(v)).map(([k]) => k);
+  if (!hidden.length) return [canonical(have), canonical(wanted)];
+  const mask = (r: Record<string, unknown>) => {
+    const h = headersOf(r);
+    if (!h) return r;
+    const lower = new Set(hidden.map((k) => k.toLowerCase()));
+    return { ...r, headers: Object.fromEntries(Object.entries(h).map(([k, v]) =>
+      [k, lower.has(k.toLowerCase()) ? "‹redacted›" : v])) };
+  };
+  return [canonical(mask(have)), canonical(mask(wanted))];
+}
+
 /** Each request that sets something up again: it holds the switch queue. */
 const SETUP_TIMEOUT_MS = 15_000;
 
@@ -523,11 +548,12 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
     }
     if (!onServer) return undefined;
     const taken = new Set(mocks.flatMap((m) => [...m.rules.values()]));
-    const want = canonical({ ...RESPONSE_DEFAULTS, ...mock.response });
+    const want = { ...RESPONSE_DEFAULTS, ...mock.response } as Record<string, unknown>;
     // Only a rule this session set (#650): another agent's identical mock
     // ends with that agent's session, not this one's.
     return onServer.find((r) => !taken.has(r.rule_id) && r.pattern === mock.pattern &&
-      (r.simulator_udid ?? null) === scope && canonical(r.response) === want &&
+      (r.simulator_udid ?? null) === scope &&
+      ((pair) => pair[0] === pair[1])(comparable(r.response, want)) &&
       (r.session === undefined || mySession(r.session)))?.rule_id;
   };
   // Scoped mocks first. For a key that may not mock every device, an
