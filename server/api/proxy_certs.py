@@ -645,6 +645,7 @@ def _bound_loopback_only(adapter) -> bool:
 
 def _reattach_hint(
     reattached: bool | None, *, cleared: bool = False, networked: bool = False,
+    verified: bool | None = True, restored: str | None = None,
 ) -> str | None:
     """What to do when the bounce did not bring the network back.
 
@@ -655,26 +656,71 @@ def _reattach_hint(
     configured but not yet capturing, and it has no working network until it
     rejoins. Saying so is the difference between a caller that fixes it and
     one that reports the proxy as broken.
+
+    For a clear, `verified` is the clear's read-back and `restored` the proxy
+    it put back, if any: "unset" and "go direct" are said only when the device
+    confirmed it and nothing was put back (CodeRabbit on #744).
     """
     if reattached is not False:
         return None
+    rejoin = ("which also drops this adb connection, so it has to be connected "
+              "again afterwards")
+    if cleared:
+        # No "call clear" here: that is what just happened, and advising it
+        # again would send a caller round a loop that cannot help.
+        if verified is True:
+            done = (f"The device's previous proxy, {restored}, is back" if restored
+                    else "quern's proxy is unset")
+        else:
+            # An unconfirmed clear stays for the release to retry; saying
+            # "unset" would claim what the device did not confirm.
+            done = ((f"quern put the device's previous proxy, {restored}, back"
+                     if restored else "quern cleared its proxy")
+                    + ", but the device did not confirm it: read its proxy again "
+                    "before relying on it")
+        if networked:
+            # See below: nothing was attempted, on purpose (#741).
+            # Where new connections go is said only for a confirmed clear: an
+            # unconfirmed one may have left quern's proxy in place (CodeRabbit
+            # on #744).
+            if verified is not True:
+                where = ("Until it is confirmed, traffic may still reach quern's proxy; "
+                         "a rejoin of Wi-Fi does not settle that, and")
+                return (
+                    f"{done}. quern did not bounce Wi-Fi: adb reaches this device over "
+                    "the network, and the bounce would cut that connection. "
+                    f"{where} would drop this adb connection too."
+                )
+            where = (f"New connections may already use {restored}; if traffic still "
+                     "reaches quern's proxy, it moves" if restored else
+                     "New connections may already go direct; if traffic still "
+                     "reaches the proxy, it stops")
+            return (
+                f"{done}. quern did not bounce Wi-Fi: adb reaches this device over "
+                "the network, and the bounce would cut that connection. "
+                f"{where} once the device rejoins Wi-Fi, {rejoin}."
+            )
+        return (
+            f"{done}, and the Wi-Fi bounce did not bring the network back. "
+            "Reconnect the device (Settings > Wi-Fi, tap the network) to restore it."
+        )
     if networked:
         # A different fact entirely from "the bounce failed": nothing was
         # attempted, on purpose. Telling this caller to retry would invite
         # them to strand the device by hand.
+        #
+        # And not "takes effect the next time it attaches" (#741): that was
+        # a guess stated as fact. A Pixel 3 XL on Android 10, over adb on
+        # Wi-Fi, sent its traffic through the proxy at once with no
+        # reconnect, where the measurement behind the bounce (#265) saw none
+        # until the network re-attached. Which one a device does is not
+        # known here, so the caller is told how to find out.
         return (
-            "The setting is written, but quern did not bounce Wi-Fi: adb "
-            "reaches this device over the network, and the bounce would cut "
-            "that connection. It takes effect the next time the device "
-            "attaches to Wi-Fi."
-        )
-    if cleared:
-        # No "call clear" here: that is what just happened, and advising it
-        # again would send a caller round a loop that cannot help.
-        return (
-            "quern's proxy is undone, but the Wi-Fi bounce did not bring the "
-            "network back. Reconnect the device (Settings > Wi-Fi, tap the "
-            "network) to restore it."
+            "The setting is written, but quern did not bounce Wi-Fi: adb reaches "
+            "this device over the network, and the bounce would cut that "
+            "connection. It may already be in effect -- on some devices it is at "
+            "once -- so look for flows from this device. If none arrive, it takes "
+            f"effect once the device rejoins Wi-Fi, {rejoin}."
         )
     return (
         "The Wi-Fi bounce did not bring the network back. The setting is "
@@ -943,12 +989,21 @@ async def _https_readiness(controller, udid: str) -> dict:
             "and later the install is held in memory and does not survive a reboot: "
             "check again after one.")
     elif ca_install == "manual":
+        # The bundled CA first (#741): nothing on the device and no screen
+        # lock. It is what made a real session work, on a Pixel 3 XL, where
+        # the user-certificate route below needed both.
         note = (
-            f"{udid}'s build cannot be rooted, so quern cannot install its CA, and "
-            "HTTPS from apps that do not trust user certificates fails. For your own "
-            "app's debug build: install the CA as a user certificate in the device's "
-            "Settings (it needs a screen lock), and give the app a network security "
-            "config that trusts user certificates. Other apps' HTTPS cannot be "
+            f"{udid}'s build cannot be rooted, so quern cannot put its CA in the "
+            "system store, and HTTPS from apps that do not trust it fails. For your "
+            "own app, the simplest fix needs nothing on the device: in a debug-only "
+            "source set, add quern's CA as res/raw/quern_ca.pem (GET "
+            "/api/v1/proxy/cert?format=pem, no key needed), a network security config "
+            "(network_security_config.xml) whose trust-anchors are system and "
+            "@raw/quern_ca, and a debug AndroidManifest.xml that points at it; then "
+            "rebuild and install over the old build. Release builds never trust it, "
+            "and an app that pins certificates still fails. Or install the CA as a "
+            "user certificate in the device's Settings (it needs a screen lock) and "
+            "trust user certificates in the config. Other apps' HTTPS cannot be "
             "decrypted on this device; a Google APIs emulator image can be rooted. "
             "Plain HTTP is captured either way.")
     else:
@@ -1075,6 +1130,7 @@ async def record_device_proxy_config_endpoint(
             "hint": _reattach_hint(
                 reattached, cleared=True,
                 networked=controller.adb.is_network_transport(body.udid),
+                verified=cleared["proxy_verified"], restored=cleared["restored_proxy"],
             ),
             #: Read back from the device rather than inferred from the call
             #: returning: the proxy it uses, Android's own copy where it keeps

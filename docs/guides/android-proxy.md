@@ -17,7 +17,9 @@ Then, for rootable emulators (Google APIs images):
 > "Install the proxy certificate on my Android emulator"
 
 For non-rootable devices — including every physical phone — the certificate is
-the part that needs work, and you'll need to modify your app. Keep reading.
+the part that needs work, and you'll need to modify your app. The simplest way
+puts quern's CA in your app's debug build, with nothing installed on the device
+([Option 2](#option-2-trust-querns-ca-in-your-debug-build)). Keep reading.
 
 ## Which Path a Device Takes
 
@@ -26,7 +28,7 @@ Every Android device in `list_devices`, `list_remotes` and a reservation's answe
 | `ca_install` | Which devices | HTTPS through quern |
 |---|---|---|
 | `automatic` | Rootable builds: Google APIs and AOSP emulator images | Your agent installs the certificate (`install_proxy_cert`) and every app's HTTPS is decrypted. On Android 14+ the install does not survive a reboot. |
-| `manual` | Google Play emulator images, and phones | quern cannot install it. Install it yourself as a user certificate in Settings (it needs a screen lock), and only apps that trust user certificates -- your own debug build, with the config below -- are decrypted. |
+| `manual` | Google Play emulator images, and phones | quern cannot install it in the system store. For your own app, put quern's CA in its debug build ([Option 2](#option-2-trust-querns-ca-in-your-debug-build)): nothing is installed on the device. Or install it as a user certificate in Settings (it needs a screen lock), and only apps that trust user certificates are decrypted. |
 | `unknown` | quern could not read the build (still booting, or an image it does not recognise) | Ask again once the device has settled. |
 
 A shut-down emulator's `ca_install` comes from the image its AVD names, so you can choose one without booting it.
@@ -44,7 +46,7 @@ Android separates certificate trust into two stores:
 - **System certs**: Trusted by all apps. Read-only — requires root to modify.
 - **User certs**: Installable without root, but **not trusted by apps** targeting API 24+ (Android 7+) unless the app explicitly opts in.
 
-This means installing a cert through Android Settings doesn't help for debugging most modern apps. You either need root (to install as a system cert) or you need to configure your app to trust user certs in debug builds.
+This means installing a cert through Android Settings doesn't help for debugging most modern apps. You either need root (to install as a system cert), or you configure your own app's debug build to trust quern's CA: by bundling the CA in it, or by trusting user certs.
 
 ## Rootable Emulators (Automatic)
 
@@ -67,7 +69,7 @@ Both approaches are non-persistent — the cert may be lost on emulator reboot. 
 
 ## Non-Rootable Devices (Manual App Change)
 
-Google Play emulator images and physical devices (without root) can't have system certs injected. You have two options:
+Google Play emulator images and physical devices (without root) can't have system certs injected. You have three options:
 
 ### Option 1: Use a Rootable Emulator Instead
 
@@ -75,7 +77,50 @@ Create a Google APIs emulator (see [Getting Started](android-getting-started.md#
 
 Your agent will suggest this if you try to install a cert on a non-rootable device — it'll tell you the exact `sdkmanager` and `avdmanager` commands to create one. If you ask nicely, it might even run them for you.
 
-### Option 2: networkSecurityConfig (Debug Builds)
+### Option 2: Trust quern's CA in your debug build
+
+The simplest route for your own app on a phone or a Google Play image: the debug build carries quern's CA and trusts it, so **nothing is installed on the device and no screen lock is needed**. Everything below lives in the debug-only source set, so a release build never sees any of it.
+
+1. **Get quern's CA as PEM** and save it as `app/src/debug/res/raw/quern_ca.pem`. Fetch it from the quern server with `GET /api/v1/proxy/cert?format=pem` (no API key needed), or copy `~/.mitmproxy/mitmproxy-ca-cert.pem` on the server's Mac -- they are the same file. Gitignore it: it is that machine's CA. Its SHA-256 fingerprint should match the one `proxy_status` reports under `cert_setup`.
+
+2. **`app/src/debug/res/xml/network_security_config.xml`:**
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/quern_ca" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
+```
+
+   **If your app uses plain HTTP:** once an app has a network security config, Android ignores `android:usesCleartextTraffic`, and from API 28 the config refuses cleartext unless it says otherwise. An app that relied on that attribute would lose its HTTP requests in the debug build. Allow cleartext where it's needed, scoped to the hosts that need it:
+```xml
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">dev.example.com</domain>
+    </domain-config>
+```
+   inside `<network-security-config>`, or `cleartextTrafficPermitted="true"` on `<base-config>` if it needs HTTP everywhere. An app that uses only HTTPS needs nothing here.
+
+3. **`app/src/debug/AndroidManifest.xml`**, merged over your main manifest:
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:networkSecurityConfig="@xml/network_security_config" />
+</manifest>
+```
+
+   **If your main manifest already sets `android:networkSecurityConfig`**, the debug manifest above conflicts with it when the manifests merge. Two ways out:
+   - **Same resource name, no manifest change:** skip the debug manifest. Name the debug file after the one your main manifest points at, for example `app/src/debug/res/xml/production_network_security_config.xml`. The debug build's resource then replaces the main one. Copy your main config's rules into it (its `<domain-config>`s) and add `@raw/quern_ca` to its trust anchors, so the debug build keeps your policy and trusts quern too. A `<pin-set>` you copy still refuses quern for its domains, so leave it out of the debug copy if you need to see their traffic.
+   - **A different name:** in the debug manifest, declare `xmlns:tools="http://schemas.android.com/tools"` on `<manifest>`, and add `tools:replace="android:networkSecurityConfig"` to `<application>`. The debug build then uses your debug file instead of the main one, so carry over any rules from the main config that you still want.
+
+4. **Rebuild the debug APK and install it over the old one.** `install_app` upgrades in place; no clean install is needed. Then route the device with `record_device_proxy_config` and `apply=true`.
+
+Measured on a Pixel 3 XL on Android 10, with adb over Wi-Fi: the app's HTTPS showed up as decrypted flows straight away. Two limits: an app or SDK that **pins certificates** still refuses the proxy, since this only adds a trust anchor; and if quern's CA changes (a new `~/.mitmproxy`), copy it in again and rebuild.
+
+### Option 3: Trust user certificates (Debug Builds)
 
 Add a network security configuration to your app that trusts user-installed certificates in debug builds only:
 
@@ -99,11 +144,13 @@ Add a network security configuration to your app that trusts user-installed cert
     ... >
 ```
 
-Then install the mitmproxy cert as a user certificate (Settings > Security > Install a certificate > CA certificate).
+Then install the mitmproxy cert as a user certificate (Settings > Security > Install a certificate > CA certificate). Android asks for a screen lock before it will install one.
+
+As with Option 2, a network security config replaces `android:usesCleartextTraffic`: if your app uses plain HTTP, allow it there with `cleartextTrafficPermitted` (see [Option 2](#option-2-trust-querns-ca-in-your-debug-build)).
 
 The `<debug-overrides>` block only applies to debug builds. Release builds ignore it entirely — no security risk.
 
-**This is actually the recommended approach for app developers.** It explicitly declares your app's trust policy, works on any device, and doesn't require root. The rootable-emulator approach is better for ad-hoc debugging of apps you can't modify.
+**Options 2 and 3 are the recommended approach for app developers.** They declare your app's trust policy explicitly, work on any device, and don't require root. Option 2 needs nothing on the device; Option 3 needs the certificate installed by hand. The rootable-emulator approach is better for ad-hoc debugging of apps you can't modify.
 
 ## HTTP Proxy
 
@@ -124,11 +171,14 @@ its own.
 
 Two things in the response are worth reading:
 
-- `network_reattached` — the setting is only read when the network attaches,
-  so quern bounces Wi-Fi. When this is `false` the setting is written but not
-  yet in effect; reconnect the device and it will be. `hint` says what to do.
-  Quern will not bounce Wi-Fi on a device whose adb connection runs over that
-  same Wi-Fi, since that would cut the connection needed to turn it back on.
+- `network_reattached` — on some devices the setting is only read when the
+  network attaches, so quern bounces Wi-Fi. When this is `false` the setting is
+  written, and may not be in effect yet; reconnect the device and it will be.
+  `hint` says what to do. Quern will not bounce Wi-Fi on a device whose adb
+  connection runs over that same Wi-Fi, since that would cut the connection
+  needed to turn it back on. Such a device may use the proxy at once anyway --
+  a Pixel 3 XL on Android 10 did -- so look for its flows before reconnecting
+  it, which would drop the adb connection too.
 - `proxy_verified` — quern reads the setting back off the device and compares
   it, rather than assuming the write took.
 
@@ -180,5 +230,7 @@ The certificate is designed to persist and affects nothing outside the device.
   device's proxy should point at your machine's address on the device's own
   network and at the port the proxy actually listens on — `10.0.2.2` is the
   emulator's alias for *its* host and is not reachable from a physical phone.
-- If `network_reattached` is `false`, the setting is written but the device has
-  not picked it up. Reconnect it to Wi-Fi.
+- If `network_reattached` is `false`, the setting is written but the device may
+  not have picked it up yet: some devices use it at once, others only after the
+  network re-attaches. If no flows arrive, reconnect it to Wi-Fi -- which, over
+  adb on Wi-Fi, drops the adb connection too, so connect it again after.
