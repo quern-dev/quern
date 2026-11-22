@@ -364,6 +364,11 @@ async def replay_flow(
             request_body, body_restored = _restored_body(body.modify_body)
             if body_restored:
                 restored = [*restored, "body"]
+    # The captured length is the original body's: httpx sets the real one.
+    # Kept, any modify_body of another length -- or a placeholder put back
+    # to a value of another length -- failed with "Too much data for
+    # declared Content-Length" (#749 live test).
+    headers = {k: v for k, v in headers.items() if k.lower() != "content-length"}
 
     # Route through the proxy so the replayed flow appears in captures
     proxy_url = f"http://127.0.0.1:{adapter.listen_port}"
@@ -394,10 +399,14 @@ async def replay_flow(
             note=redact.restored_note(restored),
         )
     except Exception as e:
+        from server.proxy import redact
+
         return ReplayResponse(
             status="error",
             original_flow_id=flow_id,
             error=str(e),
+            restored=restored or None,
+            note=redact.restored_note(restored),
         )
 
 

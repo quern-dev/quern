@@ -284,3 +284,39 @@ def test_a_recorded_body_is_redacted_and_still_shaped():
     off = RecordingManager._record_of(SimpleNamespace(filters=Filters(redact=False)), "flow",
                                       _flow(response_body=TOKEN_RESPONSE))
     assert off["response"]["body"] == TOKEN_RESPONSE
+
+
+async def test_a_replay_with_a_body_of_another_length_sends_its_own_length(app, running):  # noqa: F811
+    """The captured Content-Length is the original body's: kept, a changed
+    body failed with "Too much data for declared Content-Length" (#749 live
+    test). httpx sets the real one when the header is not passed."""
+    from unittest.mock import AsyncMock, patch
+
+    flow = _flow("r3", request_body='{"a":1}')
+    flow.request.headers["Content-Length"] = "7"
+    await app.state.flow_store.add(flow)
+    with patch("server.api.proxy_intercept.httpx.AsyncClient") as cls:
+        client = AsyncMock()
+        client.request = AsyncMock(return_value=AsyncMock(status_code=200))
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        cls.return_value = client
+        resp = await _call(app, "POST", "/api/v1/proxy/replay/r3",
+                           json={"modify_body": '{"a":12345}'})
+    assert resp.status_code == 200, resp.text
+    sent = client.request.call_args.kwargs["headers"]
+    assert not any(k.lower() == "content-length" for k in sent)
+
+
+async def test_a_failed_replay_still_says_what_it_restored(app, running):  # noqa: F811
+    from unittest.mock import AsyncMock, patch
+
+    shown = await _shown_body(app, _flow("r4", request_body='{"password":"p"}'))
+    with patch("server.api.proxy_intercept.httpx.AsyncClient") as cls:
+        client = AsyncMock()
+        client.request = AsyncMock(side_effect=OSError("refused"))
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        cls.return_value = client
+        resp = await _call(app, "POST", "/api/v1/proxy/replay/r4", json={"modify_body": shown})
+    assert resp.json()["status"] == "error" and resp.json()["restored"] == ["body"]
