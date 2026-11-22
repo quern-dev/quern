@@ -3382,16 +3382,14 @@ def _setup_ios(report: SetupReport) -> IosFacts:
         #   - Older Xcode → fall back to idb + fb-idb
 
         if _sim_bridge_supported():
-            print(
-                "    Xcode 26+ detected — "
-                "sim-bridge handles simulator UI natively. Skipping idb."
-            )
-            report.add(_setup_idb_companion(sim_bridge=True))
-            report.add(CheckResult(
-                name="idb (fb-idb)",
-                status=CheckStatus.SKIPPED,
-                message="Not required (sim-bridge active)",
-            ))
+            # Nothing to install and nothing to say: a line per tool setup is
+            # *not* installing is noise in a summary people read for what is
+            # wrong. The one thing worth a line is an outdated idb_companion
+            # from an earlier setup, which is still the fallback and is
+            # offered for update (see _setup_idb_companion).
+            companion = _setup_idb_companion(sim_bridge=True)
+            if companion.status != CheckStatus.SKIPPED:
+                report.add(companion)
         else:
             report.add(_setup_idb_companion(sim_bridge=False))
 
@@ -4227,6 +4225,11 @@ def report_tool_sites(record: bool = False) -> list[CheckResult]:
     for site in sites:
         label = f"{site['name']} ({site['role']})"
         if not site["available"]:
+            # idb is the simulator backend only where sim-bridge cannot run;
+            # elsewhere setup does not install it, and listing it as "not
+            # found" reads as something missing.
+            if site["name"] == "idb" and _sim_bridge_supported():
+                continue
             results.append(CheckResult(
                 name=label, status=CheckStatus.SKIPPED, message="not found",
             ))

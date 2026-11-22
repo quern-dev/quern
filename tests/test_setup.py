@@ -3832,6 +3832,27 @@ class TestSetupIos:
         assert setup._setup_ios(setup.SetupReport()).simulators is True
         assert "idb_companion" in calls and "check_iphones" in calls
 
+    def test_sim_bridge_mac_reports_nothing_about_idb(self, monkeypatch, capsys):
+        """Setup does not install idb where sim-bridge runs, so it says nothing
+        about it: no "Not required" lines for tools it is not installing."""
+        setup, _ = self._stub(monkeypatch, CheckStatus.OK)
+        monkeypatch.setattr(setup, "_setup_idb_companion", lambda **k: CheckResult(
+            name="idb_companion", status=CheckStatus.SKIPPED, message="Not required"))
+        report = setup.SetupReport()
+        setup._setup_ios(report)
+        assert not [r for r in report.results if r.name.startswith("idb")]
+        assert "idb" not in capsys.readouterr().out.lower()
+
+    def test_sim_bridge_mac_still_reports_an_outdated_companion(self, monkeypatch, capsys):
+        """An old idb_companion is still the fallback; its update offer stays."""
+        setup, _ = self._stub(monkeypatch, CheckStatus.OK)
+        offer = CheckResult(name="idb_companion", status=CheckStatus.WARNING,
+                            message="Update failed; the installed build does not work with Xcode 27")
+        monkeypatch.setattr(setup, "_setup_idb_companion", lambda **k: offer)
+        report = setup.SetupReport()
+        setup._setup_ios(report)
+        assert offer in report.results
+
 
 class TestCheckIphones:
     def _phones(self, monkeypatch, *, found, states, mount=None, answer=True):
@@ -4000,3 +4021,27 @@ class TestPlatformMatrix:
         adb, emulator, avds = setup._android_facts()
         assert adb == str(sdk / "platform-tools" / "adb")
         assert avds == ["Pixel_7", "Pixel_6"]
+
+
+class TestToolSitesLeaveOutUnneededIdb:
+    """The end-of-setup tool list says "not found" for a missing tool; for idb
+    on a Mac where sim-bridge runs, that reads as missing what is not needed."""
+
+    @staticmethod
+    def _sites():
+        base = {"role": "cli", "version": None, "source": "", "volatile_path": False}
+        return [dict(base, name="idb", available=False), dict(base, name="adb", available=False)]
+
+    def _report(self, monkeypatch, sim_bridge: bool):
+        from server.lifecycle import setup
+
+        monkeypatch.setattr(setup, "_collect_sites_sync", self._sites)
+        monkeypatch.setattr(setup, "_report_drift", lambda sites: [])
+        monkeypatch.setattr(setup, "_sim_bridge_supported", lambda: sim_bridge)
+        return [r.name for r in setup.report_tool_sites()]
+
+    def test_missing_idb_is_not_listed_where_sim_bridge_runs(self, monkeypatch):
+        assert self._report(monkeypatch, sim_bridge=True) == ["adb (cli)"]
+
+    def test_missing_idb_is_listed_where_idb_is_the_backend(self, monkeypatch):
+        assert self._report(monkeypatch, sim_bridge=False) == ["idb (cli)", "adb (cli)"]
