@@ -541,3 +541,24 @@ class TestTheLogKeepsSecretsOut:
             await adapter._read_loop()
         logged = " ".join(r.getMessage() for r in caplog.records)
         assert "access_token=" in logged and "t0k3n" not in logged
+
+    async def test_an_old_addons_stdout_event_is_named_without_quoting_it(self, caplog):
+        adapter = ProxyAdapter()
+        line = json.dumps({"type": "flow", "id": "f8", "request": {
+            "headers": {"Authorization": "Bearer s3cr3t"}, "path": "/?token=t0k3n"}})
+        with patch.object(adapter, "_dispatch", side_effect=RuntimeError("boom")), \
+                caplog.at_level(logging.ERROR, logger="server.sources.proxy"):
+            assert await adapter._stdout_event(line) is True
+        logged = " ".join(r.getMessage() for r in caplog.records)
+        assert "type='flow' id='f8'" in logged
+        assert "s3cr3t" not in logged and "t0k3n" not in logged
+
+    def test_a_flow_that_does_not_parse_is_logged_without_its_values(self, caplog):
+        adapter = ProxyAdapter()
+        bad = {"id": "f7", "request": {
+            "method": "GET", "url": "https://e.com/", "host": "e.com", "path": "/",
+            "headers": {"Authorization": ["Bearer s3cr3t"]}}}
+        with caplog.at_level(logging.WARNING, logger="server.sources.proxy"):
+            adapter._parse_flow(bad)
+        logged = " ".join(r.getMessage() for r in caplog.records)
+        assert "Failed to parse flow data" in logged and "s3cr3t" not in logged

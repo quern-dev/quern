@@ -1434,7 +1434,9 @@ class ProxyAdapter(BaseSourceAdapter):
                     continue
                 if line.startswith("{") and await self._stdout_event(line):
                     continue
-                logger.warning("mitmdump: %s", line[:LOGGED_LINE_MAX])
+                from server.proxy import redact
+
+                logger.warning("mitmdump: %s", redact.redact_text(line[:LOGGED_LINE_MAX]))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1457,7 +1459,8 @@ class ProxyAdapter(BaseSourceAdapter):
         try:
             await self._dispatch(data)
         except Exception:
-            logger.exception("Proxy event handler failed; skipping the event: %r", line[:500])
+            logger.exception("Proxy event handler failed; skipping the event: %s",
+                             _event_label(data) if isinstance(data, dict) else "(not an object)")
         return True
 
     async def _drain_stderr(self) -> None:
@@ -1737,5 +1740,9 @@ class ProxyAdapter(BaseSourceAdapter):
                 started_monotonic=data.get("started_monotonic"),
             )
         except Exception as e:
-            logger.warning("Failed to parse flow data: %s", e)
+            # Without the input: pydantic quotes the values it rejected, and
+            # a rejected header is a captured one (#750 review).
+            detail = (e.errors(include_input=False, include_url=False)
+                      if hasattr(e, "errors") else type(e).__name__)
+            logger.warning("Failed to parse flow data: %s", detail)
             return None

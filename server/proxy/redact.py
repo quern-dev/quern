@@ -178,6 +178,15 @@ def placeholder(value: str) -> str:
 _SCHEMED = frozenset({"authorization", "proxy-authorization"})
 
 
+def _hide(value: str) -> str:
+    """`value` as a placeholder -- unless it already is exactly one. A trace
+    built from a redacted recording reads placeholders back: redacted again
+    they would show the placeholder's own length and a new id, and restore to
+    the placeholder rather than the real value (#750 review). Text *beside* a
+    placeholder is still redacted: only a whole one is left."""
+    return value if _PLACEHOLDER.fullmatch(value) else placeholder(value)
+
+
 def _header_value(name: str, value: str) -> str:
     # A captured value that happens to contain placeholder text is redacted
     # like any other: it is the app's, so it is untrusted, and a guard that
@@ -188,20 +197,20 @@ def _header_value(name: str, value: str) -> str:
         # Each cookie's name stays: which cookies a request carried is often
         # the question, and the names are not the secret.
         return "; ".join(
-            f"{k}={placeholder(v)}" if v else part
+            f"{k}={_hide(v)}" if v else part
             for part in value.split(";")
             for k, _, v in [part.strip().partition("=")]
             if part.strip())
     if name == "set-cookie":
         return _SET_COOKIE.sub(
-            lambda m: f"{m.group(1)}{m.group(2)}={placeholder(m.group(3))}"
+            lambda m: f"{m.group(1)}{m.group(2)}={_hide(m.group(3))}"
             if m.group(3) else m.group(0), value)
     # A scheme is kept only where the header has one: in X-Api-Key, the
     # first word of "live-secret suffix" is part of the key (review).
     scheme = _SCHEME.match(value) if name in _SCHEMED else None
     if scheme:
-        return f"{scheme.group(1)}{scheme.group(2)}{placeholder(scheme.group(3))}"
-    return placeholder(value)
+        return f"{scheme.group(1)}{scheme.group(2)}{_hide(scheme.group(3))}"
+    return _hide(value)
 
 
 def _query(text: str, params: frozenset[str], reveal: frozenset[str]) -> tuple[str, set[str]]:
@@ -218,7 +227,7 @@ def _query(text: str, params: frozenset[str], reveal: frozenset[str]) -> tuple[s
         key, eq, val = part.partition("=")
         name = unquote_plus(key).lower()
         if eq and val and name in params and name not in reveal:
-            out.append(f"{key}={placeholder(val)}")
+            out.append(f"{key}={_hide(val)}")
             names.add(name)
         else:
             out.append(part)

@@ -221,3 +221,16 @@ class TestReviewFindings:
         assert "true=1" in shown.request.url
         assert shown.request.headers["Authorization"] != "Bearer t"
         assert "authorization" in names
+
+    def test_a_value_that_is_one_whole_placeholder_is_left_alone(self):
+        """A trace built from a redacted recording reads placeholders back:
+        redacted again, they would show a new id and length, and restore to
+        the placeholder rather than the real value (#750 review)."""
+        shown, _ = redact.redact_flow(_flow({"Authorization": f"Bearer {TOKEN}",
+                                             "Cookie": "sid=abc"}))
+        again, _ = redact.redact_flow(shown)
+        assert again.request.headers == shown.request.headers
+        assert again.request.url == shown.request.url
+        assert redact.redact_text(shown.request.path) == shown.request.path
+        back, _ = redact.restore(again.request.headers["Authorization"])
+        assert back == f"Bearer {TOKEN}"
