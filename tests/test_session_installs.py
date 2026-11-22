@@ -189,6 +189,82 @@ async def test_an_install_that_adds_nothing_counts_as_a_reinstall():
     assert (record.reinstalls, record.added, record.unclear) == (1, set(), 0)
 
 
+async def test_a_reinstall_whose_app_is_known_is_named_on_release():
+    """A count alone -- "installs_adding_nothing": 1 -- read as "the install
+    did nothing", and did not say which app stayed or why (#743)."""
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s), installed=("com.example.probe",))
+    before = await si.before_install(app, SIM, _caller(s))
+    await si.after_install(app, before, "com.example.probe")
+    app.state.sessions.held = None
+    actions = await _release(app, s)
+    assert actions[0]["installs_adding_nothing"] == 1
+    assert actions[0]["installs_kept_already_present"] == ["com.example.probe"]
+    assert actions[0]["note"] == ("com.example.probe was already on the device before this "
+                                  "session installed it, so it was left.")
+    assert state["apps"] == ["com.example.probe"]          # left, as before
+
+
+async def test_two_installs_over_one_app_name_it_once_and_count_both():
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s), installed=("com.example.probe",))
+    for _ in range(2):
+        before = await si.before_install(app, SIM, _caller(s))
+        await si.after_install(app, before, "com.example.probe")
+    app.state.sessions.held = None
+    actions = await _release(app, s)
+    assert actions[0]["installs_adding_nothing"] == 2
+    assert actions[0]["installs_kept_already_present"] == ["com.example.probe"]
+    assert "added no new app" not in actions[0]["note"]   # none unnamed
+
+
+async def test_reinstalling_the_sessions_own_app_does_not_call_it_kept():
+    """Installed, then installed again: the second adds nothing, but the app
+    is the session's own, and the release removes it (CodeRabbit on #745)."""
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s))
+    before = await si.before_install(app, SIM, _caller(s))
+    state["apps"].append("com.example.probe")
+    await si.after_install(app, before, "com.example.probe")
+    before = await si.before_install(app, SIM, _caller(s))
+    await si.after_install(app, before, "com.example.probe")
+    app.state.sessions.held = None
+    action = (await _release(app, s))[0]
+    assert action["removed"] == ["com.example.probe"] and state["apps"] == []
+    assert action["installs_adding_nothing"] == 1
+    assert "installs_kept_already_present" not in action
+    assert "note" not in action                              # nothing left, nothing unnamed
+
+
+async def test_an_unidentified_reinstall_of_the_sessions_own_app_claims_no_retention():
+    """Its app could not be read, and was the session's own, which the
+    release removes: the note must not say it was left (CodeRabbit on #745)."""
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s))
+    before = await si.before_install(app, SIM, _caller(s))
+    state["apps"].append("com.example.probe")
+    await si.after_install(app, before, "com.example.probe")
+    await _install(app, state, s)                            # again, no id read
+    app.state.sessions.held = None
+    action = (await _release(app, s))[0]
+    assert action["removed"] == ["com.example.probe"] and state["apps"] == []
+    assert action["installs_adding_nothing"] == 1
+    assert "left" not in action["note"]
+    assert "nothing was removed for it" in action["note"]
+
+
+async def test_a_named_and_an_unnamed_reinstall_are_both_said():
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s), installed=("com.example.probe",))
+    before = await si.before_install(app, SIM, _caller(s))
+    await si.after_install(app, before, "com.example.probe")
+    await _install(app, state, s)                            # no id read
+    app.state.sessions.held = None
+    note = (await _release(app, s))[0]["note"]
+    assert note.startswith("com.example.probe was already on the device")
+    assert "1 install added no new app" in note
+
+
 async def test_an_install_that_seems_to_add_several_is_unclear_not_trusted():
     """A short listing before the install makes apps already there look new:
     nothing is recorded from it, and the release says so."""
@@ -482,7 +558,10 @@ async def test_uninstall_removes_what_the_session_added_and_nothing_else():
     actions = await _release(app, s)
     assert state["apps"] == ["com.apple.Maps"]
     assert actions == [{"udid": SIM, "ok": True, "action": "installs_removed",
-                        "removed": ["com.example.new"], "installs_adding_nothing": 1}]
+                        "removed": ["com.example.new"], "installs_adding_nothing": 1,
+                        "note": "1 install added no new app (an app already on the "
+                                "device was reinstalled, and which one could not be "
+                                "read), so nothing was removed for it."}]
     assert app.state.session_installs == {}
 
 
