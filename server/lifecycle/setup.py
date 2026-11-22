@@ -331,21 +331,59 @@ def _find_brew_binary(name: str) -> str | None:
     return None
 
 
+#: Printed once per setup run, before the first install on a Mac where
+#: Homebrew compiles from source (#757), so a long build is not read as a hang.
+_source_build_notice_shown = False
+
+
+def _brew_has(formula: str) -> bool:
+    """True when Homebrew reports *formula* installed.
+
+    Answers False when brew cannot be asked; a caller uses it only to turn a
+    reported failure into a success, never the other way.
+    """
+    rc, stdout, _ = _run(["brew", "list", "--versions", formula], timeout=30)
+    return rc == 0 and bool(stdout)
+
+
 def _brew_install(formula: str) -> bool:
-    """Install a Homebrew formula. Returns True on success."""
+    """Install a Homebrew formula. Returns True when it ends up installed.
+
+    No timeout (#757). This had one of five minutes, which a bottle never
+    comes near but a source build routinely passes -- and Homebrew builds
+    every formula from source on an Intel Mac now, and on any Mac for a
+    formula without a bottle. Measured on a 2018 MacBook Pro: libimobiledevice
+    took about 22 minutes, so setup killed `brew`, reported "Homebrew install
+    failed", and the build finished anyway; node's was killed inside its cmake
+    dependency at the five-minute mark. Setup asks before each install,
+    Homebrew streams its own progress, and Ctrl-C still stops it, so a hang
+    is visible and interruptible; a timer cannot tell one from a long build,
+    and killing the build is the worst way to end either.
+
+    A non-zero exit is checked against what Homebrew then reports, so an
+    install that completed but failed a later step (linking, a post-install
+    hook) is not reported as missing.
+    """
+    global _source_build_notice_shown
+    if not _is_apple_silicon() and not _source_build_notice_shown:
+        _source_build_notice_shown = True
+        print(
+            "    Note: Homebrew has no prebuilt packages for Intel Macs, so it "
+            "builds each one from source. That can take many minutes per "
+            "package; it is working, not stuck."
+        )
     print(f"    Installing {formula} via Homebrew...")
     try:
         result = subprocess.run(
             ["brew", "install", formula],
             stdin=subprocess.DEVNULL,
-            timeout=300,  # 5 min timeout for installs
         )
-        if result.returncode == 0:
-            _record_install("brew", formula)
-            return True
+    except (OSError, subprocess.SubprocessError):
         return False
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+    if result.returncode == 0 or _brew_has(formula):
+        _record_install("brew", formula)
+        return True
+    return False
 
 
 def _brew_python(formula: str, version: str) -> str | None:
