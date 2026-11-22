@@ -276,8 +276,9 @@ def _redact_one(flow: Any, headers: frozenset[str], params: frozenset[str],
     return flow.model_copy(update=update)
 
 
-def redact_summary(item: Any, reveal: Any = None) -> Any:
-    """A FlowSummaryItem's URL and path, as `redact_flow` shows them."""
+def redact_urls(item: Any, reveal: Any = None) -> Any:
+    """A copy of anything with `url` and `path` -- a FlowEvent on the stream
+    -- with secret query parameters redacted, as `redact_flow` shows them."""
     on, _, params = settings()
     shown = reveal_set(reveal)
     if not on or shown is ALL:
