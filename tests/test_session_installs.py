@@ -218,6 +218,24 @@ async def test_two_installs_over_one_app_name_it_once_and_count_both():
     assert "went over an app" not in actions[0]["note"]   # none unnamed
 
 
+async def test_reinstalling_the_sessions_own_app_does_not_call_it_kept():
+    """Installed, then installed again: the second adds nothing, but the app
+    is the session's own, and the release removes it (CodeRabbit on #745)."""
+    s = _session()
+    app, ctrl, state = _app(holder=_held_by(s))
+    before = await si.before_install(app, SIM, _caller(s))
+    state["apps"].append("com.example.probe")
+    await si.after_install(app, before, "com.example.probe")
+    before = await si.before_install(app, SIM, _caller(s))
+    await si.after_install(app, before, "com.example.probe")
+    app.state.sessions.held = None
+    action = (await _release(app, s))[0]
+    assert action["removed"] == ["com.example.probe"] and state["apps"] == []
+    assert action["installs_adding_nothing"] == 1
+    assert "installs_kept_already_present" not in action
+    assert "note" not in action                              # nothing left, nothing unnamed
+
+
 async def test_a_named_and_an_unnamed_reinstall_are_both_said():
     s = _session()
     app, ctrl, state = _app(holder=_held_by(s), installed=("com.example.probe",))

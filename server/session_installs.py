@@ -460,7 +460,11 @@ async def _uninstall(controller: Any, record: InstallRecord, udid: str,
     # Each reason an app was left, said in words: a bare count of installs
     # "adding nothing" did not say that the app stayed, or why (#743).
     notes = []
-    kept = sorted(set(record.kept))
+    # Not an app the session added itself: one installed and then installed
+    # again is the session's, removed above (or meant to be), not "already
+    # on the device before this session" (CodeRabbit on #745). Still a named
+    # reinstall, so not counted as unnamed below.
+    kept = sorted(set(record.kept) - record.added)
     unnamed = record.reinstalls - len(record.kept)
     if kept:
         notes.append(f"{', '.join(kept)} {'was' if len(kept) == 1 else 'were'} already on "
