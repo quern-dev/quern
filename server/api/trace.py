@@ -23,6 +23,7 @@ from server import gauges as gauges_mod
 from server import visibility
 from server.device.ios.devicectl import canonical_device_id
 from server.models import LogEntry, LogQueryParams, LogSource, TraceResponse, UtcDatetime
+from server.proxy import redact
 from server.recording import recorder as recording_mod
 from server.trace import (
     APP_LOG_SOURCES,
@@ -178,7 +179,9 @@ def _serialise(attribution: Attribution, ip_map: dict[str, tuple[str, bool]]) ->
                 "id": flow.id,
                 "timestamp": flow.timestamp.isoformat(),
                 "method": flow.request.method,
-                "url": flow.request.url,
+                # Redacted, as every flow answer's URL is (#742). The trace
+                # keeps no reveal of its own: get_flow_detail has one.
+                "url": redact.redact_text(flow.request.url),
                 "status": flow.response.status_code if flow.response else None,
                 # Set for a request with no response: in flight, or one a
                 # recording has a start for and no end (#364).

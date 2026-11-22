@@ -10,6 +10,7 @@ This topic is split into pages, one per subject. Read the one you need:
 - `quern://guide/network/ca-trust` -- CA trust and capture refusals: why capture refuses (428 and the rest), certificates, auto_install_cert
 - `quern://guide/network/filtering` -- Filtering flows: query_flows filters (host, method, path, status) and compact detail
 - `quern://guide/network/tools` -- Tools for network work: which tool for each network job, including add_session_capture
+- `quern://guide/network/secrets` -- Secrets in captured traffic: what is redacted, the placeholder and its id, reveal, passing a placeholder back, and the settings
 - `quern://guide/network/intercept` -- Intercept-Modify-Release for Testing Edge Cases: holding a request and releasing it changed
 - `quern://guide/network/slow-network` -- Slowing the network on a simulator: intercept holds or Network Link Conditioner
 - `quern://guide/network/mocks` -- Mocking for Deterministic Testing: set_mock and update_mock, mocking one simulator or Android device, filter syntax

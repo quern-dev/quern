@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Secrets in captured traffic are redacted in what quern shows (#742).** From a real session: flow detail carried an app's bearer token in full, so to keep it out of its transcript an agent had to read flows over REST and strip the header by hand.
+  - **What is redacted:** the headers `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key` and `x-auth-token`, and token-like query parameters (`access_token`, `token`, `key`, `sig` and others).
+  - **Where:** every flow answer over MCP and REST (`query_flows` in both detail levels, `get_flow_detail`, `wait_for_flow`, `stop_capture_session`, `get_flow_summary`, `list_held_flows`, pending flows and the stream), the proxy's log lines, the trace, and recordings.
+  - **The placeholder** keeps the scheme and length, a cookie's names and a `Set-Cookie`'s attributes: `Bearer ‹redacted, 1,184 chars, id 3f2a9c1e04bd›`. Its id is an HMAC under a per-server key in `~/.quern/redaction-key`, so equal values share an id on this server: "same token?" and "did it rotate?" can be answered without seeing it.
+  - **Real values stay inside the server.** A placeholder passed back to `release_flow`, `replay_flow`, `set_mock` or `update_mock` is sent as the real value it stands for, and the answer names it in `restored`. Otherwise an agent copying the headers it was shown would send the placeholder and get a 401 that looks like the app's own bug. One this server never showed is a 400. Listed mocks redact their secret headers, since a mock set from placeholders holds real values.
+  - **When the value is the bug:**
+    - `reveal` (names, or `true`) on the flow tools and routes shows it, and the answer's `revealed` says so.
+    - A recording made with `redact: false` (also on the MCP `start_recording`) keeps the real values. Its manifest's `filters.redact` says what the events hold: false under the owner's `proxy.redact: false` whatever was asked. A recording resumed from a manifest written before this records as it did, unredacted.
+    - In `~/.quern/config.json`, `proxy.redact_headers` and `proxy.redact_params` add names to the defaults, and `proxy.redact: false` (only a literal `false`) turns redaction off on that Mac.
+  - **For REST callers:** a script that read these header values now gets placeholders. Add `reveal`.
+  - **A mock set from placeholders is not recreated on another server** after a session switch, and `set_mock` says so (#751).
+  - **Bodies are not redacted** (#749), and answers say so.
+
 ### Fixed
 - **A release names the apps it left because they were already installed, and says why (#743).** An install over an app already on the device adds nothing, so its release leaves that app. But the answer gave only a count, `"installs_adding_nothing": 1` beside `"removed": []`, which read as "the install did nothing": an agent couldn't tell whether quern had meant to uninstall its app. The release now names those apps in `installs_kept_already_present`, where the install said which app it was, and its `note` says why each was left, for example "com.example.probe was already on the device before this session installed it, so it was left." An install whose app couldn't be read is still counted, and said without a name. `installs_adding_nothing` stays.
 - **Android log capture finds adb where the rest of quern does.** It looked on the server's PATH alone, and a server started by the menu-bar app has no Android tools on its PATH when adb came with Android Studio: every other Android tool worked while `start_device_logging` answered "adb not found on PATH". It now uses the same lookup -- PATH, then `ANDROID_HOME`/`ANDROID_SDK_ROOT`, then the SDK's usual folders -- and says where it looked when adb is in none of them.

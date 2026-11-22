@@ -66,6 +66,25 @@ def _is_owner_key() -> bool:
     return principal.label_of(visibility.current_caller().principal) is None
 
 
+def _restored(headers: dict | None, url: str | None = None
+              ) -> tuple[dict | None, str | None, list[str]]:
+    """Headers and a URL an agent sent back, with each redacted placeholder
+    put back to the real value it stands for (#742), and the names that had
+    one. A placeholder copied from a flow answer and sent on would fail auth
+    in a way that looks like the app's own bug. One this server never showed
+    is refused (400) rather than sent."""
+    from server.proxy import redact
+
+    try:
+        headers, names = redact.restore_headers(headers)
+        if url and redact.restore(url)[1]:
+            url = redact.restore(url)[0]
+            names = [*names, "url"]
+    except redact.UnknownPlaceholder as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return headers, url, names
+
+
 @router.post("/intercept")
 @logged_action("set_intercept", category="proxy")
 async def set_intercept(request: Request, body: InterceptSetRequest) -> dict:
@@ -185,8 +204,10 @@ async def clear_intercept(request: Request) -> dict:
 async def list_held_flows(
     request: Request,
     timeout: float = Query(default=0, ge=0, le=60),
+    reveal: str | None = None,
 ) -> InterceptStatusResponse:
-    """List currently held flows.
+    """List currently held flows. Their secret headers and query parameters
+    are redacted (#742): `reveal` names those to show, or `true` for all.
 
     Supports long-polling: if timeout > 0 and no flows are currently held,
     the server blocks until a flow is intercepted or timeout expires.
@@ -220,7 +241,13 @@ async def list_held_flows(
             await adapter.wait_for_held(left)
             rules, held = visible()
     pattern = adapter._intercept_pattern if view.everything else None
+    from server.api.proxy import _shown_requests
+    from server.models import FlowRequest
+
+    held_requests, redaction = _shown_requests(
+        [FlowRequest.model_validate(h["request"]) for h in held], reveal)
     return InterceptStatusResponse(
+        **redaction,
         pattern=pattern,
         intercepts=[InterceptRuleInfo(rule_id=r["rule_id"], pattern=r["pattern"],
                                       simulator_udid=r.get("simulator_udid"),
@@ -231,10 +258,10 @@ async def list_held_flows(
                 id=h["id"],
                 held_at=h["held_at"],
                 age_seconds=h["age_seconds"],
-                request=h["request"],
+                request=shown,
                 rule_id=h.get("rule_id"),
             )
-            for h in held
+            for h, shown in zip(held, held_requests, strict=True)
         ],
         total_held=len(held),
     )
@@ -256,10 +283,22 @@ async def release_flow(request: Request, body: ReleaseFlowRequest) -> dict:
                 f"Flow {body.flow_id} was held by an intercept that is not yours; "
                 "only the session that set it, or the owner, may release it."))
 
-    await adapter.release_flow(body.flow_id, modifications=body.modifications)
+    modifications, restored = body.modifications, []
+    if isinstance(modifications, dict):
+        headers, url, restored = _restored(
+            modifications.get("headers"),
+            modifications.get("url") if isinstance(modifications.get("url"), str) else None)
+        modifications = {**modifications,
+                         **({"headers": headers} if headers is not None else {}),
+                         **({"url": url} if url is not None else {})}
+    await adapter.release_flow(body.flow_id, modifications=modifications)
     # Remove from server-side tracking (addon will also emit a released event)
     adapter.forget_held(body.flow_id)
-    return {"status": "released", "flow_id": body.flow_id}
+    from server.proxy import redact
+
+    return {"status": "released", "flow_id": body.flow_id,
+            **({"restored": restored, "note": redact.restored_note(restored)}
+               if restored else {})}
 
 
 @router.post("/intercept/release-all")
@@ -299,9 +338,11 @@ async def replay_flow(
     headers = dict(req.headers)
     request_body = req.body
 
+    restored: list[str] = []
     if body:
         if body.modify_headers:
-            headers.update(body.modify_headers)
+            modify, _, restored = _restored(body.modify_headers)
+            headers.update(modify)
         if body.modify_body is not None:
             request_body = body.modify_body
 
@@ -324,10 +365,14 @@ async def replay_flow(
                 headers=headers,
                 content=request_body.encode("utf-8") if request_body else None,
             )
+        from server.proxy import redact
+
         return ReplayResponse(
             status="success",
             original_flow_id=flow_id,
             status_code=resp.status_code,
+            restored=restored or None,
+            note=redact.restored_note(restored),
         )
     except Exception as e:
         return ReplayResponse(
@@ -523,10 +568,12 @@ async def set_mock(request: Request, body: SetMockRequest) -> dict:
     adapter = _require_running_proxy(request)
     owner = rule_owners.capture(request.app)
     client_ip = await _android_mock_scope(request, body.simulator_udid)
+    response = body.response.model_dump()
+    response["headers"], _, restored = _restored(response.get("headers"))
     try:
         rule_id = await adapter.set_mock(
             pattern=body.pattern,
-            response=body.response.model_dump(),
+            response=response,
             simulator_udid=body.simulator_udid,
             client_ip=client_ip,
         )
@@ -544,7 +591,30 @@ async def set_mock(request: Request, body: SetMockRequest) -> dict:
     warning = await _mock_scope_warning(request, body.simulator_udid)
     if warning:
         result["warning"] = warning
+    if restored:
+        from server.proxy import redact
+
+        result["restored"] = restored
+        result["note"] = f"{redact.restored_note(restored)} {_NOT_CARRIED}"
     return result
+
+
+#: Said when a mock was set from placeholders (#750 review): the MCP's copy
+#: kept for a session switch holds the placeholders, which another server
+#: never showed and refuses.
+_NOT_CARRIED = ("A mock set from placeholders is not recreated on another server after a "
+                "session switch: if it must carry, set it with the real values (read the "
+                "flow with reveal).")
+
+
+def _shown_mock(response: dict) -> MockResponseSpec:
+    """A mock's response as listed, its secret headers redacted (#742). A mock
+    set from placeholders holds the real values, which the agent that set it
+    was never shown."""
+    from server.proxy import redact
+
+    spec = MockResponseSpec(**response)
+    return spec.model_copy(update={"headers": redact.redact_headers(spec.headers)})
 
 
 @router.get("/mocks", response_model=MockListResponse)
@@ -558,7 +628,7 @@ async def list_mocks(request: Request) -> MockListResponse:
         MockRuleInfo(
             rule_id=r["rule_id"],
             pattern=r["pattern"],
-            response=MockResponseSpec(**r["response"]) if r.get("response") else MockResponseSpec(),
+            response=_shown_mock(r["response"]) if r.get("response") else MockResponseSpec(),
             simulator_udid=r.get("simulator_udid"),
             client_ip=r.get("client_ip"),
             **rule_owners.label(request.app, "mock", r["rule_id"]),
@@ -599,12 +669,16 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
 
         device_access.require_owner("removing a mock rule's simulator_udid")
     client_ip = await _android_mock_scope(request, body.simulator_udid) if scope_given else None
+    update_response = body.response.model_dump(exclude_unset=True) if body.response else None
+    update_restored: list[str] = []
+    if update_response and "headers" in update_response:
+        update_response["headers"], _, update_restored = _restored(update_response["headers"])
     try:
         rule = await adapter.update_mock(
             rule_id=rule_id,
             pattern=body.pattern,
             # The fields named, not the spec's defaults for the rest (#574).
-            response=body.response.model_dump(exclude_unset=True) if body.response else None,
+            response=update_response,
             simulator_udid=body.simulator_udid,
             scope_given=scope_given,
             client_ip=client_ip,
@@ -615,7 +689,11 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
         raise HTTPException(status_code=status, detail=detail)
     result = {
         "status": "updated", "rule_id": rule_id,
-        "pattern": rule["pattern"], "response": rule["response"],
+        # As listed: the stored rule holds any real value a placeholder
+        # stood for, which this caller was never shown (review).
+        "pattern": rule["pattern"],
+        "response": _shown_mock(rule["response"]).model_dump() if rule.get("response")
+        else rule.get("response"),
         "simulator_udid": rule.get("simulator_udid"),
         "platform": _scope_platform(rule.get("simulator_udid")),
     }
@@ -624,6 +702,11 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
     )
     if warning:
         result["warning"] = warning
+    if update_restored:
+        from server.proxy import redact
+
+        result["restored"] = update_restored
+        result["note"] = f"{redact.restored_note(update_restored)} {_NOT_CARRIED}"
     return result
 
 

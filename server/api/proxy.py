@@ -49,6 +49,7 @@ from server.models import (
     WifiProxyNetworkConfig,
 )
 from server.processing.summarizer import WINDOW_DURATIONS
+from server.proxy import redact
 from server.proxy.summary import generate_flow_summary
 from server.proxy.system_proxy import (
     SystemProxySnapshot,
@@ -330,6 +331,35 @@ def _deprecations(body) -> list[str] | None:
         _proxy_logger.warning("skip_cert_check was passed: %s", SKIP_CERT_CHECK_DEPRECATION)
         return [SKIP_CERT_CHECK_DEPRECATION]
     return None
+
+
+#: `reveal` as the routes take it: "true" or names in a query string, or
+#: true or a list of names in a JSON body. None redacts everything.
+Reveal = bool | str | list[str] | None
+
+
+def _shown(flows: list, reveal: Reveal) -> tuple[list, dict]:
+    """`flows` as shown, with secret headers and query parameters redacted
+    (#742), and the answer fields saying what was. Every route that returns a
+    flow goes through here: the stored records keep the real values."""
+    from server.proxy import redact
+
+    out, names = redact.redact_flows(flows, reveal)
+    asked = redact.reveal_set(reveal)
+    revealed = (["*"] if asked is redact.ALL
+                else sorted(asked) if asked else None)
+    return out, {"redacted": names or None, "revealed": revealed,
+                 "redaction_note": redact.NOTE if names else None}
+
+
+def _shown_requests(requests: list, reveal: Reveal) -> tuple[list, dict]:
+    """`_shown` for bare requests -- an intercept's held flows."""
+    out, names = redact.redact_requests(requests, reveal)
+    asked = redact.reveal_set(reveal)
+    revealed = (["*"] if asked is redact.ALL
+                else sorted(asked) if asked else None)
+    return out, {"redacted": names or None, "revealed": revealed,
+                 "redaction_note": redact.NOTE if names else None}
 
 
 def _with_tls_note(request: Request, udid: str | None, response):
@@ -794,8 +824,11 @@ async def query_flows(
     detail: str = Query(default="full", pattern=r"^(full|summary)$"),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
+    reveal: str | None = None,
 ) -> FlowQueryResponse:
-    """Query captured HTTP flows with filters and pagination."""
+    """Query captured HTTP flows with filters and pagination. Secret headers
+    and query parameters are redacted (#742): `reveal` names those to show,
+    comma-separated, or `true` for all."""
     _refuse_client_ip_if_blind(client_ip)
     flow_store = request.app.state.flow_store
     if flow_store is None:
@@ -833,6 +866,7 @@ async def query_flows(
         flow_store, since, simulator_udid=simulator_udid, client_ip=client_ip,
         device_serial=device_serial,
     )
+    flows, redaction = _shown(flows, reveal)
 
     if detail == "summary":
         from server.models import FlowSummaryItem
@@ -853,10 +887,11 @@ async def query_flows(
         ]
         return _with_tls_note(request, simulator_udid, FlowQueryResponse(
             flow_summaries=summaries, total=total, has_more=has_more, **completeness,
+            **redaction,
         ))
 
     return _with_tls_note(request, simulator_udid, FlowQueryResponse(
-        flows=flows, total=total, has_more=has_more, **completeness,
+        flows=flows, total=total, has_more=has_more, **completeness, **redaction,
     ))
 
 
@@ -918,6 +953,9 @@ async def flow_summary(
     allowed = visibility.flow_filter(visibility.data_view())
     if allowed is not None:
         flows = [f for f in flows if allowed(f)]
+    # The summary prints paths and URLs: their secret query parameters are
+    # redacted as every flow answer's are (#742).
+    flows, _ = redact.redact_flows(flows)
     summary = generate_flow_summary(
         flows, window=window, host=host,
         simulator_udid=simulator_udid, device_serial=device_serial,
@@ -988,7 +1026,9 @@ async def pending_flows(
             "id": flow.id, "started_at": flow.timestamp.isoformat(),
             "age_s": round((now - flow.timestamp).total_seconds(), 1),
             "started_monotonic": flow.started_monotonic,
-            "method": flow.request.method, "url": flow.request.url,
+            # Redacted, as every flow answer is (#742): a URL's token is no
+            # less a secret here. No reveal: the full flow has one.
+            "method": flow.request.method, "url": redact.redact_text(flow.request.url),
             "host": flow.request.host, "source_process": flow.source_process,
             "simulator_udid": flow.simulator_udid, "device_serial": flow.device_serial,
             "client_ip": flow.client_ip,
@@ -1004,8 +1044,10 @@ async def stream_flows(
     method: str | None = None,
     device_id: str | None = None,
     simulator_udid: str | None = None,
+    reveal: str | None = None,
 ) -> EventSourceResponse:
-    """Stream flow events in real time via Server-Sent Events.
+    """Stream flow events in real time via Server-Sent Events. Their URLs'
+    secret query parameters are redacted (#742) unless `reveal` names them.
 
     Emits lightweight FlowEvent payloads (no headers or bodies).
     Use GET /proxy/flows/{id} to fetch full details for a flow.
@@ -1057,7 +1099,7 @@ async def stream_flows(
                         queue.get(), timeout=15.0,
                     )
                     if matches_filter(flow):
-                        event = FlowEvent.from_flow(flow)
+                        event = redact.redact_urls(FlowEvent.from_flow(flow), reveal)
                         yield {
                             "event": "flow",
                             "data": event.model_dump_json(),
@@ -1119,9 +1161,11 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
                 # still reported as it is. Null means "nothing was evicted",
                 # and saying that after evictions would be a false statement
                 # sitting next to a true answer (review).
+                (shown,), redaction = _shown([flows[0]], body.reveal)
                 return _with_tls_note(request, body.simulator_udid, WaitForFlowResponse(
                     matched=True,
-                    flow=flows[0],
+                    flow=shown,
+                    **redaction,
                     elapsed_seconds=round(time.monotonic() - start, 3),
                     polls=polls,
                     truncated=False,
@@ -1207,15 +1251,23 @@ async def stop_capture(request: Request, body: CaptureStopRequest) -> CaptureSto
             session_id=body.session_id, duration_seconds=0, total_flows=0,
         ))
     try:
-        return _with_tls_note(
-            request, udid, await manager.stop(body.session_id, flow_store),
-        )
+        stopped = await manager.stop(body.session_id, flow_store)
+        flows, redaction = _shown(stopped.flows, body.reveal)
+        update: dict = {"flows": flows}
+        if stopped.flow_summaries is not None:
+            # Summary rows carry URLs too, built from the stored flows (review).
+            rows, row_names = redact.redact_summaries(stopped.flow_summaries, body.reveal)
+            update["flow_summaries"] = rows
+            names = sorted(set(redaction["redacted"] or []) | set(row_names))
+            redaction = {**redaction, "redacted": names or None,
+                         "redaction_note": redact.NOTE if names else None}
+        return _with_tls_note(request, udid, stopped.model_copy(update={**update, **redaction}))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/flows/{flow_id}", response_model=FlowRecord)
-async def get_flow(request: Request, flow_id: str) -> FlowRecord:
+async def get_flow(request: Request, flow_id: str, reveal: str | None = None) -> FlowRecord:
     """Get full details for a single captured flow."""
     flow_store = request.app.state.flow_store
     if flow_store is None:
@@ -1239,7 +1291,9 @@ async def get_flow(request: Request, flow_id: str) -> FlowRecord:
                 "may have been evicted rather than never captured."
             )
         raise HTTPException(status_code=404, detail=detail)
-    return flow
+    # Redacted as shown (#742): `reveal` names what to show, or `true`.
+    (shown,), redaction = _shown([flow], reveal)
+    return shown.model_copy(update=redaction)
 
 
 # ---------------------------------------------------------------------------

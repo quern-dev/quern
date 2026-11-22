@@ -229,6 +229,9 @@ class Filters:
     #: What asks for a keyframe when filming (#415). Requests matter for runs
     #: quern does not drive: a CI suite has no quern actions at all.
     keyframes: tuple[str, ...] = KEYFRAME_TRIGGERS
+    #: Secret headers and query parameters redacted in the recorded flows
+    #: (#742). Kept in the manifest, so a recording made with `False` says so.
+    redact: bool = True
     #: The app to sample CPU, memory and frames of, by bundle id or package
     #: (#245, phase 2): `gauge` lines, and per-action peaks in the trace.
     gauges: str | None = None
@@ -266,7 +269,7 @@ class Filters:
                 "include_unattributed": self.include_unattributed, "video": self.video,
                 "bodies": self.bodies, "max_body_bytes": self.max_body_bytes,
                 "exclude_content_types": self.exclude_content_types,
-                "keyframes": list(self.keyframes),
+                "keyframes": list(self.keyframes), "redact": self.redact,
                 "gauges": self.gauges, "gauge_interval_s": self.gauge_interval_s}
 
     @classmethod
@@ -283,6 +286,9 @@ class Filters:
                    # A manifest from before #415 has no `keyframes`: it was
                    # recorded with action keyframes only, and resumes so.
                    keyframes=tuple(d["keyframes"]) if "keyframes" in d else ("actions",),
+                   # A manifest from before #742 recorded the real values, and
+                   # resumes so: half of one recording redacted would mislead.
+                   redact=d.get("redact") is True,
                    gauges=d.get("gauges"),
                    gauge_interval_s=d.get("gauge_interval_s", gauges_mod.INTERVAL_DEFAULT_S))
 
@@ -1084,8 +1090,23 @@ class RecordingManager:
     @staticmethod
     def _record_of(rec: Recording, kind: str, item) -> dict:
         data = item.model_dump(mode="json")
-        if kind in ("flow", "request_started"):
-            data = shape_bodies(kind, data, rec.filters)
+        if kind not in ("flow", "request_started"):
+            return data
+        # Bodies are shaped by the real Content-Type, then the redacted
+        # headers and URL laid over: a Content-Type named in redact_headers
+        # would otherwise slip an excluded body past exclude_content_types
+        # (review).
+        data = shape_bodies(kind, data, rec.filters)
+        if rec.filters.redact:
+            from server.proxy import redact
+
+            shown = redact.redact_flow(item, force=True)[0].model_dump(mode="json")
+            for side in ("request", "response"):
+                if data.get(side) and shown.get(side):
+                    data[side]["headers"] = shown[side].get("headers")
+            for field in ("url", "path"):
+                if data.get("request") and field in data["request"]:
+                    data["request"][field] = shown["request"][field]
         return data
 
     def _request_keyframe(self, rec: Recording) -> None:

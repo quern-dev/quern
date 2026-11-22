@@ -5,7 +5,7 @@ import { apiRequest } from "../http.js";
 import { forgetCapture, recordCapture, recordDeviceProxy } from "../carried.js";
 // As mocks: never in the middle of a switch (CodeRabbit).
 import { betweenSwitches } from "./system.js";
-import { strictParams, errorText } from "./helpers.js";
+import { strictParams, errorText, revealParam, revealQuery } from "./helpers.js";
 
 export function registerProxyTools(server: McpServer): void {
   server.registerTool("list_pending_requests", {
@@ -84,6 +84,7 @@ For an Android emulator, filter by device_serial (e.g. emulator-5554): its traff
         .default(100)
         .describe("Max flows to return"),
       offset: z.coerce.number().min(0).default(0).describe("Pagination offset"),
+      reveal: revealParam,
     }),
   }, async ({
     host,
@@ -102,9 +103,11 @@ For an Android emulator, filter by device_serial (e.g. emulator-5554): its traff
     detail,
     limit,
     offset,
+    reveal,
   }) => {
     try {
       const data = await apiRequest("GET", "/api/v1/proxy/flows", {
+        reveal: revealQuery(reveal),
         host,
         hosts,
         exclude_hosts,
@@ -250,6 +253,7 @@ Use this after triggering a UI action to observe the resulting network request w
         .max(5)
         .default(0.5)
         .describe("Poll interval in seconds (default 0.5)"),
+      reveal: revealParam,
     }),
   }, async ({
     host,
@@ -263,9 +267,11 @@ Use this after triggering a UI action to observe the resulting network request w
     client_ip,
     timeout,
     interval,
+    reveal,
   }) => {
     try {
       const body: Record<string, unknown> = {};
+      if (reveal !== undefined) body.reveal = reveal;
       if (host !== undefined) body.host = host;
       if (path_contains !== undefined) body.path_contains = path_contains;
       if (method !== undefined) body.method = method;
@@ -309,15 +315,17 @@ Use this after triggering a UI action to observe the resulting network request w
   });
 
   server.registerTool("get_flow_detail", {
-    description: `Get full request/response detail for a single captured HTTP flow, including headers and bodies. A 404 on an id from an earlier query may mean the flow was evicted; the error says so when the store has evicted anything.`,
+    description: `Get full request/response detail for a single captured HTTP flow, including headers and bodies. Secret headers and token-like query parameters are redacted (see reveal); bodies are not. A 404 on an id from an earlier query may mean the flow was evicted; the error says so when the store has evicted anything.`,
     inputSchema: strictParams({
       flow_id: z.string().describe("The flow ID to retrieve"),
+      reveal: revealParam,
     }),
-  }, async ({ flow_id }) => {
+  }, async ({ flow_id, reveal }) => {
     try {
       const data = await apiRequest(
         "GET",
-        `/api/v1/proxy/flows/${encodeURIComponent(flow_id)}`
+        `/api/v1/proxy/flows/${encodeURIComponent(flow_id)}`,
+        { reveal: revealQuery(reveal) },
       );
 
       // Try to parse JSON body strings into objects so they render

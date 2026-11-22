@@ -248,6 +248,13 @@ test("a retry adopts the rule a failed attempt made anyway, rather than making a
   assert.equal(r.second.still_waiting, undefined);
 });
 
+test("a retry adopts a rule whose secret header the listing shows redacted (#742)", async () => {
+  const r = await run("carry-ambiguous-secret");
+  assert.match(r.first.failed[0].error, /HTTP 500/);
+  assert.deepEqual(r.second.mocks_recreated, [{ pattern: "~u /amb", rule_id: "mock_romulus1", simulator_udid: "SIM-R1" }]);
+  assert.equal(r.made, 1, "one rule on the server, not two (CodeRabbit)");
+});
+
 test("a retry adopts its own session's rule, not another agent's identical one (#650)", async () => {
   const r = await run("carry-ambiguous-other");
   assert.deepEqual(r.second.mocks_recreated, [{ pattern: "~u /amb", rule_id: "mock_romulus2", simulator_udid: "SIM-R1" }]);

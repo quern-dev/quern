@@ -104,8 +104,12 @@ def _classify_level(flow: FlowRecord) -> LogLevel:
 
 def _format_summary(flow: FlowRecord) -> str:
     """Format a one-line summary of a flow for the log buffer."""
+    from server.proxy import redact
+
     req = flow.request
-    parts = [f"{req.method} {req.path}"]
+    # The log buffer is read by query_logs and tail_logs: a token in the
+    # query string is no less a secret there (#742). The flow keeps it.
+    parts = [f"{req.method} {redact.redact_text(req.path)}"]
 
     if flow.response:
         resp = flow.response
@@ -176,6 +180,25 @@ def _rules_locked(method):
         async with self._rules_lock:
             return await method(self, *args, **kwargs)
     return locked
+
+
+#: An event's fields that say which one it was and hold no secret.
+_LABEL_FIELDS = ("type", "id", "flow_id", "sni", "host", "client_ip", "method")
+
+
+def _event_label(data: dict) -> str:
+    """Which event a log line is about, without quoting it: an event is a
+    captured flow, headers and all, and the server log is not redacted
+    (#742 review). The path is shown with its secret parameters redacted."""
+    from server.proxy import redact
+
+    request = data.get("request") if isinstance(data.get("request"), dict) else {}
+    parts = [f"{k}={v!r}" for k in _LABEL_FIELDS
+             for v in [data.get(k, request.get(k))] if isinstance(v, (str, int))]
+    path = request.get("path") or data.get("path")
+    if isinstance(path, str):
+        parts.append(f"path={redact.redact_text(path)[:200]!r}")
+    return " ".join(parts) or "(no identifying fields)"
 
 
 class ProxyAdapter(BaseSourceAdapter):
@@ -1255,6 +1278,9 @@ class ProxyAdapter(BaseSourceAdapter):
         self._bad_lines += 1
         if self._bad_lines <= BAD_LINES_LOGGED or self._bad_lines % 100 == 0:
             text = line.decode("utf-8", errors="replace") if isinstance(line, bytes) else line
+            from server.proxy import redact
+
+            text = redact.redact_text(text)                 # a URL's token, if it has one
             logger.warning(
                 "mitmdump: %s (%d so far): %r", what, self._bad_lines, text[:500],
             )
@@ -1312,7 +1338,8 @@ class ProxyAdapter(BaseSourceAdapter):
                     await self._dispatch(data)
                 except Exception:
                     logger.exception(
-                        "Proxy event handler failed; skipping the event: %r", line[:500],
+                        "Proxy event handler failed; skipping the event: %s",
+                        _event_label(data),
                     )
         except asyncio.CancelledError:
             raise
@@ -1407,7 +1434,9 @@ class ProxyAdapter(BaseSourceAdapter):
                     continue
                 if line.startswith("{") and await self._stdout_event(line):
                     continue
-                logger.warning("mitmdump: %s", line[:LOGGED_LINE_MAX])
+                from server.proxy import redact
+
+                logger.warning("mitmdump: %s", redact.redact_text(line[:LOGGED_LINE_MAX]))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1430,7 +1459,8 @@ class ProxyAdapter(BaseSourceAdapter):
         try:
             await self._dispatch(data)
         except Exception:
-            logger.exception("Proxy event handler failed; skipping the event: %r", line[:500])
+            logger.exception("Proxy event handler failed; skipping the event: %s",
+                             _event_label(data) if isinstance(data, dict) else "(not an object)")
         return True
 
     async def _drain_stderr(self) -> None:
@@ -1578,6 +1608,8 @@ class ProxyAdapter(BaseSourceAdapter):
         # Emit NOTICE log entry
         method = req_data.get("method", "?")
         path = req_data.get("path", "?")
+        from server.proxy import redact
+
         entry = LogEntry(
             id=uuid.uuid4().hex[:8],
             timestamp=held_at,
@@ -1585,7 +1617,7 @@ class ProxyAdapter(BaseSourceAdapter):
             process="network",
             subsystem=req_data.get("host", ""),
             level=LogLevel.NOTICE,
-            message=f"INTERCEPTED: {method} {path}",
+            message=f"INTERCEPTED: {method} {redact.redact_text(path)}",
             source=LogSource.PROXY,
         )
         # Fire-and-forget emit (synchronous context)
@@ -1708,5 +1740,9 @@ class ProxyAdapter(BaseSourceAdapter):
                 started_monotonic=data.get("started_monotonic"),
             )
         except Exception as e:
-            logger.warning("Failed to parse flow data: %s", e)
+            # Without the input: pydantic quotes the values it rejected, and
+            # a rejected header is a captured one (#750 review).
+            detail = (e.errors(include_input=False, include_url=False)
+                      if hasattr(e, "errors") else type(e).__name__)
+            logger.warning("Failed to parse flow data: %s", detail)
             return None

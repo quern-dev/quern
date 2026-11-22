@@ -839,7 +839,18 @@ class FlowTiming(BaseModel):
     total_ms: float | None = None
 
 
-class FlowRecord(BaseModel):
+class Redaction(BaseModel):
+    """What a flow answer hid, and what it was asked to show (#742)."""
+
+    #: The secret header and query-parameter names redacted in this answer.
+    redacted: list[str] | None = None
+    #: What `reveal` asked to be shown: names, or ["*"] for everything.
+    revealed: list[str] | None = None
+    #: Said when anything was redacted: how to see it, and that bodies are not.
+    redaction_note: str | None = None
+
+
+class FlowRecord(Redaction):
     """A complete HTTP flow (request + response) captured by the proxy."""
 
     id: str = Field(description="Unique flow identifier")
@@ -941,7 +952,7 @@ class FlowSummaryItem(BaseModel):
     total_ms: float | None = None
 
 
-class FlowQueryResponse(Completeness, SimulatorTlsNote):
+class FlowQueryResponse(Completeness, SimulatorTlsNote, Redaction):
     """Response from flow query endpoint."""
 
     flows: list[FlowRecord] = []
@@ -1011,6 +1022,11 @@ class RecordingStartRequest(BaseModel):
     exclude_content_types: list[str] | None = Field(default=None, description=(
         "Drop bodies whose Content-Type starts with any of these, e.g. `image/`, "
         "`text/html`. The flow itself is kept."))
+    redact: bool = Field(default=True, description=(
+        "Redact secret headers and query-string parameters in the recorded flows "
+        "(#742), as every flow answer does: a recording is often shared, and a redacted "
+        "one cannot be un-redacted later. `false` records the real values, and the "
+        "manifest says so (`filters.redact`). Bodies are not redacted either way."))
     #: Stripped before its length is checked, as the recorder stores it.
     requested_by: Annotated[
         str, StringConstraints(strip_whitespace=True, max_length=200),
@@ -1075,9 +1091,12 @@ class CaptureStopRequest(BaseModel):
     """Request body for POST /api/v1/proxy/capture/stop."""
 
     session_id: str
+    #: Secret headers and query parameters are redacted in the flows returned
+    #: (#742): names to show, or true for all.
+    reveal: bool | list[str] | None = None
 
 
-class CaptureStopResponse(Completeness, SimulatorTlsNote):
+class CaptureStopResponse(Completeness, SimulatorTlsNote, Redaction):
     """Response from POST /api/v1/proxy/capture/stop."""
 
     session_id: str
@@ -1090,6 +1109,10 @@ class CaptureStopResponse(Completeness, SimulatorTlsNote):
 
 class WaitForFlowRequest(BaseModel):
     """Request body for POST /api/v1/proxy/flows/wait."""
+
+    #: Secret headers and query parameters are redacted in the flow returned
+    #: (#742): names to show, or true for all.
+    reveal: bool | list[str] | None = None
 
     host: str | None = None
     path_contains: str | None = None
@@ -1106,7 +1129,7 @@ class WaitForFlowRequest(BaseModel):
     since: UtcDatetime | None = None  # defaults to now - 5s if omitted
 
 
-class WaitForFlowResponse(Completeness, SimulatorTlsNote):
+class WaitForFlowResponse(Completeness, SimulatorTlsNote, Redaction):
     """Response from POST /api/v1/proxy/flows/wait."""
 
     matched: bool
@@ -1733,7 +1756,7 @@ class HeldFlow(BaseModel):
     """The intercept that held it."""
 
 
-class InterceptStatusResponse(BaseModel):
+class InterceptStatusResponse(Redaction):
     """Response from GET /api/v1/proxy/intercept/held."""
 
     pattern: str | None = None
@@ -1770,6 +1793,10 @@ class ReplayResponse(BaseModel):
     original_flow_id: str
     status_code: int | None = None
     error: str | None = None
+    #: Headers whose redacted placeholders were put back to their real values
+    #: before the replay went out (#742), and the note saying so.
+    restored: list[str] | None = None
+    note: str | None = None
 
 
 # ---------------------------------------------------------------------------
