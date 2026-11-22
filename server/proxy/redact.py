@@ -29,6 +29,7 @@ as captured, and the answer names them, so nobody assumes they were redacted.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import hmac
 import logging
@@ -91,6 +92,15 @@ _settings_cache: tuple[tuple, tuple[bool, frozenset[str], frozenset[str], frozen
 #: The ids of placeholders that stand for a JSON literal (`1234`, `true`), not
 #: a string: a body's way back puts them back without quotes.
 _literal_ids: set[str] = set()
+#: Under blind sharing only (#254): the flows each placeholder was made from,
+#: as (device, time), so a placeholder is put back only for a caller whose
+#: view still shows one of them (#756 review). Without it a client key could
+#: pass a placeholder from a device it never held, or no longer holds, and
+#: read the real value back from `restored_response` -- or send it on.
+_sources: dict[str, set[tuple[str, Any]]] = {}
+#: The flow being redacted, as (device, time), while `_redact_one` runs.
+_source: contextvars.ContextVar[tuple[str, Any] | None] = contextvars.ContextVar(
+    "quern_redact_source", default=None)
 
 
 class UnknownPlaceholder(ValueError):
@@ -194,9 +204,12 @@ def placeholder(value: str, *, literal: bool = False) -> str:
         _seen.move_to_end(vid)
         if literal:
             _literal_ids.add(vid)
+        if (source := _source.get()) is not None:
+            _sources.setdefault(vid, set()).add(source)
         while len(_seen) > SEEN_MAX:
             gone, _ = _seen.popitem(last=False)
             _literal_ids.discard(gone)
+            _sources.pop(gone, None)
     return f"‹redacted, {len(value):,} chars, id {vid}›"
 
 
@@ -388,6 +401,51 @@ def _redact_request(request: Any, lists: Lists, shown: frozenset[str],
 
 def _redact_one(flow: Any, lists: Lists, shown: frozenset[str],
                 names: set[str], unscanned: set[str]) -> Any:
+    token = _source.set(_flow_source(flow))
+    try:
+        return _redact_one_in(flow, lists, shown, names, unscanned)
+    finally:
+        _source.reset(token)
+
+
+def _flow_source(flow: Any) -> tuple[str, Any] | None:
+    """The device and time a flow is attributed to, as flow visibility does --
+    recorded only under blind sharing, where it decides who may restore."""
+    from server import visibility
+
+    if visibility.MODE != "blind":
+        return None
+    from server.trace import device_of
+
+    try:
+        from server.api.trace import read_ip_map
+
+        ip_map = read_ip_map()
+    except Exception:  # noqa: BLE001 -- unreadable: no physical flow is attributable
+        ip_map = {}
+    udid, firm = device_of(flow, ip_map)
+    return (udid, getattr(flow, "timestamp", None)) if firm and udid else None
+
+
+def _may_restore(vid: str) -> bool:
+    """Whether the current caller may have placeholder `vid` put back: always
+    under shared visibility, and for the owner. A blind client only while its
+    view shows a flow the placeholder came from -- what reveal would show it."""
+    from server import visibility
+
+    if visibility.MODE != "blind":
+        return True
+    caller = visibility.current_caller()
+    if caller.is_owner:
+        return True
+    view = visibility.data_view(caller)
+    with _lock:
+        sources = list(_sources.get(vid, ()))
+    return any(view.allows(udid, when) for udid, when in sources)
+
+
+def _redact_one_in(flow: Any, lists: Lists, shown: frozenset[str],
+                   names: set[str], unscanned: set[str]) -> Any:
     headers, _, fields = lists
     update: dict[str, Any] = {
         "request": _redact_request(flow.request, lists, shown, names, unscanned)}
@@ -487,7 +545,9 @@ def restore(text: str) -> tuple[str, int]:
         nonlocal count
         with _lock:
             value = _seen.get(m.group(1))
-        if value is None:
+        # Refused alike when the caller may not have it: the answer must not
+        # say a placeholder exists that this caller was never shown.
+        if value is None or not _may_restore(m.group(1)):
             raise UnknownPlaceholder(
                 f"the redacted value {m.group(0)} is not known to this server -- it may "
                 "come from another server, or from long enough ago to have been let go. "
@@ -526,8 +586,8 @@ def restore_body(text: str | None) -> tuple[str | None, int]:
         nonlocal count
         with _lock:
             value = _seen.get(m.group(2)) if m.group(2) in _literal_ids else None
-        if value is None:
-            return m.group(0)                     # a string's: `restore` below
+        if value is None or not _may_restore(m.group(2)):
+            return m.group(0)                     # a string's, or refused: `restore` below
         count += 1
         return value
 
@@ -563,5 +623,6 @@ def _forget_for_tests() -> None:
     with _lock:
         _seen.clear()
         _literal_ids.clear()
+        _sources.clear()
     _key_cache = None
     _settings_cache = None

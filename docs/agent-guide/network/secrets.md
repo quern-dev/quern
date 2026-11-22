@@ -37,6 +37,8 @@ Every answer that redacted anything lists the names in `redacted` and carries a 
 
 **Passing a placeholder back is fine.** If you copy what you were shown into `release_flow`'s `modifications` (headers, URL or body), `replay_flow`'s `modify_headers` or `modify_body`, or a mock's response headers or body, quern sends the real value each placeholder stands for. The answer names them in `restored` (`"body"` for a body).
 
+Under blind sharing, a client key's placeholder is put back only while it could still see a flow the placeholder came from: one from a device it never held, or from before its current reservation, is refused the same way.
+
 A placeholder this server never showed is refused with a 400, rather than sent on and failing auth in a way that looks like the app's own bug. That happens when it came from another server, or from long enough ago to have been let go. Pass the real value, or read the flow again with `reveal`.
 
 A mock set from placeholders holds the real values, so `GET /mocks` lists its secret headers and body fields redacted too. Over MCP, such a mock **is recreated on another server** after a session switch, with the real values: the MCP asks for them when it sets the mock (`return_restored`), keeps them for the switch, and does not show them to you (#751).

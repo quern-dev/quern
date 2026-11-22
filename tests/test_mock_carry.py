@@ -79,3 +79,77 @@ async def test_an_update_returns_what_it_restored(app, running):  # noqa: F811
     assert "t0k3n" not in repr(body["response"])           # the echoed rule stays redacted
     assert "not recreated on another server" not in body["note"]
     assert _sent(running, "set_mock")[-1]["response"]["body"] == TOKENS
+
+
+# -- who may have a placeholder put back (#756 review) -----------------------------
+
+
+def _blind_world(world):
+    from unittest.mock import AsyncMock
+
+    from server.sources.proxy import ProxyAdapter
+
+    adapter = ProxyAdapter(flow_store=world.app.state.flow_store, listen_port=9101)
+    adapter._running = True
+    adapter.started_at = datetime.now(UTC)
+    adapter.send_command = AsyncMock()
+    world.app.state.proxy_adapter = adapter
+    return adapter
+
+
+def _secret_on(udid: str, fid: str) -> FlowRecord:
+    flow = _flow()
+    flow.id, flow.simulator_udid = fid, udid
+    flow.response.headers["Set-Cookie"] = f"sid={fid}-c00kie; Path=/"   # one value a device
+    return flow
+
+
+def test_a_blind_client_cannot_restore_a_placeholder_from_a_device_it_cannot_see(tmp_path):
+    """Under blind sharing, a client key restores only a placeholder from a
+    flow its view shows -- what reveal would show it. Otherwise it is refused
+    as unknown, which does not say the placeholder exists."""
+    import asyncio
+
+    from tests.test_blind_mode import KEY, SIM_A, SIM_B, _h, world  # noqa: F401
+
+    gen = world.__wrapped__(tmp_path)
+    w = next(gen)
+    try:
+        _blind_world(w)
+        asyncio.run(w.app.state.flow_store.add(_secret_on(SIM_B, "bob-secret")))
+        asyncio.run(w.app.state.flow_store.add(_secret_on(SIM_A, "alice-secret")))
+        owner = {"X-API-Key": KEY}
+        bobs = w.client.get("/api/v1/proxy/flows/bob-secret", headers=owner).json()
+        alices = w.client.get("/api/v1/proxy/flows/alice-secret", headers=_h(w.alice)).json()
+
+        def set_from(key, shown):
+            return w.client.post("/api/v1/proxy/mocks", headers=_h(key), json={
+                "pattern": "~d e.com", "simulator_udid": SIM_A, "return_restored": True,
+                "response": {"status_code": 200, "body": "", "headers": {
+                    "Set-Cookie": shown["response"]["headers"]["Set-Cookie"]}}})
+
+        refused = set_from(w.alice, bobs)                     # bob's device: never alice's
+        assert refused.status_code == 400 and "not known to this server" in refused.text
+        assert "bob-secret-c00kie" not in refused.text
+        allowed = set_from(w.alice, alices)                   # her own device: as reveal
+        assert allowed.status_code == 200, allowed.text
+        assert allowed.json()["restored_response"]["headers"]["Set-Cookie"] == \
+            "sid=alice-secret-c00kie; Path=/"
+        # Released and reserved again, her view starts at the new reservation,
+        # after the flow: she still holds the device the mock is for, and the
+        # placeholder from before is refused like any other.
+        from datetime import timedelta
+
+        from tests.test_blind_mode import _hold
+
+        w.registry.release("alice:s1")
+        _hold(w.registry, "alice:s2", "client:alice", SIM_A,
+              since=datetime.now(UTC) + timedelta(seconds=1))
+        again = w.client.post("/api/v1/proxy/mocks", headers=_h(w.alice, "s2"), json={
+            "pattern": "~d e.com", "simulator_udid": SIM_A, "return_restored": True,
+            "response": {"status_code": 200, "body": "",
+                         "headers": {"Set-Cookie": alices["response"]["headers"]["Set-Cookie"]}}})
+        assert again.status_code == 400 and "not known to this server" in again.text
+        assert "alice-secret-c00kie" not in again.text
+    finally:
+        gen.close()
