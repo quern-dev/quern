@@ -175,6 +175,29 @@ const plans = {
                         },
                         "GET /api/v1/proxy/mocks": async () => [200, { rules: globalThis.made, total: globalThis.made.length }],
                         "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // A mock set from placeholders (#751): local restores them and, asked,
+  // returns the real values; the copy carried to romulus holds those.
+  "carry-restored": [{ "POST /api/v1/proxy/mocks": async () => [200, {
+                         status: "accepted", rule_id: "mock_local1", restored: ["Set-Cookie", "body"],
+                         restored_response: { headers: { "Set-Cookie": "sid=REAL-c00kie" },
+                                              body: "{\"access_token\":\"REAL-t0k3n\"}" } }],
+                       "PATCH /api/v1/proxy/mocks/mock_local1": async () => [200, {
+                         status: "updated", rule_id: "mock_local1", restored: ["body"],
+                         restored_response: { body: "{\"access_token\":\"REAL-t0k3n-2\"}" } }] },
+                     { "POST /api/v1/proxy/mocks": mockIds("romulus"),
+                       "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // As carry-ambiguous, for a mock whose body holds a secret field, which the
+  // listing shows redacted (#749): the retry must still adopt the rule.
+  "carry-ambiguous-body": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
+                      { "POST /api/v1/proxy/mocks": async (b) => {
+                          const id = `mock_romulus${globalThis.made.length + 1}`;
+                          globalThis.made.push({ rule_id: id, pattern: b.pattern, simulator_udid: b.simulator_udid ?? null,
+                                                 response: { status_code: 200, headers: { "content-type": "application/json" }, ...b.response } });
+                          return globalThis.made.length === 1 ? [500, { detail: "timed out" }] : [200, { rule_id: id }];
+                        },
+                        "GET /api/v1/proxy/mocks": async () => [200, { total: globalThis.made.length, rules: globalThis.made.map((r) => ({
+                          ...r, response: { ...r.response, body: '{"password":"‹redacted, 7 chars, id 0123456789ab›","pin":"‹redacted, 4 chars, id 0123456789ac›","n":1}' } })) }],
+                        "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   // As carry-ambiguous, for a mock with a secret header, which the listing
   // shows redacted (#742): the retry must still adopt the rule, not make a second.
   "carry-ambiguous-secret": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
@@ -465,6 +488,27 @@ if (scenario === "leave-unreachable" || scenario === "leave-erroring") {
 } else if (scenario === "carry-ambiguous") {
   globalThis.made = [];
   await tools.set_mock({ pattern: "~u /amb", simulator_udid: "SIM-L", status_code: 200, body: "A" });
+  await tools.use_remote({ name: "romulus" });
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
+  result.first = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;
+  result.second = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;
+  result.made = globalThis.made.length;
+} else if (scenario === "carry-restored") {
+  const P = "‹redacted, 10 chars, id 0123456789ab›";
+  result.setAnswer = text(await tools.set_mock({ pattern: "~u /tok", simulator_udid: "SIM-L", status_code: 200,
+    headers: { "Set-Cookie": `sid=${P}` }, body: `{"access_token":"${P}"}` })).text;
+  result.updateAnswer = text(await tools.update_mock({ rule_id: "mock_local1",
+    body: `{"access_token":"${P}"}` })).text;
+  await tools.use_remote({ name: "romulus" });
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
+  result.reserved = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;
+  result.localPosts = local.bodies.filter((b) => b.path.startsWith("POST /api/v1/proxy/mocks") ||
+                                                 b.path.startsWith("PATCH /api/v1/proxy/mocks")).map((b) => b.body);
+  result.mockBodies = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").map((b) => b.body);
+} else if (scenario === "carry-ambiguous-body") {
+  globalThis.made = [];
+  await tools.set_mock({ pattern: "~u /amb", simulator_udid: "SIM-L", status_code: 200,
+                         body: '{"password":"hunter2","pin":1234,"n":1}' });
   await tools.use_remote({ name: "romulus" });
   globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
   result.first = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;

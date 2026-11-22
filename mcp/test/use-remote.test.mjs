@@ -248,6 +248,29 @@ test("a retry adopts the rule a failed attempt made anyway, rather than making a
   assert.equal(r.second.still_waiting, undefined);
 });
 
+test("a mock set from placeholders is carried with the real values, which the agent never sees (#751)", async () => {
+  const r = await run("carry-restored");
+  // It asked for them, on the set and the update.
+  assert.ok(r.localPosts.length === 2 && r.localPosts.every((b) => b.return_restored === true));
+  // The answers the agent is shown do not carry them.
+  for (const shown of [r.setAnswer, r.updateAnswer]) {
+    assert.doesNotMatch(shown, /REAL-|restored_response/);
+    assert.match(shown, /"restored"/);
+  }
+  // The copy set on romulus holds the real values -- the update's body.
+  assert.equal(r.mockBodies.length, 1, JSON.stringify(r.reserved));
+  assert.deepEqual(r.mockBodies[0].response.headers, { "Set-Cookie": "sid=REAL-c00kie" });
+  assert.equal(r.mockBodies[0].response.body, '{"access_token":"REAL-t0k3n-2"}');
+  assert.doesNotMatch(JSON.stringify(r.mockBodies), /‹redacted/);
+});
+
+test("a retry adopts a rule whose body the listing shows redacted (#751)", async () => {
+  const r = await run("carry-ambiguous-body");
+  assert.match(r.first.failed[0].error, /HTTP 500/);
+  assert.deepEqual(r.second.mocks_recreated, [{ pattern: "~u /amb", rule_id: "mock_romulus1", simulator_udid: "SIM-R1" }]);
+  assert.equal(r.made, 1, "one rule on the server, not two");
+});
+
 test("a retry adopts a rule whose secret header the listing shows redacted (#742)", async () => {
   const r = await run("carry-ambiguous-secret");
   assert.match(r.first.failed[0].error, /HTTP 500/);

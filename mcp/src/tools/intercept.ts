@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { currentRemote } from "../config.js";
 import { apiRequest } from "../http.js";
-import { forgetAllMocks, forgetMock, recordMock, updateMock } from "../carried.js";
+import { forgetAllMocks, forgetMock, recordMock, takeRestored, updateMock } from "../carried.js";
 // Mock changes wait for a switch under way: one made on the new server while
 // the switch was still moving the old one's was moved as well (CodeRabbit).
 import { betweenSwitches } from "./system.js";
@@ -355,19 +355,22 @@ LIFETIME: a rule ends when the session that set it ends -- this MCP exiting, or 
         if (headers) {
           response.headers = headers;
         }
-        const payload: Record<string, unknown> = { pattern, response };
+        // return_restored: the real values any placeholders stood for come
+        // back, for the copy a switch sets on the next server (#751).
+        const payload: Record<string, unknown> = { pattern, response, return_restored: true };
         if (simulator_udid !== undefined) payload.simulator_udid = simulator_udid;
 
-        const data = await apiRequest(
+        const { answer: data, real } = takeRestored(await apiRequest(
           "POST",
           "/api/v1/proxy/mocks",
           undefined,
           payload
-        );
-        // Kept as set, so a switch can move it (carried.ts).
+        ));
+        // Kept as set, with the real values, so a switch can move it (carried.ts).
         const ruleId = (data as { rule_id?: unknown } | null)?.rule_id;
         if (typeof ruleId === "string") {
-          recordMock(ruleId, { pattern, response, simulator_udid: simulator_udid ?? null,
+          recordMock(ruleId, { pattern, response: { ...response, ...real },
+                               simulator_udid: simulator_udid ?? null,
                                platform: (data as { platform?: unknown } | null)?.platform });
         }
 
@@ -475,13 +478,17 @@ LIFETIME: a rule ends when the session that set it ends -- this MCP exiting, or 
           payload.response = response;
         }
 
-        const data = await apiRequest(
+        const { answer: data, real } = takeRestored(await apiRequest(
           "PATCH",
           `/api/v1/proxy/mocks/${encodeURIComponent(rule_id)}`,
           undefined,
-          payload
-        );
-        updateMock(rule_id, { ...payload,
+          { ...payload, return_restored: true }
+        ));
+        // The carried copy takes the real values a placeholder stood for (#751).
+        const change = payload.response !== undefined
+          ? { ...payload, response: { ...(payload.response as Record<string, unknown>), ...real } }
+          : payload;
+        updateMock(rule_id, { ...change,
           platform: (data as { platform?: unknown } | null)?.platform } as Parameters<typeof updateMock>[1]);
 
         return {

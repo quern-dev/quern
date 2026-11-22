@@ -613,6 +613,7 @@ async def set_mock(request: Request, body: SetMockRequest) -> dict:
     response["body"], body_restored = _restored_body(response.get("body"))
     if body_restored:
         restored = [*restored, "body"]
+    real = _restored_response(response, restored, body.return_restored)
     try:
         rule_id = await adapter.set_mock(
             pattern=body.pattern,
@@ -638,16 +639,35 @@ async def set_mock(request: Request, body: SetMockRequest) -> dict:
         from server.proxy import redact
 
         result["restored"] = restored
-        result["note"] = f"{redact.restored_note(restored)} {_NOT_CARRIED}"
+        result["note"] = (redact.restored_note(restored) if real is not None
+                          else f"{redact.restored_note(restored)} {_NOT_CARRIED}")
+        if real is not None:
+            result["restored_response"] = real
     return result
 
 
-#: Said when a mock was set from placeholders (#750 review): the MCP's copy
-#: kept for a session switch holds the placeholders, which another server
-#: never showed and refuses.
+#: Said when a mock was set from placeholders by a caller that did not ask for
+#: `return_restored` -- an MCP from before #751, or REST: a copy it keeps for a
+#: session switch holds the placeholders, which another server never showed
+#: and refuses (#750 review).
 _NOT_CARRIED = ("A mock set from placeholders is not recreated on another server after a "
                 "session switch: if it must carry, set it with the real values (read the "
                 "flow with reveal).")
+
+
+def _restored_response(response: dict | None, restored: list[str], asked: bool
+                       ) -> dict | None:
+    """The real values a mock's placeholders stood for, for a caller that
+    asked (#751): `headers` whole when any header held one, `body` when it
+    did. None when not asked or nothing was restored."""
+    if not asked or not restored or not response:
+        return None
+    real: dict = {}
+    if any(name != "body" for name in restored) and "headers" in response:
+        real["headers"] = response["headers"]
+    if "body" in restored and "body" in response:
+        real["body"] = response["body"]
+    return real or None
 
 
 def _shown_mock(response: dict) -> MockResponseSpec:
@@ -754,7 +774,11 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
         from server.proxy import redact
 
         result["restored"] = update_restored
-        result["note"] = f"{redact.restored_note(update_restored)} {_NOT_CARRIED}"
+        real = _restored_response(update_response, update_restored, body.return_restored)
+        result["note"] = (redact.restored_note(update_restored) if real is not None
+                          else f"{redact.restored_note(update_restored)} {_NOT_CARRIED}")
+        if real is not None:
+            result["restored_response"] = real
     return result
 
 

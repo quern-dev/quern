@@ -489,18 +489,33 @@ function canonical(value: unknown): string {
 /** The redacted placeholder a mock listing shows for a secret header (#742). */
 const REDACTED = /‹redacted, [\d,]+ chars, id [0-9a-f]{12}›/;
 
-/** A listed response and the one wanted, comparable: a header the server
- * lists redacted cannot be compared by value here -- the fingerprint key is
- * the server's -- so it matches on its name alone (#742 review). Without
- * this a mock with a literal secret header never matches its own rule, and
- * a retry posts a second one. */
+/** A redacted placeholder in a listed body, with the quotes a literal's
+ * (`"pin": 1234`) gains around it, so either form matches (#749). */
+const REDACTED_IN_BODY = /"?‹redacted, [\d,]+ chars, id [0-9a-f]{12}›"?/g;
+
+/** A listed response and the one wanted, comparable. What the server lists
+ * redacted cannot be compared by value here -- the fingerprint key is the
+ * server's -- so a redacted header matches on its name alone (#742 review),
+ * and a body with redacted fields matches a wanted body that agrees with it
+ * everywhere outside them (#751). Without this a mock with a literal secret
+ * never matches its own rule, and a retry posts a second one. */
 export function comparable(listed: unknown, wanted: Record<string, unknown>): [string, string] {
-  const have = (listed ?? {}) as Record<string, unknown>;
+  let have = (listed ?? {}) as Record<string, unknown>;
+  let want = wanted;
+  if (typeof have.body === "string" && REDACTED.test(have.body)) {
+    const parts = have.body.split(REDACTED_IN_BODY)
+      .map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    const shape = new RegExp(`^${parts.join("[\\s\\S]*?")}$`);
+    if (typeof want.body === "string" && shape.test(want.body)) {
+      have = { ...have, body: "‹redacted›" };
+      want = { ...want, body: "‹redacted›" };
+    }
+  }
   const headersOf = (r: Record<string, unknown>) =>
     r.headers && typeof r.headers === "object" ? r.headers as Record<string, unknown> : null;
   const hidden = Object.entries(headersOf(have) ?? {})
     .filter(([, v]) => typeof v === "string" && REDACTED.test(v)).map(([k]) => k);
-  if (!hidden.length) return [canonical(have), canonical(wanted)];
+  if (!hidden.length) return [canonical(have), canonical(want)];
   const mask = (r: Record<string, unknown>) => {
     const h = headersOf(r);
     if (!h) return r;
@@ -508,7 +523,22 @@ export function comparable(listed: unknown, wanted: Record<string, unknown>): [s
     return { ...r, headers: Object.fromEntries(Object.entries(h).map(([k, v]) =>
       [k, lower.has(k.toLowerCase()) ? "‹redacted›" : v])) };
   };
-  return [canonical(mask(have)), canonical(mask(wanted))];
+  return [canonical(mask(have)), canonical(mask(want))];
+}
+
+/** A mock answer split into what the agent is shown and the real values its
+ * placeholders stood for (#751): the server returns them in
+ * `restored_response` when asked (`return_restored`), for the copy a switch
+ * sets on the next server, where the placeholders would be refused. The
+ * agent never sees them -- it was shown the placeholders, and asking for the
+ * values is what reveal is for. */
+export function takeRestored(data: unknown): { answer: unknown; real: Record<string, unknown> } {
+  if (!data || typeof data !== "object" || !("restored_response" in data)) {
+    return { answer: data, real: {} };
+  }
+  const { restored_response: real, ...answer } = data as Record<string, unknown>;
+  const values = real && typeof real === "object" ? real as Record<string, unknown> : {};
+  return { answer, real: values };
 }
 
 /** Each request that sets something up again: it holds the switch queue. */

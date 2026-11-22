@@ -1861,6 +1861,12 @@ class SetMockRequest(BaseModel):
     status_code: int | None = None
     headers: dict[str, str] | None = None
     body: str | None = None
+    return_restored: bool = False
+    """Also answer with `restored_response`: the real header and body values
+    any redacted placeholders in `response` stood for (#751). The MCP asks,
+    to keep a copy it can set on another server after a session switch,
+    where the placeholders would be refused, and strips the field before
+    showing the answer. The values are ones the caller could see with reveal."""
     simulator_udid: str | None = None
     """Apply the mock only to requests from this device: a simulator's UDID,
     or an Android emulator's or phone's serial (#582).
@@ -1899,6 +1905,12 @@ class UpdateMockRequest(BaseModel):
     status_code: int | None = None
     headers: dict[str, str] | None = None
     body: str | None = None
+    return_restored: bool = False
+    """Also answer with `restored_response`: the real header and body values
+    any redacted placeholders in `response` stood for (#751). The MCP asks,
+    to keep a copy it can set on another server after a session switch,
+    where the placeholders would be refused, and strips the field before
+    showing the answer. The values are ones the caller could see with reveal."""
     simulator_udid: str | None = None
     """Omit to keep the rule's scope; a UDID to scope it; null to unscope it.
 
