@@ -303,3 +303,25 @@ def test_a_recording_from_before_redaction_resumes_unredacted():
 
     assert Filters.from_dict({"bodies": "all"}).redact is False
     assert Filters.from_dict({"redact": True}).redact is True
+
+
+# -- the trace ---------------------------------------------------------------------
+
+
+def test_a_traced_flow_redacts_its_url():
+    from server.api.trace import _serialise
+    from server.trace import Attribution
+
+    class _Action:
+        """Every field the serialiser reads: a real time and duration, the
+        rest None."""
+
+        timestamp = datetime.now(UTC)
+        duration_ms = 0.0
+
+        def __getattr__(self, name):
+            return None
+
+    entry = _serialise(Attribution(action=_Action(), flows=[_secret_flow()]), {})
+    (flow,) = entry["flows"]
+    assert "t0k3n" not in flow["url"] and "&page=2" in flow["url"]
