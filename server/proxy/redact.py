@@ -39,6 +39,7 @@ import re
 import secrets
 import threading
 from collections import OrderedDict
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import unquote_plus
 
@@ -491,7 +492,7 @@ def shown_requests(requests: list[Any], reveal: Any = None
 
 
 @contextlib.contextmanager
-def shown_to_caller():
+def shown_to_caller() -> Iterator[None]:
     """Placeholders made inside are the current caller's principal's to put
     back, under blind sharing: for what quern shows a caller of its own --
     the requests its intercepts hold, the mocks it set -- where there is no

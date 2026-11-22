@@ -241,3 +241,28 @@ def test_a_blind_client_reuses_a_placeholder_from_its_own_listed_mock(tmp_path):
         assert sent["response"]["headers"]["Set-Cookie"] == "sid=alice-real"
     finally:
         gen.close()
+
+
+def test_a_client_changes_and_removes_only_its_own_mock(tmp_path):
+    """Holding the device a rule is scoped to is not enough: a previous
+    holder's rule there is not the next holder's to change, or to read back
+    through its answer (#756 review)."""
+    from tests.test_blind_mode import SIM_A, _h, world  # noqa: F401
+
+    gen = world.__wrapped__(tmp_path)
+    w = next(gen)
+    try:
+        adapter = _blind_world(w)
+        adapter._mock_rules = [{"rule_id": "bobs", "pattern": "~d e.com", "simulator_udid": SIM_A,
+                                "response": {"status_code": 200, "body": "",
+                                             "headers": {"Set-Cookie": "sid=bob-real"}}}]
+        w.app.state.mock_owners = {"bobs": "client:bob"}
+        upd = w.client.patch("/api/v1/proxy/mocks/bobs", headers=_h(w.alice),
+                             json={"response": {"status_code": 201}})
+        assert upd.status_code == 403 and "not yours" in upd.text
+        assert "bob-real" not in upd.text
+        gone = w.client.delete("/api/v1/proxy/mocks/bobs", headers=_h(w.alice))
+        assert gone.status_code == 403
+        assert [r["rule_id"] for r in adapter._mock_rules] == ["bobs"]        # still there
+    finally:
+        gen.close()

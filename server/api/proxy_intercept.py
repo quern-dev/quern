@@ -60,6 +60,17 @@ def _own_rule_ids(request: Request, rules: list[dict], view) -> set[str]:
             if owners.get(r["rule_id"]) == caller and view.allows(r.get("simulator_udid"))}
 
 
+def _check_mock_owner(request: Request, rule_id: str) -> None:
+    """A client key changes or removes only a mock it set, as with intercepts
+    (#646). Holding the device a rule is scoped to is not enough: the rule may
+    be a previous holder's, and its answer shows that holder's values as
+    placeholders this caller could then send back (#756 review)."""
+    owners = getattr(request.app.state, "mock_owners", {}) or {}
+    if not _is_owner_key() and owners.get(rule_id) != visibility.current_caller().principal:
+        raise HTTPException(status_code=403, detail=(
+            f"Mock {rule_id} is not yours: a client key changes and removes only its own."))
+
+
 def _is_owner_key() -> bool:
     from server import principal
 
@@ -731,6 +742,7 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
     _check_mock_scope(adapter, rule_id)
     if not any(r.get("rule_id") == rule_id for r in getattr(adapter, "_mock_rules", []) or []):
         raise HTTPException(status_code=404, detail=f"Mock rule not found: {rule_id}")
+    _check_mock_owner(request, rule_id)
     if scope_given and not body.simulator_udid:
         # A new scope that names a simulator reaches the access middleware as
         # a device; removing the scope names none, and makes the rule answer
@@ -812,6 +824,8 @@ async def delete_mock(request: Request, rule_id: str) -> dict:
     """Delete a specific mock rule."""
     adapter = _require_running_proxy(request)
     _check_mock_scope(adapter, rule_id)
+    if any(r.get("rule_id") == rule_id for r in getattr(adapter, "_mock_rules", []) or []):
+        _check_mock_owner(request, rule_id)
     removed = await adapter.clear_mock(rule_id=rule_id)
     if not removed:
         # 404, matching PATCH on the same id. Reporting "deleted" for a rule
