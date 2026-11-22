@@ -878,7 +878,7 @@ the background and can be re-enabled with configure_system_proxy.`,
     description: `Point a device at the Quern proxy, or record that someone else did. ` +
     `On Android, pass apply=true and Quern writes the setting itself over adb — no root, ` +
     `no Settings screen, on any device or emulator — then bounces Wi-Fi so it takes effect, ` +
-    `since the setting is only read when the network attaches. ` +
+    `since some devices read the setting only when the network attaches. ` +
     `On iOS the proxy is still configured by hand in Settings > Wi-Fi; call this afterwards to record it, ` +
     `and apply/clear are refused rather than silently ignored. ` +
     `Pass clear=true to undo it — the setting survives reboots, and a device left pointing at a proxy ` +
@@ -894,8 +894,9 @@ the background and can be re-enabled with configure_system_proxy.`,
     `not that traffic is flowing yet. ` +
     `client_ip also enables per-device flow filtering on query_flows/get_flow_summary. ` +
     `An applied answer's https says whether HTTPS will work there: ca_install (automatic: a rootable ` +
-    `build, install_proxy_cert installs the CA; manual: a person installs it as a user certificate and ` +
-    `only apps that trust user certificates decrypt; unknown), ca_trusted, and a note. ` +
+    `build, install_proxy_cert installs the CA; manual: quern cannot, and the note gives two ways for ` +
+    `your own app -- trust quern's CA in its debug build, with nothing on the device, or install it ` +
+    `as a user certificate, and only apps that trust those decrypt; unknown), ca_trusted, and a note. ` +
     `A proxy applied by a session that holds the device is cleared when that hold ends, and after ` +
     `use_remote the next reservation's Android devices are routed through the new server's proxy.`,
     inputSchema: strictParams({

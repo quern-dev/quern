@@ -12,8 +12,10 @@ one of them was the gate:
   device must be routed before it can fetch a certificate at all -- meaning a
   device that could not take the cert got no proxy either, not even for
   plaintext HTTP, which needs no certificate;
-- the setting is read when the network attaches, so writing it to a connected
-  device does nothing until something reattaches.
+- some devices read the setting only when the network attaches, so writing it
+  to a connected device did nothing until something reattached (measured: no
+  proxied requests before the bounce, twenty after). Not all: a Pixel 3 XL on
+  Android 10, over adb on Wi-Fi, used it at once (#741).
 
 See #265.
 """
@@ -515,6 +517,46 @@ class TestItWillNotStrandADeviceItCannotReach:
         assert "would cut" in out["hint"]
         assert "Settings > Wi-Fi" not in out["hint"]
 
+    async def test_it_says_the_setting_may_already_be_in_effect(self):
+        """Not "it takes effect the next time the device attaches": that was a
+        guess, and a Pixel 3 XL on Android 10 used the proxy at once with no
+        reconnect (#741). The caller is told how to find out, and what a
+        reconnect costs it over this transport."""
+        ctrl = _android("192.168.1.9:5555")
+        ctrl.adb.is_network_transport = MagicMock(return_value=True)
+        ctrl.adb.reattach_network = AsyncMock(return_value=False)
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="192.168.1.9:5555", apply=True),
+                _request(ctrl),
+            )
+
+        hint = out["hint"]
+        assert "may already be in effect" in hint
+        assert "look for flows" in hint
+        assert "drops this adb connection" in hint
+        assert "next time the device attaches" not in hint
+
+    async def test_a_clear_over_the_network_says_unset_not_written(self):
+        """The networked branch came before the clear one, so a clear over adb
+        on Wi-Fi was told "The setting is written" (#741)."""
+        ctrl = _android("192.168.1.9:5555")
+        ctrl.adb.is_network_transport = MagicMock(return_value=True)
+        ctrl.adb.reattach_network = AsyncMock(return_value=False)
+        a, b = _hosts()
+        with a, b:
+            out = await record_device_proxy_config_endpoint(
+                RecordDeviceProxyRequest(udid="192.168.1.9:5555", clear=True),
+                _request(ctrl),
+            )
+
+        hint = out["hint"]
+        assert hint.startswith("quern's proxy is unset")
+        assert "setting is written" not in hint
+        assert "would cut" in hint and "drops this adb connection" in hint
+        assert "Settings > Wi-Fi" not in hint
+
     def test_the_transport_shape_is_the_test(self):
         from server.device.android.adb import AdbBackend
 
@@ -936,6 +978,18 @@ class TestApplyingSaysWhetherHttpsWillWork:
         assert https["ca_trusted"] is None, "a user CA is where adb cannot read it"
         assert "user certificate" in https["note"] and "network security config" in https["note"]
         ctrl.adb.system_cert_state.assert_not_awaited()
+
+    async def test_the_manual_note_offers_the_ca_in_the_debug_build_first(self):
+        """Nothing on the device and no screen lock: what made a real session
+        work on a Pixel 3 XL (#741). Offered before the user certificate, with
+        where to get the CA and the two limits."""
+        ctrl = _android()
+        ctrl.adb.is_rootable = AsyncMock(return_value=False)
+        note = (await self._apply(ctrl))["https"]["note"]
+        assert "@raw/quern_ca" in note and "debug-only source set" in note
+        assert "/api/v1/proxy/cert?format=pem" in note and "no key needed" in note
+        assert "pins certificates" in note and "Release builds never trust it" in note
+        assert note.index("@raw/quern_ca") < note.index("user certificate")
 
     @pytest.mark.parametrize("failure", ["unreadable props", "adb raises"])
     async def test_a_check_that_cannot_run_is_unknown_not_a_failed_apply(self, failure):

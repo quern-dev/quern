@@ -662,11 +662,28 @@ def _reattach_hint(
         # A different fact entirely from "the bounce failed": nothing was
         # attempted, on purpose. Telling this caller to retry would invite
         # them to strand the device by hand.
+        #
+        # And not "takes effect the next time it attaches" (#741): that was
+        # a guess stated as fact. A Pixel 3 XL on Android 10, over adb on
+        # Wi-Fi, sent its traffic through the proxy at once with no
+        # reconnect, where the measurement behind the bounce (#265) saw none
+        # until the network re-attached. Which one a device does is not
+        # known here, so the caller is told how to find out.
+        rejoin = ("which also drops this adb connection, so it has to be connected "
+                  "again afterwards")
+        if cleared:
+            return (
+                "quern's proxy is unset, but quern did not bounce Wi-Fi: adb reaches "
+                "this device over the network, and the bounce would cut that "
+                "connection. New connections may already go direct; if traffic still "
+                f"reaches the proxy, it stops once the device rejoins Wi-Fi, {rejoin}."
+            )
         return (
-            "The setting is written, but quern did not bounce Wi-Fi: adb "
-            "reaches this device over the network, and the bounce would cut "
-            "that connection. It takes effect the next time the device "
-            "attaches to Wi-Fi."
+            "The setting is written, but quern did not bounce Wi-Fi: adb reaches "
+            "this device over the network, and the bounce would cut that "
+            "connection. It may already be in effect -- on some devices it is at "
+            "once -- so look for flows from this device. If none arrive, it takes "
+            f"effect once the device rejoins Wi-Fi, {rejoin}."
         )
     if cleared:
         # No "call clear" here: that is what just happened, and advising it
@@ -943,12 +960,21 @@ async def _https_readiness(controller, udid: str) -> dict:
             "and later the install is held in memory and does not survive a reboot: "
             "check again after one.")
     elif ca_install == "manual":
+        # The bundled CA first (#741): nothing on the device and no screen
+        # lock. It is what made a real session work, on a Pixel 3 XL, where
+        # the user-certificate route below needed both.
         note = (
-            f"{udid}'s build cannot be rooted, so quern cannot install its CA, and "
-            "HTTPS from apps that do not trust user certificates fails. For your own "
-            "app's debug build: install the CA as a user certificate in the device's "
-            "Settings (it needs a screen lock), and give the app a network security "
-            "config that trusts user certificates. Other apps' HTTPS cannot be "
+            f"{udid}'s build cannot be rooted, so quern cannot put its CA in the "
+            "system store, and HTTPS from apps that do not trust it fails. For your "
+            "own app, the simplest fix needs nothing on the device: in a debug-only "
+            "source set, add quern's CA as res/raw/quern_ca.pem (GET "
+            "/api/v1/proxy/cert?format=pem, no key needed), a network security config "
+            "(network_security_config.xml) whose trust-anchors are system and "
+            "@raw/quern_ca, and a debug AndroidManifest.xml that points at it; then "
+            "rebuild and install over the old build. Release builds never trust it, "
+            "and an app that pins certificates still fails. Or install the CA as a "
+            "user certificate in the device's Settings (it needs a screen lock) and "
+            "trust user certificates in the config. Other apps' HTTPS cannot be "
             "decrypted on this device; a Google APIs emulator image can be rooted. "
             "Plain HTTP is captured either way.")
     else:
