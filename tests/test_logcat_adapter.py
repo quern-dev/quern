@@ -135,3 +135,97 @@ class TestAdapterInit:
         adapter = LogcatAdapter(serial="emulator-5554")
         entry = adapter._parse_line("03-08 14:22:45.123  1234  5678 D Tag  : msg")
         assert entry.source == LogSource.LOGCAT
+
+
+# ---------------------------------------------------------------------------
+# Finding adb
+# ---------------------------------------------------------------------------
+
+
+class TestFindingAdb:
+    """Capture finds adb as the rest of quern does. It used PATH alone, and a
+    server started by the menu-bar app has no platform-tools on its PATH when
+    adb came with Android Studio: every other Android call worked and capture
+    said "adb not found on PATH" (measured on this Mac's own server)."""
+
+    @staticmethod
+    def _no_adb_on_path(monkeypatch, tmp_path, *, sdk_has_adb: bool):
+        import shutil
+
+        from server.device.android import adb as adb_mod
+
+        sdk = tmp_path / "Library" / "Android" / "sdk"
+        if sdk_has_adb:
+            (sdk / "platform-tools").mkdir(parents=True)
+            (sdk / "platform-tools" / "adb").write_text("#!/bin/sh\n")
+        monkeypatch.setattr(shutil, "which", lambda _name: None)
+        monkeypatch.delenv("ANDROID_HOME", raising=False)
+        monkeypatch.delenv("ANDROID_SDK_ROOT", raising=False)
+        monkeypatch.setattr(adb_mod, "_SDK_SEARCH_PATHS", [sdk])
+        return str(sdk / "platform-tools" / "adb")
+
+    @staticmethod
+    def _fake_exec(monkeypatch, calls):
+        import asyncio
+
+        class _Getprop:
+            returncode = 0
+
+            async def communicate(self):
+                return b"23\n", b""
+
+        class _Logcat:
+            """Runs until terminated, as a live logcat does."""
+
+            def __init__(self):
+                self.returncode = None
+                self.stdout, self.stderr = asyncio.StreamReader(), asyncio.StreamReader()
+                self._exited = asyncio.Event()
+
+            async def wait(self):
+                await self._exited.wait()
+                return 0
+
+            def terminate(self):
+                for stream in (self.stdout, self.stderr):
+                    stream.feed_eof()
+                self.returncode = 0
+                self._exited.set()
+
+            kill = terminate
+
+        async def fake_exec(*args, **kwargs):
+            calls.append(args)
+            return _Getprop() if "getprop" in args else _Logcat()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(LogcatAdapter, "_read_loop", lambda self: asyncio.sleep(0))
+
+    async def test_adb_in_the_android_sdk_is_used_when_it_is_not_on_path(
+        self, monkeypatch, tmp_path,
+    ):
+        adb = self._no_adb_on_path(monkeypatch, tmp_path, sdk_has_adb=True)
+        calls: list = []
+        self._fake_exec(monkeypatch, calls)
+
+        adapter = LogcatAdapter(serial="08649a85")
+        await adapter.start()
+
+        assert adapter._error is None, adapter._error
+        assert [c[0] for c in calls] == [adb, adb], "getprop and logcat both use it"
+        assert adapter.api_level == 23
+        await adapter.stop()
+
+    async def test_no_adb_anywhere_is_an_error_that_says_where_it_looked(
+        self, monkeypatch, tmp_path,
+    ):
+        self._no_adb_on_path(monkeypatch, tmp_path, sdk_has_adb=False)
+        calls: list = []
+        self._fake_exec(monkeypatch, calls)
+
+        adapter = LogcatAdapter(serial="08649a85")
+        await adapter.start()
+
+        assert calls == [], "nothing is run without an adb"
+        assert not adapter.is_running
+        assert "ANDROID_HOME" in adapter._error and "not on PATH" in adapter._error
