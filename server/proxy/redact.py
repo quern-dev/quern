@@ -70,6 +70,7 @@ _SET_COOKIE = re.compile(r"(^|,\s*)([^=;,\s]+)=([^;,]*)")
 _lock = threading.Lock()
 _seen: OrderedDict[str, str] = OrderedDict()
 _key_cache: bytes | None = None
+_settings_cache: tuple[tuple, tuple[bool, frozenset[str], frozenset[str]]] | None = None
 
 
 class UnknownPlaceholder(ValueError):
@@ -92,9 +93,20 @@ def settings() -> tuple[bool, frozenset[str], frozenset[str]]:
     false, nothing else -- is the one way to turn it off on this Mac.
     Anything malformed reads as on with the defaults: a typo must never mean
     "show every token"."""
-    from server.config import read_user_config
+    from server import config
 
-    raw = read_user_config().get("proxy")
+    # Cached on the file's identity: this runs for every captured flow's log
+    # line, and config.json changes rarely. A changed file is read again.
+    path = config.USER_CONFIG_FILE
+    try:
+        st = path.stat()
+        stamp = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = (str(path), None, None)
+    global _settings_cache
+    if _settings_cache is not None and _settings_cache[0] == stamp:
+        return _settings_cache[1]
+    raw = config.read_user_config().get("proxy")
     raw = raw if isinstance(raw, dict) else {}
 
     def extra(key: str) -> frozenset[str]:
@@ -103,8 +115,10 @@ def settings() -> tuple[bool, frozenset[str], frozenset[str]]:
             return frozenset()
         return frozenset(n.strip().lower() for n in names if isinstance(n, str) and n.strip())
 
-    return (raw.get("redact") is not False, HEADERS | extra("redact_headers"),
-            PARAMS | extra("redact_params"))
+    result = (raw.get("redact") is not False, HEADERS | extra("redact_headers"),
+              PARAMS | extra("redact_params"))
+    _settings_cache = (stamp, result)
+    return result
 
 
 def _key() -> bytes:
@@ -365,7 +379,8 @@ def restored_note(names: list[str]) -> str | None:
 
 
 def _forget_for_tests() -> None:
-    global _key_cache
+    global _key_cache, _settings_cache
     with _lock:
         _seen.clear()
     _key_cache = None
+    _settings_cache = None

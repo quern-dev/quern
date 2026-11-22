@@ -245,3 +245,29 @@ async def test_a_mock_set_from_a_shown_cookie_holds_the_real_one_and_lists_it_re
     assert resp.json()["restored"] == ["Set-Cookie"]
     listed = (await _call(app, "GET", "/api/v1/proxy/mocks")).json()
     assert "c00kie" not in repr(listed)                 # the agent was never shown it
+
+
+# -- the log buffer ---------------------------------------------------------------
+
+
+def test_a_flows_log_line_redacts_its_query():
+    from server.sources.proxy import _format_summary
+
+    line = _format_summary(_secret_flow())
+    assert line.startswith("GET /v1/me?access_token=‹redacted") and "t0k3n" not in line
+    assert "&page=2" in line
+
+
+async def test_an_intercepted_log_line_redacts_its_query(running):
+    import asyncio
+
+    entries = []
+
+    async def emit(entry):
+        entries.append(entry)
+    running.emit = emit
+    running._handle_intercepted({"id": "h9", "request": {
+        "method": "GET", "path": "/me?token=t0k3n", "host": "api.example.com"}})
+    await asyncio.sleep(0)
+    assert entries and "t0k3n" not in entries[0].message
+    assert entries[0].message.startswith("INTERCEPTED: GET /me?token=‹redacted")

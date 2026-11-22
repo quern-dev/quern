@@ -104,8 +104,12 @@ def _classify_level(flow: FlowRecord) -> LogLevel:
 
 def _format_summary(flow: FlowRecord) -> str:
     """Format a one-line summary of a flow for the log buffer."""
+    from server.proxy import redact
+
     req = flow.request
-    parts = [f"{req.method} {req.path}"]
+    # The log buffer is read by query_logs and tail_logs: a token in the
+    # query string is no less a secret there (#742). The flow keeps it.
+    parts = [f"{req.method} {redact.redact_text(req.path)}"]
 
     if flow.response:
         resp = flow.response
@@ -1578,6 +1582,8 @@ class ProxyAdapter(BaseSourceAdapter):
         # Emit NOTICE log entry
         method = req_data.get("method", "?")
         path = req_data.get("path", "?")
+        from server.proxy import redact
+
         entry = LogEntry(
             id=uuid.uuid4().hex[:8],
             timestamp=held_at,
@@ -1585,7 +1591,7 @@ class ProxyAdapter(BaseSourceAdapter):
             process="network",
             subsystem=req_data.get("host", ""),
             level=LogLevel.NOTICE,
-            message=f"INTERCEPTED: {method} {path}",
+            message=f"INTERCEPTED: {method} {redact.redact_text(path)}",
             source=LogSource.PROXY,
         )
         # Fire-and-forget emit (synchronous context)
