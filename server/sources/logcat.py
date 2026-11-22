@@ -111,13 +111,23 @@ class LogcatAdapter(BaseSourceAdapter):
         #: Tags let through only for crash and hang detection (see start).
         self._detection_only: set[str] = set()
         self.api_level: int | None = None
+        #: Where adb is, found as the rest of quern finds it.
+        self._adb: str | None = None
 
     async def start(self) -> None:
         """Spawn adb logcat from the newest line on, and begin reading output."""
-        import shutil
+        from server.device.android.adb import _find_sdk_tool
 
-        if not shutil.which("adb"):
-            self._error = "adb not found on PATH"
+        # The same lookup as every other adb call, not PATH alone. A server
+        # started outside a shell -- by the menu-bar app, or launchd -- has no
+        # platform-tools on its PATH when adb came with Android Studio, so
+        # capture failed with "adb not found on PATH" on a Mac where every
+        # other Android tool was working (measured on a Nexus 7 and the Mac's
+        # own server).
+        self._adb = _find_sdk_tool("adb")
+        if self._adb is None:
+            self._error = ("adb not found: not on PATH, in ANDROID_HOME or "
+                           "ANDROID_SDK_ROOT, or in the Android SDK's usual places")
             logger.error(self._error)
             return
 
@@ -134,7 +144,7 @@ class LogcatAdapter(BaseSourceAdapter):
         # for them unconditionally turned capture on those devices into a
         # process that died at once while the start call reported success.
         self.api_level = await self._api_level()
-        cmd = ["adb", "-s", self.serial, "logcat", "-v", "threadtime"]
+        cmd = [self._adb, "-s", self.serial, "logcat", "-v", "threadtime"]
         if self.api_level is None or self.api_level >= UTC_FORMAT_MIN_API:
             # Unknown is treated as modern: every device measured is, and if
             # this one is not, the early-exit check below says so rather
@@ -161,7 +171,7 @@ class LogcatAdapter(BaseSourceAdapter):
                 stderr=asyncio.subprocess.PIPE,
             )
         except FileNotFoundError:
-            self._error = "adb not found on PATH"
+            self._error = f"adb not found at {self._adb}"
             logger.error(self._error)
             return
         except Exception as e:
@@ -281,7 +291,8 @@ class LogcatAdapter(BaseSourceAdapter):
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
-                "adb", "-s", self.serial, "shell", "getprop", "ro.build.version.sdk",
+                self._adb or "adb", "-s", self.serial, "shell", "getprop",
+                "ro.build.version.sdk",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
