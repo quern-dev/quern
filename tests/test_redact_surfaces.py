@@ -325,3 +325,20 @@ def test_a_traced_flow_redacts_its_url():
     entry = _serialise(Attribution(action=_Action(), flows=[_secret_flow()]), {})
     (flow,) = entry["flows"]
     assert "t0k3n" not in flow["url"] and "&page=2" in flow["url"]
+
+
+async def test_stopping_a_capture_returns_its_flows_redacted(app):
+    from server.proxy.capture_session import CaptureSessionManager
+
+    app.state.capture_sessions = CaptureSessionManager()   # the lifespan's, which tests skip
+    started = await _call(app, "POST", "/api/v1/proxy/capture/start", json={})
+    assert started.status_code == 200, started.text
+    session_id = started.json()["session_id"]
+    await app.state.flow_store.add(_secret_flow("c1"))
+    stopped = await _call(app, "POST", "/api/v1/proxy/capture/stop",
+                          json={"session_id": session_id})
+    assert stopped.status_code == 200, stopped.text
+    body = stopped.json()
+    assert body["flows"], body                                # the flow is in it
+    _assert_hidden(body["flows"][0])
+    assert "authorization" in body["redacted"]
