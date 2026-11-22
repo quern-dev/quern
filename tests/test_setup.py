@@ -3990,3 +3990,57 @@ class TestPlatformMatrix:
         adb, emulator, avds = setup._android_facts()
         assert adb == str(sdk / "platform-tools" / "adb")
         assert avds == ["Pixel_7", "Pixel_6"]
+
+
+# ── fb-idb is installed on demand, not a hard dependency ───────────────
+
+
+class TestFbIdbOnDemand:
+    """fb-idb supplies the `idb` CLI, which only Macs with Xcode before 26 use
+    (sim-bridge serves 26+). It is not in pyproject.toml; setup installs it
+    where idb is the backend."""
+
+    def test_not_a_hard_dependency(self):
+        import tomllib
+
+        root = Path(__file__).resolve().parent.parent
+        deps = tomllib.loads((root / "pyproject.toml").read_text())["project"]["dependencies"]
+        assert not [d for d in deps if d.split(">")[0].split("=")[0].strip().lower() == "fb-idb"]
+
+    def test_installs_the_pinned_requirement_and_records_it(self, tmp_path):
+        from server.lifecycle import setup
+
+        manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
+        ok = CheckResult(name="idb (fb-idb)", status=CheckStatus.OK, message="installed")
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path),
+            patch("server.lifecycle.setup._which", return_value=None),
+            patch("server.lifecycle.setup.subprocess.run", return_value=_mock_run(returncode=0)) as run,
+            patch("server.lifecycle.setup.check_idb", return_value=ok),
+        ):
+            assert setup._pip_install_fb_idb() is ok
+            assert "fb-idb" in _read_manifest()["pip"]
+        cmd = run.call_args.args[0]
+        assert cmd[1:] == ["install", setup.FB_IDB_REQUIREMENT]
+
+    def test_a_failed_pip_install_is_an_error_naming_the_requirement(self, tmp_path):
+        from server.lifecycle import setup
+
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", tmp_path / "m.json"),
+            patch("server.lifecycle.setup._which", return_value=None),
+            patch("server.lifecycle.setup.subprocess.run", return_value=_mock_run(returncode=1)),
+        ):
+            result = setup._pip_install_fb_idb()
+        assert result.status == CheckStatus.ERROR
+        assert setup.FB_IDB_REQUIREMENT in result.detail
+
+    def test_pip_that_cannot_be_executed_is_an_error_not_a_crash(self, tmp_path):
+        from server.lifecycle import setup
+
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", tmp_path / "m.json"),
+            patch("server.lifecycle.setup._which", return_value=None),
+            patch("server.lifecycle.setup.subprocess.run", side_effect=PermissionError("pip")),
+        ):
+            assert setup._pip_install_fb_idb().status == CheckStatus.ERROR

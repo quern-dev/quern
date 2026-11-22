@@ -2389,6 +2389,12 @@ def _node_can_build(node_result: CheckResult) -> bool:
     return node_result.status in (CheckStatus.OK, CheckStatus.WARNING)
 
 
+#: The `idb` CLI's distribution, with the floor that used to sit in
+#: pyproject.toml. Not a hard dependency: only a Mac where idb is the simulator
+#: backend (Xcode before 26) needs it, and setup installs it there.
+FB_IDB_REQUIREMENT = "fb-idb>=1.1.0"
+
+
 def check_idb() -> CheckResult:
     """Check for idb CLI tool (needed for UI automation)."""
     tool = _which("idb")
@@ -2405,7 +2411,7 @@ def check_idb() -> CheckResult:
         name="idb (fb-idb)",
         status=CheckStatus.MISSING,
         message="Not installed (needed for simulator UI automation)",
-        detail="Install with: pip install fb-idb\n"
+        detail=f"Install with: pip install '{FB_IDB_REQUIREMENT}'\n"
                "Also requires: brew install idb-companion\n"
                "Then run: pyenv rehash (if using pyenv)",
         fixable=True,
@@ -2426,6 +2432,41 @@ def _companion_probe_env(companion: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["DYLD_FRAMEWORK_PATH"] = f"{fw}:{fw / 'PackageFrameworks'}"
     return env
+
+
+def _pip_install_fb_idb() -> CheckResult:
+    """Install fb-idb into the environment setup runs in, and re-check idb.
+
+    Setup has re-exec'd into the venv by now, so `sys.prefix` is the venv and
+    this lands where the server looks for `idb`.
+    """
+    if sys.prefix != sys.base_prefix:
+        pip_cmd = str(Path(sys.prefix) / "bin" / "pip")
+    else:
+        pip_cmd = "pip" if _which("pip") else "pip3"
+    print("    Installing fb-idb...")
+    failed = CheckResult(
+        name="idb (fb-idb)",
+        status=CheckStatus.ERROR,
+        message="pip install failed",
+        detail=f"Try manually: pip install '{FB_IDB_REQUIREMENT}'",
+    )
+    try:
+        result = subprocess.run(
+            [pip_cmd, "install", FB_IDB_REQUIREMENT],
+            stdin=subprocess.DEVNULL, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return failed
+    if result.returncode != 0:
+        return failed
+    _record_install("pip", "fb-idb")
+    if _which("pyenv"):
+        try:
+            subprocess.run(["pyenv", "rehash"], stdin=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass  # a stale shim is pyenv's problem, not a failed install
+    return check_idb()
 
 
 def check_idb_companion() -> CheckResult:
@@ -3389,38 +3430,7 @@ def _setup_ios(report: SetupReport) -> IosFacts:
             if idb_result.status == CheckStatus.MISSING:
                 print("    idb CLI not found. This is the Python client for idb_companion.")
                 if _prompt_yn("    Install fb-idb via pip?"):
-                    if sys.prefix != sys.base_prefix:
-                        pip_cmd = str(Path(sys.prefix) / "bin" / "pip")
-                    else:
-                        pip_cmd = "pip" if _which("pip") else "pip3"
-                    print("    Installing fb-idb...")
-                    try:
-                        result = subprocess.run(
-                            [pip_cmd, "install", "fb-idb"],
-                            stdin=subprocess.DEVNULL, timeout=120,
-                        )
-                        if result.returncode == 0:
-                            _record_install("pip", "fb-idb")
-                            if _which("pyenv"):
-                                subprocess.run(
-                                    ["pyenv", "rehash"],
-                                    stdin=subprocess.DEVNULL, timeout=10,
-                                )
-                            idb_result = check_idb()  # re-check
-                        else:
-                            idb_result = CheckResult(
-                                name="idb (fb-idb)",
-                                status=CheckStatus.ERROR,
-                                message="pip install failed",
-                                detail="Try manually: pip install fb-idb",
-                            )
-                    except (FileNotFoundError, subprocess.TimeoutExpired):
-                        idb_result = CheckResult(
-                            name="idb (fb-idb)",
-                            status=CheckStatus.ERROR,
-                            message="pip install failed",
-                            detail="Try manually: pip install fb-idb",
-                        )
+                    idb_result = _pip_install_fb_idb()
             report.add(idb_result)
 
 

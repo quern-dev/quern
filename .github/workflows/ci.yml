@@ -99,9 +99,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        # Worth watching in its own right: fb-idb is an unconditional dependency
-        # that exists only to supply an iOS binary, and it pulls grpcio and
-        # protobuf. If this step is what fails, that is a finding.
+        # Worth watching in its own right: a dependency that fails to install on
+        # Linux is a finding. (fb-idb, which supplied only an iOS binary and
+        # pulled grpclib and protobuf, is no longer one; setup installs it on
+        # the Macs that need it.)
         run: |
           python -m venv .venv
           .venv/bin/pip install -e ".[dev]"
