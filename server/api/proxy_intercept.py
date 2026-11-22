@@ -680,7 +680,11 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
         raise HTTPException(status_code=status, detail=detail)
     result = {
         "status": "updated", "rule_id": rule_id,
-        "pattern": rule["pattern"], "response": rule["response"],
+        # As listed: the stored rule holds any real value a placeholder
+        # stood for, which this caller was never shown (review).
+        "pattern": rule["pattern"],
+        "response": _shown_mock(rule["response"]).model_dump() if rule.get("response")
+        else rule.get("response"),
         "simulator_udid": rule.get("simulator_udid"),
         "platform": _scope_platform(rule.get("simulator_udid")),
     }

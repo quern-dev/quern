@@ -355,3 +355,113 @@ async def test_stopping_a_capture_returns_its_flows_redacted(app):
     assert body["flows"], body                                # the flow is in it
     _assert_hidden(body["flows"][0])
     assert "authorization" in body["redacted"]
+
+
+async def test_a_summary_capture_redacts_its_rows_and_honours_reveal(app):
+    """With detail "summary" the answer is rows, not flows: their URLs are
+    redacted too, and reveal still reaches them (review)."""
+    from server.proxy.capture_session import CaptureSessionManager
+
+    app.state.capture_sessions = CaptureSessionManager()
+    for reveal in (None, True):
+        started = await _call(app, "POST", "/api/v1/proxy/capture/start",
+                              json={"detail": "summary"})
+        assert started.status_code == 200, started.text
+        await app.state.flow_store.add(_secret_flow(f"s{reveal}"))
+        body = (await _call(app, "POST", "/api/v1/proxy/capture/stop", json={
+            "session_id": started.json()["session_id"], "reveal": reveal})).json()
+        assert body["flow_summaries"], body                   # the rows are there
+        if reveal is None:
+            assert "t0k3n" not in repr(body["flow_summaries"])
+            assert body["redacted"] == ["access_token"] and body["redaction_note"]
+        else:
+            assert "access_token=t0k3n" in body["flow_summaries"][-1]["url"]
+
+
+async def test_an_updated_mock_is_answered_redacted_and_stored_real(app, running):
+    """The PATCH answer echoes the rule: a placeholder it restored must not
+    come back as the real value (review)."""
+    await running.flow_store.add(_secret_flow("m2"))
+    cookie = (await _call(app, "GET", "/api/v1/proxy/flows/m2")).json()[
+        "response"]["headers"]["Set-Cookie"]
+    rule_id = (await _call(app, "POST", "/api/v1/proxy/mocks", json={
+        "pattern": "~d api.example.com",
+        "response": {"status_code": 200, "body": ""}})).json()["rule_id"]
+    resp = await _call(app, "PATCH", f"/api/v1/proxy/mocks/{rule_id}",
+                       json={"response": {"headers": {"Set-Cookie": cookie}}})
+    assert resp.status_code == 200, resp.text
+    assert "c00kie" not in repr(resp.json())
+    assert resp.json()["response"]["headers"]["Set-Cookie"].startswith("sid=‹redacted")
+    sent = _sent(running, "set_mock")[-1]                    # an update is re-sent whole
+    assert sent["response"]["headers"]["Set-Cookie"] == "sid=c00kie; Path=/"
+
+
+def test_an_excluded_content_type_is_judged_before_it_is_redacted(tmp_path, monkeypatch):
+    """With Content-Type in redact_headers, the excluded body must still be
+    dropped: judged by the placeholder, it would be written (review)."""
+    import json as _json
+
+    from server import config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config, "USER_CONFIG_FILE", tmp_path / "config.json")
+    (tmp_path / "config.json").write_text(
+        _json.dumps({"proxy": {"redact_headers": ["content-type"]}}))
+    from types import SimpleNamespace
+
+    from server.recording.recorder import Filters, RecordingManager
+
+    flow = _secret_flow()
+    flow.response.headers["Content-Type"] = "application/json"
+    flow.response.body = '{"big": true}'
+    rec = SimpleNamespace(filters=Filters(exclude_content_types=["application/json"]))
+    line = RecordingManager._record_of(rec, "flow", flow)
+    assert line["response"]["body"] is None
+    assert line["response"]["body_omitted"] == "content type excluded"
+    assert line["response"]["headers"]["Content-Type"].startswith("‹redacted")
+    assert "s3cr3t" not in repr(line)
+
+
+def test_a_recording_says_what_its_events_hold(tmp_path, monkeypatch):
+    """The owner's proxy.redact: false makes a recording unredacted, and the
+    manifest must say so; one started redacted stays redacted (review)."""
+    import json as _json
+    from types import SimpleNamespace
+
+    from server import config
+    from server.recording.recorder import Filters, RecordingManager
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config, "USER_CONFIG_FILE", tmp_path / "config.json")
+    # Started redacted, then the owner turns it off: the events stay as said.
+    rec = SimpleNamespace(filters=Filters(redact=True))
+    (tmp_path / "config.json").write_text(_json.dumps({"proxy": {"redact": False}}))
+    line = RecordingManager._record_of(rec, "flow", _secret_flow())
+    assert "s3cr3t" not in repr(line)
+
+
+@pytest.mark.parametrize(("owner_off", "asked", "written"), [
+    (False, None, True), (False, False, False), (True, None, False), (True, True, False)])
+def test_the_manifest_records_the_redaction_the_events_have(
+        tmp_path, monkeypatch, owner_off, asked, written):
+    """With the owner's proxy.redact: false the events are unredacted, so the
+    manifest says false whatever was asked (review)."""
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from server import config
+    from tests.test_recording import SIM, Sources, _app
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config, "USER_CONFIG_FILE", tmp_path / "config.json")
+    if owner_off:
+        (tmp_path / "config.json").write_text(_json.dumps({"proxy": {"redact": False}}))
+    out = tmp_path / "r"
+    with TestClient(_app(Sources())) as client:
+        started = client.post("/api/v1/recordings", json={
+            "udid": SIM, "output_dir": str(out),
+            **({"redact": asked} if asked is not None else {})}).json()
+        client.post(f"/api/v1/recordings/{started['id']}/stop")
+    manifest = _json.loads((out / "manifest.json").read_text())
+    assert manifest["filters"]["redact"] is written

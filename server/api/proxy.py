@@ -333,7 +333,12 @@ def _deprecations(body) -> list[str] | None:
     return None
 
 
-def _shown(flows: list, reveal) -> tuple[list, dict]:
+#: `reveal` as the routes take it: "true" or names in a query string, or
+#: true or a list of names in a JSON body. None redacts everything.
+Reveal = bool | str | list[str] | None
+
+
+def _shown(flows: list, reveal: Reveal) -> tuple[list, dict]:
     """`flows` as shown, with secret headers and query parameters redacted
     (#742), and the answer fields saying what was. Every route that returns a
     flow goes through here: the stored records keep the real values."""
@@ -347,7 +352,7 @@ def _shown(flows: list, reveal) -> tuple[list, dict]:
                  "redaction_note": redact.NOTE if names else None}
 
 
-def _shown_requests(requests: list, reveal) -> tuple[list, dict]:
+def _shown_requests(requests: list, reveal: Reveal) -> tuple[list, dict]:
     """`_shown` for bare requests -- an intercept's held flows."""
     out, names = redact.redact_requests(requests, reveal)
     asked = redact.reveal_set(reveal)
@@ -1248,9 +1253,15 @@ async def stop_capture(request: Request, body: CaptureStopRequest) -> CaptureSto
     try:
         stopped = await manager.stop(body.session_id, flow_store)
         flows, redaction = _shown(stopped.flows, body.reveal)
-        return _with_tls_note(
-            request, udid, stopped.model_copy(update={"flows": flows, **redaction}),
-        )
+        update: dict = {"flows": flows}
+        if stopped.flow_summaries is not None:
+            # Summary rows carry URLs too, built from the stored flows (review).
+            rows, row_names = redact.redact_summaries(stopped.flow_summaries, body.reveal)
+            update["flow_summaries"] = rows
+            names = sorted(set(redaction["redacted"] or []) | set(row_names))
+            redaction = {**redaction, "redacted": names or None,
+                         "redaction_note": redact.NOTE if names else None}
+        return _with_tls_note(request, udid, stopped.model_copy(update={**update, **redaction}))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

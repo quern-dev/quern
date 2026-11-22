@@ -1089,13 +1089,24 @@ class RecordingManager:
 
     @staticmethod
     def _record_of(rec: Recording, kind: str, item) -> dict:
-        if kind in ("flow", "request_started") and rec.filters.redact:
+        data = item.model_dump(mode="json")
+        if kind not in ("flow", "request_started"):
+            return data
+        # Bodies are shaped by the real Content-Type, then the redacted
+        # headers and URL laid over: a Content-Type named in redact_headers
+        # would otherwise slip an excluded body past exclude_content_types
+        # (review).
+        data = shape_bodies(kind, data, rec.filters)
+        if rec.filters.redact:
             from server.proxy import redact
 
-            item, _ = redact.redact_flow(item)
-        data = item.model_dump(mode="json")
-        if kind in ("flow", "request_started"):
-            data = shape_bodies(kind, data, rec.filters)
+            shown = redact.redact_flow(item, force=True)[0].model_dump(mode="json")
+            for side in ("request", "response"):
+                if data.get(side) and shown.get(side):
+                    data[side]["headers"] = shown[side].get("headers")
+            for field in ("url", "path"):
+                if data.get("request") and field in data["request"]:
+                    data["request"][field] = shown["request"][field]
         return data
 
     def _request_keyframe(self, rec: Recording) -> None:

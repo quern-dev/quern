@@ -18,6 +18,7 @@ from server.api.actions import logged_action
 from server.api.trace import _proxy_is_running
 from server.device.ios.devicectl import canonical_device_id
 from server.models import DeviceType, RecordingKeyframeRequest, RecordingStartRequest, UtcDatetime
+from server.proxy import redact
 from server.recording import recorder as recording_mod
 from server.recording.recorder import (
     KEYFRAME_TRIGGERS,
@@ -84,7 +85,11 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             kinds=tuple(body.kinds or KINDS), hosts=body.hosts,
             exclude_hosts=body.exclude_hosts, include_unattributed=body.include_unattributed,
             video=body.video, bodies=body.bodies, max_body_bytes=body.max_body_bytes,
-            exclude_content_types=body.exclude_content_types, redact=body.redact,
+            exclude_content_types=body.exclude_content_types,
+            # What the events will hold, fixed now: the owner's
+            # `proxy.redact: false` makes the recording unredacted, and the
+            # manifest says so rather than what was asked (review).
+            redact=body.redact and redact.settings()[0],
             keyframes=tuple(body.keyframes) if body.keyframes is not None
             else KEYFRAME_TRIGGERS,
             gauges=body.gauges, gauge_interval_s=body.gauge_interval_s)

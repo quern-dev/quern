@@ -174,9 +174,16 @@ def placeholder(value: str) -> str:
     return f"‹redacted, {len(value):,} chars, id {vid}›"
 
 
+#: The headers whose value starts with an auth scheme ("Bearer ...").
+_SCHEMED = frozenset({"authorization", "proxy-authorization"})
+
+
 def _header_value(name: str, value: str) -> str:
-    if not value or _PLACEHOLDER.search(value):
-        return value                              # empty, or already shown redacted
+    # A captured value that happens to contain placeholder text is redacted
+    # like any other: it is the app's, so it is untrusted, and a guard that
+    # skipped it would show the real secret beside it (review).
+    if not value:
+        return value
     if name == "cookie":
         # Each cookie's name stays: which cookies a request carried is often
         # the question, and the names are not the secret.
@@ -189,7 +196,9 @@ def _header_value(name: str, value: str) -> str:
         return _SET_COOKIE.sub(
             lambda m: f"{m.group(1)}{m.group(2)}={placeholder(m.group(3))}"
             if m.group(3) else m.group(0), value)
-    scheme = _SCHEME.match(value)
+    # A scheme is kept only where the header has one: in X-Api-Key, the
+    # first word of "live-secret suffix" is part of the key (review).
+    scheme = _SCHEME.match(value) if name in _SCHEMED else None
     if scheme:
         return f"{scheme.group(1)}{scheme.group(2)}{placeholder(scheme.group(3))}"
     return placeholder(value)
@@ -208,8 +217,7 @@ def _query(text: str, params: frozenset[str], reveal: frozenset[str]) -> tuple[s
     for part in query.split("&"):
         key, eq, val = part.partition("=")
         name = unquote_plus(key).lower()
-        if eq and val and name in params and name not in reveal \
-                and not _PLACEHOLDER.search(val):
+        if eq and val and name in params and name not in reveal:
             out.append(f"{key}={placeholder(val)}")
             names.add(name)
         else:
@@ -244,20 +252,23 @@ def redact_text(text: str) -> str:
     return _query(text, params, frozenset())[0]
 
 
-def redact_flow(flow: Any, reveal: Any = None) -> tuple[Any, list[str]]:
+def redact_flow(flow: Any, reveal: Any = None, *, force: bool = False
+                ) -> tuple[Any, list[str]]:
     """A copy of `flow` (a FlowRecord) as shown, and the names redacted in it.
     The stored record is never changed: replay and mocks need the real
-    values."""
-    flows, names = redact_flows([flow], reveal)
+    values. `force` redacts even with `proxy.redact: false`: a recording
+    that started redacted says so in its manifest, and stays so."""
+    flows, names = redact_flows([flow], reveal, force=force)
     return flows[0], names
 
 
-def redact_flows(flows: list[Any], reveal: Any = None) -> tuple[list[Any], list[str]]:
+def redact_flows(flows: list[Any], reveal: Any = None, *, force: bool = False
+                 ) -> tuple[list[Any], list[str]]:
     """Copies of `flows` as shown, and every name redacted in any of them.
     The settings are read once for the lot, not once a flow."""
     on, headers, params = settings()
     shown = reveal_set(reveal)
-    if not on or shown is ALL:
+    if (not on and not force) or shown is ALL:
         return list(flows), []
     shown = shown or frozenset()
     names: set[str] = set()
@@ -330,6 +341,25 @@ def redact_urls(item: Any, reveal: Any = None) -> Any:
     shown = shown or frozenset()
     return item.model_copy(update={"url": _query(item.url, params, shown)[0],
                                    "path": _query(item.path, params, shown)[0]})
+
+
+def redact_summaries(items: list[Any], reveal: Any = None) -> tuple[list[Any], list[str]]:
+    """Copies of flow summary rows (`url`, `path`) as shown, and the names
+    redacted in them: a capture stopped with detail "summary" returns rows,
+    not flows (review)."""
+    on, _, params = settings()
+    shown = reveal_set(reveal)
+    if not on or shown is ALL:
+        return list(items), []
+    shown = shown or frozenset()
+    names: set[str] = set()
+    out = []
+    for item in items:
+        url, a = _query(item.url, params, shown)
+        path, b = _query(item.path, params, shown)
+        names |= a | b
+        out.append(item.model_copy(update={"url": url, "path": path}))
+    return out, sorted(names)
 
 
 # -- the way back ---------------------------------------------------------------

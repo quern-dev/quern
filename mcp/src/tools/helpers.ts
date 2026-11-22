@@ -66,5 +66,8 @@ export const revealParam = z
 export function revealQuery(reveal: boolean | string[] | undefined): string | undefined {
   if (reveal === undefined || reveal === false) return undefined;
   if (reveal === true) return "true";
-  return reveal.length ? reveal.join(",") : undefined;
+  // A trailing comma keeps a list a list: the server reads a bare "true" as
+  // "reveal everything", so a configured parameter named `true` asked for
+  // alone would show every other secret (review).
+  return reveal.length ? reveal.join(",") + "," : undefined;
 }

@@ -191,3 +191,33 @@ class TestRestore:
     def test_real_values_pass_through(self):
         assert redact.restore_headers({"Authorization": "Bearer real"}) == (
             {"Authorization": "Bearer real"}, [])
+
+
+# -- review findings --------------------------------------------------------------
+
+
+class TestReviewFindings:
+    def test_a_captured_value_holding_placeholder_text_is_still_redacted(self):
+        """The app's text is untrusted: a placeholder-looking part must not
+        exempt the real secret beside it."""
+        fake = "‹redacted, 1 chars, id 0123456789ab›"
+        shown, _ = redact.redact_flow(_flow({"Cookie": f"sid=live-secret; debug={fake}"},
+                                            url=f"https://e.com/a?token=raw{fake}"))
+        assert "live-secret" not in shown.request.headers["Cookie"]
+        assert "raw" not in shown.request.url.split("token=", 1)[1][:4]
+
+    def test_only_authorization_headers_keep_a_scheme(self):
+        shown, _ = redact.redact_flow(_flow({"X-Api-Key": "live-secret suffix",
+                                             "Proxy-Authorization": "Basic abc"},
+                                            url="https://e.com/"))
+        assert shown.request.headers["X-Api-Key"].startswith("‹redacted")
+        assert shown.request.headers["Proxy-Authorization"].startswith("Basic ‹redacted")
+
+    def test_a_name_list_holding_true_is_not_reveal_all(self, tmp_path):
+        """What the MCP sends for reveal: ["true"] -- a trailing comma."""
+        _config(tmp_path, {"redact_params": ["true"]})
+        flow = _flow({"Authorization": "Bearer t"}, url="https://e.com/a?true=1")
+        shown, names = redact.redact_flow(flow, reveal="true,")
+        assert "true=1" in shown.request.url
+        assert shown.request.headers["Authorization"] != "Bearer t"
+        assert "authorization" in names
