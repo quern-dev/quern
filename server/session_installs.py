@@ -472,8 +472,13 @@ async def _uninstall(controller: Any, record: InstallRecord, udid: str,
                      f"{'it' if len(kept) == 1 else 'them'}, so "
                      f"{'it was' if len(kept) == 1 else 'they were'} left")
     if unnamed > 0:
-        notes.append(f"{unnamed} install{'s' if unnamed != 1 else ''} went over an app "
-                     "already on the device, which was left")
+        # Not "which was left": its app could not be read, and may be one the
+        # session added itself, which the release removes (CodeRabbit on
+        # #745). What is known is that it added nothing to remove.
+        notes.append(f"{unnamed} install{'s' if unnamed != 1 else ''} added no new app "
+                     f"(an app already on the device was reinstalled, and which one "
+                     f"could not be read), so nothing was removed for "
+                     f"{'it' if unnamed == 1 else 'them'}")
     if record.unclear:
         notes.append("some installs could not be told apart from what was already "
                      "there, so their apps were left")
