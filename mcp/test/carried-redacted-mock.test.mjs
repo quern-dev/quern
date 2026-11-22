@@ -68,3 +68,11 @@ test("numbers are compared as written, past a float's precision", () => {
   assert.ok(same(comparable({ status_code: 200, headers: {}, body: `{"pin":"${ph(4)}"}` },
     { status_code: 200, headers: {}, body: '{"pin":1234}' })));
 });
+
+test("a number never matches an object with a source field, either way round", () => {
+  const body = (o) => ({ status_code: 200, headers: {}, body: JSON.stringify(o) });
+  const listed = body({ password: ph(1), value: { source: "1234" } });
+  assert.ok(!same(comparable(listed, body({ password: "x", value: 1234 }))));
+  const listedNum = body({ password: ph(1), value: 1234 });
+  assert.ok(!same(comparable(listedNum, body({ password: "x", value: { source: "1234" } }))));
+});

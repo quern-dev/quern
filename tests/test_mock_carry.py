@@ -208,3 +208,36 @@ def test_a_reused_secrets_sources_stay_one_entry_a_device(monkeypatch):
     entries = [v for v in redact._sources.values() if "SIM-X" in v]
     assert entries and all(len(v) == 1 for v in entries)
     assert all(v["SIM-X"] == base + timedelta(seconds=49) for v in entries)   # the latest
+
+
+def test_a_blind_client_reuses_a_placeholder_from_its_own_listed_mock(tmp_path):
+    """It set the real value, so what its listing shows is its to send back
+    (#756 review). Another client's listed values never reach it at all."""
+    from tests.test_blind_mode import SIM_A, SIM_B, _h, world  # noqa: F401
+
+    gen = world.__wrapped__(tmp_path)
+    w = next(gen)
+    try:
+        adapter = _blind_world(w)
+
+        def set_mock(key, udid, cookie):
+            r = w.client.post("/api/v1/proxy/mocks", headers=_h(key), json={
+                "pattern": "~d e.com", "simulator_udid": udid,
+                "response": {"status_code": 200, "body": "", "headers": {"Set-Cookie": cookie}}})
+            assert r.status_code == 200, r.text
+            return r.json()["rule_id"]
+
+        mine = set_mock(w.alice, SIM_A, "sid=alice-real")
+        set_mock(w.bob, SIM_B, "sid=bob-real")
+        listed = w.client.get("/api/v1/proxy/mocks", headers=_h(w.alice)).json()["rules"]
+        assert [r["rule_id"] for r in listed] == [mine]               # only her own
+        shown = listed[0]["response"]["headers"]["Set-Cookie"]
+        assert "alice-real" not in shown
+        upd = w.client.patch(f"/api/v1/proxy/mocks/{mine}", headers=_h(w.alice), json={
+            "response": {"status_code": 201, "headers": {"Set-Cookie": shown}}})
+        assert upd.status_code == 200, upd.text
+        sent = [c.args[0] for c in adapter.send_command.call_args_list
+                if c.args[0].get("action") == "set_mock"][-1]
+        assert sent["response"]["headers"]["Set-Cookie"] == "sid=alice-real"
+    finally:
+        gen.close()

@@ -677,8 +677,12 @@ def _shown_mock(response: dict) -> MockResponseSpec:
     from server.proxy import redact
 
     spec = MockResponseSpec(**response)
-    return spec.model_copy(update={"headers": redact.redact_headers(spec.headers),
-                                   "body": redact.redact_body_text(spec.body, spec.headers)})
+    # Under blind sharing a caller is listed only its own mocks: what it is
+    # shown of them is its to send back, as in update_mock (#756 review).
+    with redact.shown_to_caller():
+        return spec.model_copy(update={
+            "headers": redact.redact_headers(spec.headers),
+            "body": redact.redact_body_text(spec.body, spec.headers)})
 
 
 @router.get("/mocks", response_model=MockListResponse)
@@ -688,6 +692,17 @@ async def list_mocks(request: Request) -> MockListResponse:
     if adapter is None:
         return MockListResponse(rules=[], total=0)
 
+    # Blind (#254): the caller's own rules on its own devices. Not "every rule
+    # on its devices": a previous holder's rule on a device is not the next
+    # holder's to read. Unscoped rules are the owner's set-up. Chosen before
+    # any is shown: what is shown is the caller's to send back (#756 review).
+    raw = list(adapter._mock_rules)
+    view = visibility.data_view()
+    if not view.everything:
+        caller = visibility.current_caller()
+        owners = getattr(request.app.state, "mock_owners", {}) or {}
+        raw = [r for r in raw if view.allows(r.get("simulator_udid"))
+               and owners.get(r["rule_id"]) == caller.principal]
     rules = [
         MockRuleInfo(
             rule_id=r["rule_id"],
@@ -697,17 +712,8 @@ async def list_mocks(request: Request) -> MockListResponse:
             client_ip=r.get("client_ip"),
             **rule_owners.label(request.app, "mock", r["rule_id"]),
         )
-        for r in adapter._mock_rules
+        for r in raw
     ]
-    # Blind (#254): the caller's own rules on its own devices. Not "every rule
-    # on its devices": a previous holder's rule on a device is not the next
-    # holder's to read. Unscoped rules are the owner's set-up.
-    view = visibility.data_view()
-    if not view.everything:
-        caller = visibility.current_caller()
-        owners = getattr(request.app.state, "mock_owners", {}) or {}
-        rules = [r for r in rules if view.allows(r.simulator_udid)
-                 and owners.get(r.rule_id) == caller.principal]
     return MockListResponse(rules=rules, total=len(rules))
 
 

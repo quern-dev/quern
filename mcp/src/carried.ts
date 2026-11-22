@@ -513,8 +513,10 @@ function sameShown(listed: unknown, wanted: unknown): boolean {
   if (typeof listed === "string" && WHOLE_PLACEHOLDER.test(listed)) {
     return wanted === null || typeof wanted !== "object" || wanted instanceof JsonNumber;
   }
-  if (listed instanceof JsonNumber) {
-    return wanted instanceof JsonNumber && listed.source === wanted.source;
+  if (listed instanceof JsonNumber || wanted instanceof JsonNumber) {
+    // Either side: a number never matches an object whose field is `source`.
+    return listed instanceof JsonNumber && wanted instanceof JsonNumber &&
+      listed.source === wanted.source;
   }
   if (Array.isArray(listed)) {
     return Array.isArray(wanted) && listed.length === wanted.length &&

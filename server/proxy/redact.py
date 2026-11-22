@@ -29,6 +29,7 @@ as captured, and the answer names them, so nobody assumes they were redacted.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import hashlib
 import hmac
@@ -485,13 +486,23 @@ def shown_requests(requests: list[Any], reveal: Any = None
     intercepts hold (`list_held_flows`), and may release only those, so their
     placeholders are the caller's principal's to put back (#756 review) --
     a held request has no stored flow to attribute it to a device by."""
+    with shown_to_caller():
+        return _shown_requests_in(requests, reveal)
+
+
+@contextlib.contextmanager
+def shown_to_caller():
+    """Placeholders made inside are the current caller's principal's to put
+    back, under blind sharing: for what quern shows a caller of its own --
+    the requests its intercepts hold, the mocks it set -- where there is no
+    stored flow to attribute a value to a device by (#756 review)."""
     from server import visibility
 
     # (source, time): the source is the principal itself, and no time.
     token = _source.set((("principal", visibility.current_caller().principal), None)
                         if visibility.MODE == "blind" else None)
     try:
-        return _shown_requests_in(requests, reveal)
+        yield
     finally:
         _source.reset(token)
 
