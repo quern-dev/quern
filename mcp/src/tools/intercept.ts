@@ -258,7 +258,7 @@ With no arguments it removes the intercepts this session set (#646), and leaves 
   server.registerTool(
     "replay_flow",
     {
-      description: `Replay a previously captured HTTP flow through the proxy. The replayed request appears as a new flow in captures. Optionally modify headers or body.`,
+      description: `Replay a previously captured HTTP flow through the proxy. The replayed request appears as a new flow in captures. Optionally modify headers or body. A redacted placeholder you copy back from a flow, in modify_headers or modify_body, is sent as the real value it stands for, and the answer says so in \`restored\`; one this server never showed is refused. Without modify_body, the real captured body is sent.`,
       inputSchema: strictParams({
         flow_id: z.string().describe("The captured flow ID to replay"),
         modify_headers: z
