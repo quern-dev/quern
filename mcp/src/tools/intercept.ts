@@ -6,7 +6,7 @@ import { forgetAllMocks, forgetMock, recordMock, updateMock } from "../carried.j
 // Mock changes wait for a switch under way: one made on the new server while
 // the switch was still moving the old one's was moved as well (CodeRabbit).
 import { betweenSwitches } from "./system.js";
-import { strictParams, errorText } from "./helpers.js";
+import { strictParams, errorText, revealParam, revealQuery } from "./helpers.js";
 
 // The intercepts this session set (#646), by the server it set them on, so a
 // bare clear_intercept removes these from the server in use and leaves other
@@ -178,12 +178,14 @@ With no arguments it removes the intercepts this session set (#646), and leaves 
           .describe(
             "Long-poll timeout in seconds. 0 = return immediately. >0 = block until a flow is caught or timeout expires."
           ),
+        reveal: revealParam,
       }),
     },
-    async ({ timeout }) => {
+    async ({ timeout, reveal }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/proxy/intercept/held", {
           timeout,
+          reveal: revealQuery(reveal),
         });
 
         return {
@@ -208,7 +210,7 @@ With no arguments it removes the intercepts this session set (#646), and leaves 
   server.registerTool(
     "release_flow",
     {
-      description: `Release a held flow, optionally modifying the request before it continues. Modifications can include changes to headers, body, URL, or method. A client key may release only flows its own intercepts held (403 otherwise).`,
+      description: `Release a held flow, optionally modifying the request before it continues. Modifications can include changes to headers, body, URL, or method. A redacted placeholder you copy back from list_held_flows (e.g. an authorization header) is sent as the real value it stands for, and the answer says so in \`restored\`; one this server never showed is refused. A client key may release only flows its own intercepts held (403 otherwise).`,
       inputSchema: strictParams({
         flow_id: z.string().describe("The held flow ID to release"),
         modifications: z
