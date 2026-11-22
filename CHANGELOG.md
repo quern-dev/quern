@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Real values stay inside the server.** A placeholder passed back to `release_flow`, `replay_flow`, `set_mock` or `update_mock` is sent as the real value it stands for, and the answer names it in `restored`. Otherwise an agent copying the headers it was shown would send the placeholder and get a 401 that looks like the app's own bug. One this server never showed is a 400. Listed mocks redact their secret headers, since a mock set from placeholders holds real values.
   - **When the value is the bug:**
     - `reveal` (names, or `true`) on the flow tools and routes shows it, and the answer's `revealed` says so.
-    - A recording made with `redact: false` keeps the real values, and its manifest records `filters.redact`. A recording resumed from a manifest written before this records as it did, unredacted.
+    - A recording made with `redact: false` (also on the MCP `start_recording`) keeps the real values. Its manifest's `filters.redact` says what the events hold: false under the owner's `proxy.redact: false` whatever was asked. A recording resumed from a manifest written before this records as it did, unredacted.
     - In `~/.quern/config.json`, `proxy.redact_headers` and `proxy.redact_params` add names to the defaults, and `proxy.redact: false` (only a literal `false`) turns redaction off on that Mac.
   - **For REST callers:** a script that read these header values now gets placeholders. Add `reveal`.
   - **Bodies are not redacted** (#749), and answers say so.

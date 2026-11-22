@@ -34,7 +34,11 @@ A placeholder this server never showed is refused with a 400, rather than sent o
 
 A mock set from placeholders holds the real values, so `GET /mocks` lists its secret headers redacted too.
 
-**Recordings** are redacted by default. A recording made with `redact: false` (`start_recording`) keeps the real values and says so in its manifest (`filters.redact`). Use that only for a recording that stays on this machine.
+**Recordings** are redacted by default. A recording made with `redact: false` (`start_recording`) keeps the real values. Use that only for a recording that stays on this machine.
+
+The manifest's `filters.redact` says what the events hold, fixed when the recording starts:
+- with the owner's `"redact": false` (below), a recording is unredacted whatever was asked, and says `false`;
+- a recording that started redacted stays redacted, even if that setting changes while it runs.
 
 **The owner's settings,** in `~/.quern/config.json`:
 
