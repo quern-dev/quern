@@ -68,7 +68,7 @@ async def test_query_flows_redacts_and_says_so(app):
     body = resp.json()
     _assert_hidden(body["flows"][0])
     assert body["redacted"] == ["access_token", "authorization", "set-cookie"]
-    assert "Bodies are not redacted" in body["redaction_note"]
+    assert "pass reveal" in body["redaction_note"]
 
 
 async def test_query_flows_summaries_redact_their_urls(app):

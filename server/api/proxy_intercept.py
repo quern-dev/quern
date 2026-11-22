@@ -85,6 +85,19 @@ def _restored(headers: dict | None, url: str | None = None
     return headers, url, names
 
 
+def _restored_body(text: str | None) -> tuple[str | None, bool]:
+    """A body an agent sent back, with its placeholders put back to the real
+    values (#749), and whether any were. One this server never showed is
+    refused (400), as in headers."""
+    from server.proxy import redact
+
+    try:
+        text, count = redact.restore_body(text) if isinstance(text, str) else (text, 0)
+    except redact.UnknownPlaceholder as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return text, count > 0
+
+
 @router.post("/intercept")
 @logged_action("set_intercept", category="proxy")
 async def set_intercept(request: Request, body: InterceptSetRequest) -> dict:
@@ -288,9 +301,13 @@ async def release_flow(request: Request, body: ReleaseFlowRequest) -> dict:
         headers, url, restored = _restored(
             modifications.get("headers"),
             modifications.get("url") if isinstance(modifications.get("url"), str) else None)
+        new_body, body_restored = _restored_body(modifications.get("body"))
+        if body_restored:
+            restored = [*restored, "body"]
         modifications = {**modifications,
                          **({"headers": headers} if headers is not None else {}),
-                         **({"url": url} if url is not None else {})}
+                         **({"url": url} if url is not None else {}),
+                         **({"body": new_body} if body_restored else {})}
     await adapter.release_flow(body.flow_id, modifications=modifications)
     # Remove from server-side tracking (addon will also emit a released event)
     adapter.forget_held(body.flow_id)
@@ -344,7 +361,9 @@ async def replay_flow(
             modify, _, restored = _restored(body.modify_headers)
             headers.update(modify)
         if body.modify_body is not None:
-            request_body = body.modify_body
+            request_body, body_restored = _restored_body(body.modify_body)
+            if body_restored:
+                restored = [*restored, "body"]
 
     # Route through the proxy so the replayed flow appears in captures
     proxy_url = f"http://127.0.0.1:{adapter.listen_port}"
@@ -570,6 +589,9 @@ async def set_mock(request: Request, body: SetMockRequest) -> dict:
     client_ip = await _android_mock_scope(request, body.simulator_udid)
     response = body.response.model_dump()
     response["headers"], _, restored = _restored(response.get("headers"))
+    response["body"], body_restored = _restored_body(response.get("body"))
+    if body_restored:
+        restored = [*restored, "body"]
     try:
         rule_id = await adapter.set_mock(
             pattern=body.pattern,
@@ -614,7 +636,8 @@ def _shown_mock(response: dict) -> MockResponseSpec:
     from server.proxy import redact
 
     spec = MockResponseSpec(**response)
-    return spec.model_copy(update={"headers": redact.redact_headers(spec.headers)})
+    return spec.model_copy(update={"headers": redact.redact_headers(spec.headers),
+                                   "body": redact.redact_body_text(spec.body, spec.headers)})
 
 
 @router.get("/mocks", response_model=MockListResponse)
@@ -673,6 +696,10 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
     update_restored: list[str] = []
     if update_response and "headers" in update_response:
         update_response["headers"], _, update_restored = _restored(update_response["headers"])
+    if update_response and "body" in update_response:
+        update_response["body"], body_restored = _restored_body(update_response["body"])
+        if body_restored:
+            update_restored = [*update_restored, "body"]
     try:
         rule = await adapter.update_mock(
             rule_id=rule_id,

@@ -53,11 +53,13 @@ export const revealParam = z
   .optional()
   .describe(
     "Secret headers (authorization, proxy-authorization, cookie, set-cookie, x-api-key, " +
-    "x-auth-token) and token-like query parameters (access_token, token, key, sig...) are " +
+    "x-auth-token), token-like query parameters (access_token, token, key, sig...) and " +
+    "secret fields in JSON and form bodies (password, access_token, client_secret...) are " +
     "redacted in what is shown, as e.g. `Bearer ‹redacted, 1,184 chars, id 3f2a9c1e04bd›`. " +
     "Equal values share an id on this server, so you can tell whether a token changed " +
     "without seeing it. Pass names to see those values (e.g. [\"authorization\"]), or true " +
-    "for all; the answer's `revealed` says what was shown. Bodies are not redacted. A " +
+    "for all; the answer's `revealed` says what was shown. Other bodies (multipart, " +
+    "binary, HTML) are shown as captured, and redaction_note names them. A " +
     "placeholder you pass back -- in release_flow, replay_flow or a mock -- is sent as the " +
     "real value it stands for.",
   );

@@ -1092,22 +1092,23 @@ class RecordingManager:
         data = item.model_dump(mode="json")
         if kind not in ("flow", "request_started"):
             return data
-        # Bodies are shaped by the real Content-Type, then the redacted
-        # headers and URL laid over: a Content-Type named in redact_headers
-        # would otherwise slip an excluded body past exclude_content_types
-        # (review).
-        data = shape_bodies(kind, data, rec.filters)
-        if rec.filters.redact:
-            from server.proxy import redact
+        if not rec.filters.redact:
+            return shape_bodies(kind, data, rec.filters)
+        from server.proxy import redact
 
-            shown = redact.redact_flow(item, force=True)[0].model_dump(mode="json")
-            for side in ("request", "response"):
-                if data.get(side) and shown.get(side):
-                    data[side]["headers"] = shown[side].get("headers")
-            for field in ("url", "path"):
-                if data.get("request") and field in data["request"]:
-                    data["request"][field] = shown["request"][field]
-        return data
+        # The redacted flow, bodies included (#749), shaped by its *real*
+        # headers: a Content-Type named in redact_headers would otherwise
+        # slip an excluded body past exclude_content_types (#742 review).
+        shown = redact.redact_flow(item, force=True)[0].model_dump(mode="json")
+        kept = {}
+        for side in ("request", "response"):
+            if shown.get(side) and data.get(side):
+                kept[side] = shown[side].get("headers")
+                shown[side]["headers"] = data[side].get("headers")
+        shown = shape_bodies(kind, shown, rec.filters)
+        for side, headers in kept.items():
+            shown[side]["headers"] = headers
+        return shown
 
     def _request_keyframe(self, rec: Recording) -> None:
         """A request started on a device this recording is filming: make it a

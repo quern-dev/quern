@@ -344,22 +344,26 @@ def _shown(flows: list, reveal: Reveal) -> tuple[list, dict]:
     flow goes through here: the stored records keep the real values."""
     from server.proxy import redact
 
-    out, names = redact.redact_flows(flows, reveal)
+    out, names, unscanned = redact.shown_flows(flows, reveal)
+    return out, _redaction_fields(reveal, names, unscanned)
+
+
+def _redaction_fields(reveal: Reveal, names: list[str], unscanned: list[str]) -> dict:
+    """The answer fields that say what was redacted, what was revealed, and
+    which bodies were shown as captured (#749)."""
+    from server.proxy import redact
+
     asked = redact.reveal_set(reveal)
     revealed = (["*"] if asked is redact.ALL
                 else sorted(asked) if asked else None)
-    return out, {"redacted": names or None, "revealed": revealed,
-                 "redaction_note": redact.NOTE if names else None}
+    return {"redacted": names or None, "revealed": revealed,
+            "redaction_note": redact.note(names, unscanned)}
 
 
 def _shown_requests(requests: list, reveal: Reveal) -> tuple[list, dict]:
     """`_shown` for bare requests -- an intercept's held flows."""
-    out, names = redact.redact_requests(requests, reveal)
-    asked = redact.reveal_set(reveal)
-    revealed = (["*"] if asked is redact.ALL
-                else sorted(asked) if asked else None)
-    return out, {"redacted": names or None, "revealed": revealed,
-                 "redaction_note": redact.NOTE if names else None}
+    out, names, unscanned = redact.shown_requests(requests, reveal)
+    return out, _redaction_fields(reveal, names, unscanned)
 
 
 def _with_tls_note(request: Request, udid: str | None, response):
@@ -1260,7 +1264,8 @@ async def stop_capture(request: Request, body: CaptureStopRequest) -> CaptureSto
             update["flow_summaries"] = rows
             names = sorted(set(redaction["redacted"] or []) | set(row_names))
             redaction = {**redaction, "redacted": names or None,
-                         "redaction_note": redact.NOTE if names else None}
+                         # Summary rows carry no bodies: only their URLs.
+                         "redaction_note": redact.note(names, None)}
         return _with_tls_note(request, udid, stopped.model_copy(update={**update, **redaction}))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
