@@ -94,6 +94,11 @@ class InstallRecord:
     added: set[str] = field(default_factory=set)
     #: Installs that added no app: one already there was reinstalled.
     reinstalls: int = 0
+    #: Those reinstalls' apps, where the artifact said which app it was: left
+    #: at release because they were on the device before (#743). Only a
+    #: count went on the answer, which read as "the install did nothing".
+    #: One entry per such install, so it counts against `reinstalls`.
+    kept: list[str] = field(default_factory=list)
     #: Installs whose effect could not be told; their apps are left.
     unclear: int = 0
     #: Installs that failed and left nothing new: not reinstalls.
@@ -341,6 +346,8 @@ async def after_install(app: Any, install: Install | None,
             record.failed += 1
         else:
             record.reinstalls += 1
+            if expected is not None and expected in install.before:
+                record.kept.append(expected)
     elif known:
         record.added |= added
     else:
@@ -450,12 +457,28 @@ async def _uninstall(controller: Any, record: InstallRecord, udid: str,
         _still_free(registry, udid)
         await controller.uninstall_app(bundle_id, udid, set_active=False)
         record.removed.append(bundle_id)
+    # Each reason an app was left, said in words: a bare count of installs
+    # "adding nothing" did not say that the app stayed, or why (#743).
+    notes = []
+    kept = sorted(set(record.kept))
+    unnamed = record.reinstalls - len(record.kept)
+    if kept:
+        notes.append(f"{', '.join(kept)} {'was' if len(kept) == 1 else 'were'} already on "
+                     "the device before this session installed "
+                     f"{'it' if len(kept) == 1 else 'them'}, so "
+                     f"{'it was' if len(kept) == 1 else 'they were'} left")
+    if unnamed > 0:
+        notes.append(f"{unnamed} install{'s' if unnamed != 1 else ''} went over an app "
+                     "already on the device, which was left")
+    if record.unclear:
+        notes.append("some installs could not be told apart from what was already "
+                     "there, so their apps were left")
     return {"action": "installs_removed", "removed": list(record.removed),
             **({"installs_adding_nothing": record.reinstalls} if record.reinstalls else {}),
+            **({"installs_kept_already_present": kept} if kept else {}),
             **({"failed_installs": record.failed} if record.failed else {}),
-            **({"unclear_installs": record.unclear,
-                "note": "some installs could not be told apart from what was already "
-                        "there, so their apps were left"} if record.unclear else {})}
+            **({"unclear_installs": record.unclear} if record.unclear else {}),
+            **({"note": "; ".join(notes) + "."} if notes else {})}
 
 
 async def _erase(app: Any, controller: Any, session: Any, udid: str, key: tuple,
