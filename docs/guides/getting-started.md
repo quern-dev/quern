@@ -2,10 +2,8 @@
 
 ## Prerequisites
 
-You need two things before installing:
-
-- **Xcode** — Full Xcode from the App Store, not just the Command Line Tools. You need it for simulators, `xcodebuild` (app and WDA builds), signing, and provisioning. A physical iPhone on iOS 27 or later is driven without it: if that is all you need, you can skip Xcode. Sign in to your Apple Developer account in Xcode > Settings > Accounts to manage signing identities.
-- **Homebrew** — [brew.sh](https://brew.sh). Quern uses Homebrew to install most of its dependencies (idb, mitmproxy, libimobiledevice, etc.). Setup will not install Homebrew itself — if it's missing, you'll be told.
+- **Homebrew** — [brew.sh](https://brew.sh). Quern uses Homebrew to install most of its dependencies (mitmproxy, libimobiledevice, Python and Node.js if you need them, etc.). Setup will not install Homebrew itself — if it's missing, setup stops and tells you.
+- **Xcode**, depending on what you drive. Full Xcode from the App Store, not just the Command Line Tools, is needed for iOS simulators, for `xcodebuild` (app and WDA builds), and for iPhones before iOS 27, which Quern drives through WebDriverAgent. A physical iPhone on iOS 27 or later needs no Xcode: if that is all you need, skip it (see [Installation without Xcode](https://github.com/quern-dev/quern/blob/main/docs/installation.md#without-xcode)). If you do install it, sign in to your Apple Developer account in Xcode > Settings > Accounts to manage signing identities.
 - **Android Studio** (optional) — Only needed if you're working with Android. Provides `adb`, `emulator`, and the SDK tools. Quern auto-discovers these from your PATH or the standard SDK install locations.
 
 ## Install
@@ -18,11 +16,11 @@ That's it. The installer downloads the latest release to `~/.local/share/quern`,
 
 1. **Installs Python** (via Homebrew) if you don't already have a supported one (3.11–3.14), then creates a virtual environment and installs server dependencies
 2. **Checks for system tools** and offers to install what's missing:
-   - **Xcode Command Line Tools** — for `simctl` (simulator control) and `devicectl` (iOS 17+ devices)
-   - **idb + idb-companion** — for simulator UI automation (accessibility tree, tapping, typing)
+   - **Xcode Command Line Tools** — for `simctl` (simulator control) and `devicectl` (iOS 17+ devices). An Apple Silicon Mac that only drives iPhones on iOS 27 or later can do without them
+   - **idb + idb-companion** — only on an Intel Mac, or with Xcode before 26. Everywhere else simulator UI automation (accessibility tree, tapping, typing) runs on sim-bridge, which is built into Quern, and setup skips idb
    - **pymobiledevice3** — for physical device screenshots, logs, and tunneling
    - **mitmproxy** — for network traffic interception
-   - **Node.js** — for the MCP wrapper
+   - **Node.js** 22.19 or later — for the MCP wrapper
 3. **Builds the MCP server** (TypeScript → JavaScript)
 4. **Registers the MCP server** with Claude Code (writes to `~/.claude.json`)
 5. **Adds `quern` to your PATH** (via `~/.local/bin`)
@@ -65,9 +63,10 @@ When everything's ready, you'll see a summary like this:
   ✓ ideviceinstaller: ideviceinstaller 1.2.0
   ✓ Xcode CLI Tools: Installed (simctl available)
   ✓ mitmdump: 12.2.1
-  ✓ Node.js: v20.19.5
-  ✓ idb_companion: installed
-  ✓ idb (fb-idb): installed
+  ✓ Node.js: v22.23.4
+  – idb_companion: Not required (sim-bridge active)
+      Xcode 26+ on Apple Silicon: simulator UI runs through sim-bridge. An existing idb install is kept as a fallback.
+  – idb (fb-idb): Not required (sim-bridge active)
   ✓ pymobiledevice3: 7.7.1
   ✓ tunneld: Running on http://127.0.0.1:49151
   ✓ VPN Detection: No active VPN detected
@@ -78,6 +77,8 @@ When everything's ready, you'll see a summary like this:
 ──────────────────────────────────────────────────
   All checks passed — ready to go!
 ```
+
+That run was on Apple Silicon with Xcode 26. On an Intel Mac, or with Xcode before 26, setup installs idb instead, and those two lines read `✓ idb_companion: installed` and `✓ idb (fb-idb): installed`.
 
 Not everything needs to be green. If you're only working with simulators, you won't have tunneld or libimobiledevice — that's fine. Setup tells you what's missing and what it affects.
 
