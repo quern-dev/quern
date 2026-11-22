@@ -251,6 +251,7 @@ async def test_a_mock_set_from_a_shown_cookie_holds_the_real_one_and_lists_it_re
     (sent,) = _sent(running, "set_mock")
     assert sent["response"]["headers"]["Set-Cookie"] == "sid=c00kie; Path=/"
     assert resp.json()["restored"] == ["Set-Cookie"]
+    assert "not recreated on another server" in resp.json()["note"]   # #750 review
     listed = (await _call(app, "GET", "/api/v1/proxy/mocks")).json()
     assert "c00kie" not in repr(listed)                 # the agent was never shown it
 
@@ -392,6 +393,7 @@ async def test_an_updated_mock_is_answered_redacted_and_stored_real(app, running
     assert resp.status_code == 200, resp.text
     assert "c00kie" not in repr(resp.json())
     assert resp.json()["response"]["headers"]["Set-Cookie"].startswith("sid=‹redacted")
+    assert "not recreated on another server" in resp.json()["note"]
     sent = _sent(running, "set_mock")[-1]                    # an update is re-sent whole
     assert sent["response"]["headers"]["Set-Cookie"] == "sid=c00kie; Path=/"
 

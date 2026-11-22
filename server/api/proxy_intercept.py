@@ -594,8 +594,17 @@ async def set_mock(request: Request, body: SetMockRequest) -> dict:
     if restored:
         from server.proxy import redact
 
-        result["restored"], result["note"] = restored, redact.restored_note(restored)
+        result["restored"] = restored
+        result["note"] = f"{redact.restored_note(restored)} {_NOT_CARRIED}"
     return result
+
+
+#: Said when a mock was set from placeholders (#750 review): the MCP's copy
+#: kept for a session switch holds the placeholders, which another server
+#: never showed and refuses.
+_NOT_CARRIED = ("A mock set from placeholders is not recreated on another server after a "
+                "session switch: if it must carry, set it with the real values (read the "
+                "flow with reveal).")
 
 
 def _shown_mock(response: dict) -> MockResponseSpec:
@@ -697,7 +706,7 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
         from server.proxy import redact
 
         result["restored"] = update_restored
-        result["note"] = redact.restored_note(update_restored)
+        result["note"] = f"{redact.restored_note(update_restored)} {_NOT_CARRIED}"
     return result
 
 
