@@ -138,3 +138,110 @@ def test_the_stream_event_redacts_its_url():
 
     event = redact.redact_urls(FlowEvent.from_flow(_secret_flow()))
     assert "t0k3n" not in event.url and "t0k3n" not in event.path
+
+
+# -- intercepts, replay and mocks: shown redacted, sent real ---------------------
+
+
+@pytest.fixture
+def running(app):
+    """A running proxy adapter whose commands to the addon are recorded."""
+    from unittest.mock import AsyncMock
+
+    from server.sources.proxy import ProxyAdapter
+
+    store = FlowStore()
+    adapter = ProxyAdapter(flow_store=store, listen_port=9101)
+    adapter._running = True
+    adapter.started_at = datetime.now(UTC)
+    adapter.send_command = AsyncMock()
+    app.state.proxy_adapter = adapter
+    app.state.flow_store = store
+    return adapter
+
+
+def _sent(adapter, action):
+    return [c.args[0] for c in adapter.send_command.call_args_list
+            if c.args[0].get("action") == action]
+
+
+async def _held(app, adapter):
+    adapter._held_flows["h1"] = {
+        "id": "h1", "held_at": datetime.now(UTC),
+        "request": {"method": "GET", "url": "https://api.example.com/me?token=t0k3n",
+                    "host": "api.example.com", "path": "/me?token=t0k3n",
+                    "headers": {"Authorization": SECRET}},
+    }
+    return (await _call(app, "GET", "/api/v1/proxy/intercept/held")).json()
+
+
+async def test_held_flows_are_shown_redacted(app, running):
+    body = await _held(app, running)
+    request = body["held_flows"][0]["request"]
+    assert "s3cr3t-app-token" not in repr(request) and "t0k3n" not in repr(request)
+    assert body["redacted"] == ["authorization", "token"]
+
+
+async def test_a_release_copying_the_shown_headers_sends_the_real_token(app, running):
+    """The agent changes one header and passes back the rest as it was shown:
+    the request that goes out carries the real token, not the placeholder,
+    which would fail with a 401 that looks like the app's own bug."""
+    shown = (await _held(app, running))["held_flows"][0]["request"]
+    resp = await _call(app, "POST", "/api/v1/proxy/intercept/release", json={
+        "flow_id": "h1",
+        "modifications": {"headers": {**shown["headers"], "X-Debug": "1"},
+                          "url": shown["url"]},
+    })
+    assert resp.status_code == 200, resp.text
+    (sent,) = _sent(running, "modify_and_release")
+    assert sent["modifications"]["headers"]["Authorization"] == SECRET
+    assert sent["modifications"]["headers"]["X-Debug"] == "1"
+    assert sent["modifications"]["url"] == "https://api.example.com/me?token=t0k3n"
+    assert resp.json()["restored"] == ["Authorization", "url"]
+
+
+async def test_a_placeholder_this_server_never_showed_is_refused(app, running):
+    await _held(app, running)
+    resp = await _call(app, "POST", "/api/v1/proxy/intercept/release", json={
+        "flow_id": "h1",
+        "modifications": {"headers": {
+            "Authorization": "Bearer ‹redacted, 9 chars, id 0123456789ab›"}},
+    })
+    assert resp.status_code == 400 and "not known to this server" in resp.text
+    assert _sent(running, "modify_and_release") == []           # nothing went out
+
+
+async def test_a_replay_with_a_shown_header_sends_the_real_one(app, running):
+    from unittest.mock import AsyncMock, patch
+
+    await running.flow_store.add(_secret_flow("r1"))
+    shown = (await _call(app, "GET", "/api/v1/proxy/flows/r1")).json()
+    with patch("server.api.proxy_intercept.httpx.AsyncClient") as cls:
+        client = AsyncMock()
+        client.request = AsyncMock(return_value=AsyncMock(status_code=200))
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        cls.return_value = client
+        resp = await _call(app, "POST", "/api/v1/proxy/replay/r1", json={
+            "modify_headers": {"Authorization": shown["request"]["headers"]["Authorization"],
+                               "X-Debug": "1"}})
+    assert resp.status_code == 200, resp.text
+    sent = client.request.call_args.kwargs["headers"]
+    assert sent["Authorization"] == SECRET and sent["X-Debug"] == "1"
+    assert resp.json()["restored"] == ["Authorization"]
+
+
+async def test_a_mock_set_from_a_shown_cookie_holds_the_real_one_and_lists_it_redacted(
+        app, running):
+    await running.flow_store.add(_secret_flow("m1"))
+    shown = (await _call(app, "GET", "/api/v1/proxy/flows/m1")).json()
+    cookie = shown["response"]["headers"]["Set-Cookie"]
+    resp = await _call(app, "POST", "/api/v1/proxy/mocks", json={
+        "pattern": "~d api.example.com",
+        "response": {"status_code": 200, "headers": {"Set-Cookie": cookie}, "body": ""}})
+    assert resp.status_code == 200, resp.text
+    (sent,) = _sent(running, "set_mock")
+    assert sent["response"]["headers"]["Set-Cookie"] == "sid=c00kie; Path=/"
+    assert resp.json()["restored"] == ["Set-Cookie"]
+    listed = (await _call(app, "GET", "/api/v1/proxy/mocks")).json()
+    assert "c00kie" not in repr(listed)                 # the agent was never shown it

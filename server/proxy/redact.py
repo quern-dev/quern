@@ -251,29 +251,59 @@ def redact_flows(flows: list[Any], reveal: Any = None) -> tuple[list[Any], list[
     return out, sorted(names)
 
 
-def _redact_one(flow: Any, headers: frozenset[str], params: frozenset[str],
-                shown: frozenset[str], names: set[str]) -> Any:
-    def head(h: dict[str, str]) -> dict[str, str]:
-        out = {}
-        for k, v in h.items():
-            low = k.lower()
-            if low in headers and low not in shown and v:
-                out[k] = _header_value(low, v)
-                names.add(low)
-            else:
-                out[k] = v
-        return out
+def _head(h: dict[str, str], headers: frozenset[str], shown: frozenset[str],
+          names: set[str]) -> dict[str, str]:
+    out = {}
+    for k, v in h.items():
+        low = k.lower()
+        if low in headers and low not in shown and isinstance(v, str) and v:
+            out[k] = _header_value(low, v)
+            names.add(low)
+        else:
+            out[k] = v
+    return out
 
-    request = flow.request
+
+def _redact_request(request: Any, headers: frozenset[str], params: frozenset[str],
+                    shown: frozenset[str], names: set[str]) -> Any:
     url, in_url = _query(request.url, params, shown)
     path, in_path = _query(request.path, params, shown)
     names |= in_url | in_path
-    update: dict[str, Any] = {"request": request.model_copy(update={
-        "url": url, "path": path, "headers": head(request.headers)})}
+    return request.model_copy(update={
+        "url": url, "path": path, "headers": _head(request.headers, headers, shown, names)})
+
+
+def _redact_one(flow: Any, headers: frozenset[str], params: frozenset[str],
+                shown: frozenset[str], names: set[str]) -> Any:
+    update: dict[str, Any] = {
+        "request": _redact_request(flow.request, headers, params, shown, names)}
     if flow.response is not None:
         update["response"] = flow.response.model_copy(
-            update={"headers": head(flow.response.headers)})
+            update={"headers": _head(flow.response.headers, headers, shown, names)})
     return flow.model_copy(update=update)
+
+
+def redact_requests(requests: list[Any], reveal: Any = None) -> tuple[list[Any], list[str]]:
+    """Copies of FlowRequests -- a held flow's -- as shown, and the names
+    redacted in any of them."""
+    on, headers, params = settings()
+    shown = reveal_set(reveal)
+    if not on or shown is ALL:
+        return list(requests), []
+    shown = shown or frozenset()
+    names: set[str] = set()
+    out = [_redact_request(r, headers, params, shown, names) for r in requests]
+    return out, sorted(names)
+
+
+def redact_headers(h: dict[str, str]) -> dict[str, str]:
+    """Header values as shown, for headers quern holds rather than captured
+    -- a mock's. A mock set from placeholders holds the real values (see
+    `restore`), so listing it must not show them either."""
+    on, headers, _ = settings()
+    if not on or not h:
+        return h
+    return _head(h, headers, frozenset(), set())
 
 
 def redact_urls(item: Any, reveal: Any = None) -> Any:

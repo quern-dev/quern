@@ -347,6 +347,16 @@ def _shown(flows: list, reveal) -> tuple[list, dict]:
                  "redaction_note": redact.NOTE if names else None}
 
 
+def _shown_requests(requests: list, reveal) -> tuple[list, dict]:
+    """`_shown` for bare requests -- an intercept's held flows."""
+    out, names = redact.redact_requests(requests, reveal)
+    asked = redact.reveal_set(reveal)
+    revealed = (["*"] if asked is redact.ALL
+                else sorted(asked) if asked else None)
+    return out, {"redacted": names or None, "revealed": revealed,
+                 "redaction_note": redact.NOTE if names else None}
+
+
 def _with_tls_note(request: Request, udid: str | None, response):
     """Attach the passed-through-simulator note to a flow result (#354), and
     say when the simulator is refusing the proxy's certificate (#414) -- the

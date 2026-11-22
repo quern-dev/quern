@@ -1751,7 +1751,7 @@ class HeldFlow(BaseModel):
     """The intercept that held it."""
 
 
-class InterceptStatusResponse(BaseModel):
+class InterceptStatusResponse(Redaction):
     """Response from GET /api/v1/proxy/intercept/held."""
 
     pattern: str | None = None
@@ -1788,6 +1788,10 @@ class ReplayResponse(BaseModel):
     original_flow_id: str
     status_code: int | None = None
     error: str | None = None
+    #: Headers whose redacted placeholders were put back to their real values
+    #: before the replay went out (#742), and the note saying so.
+    restored: list[str] | None = None
+    note: str | None = None
 
 
 # ---------------------------------------------------------------------------
