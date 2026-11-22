@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from server.models import LogLevel, LogSource
-from server.sources.logcat import LOGCAT_PATTERN, LogcatAdapter
+from server.sources.logcat import LOGCAT_PATTERN, STARTUP_GRACE_S, LogcatAdapter
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -209,12 +210,14 @@ class TestFindingAdb:
         self._fake_exec(monkeypatch, calls)
 
         adapter = LogcatAdapter(serial="08649a85")
-        await adapter.start()
+        # Bounded here, not only by start()'s own grace: a test that hangs
+        # when that guard is removed is not a working test (CR).
+        await asyncio.wait_for(adapter.start(), timeout=STARTUP_GRACE_S + 5)
 
         assert adapter._error is None, adapter._error
         assert [c[0] for c in calls] == [adb, adb], "getprop and logcat both use it"
         assert adapter.api_level == 23
-        await adapter.stop()
+        await asyncio.wait_for(adapter.stop(), timeout=10)
 
     async def test_no_adb_anywhere_is_an_error_that_says_where_it_looked(
         self, monkeypatch, tmp_path,
@@ -224,7 +227,7 @@ class TestFindingAdb:
         self._fake_exec(monkeypatch, calls)
 
         adapter = LogcatAdapter(serial="08649a85")
-        await adapter.start()
+        await asyncio.wait_for(adapter.start(), timeout=STARTUP_GRACE_S + 5)
 
         assert calls == [], "nothing is run without an adb"
         assert not adapter.is_running
