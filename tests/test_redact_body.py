@@ -320,3 +320,44 @@ async def test_a_failed_replay_still_says_what_it_restored(app, running):  # noq
         cls.return_value = client
         resp = await _call(app, "POST", "/api/v1/proxy/replay/r4", json={"modify_body": shown})
     assert resp.json()["status"] == "error" and resp.json()["restored"] == ["body"]
+
+
+# -- #753 review --------------------------------------------------------------------
+
+
+def test_a_hash_in_a_form_body_does_not_hide_the_fields_after_it():
+    shown, _ = redact.redact_flow(_flow(request_body="note=x#y&password=hunter2",
+                                        request_type="application/x-www-form-urlencoded"))
+    assert "hunter2" not in shown.request.body
+    assert shown.request.body.startswith("note=x#y&password=‹redacted")
+
+
+def test_a_url_keeps_its_fragment():
+    assert redact.redact_text("/a?token=t#frag").endswith("#frag")
+
+
+def test_a_placeholder_re_encoded_with_ascii_escapes_is_restored():
+    """json.dumps(json.loads(shown)) escapes the delimiters by default."""
+    shown, _ = redact.redact_flow(_flow(request_body='{"password":"hunter2","token":1234}'))
+    re_encoded = json.dumps(json.loads(shown.request.body))
+    assert "\\u2039" in re_encoded                           # the case at hand
+    back, count = redact.restore_body(re_encoded)
+    assert json.loads(back) == {"password": "hunter2", "token": 1234} and count == 2
+
+
+def test_an_escaped_placeholder_this_server_never_showed_is_refused():
+    with pytest.raises(redact.UnknownPlaceholder):
+        redact.restore_body('{"password":"\\u2039redacted, 9 chars, id 0123456789ab\\u203a"}')
+
+
+async def test_a_truncated_body_is_not_replayed_in_part(app, running):  # noqa: F811
+    from unittest.mock import patch
+
+    flow = _flow("r5", request_body='{"a":"' + "x" * 50)
+    flow.request.body_truncated, flow.request.body_size = True, 200_000
+    await app.state.flow_store.add(flow)
+    with patch("server.api.proxy_intercept.httpx.AsyncClient") as cls:
+        resp = (await _call(app, "POST", "/api/v1/proxy/replay/r5", json={})).json()
+        cls.assert_not_called()                               # nothing went out
+        assert resp["status"] == "error" and "truncated" in resp["error"]
+        assert "200,000 bytes" in resp["error"]

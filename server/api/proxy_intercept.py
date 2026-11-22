@@ -364,6 +364,18 @@ async def replay_flow(
             request_body, body_restored = _restored_body(body.modify_body)
             if body_restored:
                 restored = [*restored, "body"]
+    if req.body_truncated and not (body and body.modify_body is not None):
+        # Only the first part was captured: sent as it stands, the server
+        # would get a shorter request than the app sent, and this would say
+        # success (#753 review). A full modify_body replays it.
+        from server.proxy import redact
+
+        return ReplayResponse(
+            status="error", original_flow_id=flow_id,
+            error=(f"the captured request body is truncated ({len(request_body or ''):,} of "
+                   f"{req.body_size:,} bytes kept), so replaying it would send part of it: "
+                   "pass modify_body with the whole body"),
+            restored=restored or None, note=redact.restored_note(restored))
     # The captured length is the original body's: httpx sets the real one.
     # Kept, any modify_body of another length -- or a placeholder put back
     # to a value of another length -- failed with "Too much data for

@@ -239,14 +239,17 @@ def _header_value(name: str, value: str) -> str:
     return _hide(value)
 
 
-def _query(text: str, params: frozenset[str], reveal: frozenset[str]) -> tuple[str, set[str]]:
+def _query(text: str, params: frozenset[str], reveal: frozenset[str], *,
+           fragment_ok: bool = True) -> tuple[str, set[str]]:
     """`text` -- a URL or a path -- with secret query parameters' values
     redacted, and the names redacted. Only the values change, character for
-    character elsewhere: the URL is shown, not re-encoded."""
+    character elsewhere: the URL is shown, not re-encoded. `fragment_ok`
+    false for a form body, where a `#` is data: read as a fragment, it hid
+    every field after it (#753 review)."""
     before, sep, rest = text.partition("?")
     if not sep:
         return text, set()
-    query, hashsep, fragment = rest.partition("#")
+    query, hashsep, fragment = rest.partition("#") if fragment_ok else (rest, "", "")
     names: set[str] = set()
     out = []
     for part in query.split("&"):
@@ -362,7 +365,7 @@ def _body_update(part: Any, side: str, fields: frozenset[str], shown: frozenset[
             unscanned.add(f"{side} body ({'binary' if encoding != 'utf-8' else label})")
         return {}
     if kind == "form":
-        text, found = _query("?" + body, fields, shown)
+        text, found = _query("?" + body, fields, shown, fragment_ok=False)
         names |= found
         return {"body": text[1:]} if found else {}
     found: set[str] = set()
@@ -498,13 +501,24 @@ def restore(text: str) -> tuple[str, int]:
 _QUOTED_PLACEHOLDER = re.compile(r'"(‹redacted, [\d,]+ chars, id ([0-9a-f]{12})›)"')
 
 
+_ESCAPED_PLACEHOLDER = re.compile(
+    r"\\u2039(redacted, [\d,]+ chars, id [0-9a-f]{12})\\u203[aA]")
+
+
 def restore_body(text: str | None) -> tuple[str | None, int]:
     """A body sent back -- a replay's `modify_body`, a release's or a mock's
     -- with each placeholder put back (#749), and how many were. A quoted
     placeholder that stands for a JSON literal loses its quotes again, so
     `"pin": 1234`, redacted to a string, goes back as the number it was.
     UnknownPlaceholder as `restore`."""
-    if not text or "‹redacted" not in text:
+    if not text:
+        return text, 0
+    # A JSON body re-encoded with ASCII escapes -- json.dumps' default --
+    # carries `\u2039...\u203a` for the delimiters: read as a placeholder
+    # too, or a known one would be sent as text and an unknown one would
+    # skip its refusal (#753 review).
+    text = _ESCAPED_PLACEHOLDER.sub(r"‹\1›", text)
+    if "‹redacted" not in text:
         return text, 0
     count = 0
 
