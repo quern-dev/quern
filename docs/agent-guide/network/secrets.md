@@ -39,7 +39,7 @@ Every answer that redacted anything lists the names in `redacted` and carries a 
 
 A placeholder this server never showed is refused with a 400, rather than sent on and failing auth in a way that looks like the app's own bug. That happens when it came from another server, or from long enough ago to have been let go. Pass the real value, or read the flow again with `reveal`.
 
-A mock set from placeholders holds the real values, so `GET /mocks` lists its secret headers and body fields redacted too. Such a mock is **not recreated on another server** after a session switch, and the answer says so: if it must carry, set it with the real values (read the flow with `reveal`).
+A mock set from placeholders holds the real values, so `GET /mocks` lists its secret headers and body fields redacted too. Over MCP, such a mock **is recreated on another server** after a session switch, with the real values: the MCP asks for them when it sets the mock (`return_restored`), keeps them for the switch, and does not show them to you (#751).
 
 **Recordings** are redacted by default. A recording made with `redact: false` (`start_recording`) keeps the real values. Use that only for a recording that stays on this machine.
 
