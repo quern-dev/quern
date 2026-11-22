@@ -118,10 +118,18 @@ async def test_wait_for_flow_redacts(app):
 
 
 async def test_the_flow_summary_redacts_the_paths_it_prints(app):
-    await app.state.flow_store.add(_secret_flow())
+    """A slow 401: the summary prints its path in an error pattern and its URL
+    as a slow request. A fast 200 prints neither, so that test passed with
+    the redaction removed."""
+    flow = _secret_flow()
+    flow.response.status_code = 401
+    flow.timing.total_ms = 5000.0
+    await app.state.flow_store.add(flow)
     body = (await _call(app, "GET", "/api/v1/proxy/flows/summary",
                         params={"window": "1h"})).json()
+    assert body["errors"] and body["slow_requests"], body     # both were printed
     assert "t0k3n" not in repr(body)
+    assert "access_token=‹redacted" in body["errors"][0]["pattern"]
 
 
 async def test_pending_rows_redact_their_urls(app):
@@ -286,6 +294,11 @@ def _record(flow, *, redact_on: bool):
 
 
 def test_a_recorded_flow_is_redacted_by_default():
+    from server.models import RecordingStartRequest
+    from server.recording.recorder import Filters
+
+    assert RecordingStartRequest(udid="X").redact is True           # the route's default
+    assert Filters().redact is True                          # and the recorder's
     line, filters = _record(_secret_flow(), redact_on=True)
     assert "s3cr3t-app-token" not in repr(line) and "t0k3n" not in repr(line)
     assert filters.as_dict()["redact"] is True              # said in the manifest
