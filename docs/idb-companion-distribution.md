@@ -4,7 +4,8 @@
 > hosts. The group-children probe, native screenshot capture, and HID input
 > injection all run through `tools/sim-bridge.swift` now — no idb daemon, no
 > companion binary, no subprocess-per-call. This doc remains relevant only as
-> the fallback path for Intel Macs and pre-Xcode-26 setups; the `quern setup`
+> the fallback path for pre-Xcode-26 setups (Intel Macs with Xcode 26+ use
+> sim-bridge too, #748); the `quern setup`
 > flow skips the companion install entirely when sim-bridge is supported.
 > See [`proposals/sim-bridge-spec.md`](proposals/sim-bridge-spec.md) for the current backend.
 >

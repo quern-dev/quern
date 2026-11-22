@@ -480,9 +480,19 @@ class TestSimBridgeSupported:
                 assert _sim_bridge_supported() is False
 
     def test_intel_mac_with_xcode_26(self):
+        """Measured on an Intel MacBook Pro with Xcode 26.3 (#748): sim-bridge
+        builds, reads and taps there, so idb is not required."""
         with patch("server.lifecycle.setup._is_apple_silicon", return_value=False):
             with patch(
                 "server.lifecycle.setup._xcode_major_version", return_value=26
+            ):
+                assert _sim_bridge_supported() is True
+
+    def test_intel_mac_with_xcode_25(self):
+        """The Xcode bound still applies on Intel."""
+        with patch("server.lifecycle.setup._is_apple_silicon", return_value=False):
+            with patch(
+                "server.lifecycle.setup._xcode_major_version", return_value=25
             ):
                 assert _sim_bridge_supported() is False
 
