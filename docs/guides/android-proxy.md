@@ -96,6 +96,14 @@ The simplest route for your own app on a phone or a Google Play image: the debug
 </network-security-config>
 ```
 
+   **If your app uses plain HTTP:** once an app has a network security config, Android ignores `android:usesCleartextTraffic`, and from API 28 the config refuses cleartext unless it says otherwise. An app that relied on that attribute would lose its HTTP requests in the debug build. Allow cleartext where it's needed, scoped to the hosts that need it:
+```xml
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">dev.example.com</domain>
+    </domain-config>
+```
+   inside `<network-security-config>`, or `cleartextTrafficPermitted="true"` on `<base-config>` if it needs HTTP everywhere. An app that uses only HTTPS needs nothing here.
+
 3. **`app/src/debug/AndroidManifest.xml`**, merged over your main manifest:
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
@@ -137,6 +145,8 @@ Add a network security configuration to your app that trusts user-installed cert
 ```
 
 Then install the mitmproxy cert as a user certificate (Settings > Security > Install a certificate > CA certificate). Android asks for a screen lock before it will install one.
+
+As with Option 2, a network security config replaces `android:usesCleartextTraffic`: if your app uses plain HTTP, allow it there with `cleartextTrafficPermitted` (see [Option 2](#option-2-trust-querns-ca-in-your-debug-build)).
 
 The `<debug-overrides>` block only applies to debug builds. Release builds ignore it entirely — no security risk.
 

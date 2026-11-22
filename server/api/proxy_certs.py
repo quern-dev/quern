@@ -680,6 +680,17 @@ def _reattach_hint(
                     "before relying on it")
         if networked:
             # See below: nothing was attempted, on purpose (#741).
+            # Where new connections go is said only for a confirmed clear: an
+            # unconfirmed one may have left quern's proxy in place (CodeRabbit
+            # on #744).
+            if verified is not True:
+                where = ("Until it is confirmed, traffic may still reach quern's proxy; "
+                         "a rejoin of Wi-Fi does not settle that, and")
+                return (
+                    f"{done}. quern did not bounce Wi-Fi: adb reaches this device over "
+                    "the network, and the bounce would cut that connection. "
+                    f"{where} would drop this adb connection too."
+                )
             where = (f"New connections may already use {restored}; if traffic still "
                      "reaches quern's proxy, it moves" if restored else
                      "New connections may already go direct; if traffic still "

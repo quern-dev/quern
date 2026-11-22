@@ -1972,6 +1972,17 @@ class TestTheClearHintSaysWhatTheClearDid:
         assert "did not confirm" in hint
         assert "is unset" not in hint and "undone" not in hint
         assert "clear=true" not in hint                 # no loop back to the call just made
+        # Nor where new connections go: an unconfirmed clear may have left
+        # quern's proxy in place (CodeRabbit on #744).
+        assert "go direct" not in hint and "may already use" not in hint
+
+    def test_an_unconfirmed_restore_does_not_predict_the_restored_route(self):
+        from server.api.proxy_certs import _reattach_hint
+
+        hint = _reattach_hint(False, cleared=True, networked=True, verified=None,
+                              restored="10.0.0.5:3128")
+        assert "did not confirm" in hint and "may still reach quern's proxy" in hint
+        assert "may already use" not in hint
 
     def test_a_bounced_clear_that_lost_the_network_still_says_reconnect(self):
         from server.api.proxy_certs import _reattach_hint
