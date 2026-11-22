@@ -271,3 +271,35 @@ async def test_an_intercepted_log_line_redacts_its_query(running):
     await asyncio.sleep(0)
     assert entries and "t0k3n" not in entries[0].message
     assert entries[0].message.startswith("INTERCEPTED: GET /me?token=‹redacted")
+
+
+# -- recordings ---------------------------------------------------------------------
+
+
+def _record(flow, *, redact_on: bool):
+    from types import SimpleNamespace
+
+    from server.recording.recorder import Filters, RecordingManager
+
+    rec = SimpleNamespace(filters=Filters(redact=redact_on))
+    return RecordingManager._record_of(rec, "flow", flow), rec.filters
+
+
+def test_a_recorded_flow_is_redacted_by_default():
+    line, filters = _record(_secret_flow(), redact_on=True)
+    assert "s3cr3t-app-token" not in repr(line) and "t0k3n" not in repr(line)
+    assert filters.as_dict()["redact"] is True              # said in the manifest
+
+
+def test_redact_false_records_the_real_values_and_says_so():
+    line, filters = _record(_secret_flow(), redact_on=False)
+    assert line["request"]["headers"]["Authorization"] == SECRET
+    assert filters.as_dict()["redact"] is False
+
+
+def test_a_recording_from_before_redaction_resumes_unredacted():
+    """Half of one recording redacted would mislead whoever reads it."""
+    from server.recording.recorder import Filters
+
+    assert Filters.from_dict({"bodies": "all"}).redact is False
+    assert Filters.from_dict({"redact": True}).redact is True

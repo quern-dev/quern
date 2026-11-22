@@ -1022,6 +1022,11 @@ class RecordingStartRequest(BaseModel):
     exclude_content_types: list[str] | None = Field(default=None, description=(
         "Drop bodies whose Content-Type starts with any of these, e.g. `image/`, "
         "`text/html`. The flow itself is kept."))
+    redact: bool = Field(default=True, description=(
+        "Redact secret headers and query-string parameters in the recorded flows "
+        "(#742), as every flow answer does: a recording is often shared, and a redacted "
+        "one cannot be un-redacted later. `false` records the real values, and the "
+        "manifest says so (`filters.redact`). Bodies are not redacted either way."))
     #: Stripped before its length is checked, as the recorder stores it.
     requested_by: Annotated[
         str, StringConstraints(strip_whitespace=True, max_length=200),

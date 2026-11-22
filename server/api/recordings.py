@@ -84,7 +84,7 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             kinds=tuple(body.kinds or KINDS), hosts=body.hosts,
             exclude_hosts=body.exclude_hosts, include_unattributed=body.include_unattributed,
             video=body.video, bodies=body.bodies, max_body_bytes=body.max_body_bytes,
-            exclude_content_types=body.exclude_content_types,
+            exclude_content_types=body.exclude_content_types, redact=body.redact,
             keyframes=tuple(body.keyframes) if body.keyframes is not None
             else KEYFRAME_TRIGGERS,
             gauges=body.gauges, gauge_interval_s=body.gauge_interval_s)
