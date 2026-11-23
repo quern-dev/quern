@@ -370,3 +370,131 @@ class TestReported:
 
         mn.install(mn.Release("v26.13.1", "arm64"), fetch=_dist("v26.13.1"), run=runner())
         assert classify_source(str(mn.current_binary())) == "quern"
+
+
+# ── moving existing registrations onto it ────────────────────────────────
+
+class TestRegistrationsMove:
+    """Every client still on another node moves to quern's (#760), keeping
+    where it points (QUERN_REMOTE) and anything else in its entry."""
+
+    OLD = "/opt/homebrew/bin/node"
+    NEW = "/Users/someone/.quern/node/current/bin/node"
+
+    @pytest.fixture
+    def env(self, tmp_path, monkeypatch):
+        import json
+
+        from server import __main__ as entry
+
+        root = tmp_path / "proj"
+        (root / "mcp" / "dist").mkdir(parents=True)
+        launcher = root / "mcp" / "dist" / "launcher.cjs"
+        launcher.write_text("#!/usr/bin/env node\n")
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        from server.lifecycle import mcp_clients, setup
+        monkeypatch.setattr(mcp_clients, "refresh", lambda *a, **k: None)
+        # conftest stubs the reader to []; these tests are about real configs.
+        monkeypatch.setattr(setup, "mcp_registrations", setup._real_mcp_registrations)
+
+        def claude(entries: dict, projects: dict | None = None):
+            data = {"mcpServers": entries}
+            if projects:
+                data["projects"] = projects
+            (home / ".claude.json").write_text(json.dumps(data))
+        return entry, launcher, home, claude
+
+    def _read(self, home):
+        import json
+        return json.loads((home / ".claude.json").read_text())
+
+    def test_moves_and_keeps_remote_and_other_env(self, env):
+        entry, launcher, home, claude = env
+        claude({"quern-debug": {"command": self.OLD, "args": [str(launcher)],
+                                "env": {"QUERN_REMOTE": "studio", "KEEP": "1"}}})
+        moved = entry._move_registrations_to(self.NEW, launcher)
+        assert [(c, ok) for c, ok, _ in moved] == [("claude-code", True)]
+        written = self._read(home)["mcpServers"]["quern-debug"]
+        assert written["command"] == self.NEW
+        assert written["env"] == {"QUERN_REMOTE": "studio", "KEEP": "1"}
+
+    def test_already_on_it_is_left_alone(self, env):
+        entry, launcher, home, claude = env
+        claude({"quern-debug": {"command": self.NEW, "args": [str(launcher)]}})
+        before = (home / ".claude.json").read_text()
+        assert entry._move_registrations_to(self.NEW, launcher) == []
+        assert (home / ".claude.json").read_text() == before
+
+    def test_another_install_s_registration_is_left_alone(self, env, tmp_path):
+        entry, launcher, home, claude = env
+        other = str(tmp_path / "other" / "launcher.cjs")
+        claude({"quern-debug": {"command": self.OLD, "args": [other]}})
+        assert entry._move_registrations_to(self.NEW, launcher) == []
+        assert self._read(home)["mcpServers"]["quern-debug"]["command"] == self.OLD
+
+    def test_project_entries_are_left_alone(self, env):
+        entry, launcher, home, claude = env
+        claude({}, projects={"/work/app": {"mcpServers": {"quern-debug": {
+            "command": self.OLD, "args": [str(launcher)]}}}})
+        assert entry._move_registrations_to(self.NEW, launcher) == []
+        project = self._read(home)["projects"]["/work/app"]["mcpServers"]["quern-debug"]
+        assert project["command"] == self.OLD
+
+    def test_codex_keeps_its_remote(self, env):
+        import tomllib
+
+        entry, launcher, home, _ = env
+        (home / ".codex").mkdir()
+        (home / ".codex" / "config.toml").write_text(
+            '[mcp_servers.quern]\n'
+            f'command = "{self.OLD}"\n'
+            f'args = ["{launcher}"]\n'
+            'env = { QUERN_REMOTE = "studio" }\n')
+        moved = entry._move_registrations_to(self.NEW, launcher)
+        assert [(c, ok) for c, ok, _ in moved] == [("codex", True)]
+        quern = tomllib.loads((home / ".codex" / "config.toml").read_text())["mcp_servers"]["quern"]
+        assert quern["command"] == self.NEW and quern["env"]["QUERN_REMOTE"] == "studio"
+
+    def test_setup_reports_the_move(self, env, monkeypatch):
+        from server.lifecycle import setup
+
+        entry, launcher, home, claude = env
+        claude({"quern-debug": {"command": self.OLD, "args": [str(launcher)]}})
+        monkeypatch.setattr(mn, "current_binary", lambda: Path(self.NEW))
+        result = setup._move_registrations_to_managed(launcher.parent.parent.parent)
+        assert result.status == setup.CheckStatus.OK and "claude-code" in result.message
+
+    def test_setup_says_nothing_when_nothing_moved(self, env, monkeypatch):
+        from server.lifecycle import setup
+
+        entry, launcher, home, claude = env
+        claude({"quern-debug": {"command": self.NEW, "args": [str(launcher)]}})
+        monkeypatch.setattr(mn, "current_binary", lambda: Path(self.NEW))
+        assert setup._move_registrations_to_managed(launcher.parent.parent.parent) is None
+
+
+class TestSetupMovesClientsAfterTheBuild:
+    def _stub(self, monkeypatch, calls):
+        from server.lifecycle import setup
+
+        ok = setup.CheckResult(name="MCP server", status=setup.CheckStatus.OK, message="")
+        moved = setup.CheckResult(name="MCP clients", status=setup.CheckStatus.OK, message="moved")
+        monkeypatch.setattr(setup, "_build_mcp", lambda root: calls.append("build") or ok)
+        monkeypatch.setattr(setup, "_move_registrations_to_managed",
+                            lambda root: calls.append("move") or moved)
+        return setup
+
+    def test_with_quern_s_node_clients_are_moved_after_the_build(self, monkeypatch, tmp_path):
+        calls = []
+        setup = self._stub(monkeypatch, calls)
+        results = setup._build_mcp_and_move_clients(tmp_path, None)
+        assert calls == ["build", "move"]
+        assert [r.name for r in results] == ["MCP server", "MCP clients"]
+
+    def test_with_the_user_s_node_nothing_is_moved(self, monkeypatch, tmp_path):
+        calls = []
+        setup = self._stub(monkeypatch, calls)
+        setup._build_mcp_and_move_clients(tmp_path, ["sites"])
+        assert calls == ["build"]

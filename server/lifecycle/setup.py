@@ -2251,6 +2251,49 @@ def _setup_node(*, after_update: bool) -> tuple[list | None, CheckResult]:
     return node_sites, node_result
 
 
+def _build_mcp_and_move_clients(project_root: Path, node_sites: list | None) -> list[CheckResult]:
+    """Build the wrapper; then, with quern's own Node in use (`node_sites` is
+    None), move every client still registered on another node onto it (#760).
+    A registration outlives the node it names, which is the #214 failure, and
+    quern's own never moves."""
+    results = [_build_mcp(project_root)]
+    if node_sites is None:
+        moved = _move_registrations_to_managed(project_root)
+        if moved is not None:
+            results.append(moved)
+    return results
+
+
+def _move_registrations_to_managed(project_root: Path) -> CheckResult | None:
+    """Setup's line for moving MCP clients onto quern's own Node, or None when
+    none needed it (nothing to say about a no-op)."""
+    from server.__main__ import _move_registrations_to
+    from server.lifecycle import managed_node
+
+    mcp_entry = project_root / "mcp" / "dist" / "launcher.cjs"
+    if not mcp_entry.exists():
+        return None
+    try:
+        moved = _move_registrations_to(str(managed_node.current_binary()), mcp_entry)
+    except Exception as exc:  # noqa: BLE001 -- never fail setup over a config file
+        return CheckResult(name="MCP clients", status=CheckStatus.WARNING,
+                           message="could not move them to quern's Node",
+                           detail=f"{exc}\nRun: {quern_cmd()} mcp-install")
+    if not moved:
+        return None
+    failed = [(client, msg) for client, ok, msg in moved if not ok]
+    names = ", ".join(client for client, ok, _ in moved if ok)
+    if failed:
+        return CheckResult(
+            name="MCP clients", status=CheckStatus.WARNING,
+            message=f"moved to quern's Node: {names or 'none'}; "
+                    f"not moved: {', '.join(c for c, _ in failed)}",
+            detail="\n".join(msg for _, msg in failed) + f"\nRun: {quern_cmd()} mcp-install",
+        )
+    return CheckResult(name="MCP clients", status=CheckStatus.OK,
+                       message=f"moved to quern's Node: {names}")
+
+
 def mcp_cannot_start(sites: list | None) -> bool:
     """True when node was found and no place has one meeting the floor (#506).
 
@@ -4158,7 +4201,8 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
     # Without this, the MCP shows as broken until the first `quern start`.
 
     if node_can_build and project_root:
-        report.add(_build_mcp(project_root))
+        for result in _build_mcp_and_move_clients(project_root, node_sites):
+            report.add(result)
 
     # ── Tool inventory ──
     #

@@ -988,6 +988,79 @@ def _cmd_mcp_install() -> int:
     return 0 if all_ok else 1
 
 
+def _registered_remote(client: str, config: Path) -> str | None:
+    """The QUERN_REMOTE an existing registration was written with, if any, so
+    moving it to another node keeps it pointed where it was."""
+    import json
+    import tomllib
+
+    try:
+        if client == "codex":
+            quern = tomllib.loads(config.read_text()).get("mcp_servers", {}).get("quern", {})
+            env = quern.get("env") if isinstance(quern, dict) else None
+        else:
+            from server.lifecycle import setup
+
+            data = json.loads(config.read_text())
+            for name, path, section, entry_key in setup._mcp_json_configs():
+                if name == client and path == config:
+                    entry = (data.get(section) or {}).get(entry_key) or {}
+                    env = entry.get("environment" if client == "opencode" else "env")
+                    break
+            else:
+                env = None
+    except (OSError, ValueError, AttributeError):
+        return None
+    value = env.get("QUERN_REMOTE") if isinstance(env, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _move_registrations_to(node: str, mcp_entry: Path) -> list[tuple[str, bool, str]]:
+    """Re-register every client still running this install's wrapper with
+    another node onto `node` (#760). Returns (client, ok, message) per move.
+
+    Only user-wide entries whose launcher is this install's: a registration
+    pointing at another checkout's wrapper is that checkout's business, and a
+    Claude Code project-scoped entry is not something `mcp-install` writes.
+    Each is rewritten by the installer `mcp-install` uses, with its current
+    QUERN_REMOTE passed back in, so a client pointed at a paired Mac stays
+    pointed there.
+    """
+    from server.lifecycle import setup
+
+    claude_desktop = (Path.home() / "Library" / "Application Support" / "Claude"
+                      / "claude_desktop_config.json")
+    installers = {
+        "claude-code": lambda r: _install_json_mcpservers(
+            Path.home() / ".claude.json", mcp_entry, node, r),
+        "claude-desktop": lambda r: _install_json_mcpservers(claude_desktop, mcp_entry, node, r),
+        "cursor": lambda r: _install_json_mcpservers(
+            Path.home() / ".cursor" / "mcp.json", mcp_entry, node, r),
+        "opencode": lambda r: _install_opencode(mcp_entry, node, r),
+        "codex": lambda r: _install_codex(mcp_entry, node, r),
+    }
+
+    def same_file(a: str | None, b: Path) -> bool:
+        try:
+            return bool(a) and Path(a).resolve() == b.resolve()
+        except OSError:
+            return False
+
+    moved = []
+    for reg in setup.mcp_registrations():
+        if reg.error or reg.project or reg.client not in installers:
+            continue
+        if not same_file(reg.launcher, mcp_entry) or reg.node == node:
+            continue
+        ok, message = installers[reg.client](_registered_remote(reg.client, reg.config))
+        moved.append((reg.client, ok, message))
+    if moved:
+        from server.lifecycle import mcp_clients
+
+        mcp_clients.refresh()
+    return moved
+
+
 def _check_args(
     command: str,
     rest: list[str],
