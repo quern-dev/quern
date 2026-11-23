@@ -89,3 +89,46 @@ async def test_a_release_passes_a_base64_body_on_and_refuses_a_bad_one(app, runn
     (sent,) = _sent(running, "modify_and_release")
     assert sent["modifications"]["body_encoding"] == "base64"
     assert base64.b64decode(sent["modifications"]["body"]) == RAW
+
+
+# -- placeholders inside a base64 body (#763 review) ---------------------------------
+
+
+def _with_placeholder(app):  # noqa: F811
+    """A placeholder shown for a JSON body's password, and binary bytes around
+    it that are not UTF-8."""
+    from server.proxy import redact
+
+    shown = redact.placeholder("hunter2")
+    raw = b"\xff\xfe" + f'{{"password":"{shown}"}}'.encode() + b"\x80"
+    return base64.b64encode(raw).decode(), b"\xff\xfe" + b'{"password":"hunter2"}' + b"\x80"
+
+
+async def test_a_base64_modify_body_has_its_placeholders_restored(app, running):  # noqa: F811
+    await app.state.flow_store.add(_flow("p1", '{"a":1}'))
+    encoded, real = _with_placeholder(app)
+    resp, sent = await _replay(app, "p1", {"modify_body": encoded,
+                                           "modify_body_encoding": "base64"})
+    assert resp.json()["restored"] == ["body"], resp.text
+    assert sent == real                                        # non-UTF-8 bytes kept exactly
+
+
+async def test_an_unknown_placeholder_in_a_base64_body_is_refused(app, running):  # noqa: F811
+    await app.state.flow_store.add(_flow("p2", '{"a":1}'))
+    bad = base64.b64encode('{"p":"‹redacted, 9 chars, id 0123456789ab›"}'.encode()).decode()
+    resp, sent = await _replay(app, "p2", {"modify_body": bad, "modify_body_encoding": "base64"})
+    assert resp.status_code == 400 and "not known to this server" in resp.text
+    assert sent is None
+
+
+async def test_a_release_restores_a_base64_body_before_sending(app, running):  # noqa: F811
+    running._held_flows["h2"] = {
+        "id": "h2", "held_at": datetime.now(UTC),
+        "request": {"method": "POST", "url": "https://e.com/u", "host": "e.com", "path": "/u",
+                    "headers": {}, "body": B64, "body_encoding": "base64"}}
+    encoded, real = _with_placeholder(app)
+    resp = await _call(app, "POST", "/api/v1/proxy/intercept/release", json={
+        "flow_id": "h2", "modifications": {"body": encoded, "body_encoding": "base64"}})
+    assert resp.status_code == 200 and resp.json()["restored"] == ["body"], resp.text
+    (sent,) = _sent(running, "modify_and_release")
+    assert base64.b64decode(sent["modifications"]["body"]) == real

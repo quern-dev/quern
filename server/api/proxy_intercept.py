@@ -114,6 +114,24 @@ def _body_bytes(text: str | None, encoding: str, what: str) -> bytes | None:
             f"{what} is marked base64 but does not decode ({e})")) from e
 
 
+def _restored_base64(text: str | None, what: str) -> tuple[str | None, bool]:
+    """A base64 body sent back, with the placeholders in the bytes it encodes
+    put back, re-encoded, and whether any were (#763 review). Restored in the
+    decoded bytes, read with surrogateescape so bytes that are not UTF-8 come
+    back exactly as they were; a placeholder this server never showed is
+    refused (400) as in a text body. 400 too for base64 that does not decode."""
+    import base64
+
+    raw = _body_bytes(text, "base64", what)
+    if raw is None:
+        return text, False
+    decoded = raw.decode("utf-8", "surrogateescape")
+    back, restored = _restored_body(decoded)
+    if not restored:
+        return text, False
+    return base64.b64encode((back or "").encode("utf-8", "surrogateescape")).decode(), True
+
+
 def _restored_body(text: str | None) -> tuple[str | None, bool]:
     """A body an agent sent back, with its placeholders put back to the real
     values (#749), and whether any were. One this server never showed is
@@ -334,9 +352,12 @@ async def release_flow(request: Request, body: ReleaseFlowRequest) -> dict:
             raise HTTPException(status_code=400, detail=(
                 'modifications.body_encoding must be "utf-8" or "base64"'))
         if modifications.get("body_encoding") == "base64":
-            # Checked here, so a bad one is a 400 rather than an addon error.
-            _body_bytes(modifications.get("body"), "base64", "modifications.body")
-        new_body, body_restored = _restored_body(modifications.get("body"))
+            # Decoded here, so a bad one is a 400 rather than an addon error,
+            # and restored as bytes: base64 text never shows a placeholder.
+            new_body, body_restored = _restored_base64(
+                modifications.get("body"), "modifications.body")
+        else:
+            new_body, body_restored = _restored_body(modifications.get("body"))
         if body_restored:
             restored = [*restored, "body"]
         modifications = {**modifications,
@@ -396,7 +417,10 @@ async def replay_flow(
             modify, _, restored = _restored(body.modify_headers)
             headers.update(modify)
         if body.modify_body is not None:
-            request_body, body_restored = _restored_body(body.modify_body)
+            request_body, body_restored = (
+                _restored_base64(body.modify_body, "modify_body")
+                if body.modify_body_encoding == "base64"
+                else _restored_body(body.modify_body))
             if body_restored:
                 restored = [*restored, "body"]
     if req.body_truncated and not (body and body.modify_body is not None):
