@@ -1165,6 +1165,10 @@ class TestEveryEntryPointHandsRecordOff:
         import sys
 
         env = {**os.environ, "QUERN_STATE_DIR": str(tmp_path), "PYTHONPATH": os.getcwd()}
+        # The local path only: these would send it to a paired remote or a
+        # session of the developer's (review).
+        for name in ("QUERN_REMOTE", "QUERN_CLIENT_KEY", "QUERN_SESSION"):
+            env.pop(name, None)
         r = subprocess.run([sys.executable, "-m", module, "record", "list"],
                            capture_output=True, text=True, env=env, timeout=60)
         # No server in the sandbox: the record CLI's own answer, not argparse's.
