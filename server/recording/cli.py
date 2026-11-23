@@ -31,7 +31,7 @@ Usage: quern record start --udid UDID [--out DIR] [--kinds actions,flows,logs]
                           [--requested-by NAME] [--video [--viewer]] [--allow-passthrough]
                           [--keyframes actions,requests]
                           [--bodies all|errors|none] [--max-body-bytes N]
-                          [--exclude-content-type TYPE]...
+                          [--exclude-content-type TYPE]... [--no-redact]
        quern record stop RECORDING_ID [--require-complete]
        quern record keyframe RECORDING_ID [--label TEXT]
        quern record list [--requested-by NAME]
@@ -48,6 +48,11 @@ in --kinds); --keyframes '' asks for none. `keyframe --label` marks a moment.
 a CI job to post: it plays the simulator live in a browser on another machine,
 and expires 10 minutes after the recording stops. Needs viewer.enabled in
 ~/.quern/config.json.
+Recorded flows have secret headers, query parameters and JSON or form body
+fields redacted, as every flow answer does. --no-redact keeps the real values:
+use it only for a recording that stays on this machine. The manifest's
+filters.redact says which it is, and proxy.redact: false in config.json
+already makes every recording unredacted.
 
 Record one device's actions, flows and logs to disk until stopped, for as long
 as a run lasts. `start` prints the recording's id on the first line, so a
@@ -235,6 +240,7 @@ def main(argv: list[str]) -> int:
     start.add_argument("--bodies", choices=("all", "errors", "none"))
     start.add_argument("--max-body-bytes", type=int)
     start.add_argument("--exclude-content-type", action="append")
+    start.add_argument("--no-redact", action="store_true")
     keyframe = sub.add_parser("keyframe", add_help=False)
     keyframe.add_argument("recording_id")
     keyframe.add_argument("--label")
@@ -273,6 +279,9 @@ def main(argv: list[str]) -> int:
                 body["keyframes"] = [k.strip() for k in args.keyframes.split(",") if k.strip()]
             if args.bodies is not None:
                 body["bodies"] = args.bodies
+            if args.no_redact:
+                # Only when asked: unsent, the server's default (redacted) holds.
+                body["redact"] = False
             status, answer = _call("POST", "/api/v1/recordings", body)
         elif args.what == "keyframe":
             status, answer = _call("POST", f"/api/v1/recordings/{args.recording_id}/keyframe",
@@ -299,6 +308,12 @@ def main(argv: list[str]) -> int:
         if answer.get("viewer_url"):
             print(answer["viewer_url"])
         print(f"recording {answer['udid']} into {answer['output_dir']}", file=sys.stderr)
+        if (answer.get("filters") or {}).get("redact") is False:
+            # A CI log is where someone learns its recording holds real tokens.
+            why = ("as asked (--no-redact)" if args.no_redact
+                   else "because proxy.redact is false in the server's config.json")
+            print(f"warning: flows are recorded with their real secret values, {why}: "
+                  "keep this recording on this machine", file=sys.stderr)
         _remote_note(answer["id"])
         for w in answer.get("warnings") or []:
             print(f"warning: {w}", file=sys.stderr)

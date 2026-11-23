@@ -32,6 +32,7 @@ quern record start --udid UDID --allow-passthrough   # Record even if the simula
 quern record start --udid UDID --kinds flows --bodies errors --max-body-bytes 4096 --exclude-content-type image/
                              # A small recording of a long run: every flow, few bodies
 quern record start --udid UDID --video --viewer   # Also print a LAN viewer link to post (needs viewer.enabled)
+quern record start --udid UDID --no-redact   # Keep real secret values in recorded flows (keep the recording on this machine)
 quern record stop ID [--require-complete]    # ...until stopped; exit 3 if anything was lost
 quern record keyframe ID [--label TEXT]   # Make this moment a seek point, and mark it in the recording
 quern record start --udid UDID --video --keyframes requests   # Seek points at requests only (default: actions and requests)
