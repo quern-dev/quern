@@ -21,10 +21,11 @@ Captures from multiple sources simultaneously, deduplicates, and stores in a rin
 Spawns `mitmdump` as a subprocess to capture HTTP/HTTPS traffic (port 9101 by default).
 
 - **Query flows** — filter by host, method, status code, path, or simulator UDID
-- **Inspect details** — full headers and bodies for any captured request
+- **Inspect details** — full headers and bodies for any captured request, with the app's secrets redacted (below)
+- **Secrets kept out of the transcript** — authorization headers, cookies, API keys, token-like query parameters and secret JSON or form body fields are shown as placeholders with a length and a per-server fingerprint, so an agent can still tell whether a token changed. `reveal` shows them when the value is the bug, and a placeholder passed back to replay, release or a mock is sent as the real value
 - **Intercept** — pause matching requests, inspect, modify, release; several at once, each optionally scoped to one device
 - **Mock** — return synthetic responses without hitting the real server; rules can be updated in place without tearing down and re-adding them
-- **Replay** — re-send a previously captured request
+- **Replay** — re-send a previously captured request, a binary body as its bytes
 - **Capture sessions** — bracket a single UI action and get back only the flows it produced, instead of filtering them out of everything else
 - **Bypass** — exclude domains from capture with an allowlist, so analytics and telemetry noise never enters the flow store
 - **Local capture** — transparently capture simulator traffic per-process via mitmproxy's macOS System Extension, without configuring a system proxy. Each flow is tagged with the originating simulator's UDID for per-simulator filtering
