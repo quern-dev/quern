@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0-beta.7] - 2026-11-22
+
 ### Changed
 - **Secrets in captured traffic are redacted in what quern shows (#742).** From a real session: flow detail carried an app's bearer token in full, so to keep it out of its transcript an agent had to read flows over REST and strip the header by hand.
   - **What is redacted:** the headers `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key` and `x-auth-token`, and token-like query parameters (`access_token`, `token`, `key`, `sig` and others).
@@ -1198,7 +1200,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.6...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.7...main
+[0.26.0-beta.7]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.7
 [0.26.0-beta.6]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.6
 [0.26.0-beta.5]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.5
 [0.26.0-beta.4]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.4
