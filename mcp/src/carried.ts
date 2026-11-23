@@ -489,18 +489,93 @@ function canonical(value: unknown): string {
 /** The redacted placeholder a mock listing shows for a secret header (#742). */
 const REDACTED = /‹redacted, [\d,]+ chars, id [0-9a-f]{12}›/;
 
-/** A listed response and the one wanted, comparable: a header the server
- * lists redacted cannot be compared by value here -- the fingerprint key is
- * the server's -- so it matches on its name alone (#742 review). Without
- * this a mock with a literal secret header never matches its own rule, and
+/** A whole value the listing replaced with a placeholder (#749). */
+const WHOLE_PLACEHOLDER = /^‹redacted, [\d,]+ chars, id [0-9a-f]{12}›$/;
+
+/** A JSON number as written: two that differ past a float's precision
+ * (9007199254740992 and ...993) must not compare equal (#756 review). */
+class JsonNumber {
+  constructor(readonly source: string) {}
+}
+
+/** JSON.parse, keeping each number's source text (Node 22's reviver gets it). */
+function parseExact(text: string): unknown {
+  return JSON.parse(text, (_key, value, context?: { source?: string }) =>
+    typeof value === "number" ? new JsonNumber(context?.source ?? String(value)) : value);
+}
+
+/** Whether a wanted JSON value is what the listed one shows: equal, except
+ * that a placeholder stands for exactly one scalar -- a string, a number,
+ * true, false or null, which is what the server's body scanner replaces --
+ * and never for an object, an array, or fields beside it. Objects must have
+ * the same keys, arrays the same length. Linear in the size of the values. */
+function sameShown(listed: unknown, wanted: unknown): boolean {
+  if (typeof listed === "string" && WHOLE_PLACEHOLDER.test(listed)) {
+    return wanted === null || typeof wanted !== "object" || wanted instanceof JsonNumber;
+  }
+  if (listed instanceof JsonNumber || wanted instanceof JsonNumber) {
+    // Either side: a number never matches an object whose field is `source`.
+    return listed instanceof JsonNumber && wanted instanceof JsonNumber &&
+      listed.source === wanted.source;
+  }
+  if (Array.isArray(listed)) {
+    return Array.isArray(wanted) && listed.length === wanted.length &&
+      listed.every((v, i) => sameShown(v, wanted[i]));
+  }
+  if (listed !== null && typeof listed === "object") {
+    if (wanted === null || typeof wanted !== "object" || Array.isArray(wanted)) return false;
+    const have = listed as Record<string, unknown>;
+    const want = wanted as Record<string, unknown>;
+    const keys = Object.keys(have);
+    return keys.length === Object.keys(want).length &&
+      keys.every((k) => Object.prototype.hasOwnProperty.call(want, k) && sameShown(have[k], want[k]));
+  }
+  return listed === wanted;
+}
+
+/** Whether a wanted body is what a listed one with redacted fields shows:
+ * as JSON, field by field (`sameShown`), or as a form body, pair by pair.
+ * Anything else -- a body cut off, plain text -- only if equal. */
+function sameShownBody(listed: string, wanted: string): boolean {
+  try {
+    return sameShown(parseExact(listed), parseExact(wanted));
+  } catch {
+    // not JSON: a form body, or no match
+  }
+  const have = listed.split("&");
+  const want = wanted.split("&");
+  if (have.length !== want.length) return false;
+  const split = (pair: string): [string, string] => {
+    const eq = pair.indexOf("=");
+    return eq < 0 ? [pair, ""] : [pair.slice(0, eq), pair.slice(eq + 1)];
+  };
+  return have.every((pair, i) => {
+    const [hk, hv] = split(pair);
+    const [wk, wv] = split(want[i]);
+    return hk === wk && (WHOLE_PLACEHOLDER.test(hv) || hv === wv);
+  });
+}
+
+/** A listed response and the one wanted, comparable. What the server lists
+ * redacted cannot be compared by value here -- the fingerprint key is the
+ * server's -- so a redacted header matches on its name alone (#742 review),
+ * and a body with redacted fields matches a wanted body that is the same
+ * everywhere outside them, each placeholder standing for one value (#751).
+ * Without this a mock with a literal secret never matches its own rule, and
  * a retry posts a second one. */
 export function comparable(listed: unknown, wanted: Record<string, unknown>): [string, string] {
-  const have = (listed ?? {}) as Record<string, unknown>;
+  let have = (listed ?? {}) as Record<string, unknown>;
+  let want = wanted;
+  if (typeof have.body === "string" && REDACTED.test(have.body) &&
+      typeof want.body === "string" && sameShownBody(have.body, want.body)) {
+    have = { ...have, body: "‹redacted›" };
+    want = { ...want, body: "‹redacted›" };
+  }
   const headersOf = (r: Record<string, unknown>) =>
     r.headers && typeof r.headers === "object" ? r.headers as Record<string, unknown> : null;
   const hidden = Object.entries(headersOf(have) ?? {})
     .filter(([, v]) => typeof v === "string" && REDACTED.test(v)).map(([k]) => k);
-  if (!hidden.length) return [canonical(have), canonical(wanted)];
+  if (!hidden.length) return [canonical(have), canonical(want)];
   const mask = (r: Record<string, unknown>) => {
     const h = headersOf(r);
     if (!h) return r;
@@ -508,7 +583,22 @@ export function comparable(listed: unknown, wanted: Record<string, unknown>): [s
     return { ...r, headers: Object.fromEntries(Object.entries(h).map(([k, v]) =>
       [k, lower.has(k.toLowerCase()) ? "‹redacted›" : v])) };
   };
-  return [canonical(mask(have)), canonical(mask(wanted))];
+  return [canonical(mask(have)), canonical(mask(want))];
+}
+
+/** A mock answer split into what the agent is shown and the real values its
+ * placeholders stood for (#751): the server returns them in
+ * `restored_response` when asked (`return_restored`), for the copy a switch
+ * sets on the next server, where the placeholders would be refused. The
+ * agent never sees them -- it was shown the placeholders, and asking for the
+ * values is what reveal is for. */
+export function takeRestored(data: unknown): { answer: unknown; real: Record<string, unknown> } {
+  if (!data || typeof data !== "object" || !("restored_response" in data)) {
+    return { answer: data, real: {} };
+  }
+  const { restored_response: real, ...answer } = data as Record<string, unknown>;
+  const values = real && typeof real === "object" ? real as Record<string, unknown> : {};
+  return { answer, real: values };
 }
 
 /** Each request that sets something up again: it holds the switch queue. */

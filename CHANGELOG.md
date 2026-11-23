@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - A recording made with `redact: false` (also on the MCP `start_recording`) keeps the real values. Its manifest's `filters.redact` says what the events hold: false under the owner's `proxy.redact: false` whatever was asked. A recording resumed from a manifest written before this records as it did, unredacted.
     - In `~/.quern/config.json`, `proxy.redact_headers` and `proxy.redact_params` add names to the defaults, and `proxy.redact: false` (only a literal `false`) turns redaction off on that Mac.
   - **For REST callers:** a script that read these header values now gets placeholders. Add `reveal`.
-  - **A mock set from placeholders is not recreated on another server** after a session switch, and `set_mock` says so (#751).
+  - **A mock set from placeholders is carried to another server** after a session switch (#751). The MCP asks for the real values (`return_restored`), keeps them in its carried copy, and never shows them to the agent. A REST caller that doesn't ask is told the mock won't carry.
   - **Secret fields in JSON and form bodies too (#749):** `password`, `access_token`, `refresh_token`, `client_secret`, `api_key` and others, at any depth (GraphQL `variables` included). A body is edited in place, so the rest of it stays exactly as captured and a JSON body is still JSON. A truncated body is redacted up to the cut, and `body_size` stays the real size. A placeholder passed back in a body (`replay_flow`'s `modify_body`, a release, a mock) is sent as the real value. A number goes back as a number. `proxy.redact_fields` adds names. Other bodies (multipart, binary, HTML) are shown as captured, and `redaction_note` names them.
 
 ### Fixed

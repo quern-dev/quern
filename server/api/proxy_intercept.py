@@ -60,6 +60,17 @@ def _own_rule_ids(request: Request, rules: list[dict], view) -> set[str]:
             if owners.get(r["rule_id"]) == caller and view.allows(r.get("simulator_udid"))}
 
 
+def _check_mock_owner(request: Request, rule_id: str) -> None:
+    """A client key changes or removes only a mock it set, as with intercepts
+    (#646). Holding the device a rule is scoped to is not enough: the rule may
+    be a previous holder's, and its answer shows that holder's values as
+    placeholders this caller could then send back (#756 review)."""
+    owners = getattr(request.app.state, "mock_owners", {}) or {}
+    if not _is_owner_key() and owners.get(rule_id) != visibility.current_caller().principal:
+        raise HTTPException(status_code=403, detail=(
+            f"Mock {rule_id} is not yours: a client key changes and removes only its own."))
+
+
 def _is_owner_key() -> bool:
     from server import principal
 
@@ -613,6 +624,7 @@ async def set_mock(request: Request, body: SetMockRequest) -> dict:
     response["body"], body_restored = _restored_body(response.get("body"))
     if body_restored:
         restored = [*restored, "body"]
+    real = _restored_response(response, restored, body.return_restored)
     try:
         rule_id = await adapter.set_mock(
             pattern=body.pattern,
@@ -638,16 +650,35 @@ async def set_mock(request: Request, body: SetMockRequest) -> dict:
         from server.proxy import redact
 
         result["restored"] = restored
-        result["note"] = f"{redact.restored_note(restored)} {_NOT_CARRIED}"
+        result["note"] = (redact.restored_note(restored) if real is not None
+                          else f"{redact.restored_note(restored)} {_NOT_CARRIED}")
+        if real is not None:
+            result["restored_response"] = real
     return result
 
 
-#: Said when a mock was set from placeholders (#750 review): the MCP's copy
-#: kept for a session switch holds the placeholders, which another server
-#: never showed and refuses.
+#: Said when a mock was set from placeholders by a caller that did not ask for
+#: `return_restored` -- an MCP from before #751, or REST: a copy it keeps for a
+#: session switch holds the placeholders, which another server never showed
+#: and refuses (#750 review).
 _NOT_CARRIED = ("A mock set from placeholders is not recreated on another server after a "
                 "session switch: if it must carry, set it with the real values (read the "
                 "flow with reveal).")
+
+
+def _restored_response(response: dict | None, restored: list[str], asked: bool
+                       ) -> dict | None:
+    """The real values a mock's placeholders stood for, for a caller that
+    asked (#751): `headers` whole when any header held one, `body` when it
+    did. None when not asked or nothing was restored."""
+    if not asked or not restored or not response:
+        return None
+    real: dict = {}
+    if any(name != "body" for name in restored) and "headers" in response:
+        real["headers"] = response["headers"]
+    if "body" in restored and "body" in response:
+        real["body"] = response["body"]
+    return real or None
 
 
 def _shown_mock(response: dict) -> MockResponseSpec:
@@ -657,8 +688,12 @@ def _shown_mock(response: dict) -> MockResponseSpec:
     from server.proxy import redact
 
     spec = MockResponseSpec(**response)
-    return spec.model_copy(update={"headers": redact.redact_headers(spec.headers),
-                                   "body": redact.redact_body_text(spec.body, spec.headers)})
+    # Under blind sharing a caller is listed only its own mocks: what it is
+    # shown of them is its to send back, as in update_mock (#756 review).
+    with redact.shown_to_caller():
+        return spec.model_copy(update={
+            "headers": redact.redact_headers(spec.headers),
+            "body": redact.redact_body_text(spec.body, spec.headers)})
 
 
 @router.get("/mocks", response_model=MockListResponse)
@@ -668,6 +703,17 @@ async def list_mocks(request: Request) -> MockListResponse:
     if adapter is None:
         return MockListResponse(rules=[], total=0)
 
+    # Blind (#254): the caller's own rules on its own devices. Not "every rule
+    # on its devices": a previous holder's rule on a device is not the next
+    # holder's to read. Unscoped rules are the owner's set-up. Chosen before
+    # any is shown: what is shown is the caller's to send back (#756 review).
+    raw = list(adapter._mock_rules)
+    view = visibility.data_view()
+    if not view.everything:
+        caller = visibility.current_caller()
+        owners = getattr(request.app.state, "mock_owners", {}) or {}
+        raw = [r for r in raw if view.allows(r.get("simulator_udid"))
+               and owners.get(r["rule_id"]) == caller.principal]
     rules = [
         MockRuleInfo(
             rule_id=r["rule_id"],
@@ -677,17 +723,8 @@ async def list_mocks(request: Request) -> MockListResponse:
             client_ip=r.get("client_ip"),
             **rule_owners.label(request.app, "mock", r["rule_id"]),
         )
-        for r in adapter._mock_rules
+        for r in raw
     ]
-    # Blind (#254): the caller's own rules on its own devices. Not "every rule
-    # on its devices": a previous holder's rule on a device is not the next
-    # holder's to read. Unscoped rules are the owner's set-up.
-    view = visibility.data_view()
-    if not view.everything:
-        caller = visibility.current_caller()
-        owners = getattr(request.app.state, "mock_owners", {}) or {}
-        rules = [r for r in rules if view.allows(r.simulator_udid)
-                 and owners.get(r.rule_id) == caller.principal]
     return MockListResponse(rules=rules, total=len(rules))
 
 
@@ -705,6 +742,7 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
     _check_mock_scope(adapter, rule_id)
     if not any(r.get("rule_id") == rule_id for r in getattr(adapter, "_mock_rules", []) or []):
         raise HTTPException(status_code=404, detail=f"Mock rule not found: {rule_id}")
+    _check_mock_owner(request, rule_id)
     if scope_given and not body.simulator_udid:
         # A new scope that names a simulator reaches the access middleware as
         # a device; removing the scope names none, and makes the rule answer
@@ -754,7 +792,11 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
         from server.proxy import redact
 
         result["restored"] = update_restored
-        result["note"] = f"{redact.restored_note(update_restored)} {_NOT_CARRIED}"
+        real = _restored_response(update_response, update_restored, body.return_restored)
+        result["note"] = (redact.restored_note(update_restored) if real is not None
+                          else f"{redact.restored_note(update_restored)} {_NOT_CARRIED}")
+        if real is not None:
+            result["restored_response"] = real
     return result
 
 
@@ -782,6 +824,8 @@ async def delete_mock(request: Request, rule_id: str) -> dict:
     """Delete a specific mock rule."""
     adapter = _require_running_proxy(request)
     _check_mock_scope(adapter, rule_id)
+    if any(r.get("rule_id") == rule_id for r in getattr(adapter, "_mock_rules", []) or []):
+        _check_mock_owner(request, rule_id)
     removed = await adapter.clear_mock(rule_id=rule_id)
     if not removed:
         # 404, matching PATCH on the same id. Reporting "deleted" for a rule

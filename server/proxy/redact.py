@@ -29,6 +29,8 @@ as captured, and the answer names them, so nobody assumes they were redacted.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import hmac
 import logging
@@ -37,6 +39,7 @@ import re
 import secrets
 import threading
 from collections import OrderedDict
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import unquote_plus
 
@@ -91,6 +94,20 @@ _settings_cache: tuple[tuple, tuple[bool, frozenset[str], frozenset[str], frozen
 #: The ids of placeholders that stand for a JSON literal (`1234`, `true`), not
 #: a string: a body's way back puts them back without quotes.
 _literal_ids: set[str] = set()
+#: Under blind sharing only (#254): the flows each placeholder was made from,
+#: as (device, time), so a placeholder is put back only for a caller whose
+#: view still shows one of them (#756 review). Without it a client key could
+#: pass a placeholder from a device it never held, or no longer holds, and
+#: read the real value back from `restored_response` -- or send it on.
+#: Per placeholder, its sources and the latest time each was seen: a device's
+#: udid, or ("principal", P) for a held request P's intercept holds. Only the
+#: latest time per source matters -- `View.allows` compares it with a
+#: reservation's start -- so a cookie on every request stays one entry.
+_sources: dict[str, dict[Any, Any]] = {}
+#: Where the value being redacted comes from, as (source, time), while a flow
+#: or held request is being redacted under blind sharing.
+_source: contextvars.ContextVar[tuple[Any, Any] | None] = contextvars.ContextVar(
+    "quern_redact_source", default=None)
 
 
 class UnknownPlaceholder(ValueError):
@@ -194,9 +211,15 @@ def placeholder(value: str, *, literal: bool = False) -> str:
         _seen.move_to_end(vid)
         if literal:
             _literal_ids.add(vid)
+        if (source := _source.get()) is not None:
+            key, when = source
+            seen = _sources.setdefault(vid, {})
+            if key not in seen or (when is not None and (seen[key] is None or when > seen[key])):
+                seen[key] = when
         while len(_seen) > SEEN_MAX:
             gone, _ = _seen.popitem(last=False)
             _literal_ids.discard(gone)
+            _sources.pop(gone, None)
     return f"‹redacted, {len(value):,} chars, id {vid}›"
 
 
@@ -388,6 +411,57 @@ def _redact_request(request: Any, lists: Lists, shown: frozenset[str],
 
 def _redact_one(flow: Any, lists: Lists, shown: frozenset[str],
                 names: set[str], unscanned: set[str]) -> Any:
+    token = _source.set(_flow_source(flow))
+    try:
+        return _redact_one_in(flow, lists, shown, names, unscanned)
+    finally:
+        _source.reset(token)
+
+
+def _flow_source(flow: Any) -> tuple[str, Any] | None:
+    """The device and time a flow is attributed to, as flow visibility does --
+    recorded only under blind sharing, where it decides who may restore."""
+    from server import visibility
+
+    if visibility.MODE != "blind":
+        return None
+    from server.trace import device_of
+
+    try:
+        from server.api.trace import read_ip_map
+
+        ip_map = read_ip_map()
+    except Exception:  # noqa: BLE001 -- unreadable: no physical flow is attributable
+        ip_map = {}
+    udid, firm = device_of(flow, ip_map)
+    return (udid, getattr(flow, "timestamp", None)) if firm and udid else None
+
+
+def _may_restore(vid: str) -> bool:
+    """Whether the current caller may have placeholder `vid` put back: always
+    under shared visibility, and for the owner. A blind client only while its
+    view shows a flow the placeholder came from -- what reveal would show it."""
+    from server import visibility
+
+    if visibility.MODE != "blind":
+        return True
+    caller = visibility.current_caller()
+    if caller.is_owner:
+        return True
+    view = visibility.data_view(caller)
+    with _lock:
+        sources = list(_sources.get(vid, {}).items())
+    for key, when in sources:
+        if isinstance(key, tuple):                # ("principal", P): a held request
+            if key == ("principal", caller.principal):
+                return True
+        elif view.allows(key, when):
+            return True
+    return False
+
+
+def _redact_one_in(flow: Any, lists: Lists, shown: frozenset[str],
+                   names: set[str], unscanned: set[str]) -> Any:
     headers, _, fields = lists
     update: dict[str, Any] = {
         "request": _redact_request(flow.request, lists, shown, names, unscanned)}
@@ -407,7 +481,35 @@ def redact_requests(requests: list[Any], reveal: Any = None) -> tuple[list[Any],
 
 def shown_requests(requests: list[Any], reveal: Any = None
                    ) -> tuple[list[Any], list[str], list[str]]:
-    """`redact_requests`, and the bodies shown as captured (see `shown_flows`)."""
+    """`redact_requests`, and the bodies shown as captured (see `shown_flows`).
+
+    Held requests: under blind sharing a caller is shown only those its own
+    intercepts hold (`list_held_flows`), and may release only those, so their
+    placeholders are the caller's principal's to put back (#756 review) --
+    a held request has no stored flow to attribute it to a device by."""
+    with shown_to_caller():
+        return _shown_requests_in(requests, reveal)
+
+
+@contextlib.contextmanager
+def shown_to_caller() -> Iterator[None]:
+    """Placeholders made inside are the current caller's principal's to put
+    back, under blind sharing: for what quern shows a caller of its own --
+    the requests its intercepts hold, the mocks it set -- where there is no
+    stored flow to attribute a value to a device by (#756 review)."""
+    from server import visibility
+
+    # (source, time): the source is the principal itself, and no time.
+    token = _source.set((("principal", visibility.current_caller().principal), None)
+                        if visibility.MODE == "blind" else None)
+    try:
+        yield
+    finally:
+        _source.reset(token)
+
+
+def _shown_requests_in(requests: list[Any], reveal: Any = None
+                       ) -> tuple[list[Any], list[str], list[str]]:
     on, headers, params, fields = settings()
     shown = reveal_set(reveal)
     if not on or shown is ALL:
@@ -487,7 +589,9 @@ def restore(text: str) -> tuple[str, int]:
         nonlocal count
         with _lock:
             value = _seen.get(m.group(1))
-        if value is None:
+        # Refused alike when the caller may not have it: the answer must not
+        # say a placeholder exists that this caller was never shown.
+        if value is None or not _may_restore(m.group(1)):
             raise UnknownPlaceholder(
                 f"the redacted value {m.group(0)} is not known to this server -- it may "
                 "come from another server, or from long enough ago to have been let go. "
@@ -526,8 +630,8 @@ def restore_body(text: str | None) -> tuple[str | None, int]:
         nonlocal count
         with _lock:
             value = _seen.get(m.group(2)) if m.group(2) in _literal_ids else None
-        if value is None:
-            return m.group(0)                     # a string's: `restore` below
+        if value is None or not _may_restore(m.group(2)):
+            return m.group(0)                     # a string's, or refused: `restore` below
         count += 1
         return value
 
@@ -563,5 +667,6 @@ def _forget_for_tests() -> None:
     with _lock:
         _seen.clear()
         _literal_ids.clear()
+        _sources.clear()
     _key_cache = None
     _settings_cache = None
