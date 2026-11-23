@@ -96,6 +96,24 @@ def _restored(headers: dict | None, url: str | None = None
     return headers, url, names
 
 
+def _body_bytes(text: str | None, encoding: str, what: str) -> bytes | None:
+    """A body as the bytes it stands for: base64 decoded, anything else as
+    UTF-8 text. 400 for base64 that does not decode, rather than sending it
+    as text or as part of itself."""
+    if not text:
+        return None
+    if encoding != "base64":
+        return text.encode("utf-8")
+    import base64
+    import binascii
+
+    try:
+        return base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise HTTPException(status_code=400, detail=(
+            f"{what} is marked base64 but does not decode ({e})")) from e
+
+
 def _restored_body(text: str | None) -> tuple[str | None, bool]:
     """A body an agent sent back, with its placeholders put back to the real
     values (#749), and whether any were. One this server never showed is
@@ -312,6 +330,12 @@ async def release_flow(request: Request, body: ReleaseFlowRequest) -> dict:
         headers, url, restored = _restored(
             modifications.get("headers"),
             modifications.get("url") if isinstance(modifications.get("url"), str) else None)
+        if modifications.get("body_encoding") not in (None, "utf-8", "base64"):
+            raise HTTPException(status_code=400, detail=(
+                'modifications.body_encoding must be "utf-8" or "base64"'))
+        if modifications.get("body_encoding") == "base64":
+            # Checked here, so a bad one is a 400 rather than an addon error.
+            _body_bytes(modifications.get("body"), "base64", "modifications.body")
         new_body, body_restored = _restored_body(modifications.get("body"))
         if body_restored:
             restored = [*restored, "body"]
@@ -387,6 +411,13 @@ async def replay_flow(
                    f"{req.body_size:,} bytes kept), so replaying it would send part of it: "
                    "pass modify_body with the whole body"),
             restored=restored or None, note=redact.restored_note(restored))
+    # The bytes to send (#755). A binary body is stored as base64 text
+    # (`body_encoding: "base64"`), and sent as that text it reached the server
+    # as something else than the app sent, with "success" to say so.
+    edited = body is not None and body.modify_body is not None
+    encoding = body.modify_body_encoding if edited else req.body_encoding
+    content = _body_bytes(request_body, encoding,
+                          "modify_body" if edited else "the captured body")
     # The captured length is the original body's: httpx sets the real one.
     # Kept, any modify_body of another length -- or a placeholder put back
     # to a value of another length -- failed with "Too much data for
@@ -410,7 +441,7 @@ async def replay_flow(
                 method=req.method,
                 url=req.url,
                 headers=headers,
-                content=request_body.encode("utf-8") if request_body else None,
+                content=content,
             )
         from server.proxy import redact
 

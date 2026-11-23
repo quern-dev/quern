@@ -220,6 +220,10 @@ With no arguments it removes the intercepts this session set (#646), and leaves 
               .optional()
               .describe("Headers to add/override"),
             body: z.string().optional().describe("New request body"),
+            body_encoding: z
+              .enum(["utf-8", "base64"])
+              .optional()
+              .describe('How body is written: "utf-8" text (default), or "base64" for a binary body, sent as the bytes it encodes -- as a flow shows a binary body (body_encoding "base64")'),
             url: z.string().optional().describe("New request URL"),
             method: z.string().optional().describe("New HTTP method"),
           })
@@ -258,7 +262,7 @@ With no arguments it removes the intercepts this session set (#646), and leaves 
   server.registerTool(
     "replay_flow",
     {
-      description: `Replay a previously captured HTTP flow through the proxy. The replayed request appears as a new flow in captures. Optionally modify headers or body. A redacted placeholder you copy back from a flow, in modify_headers or modify_body, is sent as the real value it stands for, and the answer says so in \`restored\`; one this server never showed is refused. Without modify_body, the real captured body is sent.`,
+      description: `Replay a previously captured HTTP flow through the proxy. The replayed request appears as a new flow in captures. Optionally modify headers or body. A redacted placeholder you copy back from a flow, in modify_headers or modify_body, is sent as the real value it stands for, and the answer says so in \`restored\`; one this server never showed is refused. Without modify_body, the real captured body is sent, a binary one (body_encoding \"base64\") as its bytes.`,
       inputSchema: strictParams({
         flow_id: z.string().describe("The captured flow ID to replay"),
         modify_headers: z
@@ -269,13 +273,18 @@ With no arguments it removes the intercepts this session set (#646), and leaves 
           .string()
           .optional()
           .describe("New body for the replayed request"),
+        modify_body_encoding: z
+          .enum(["utf-8", "base64"])
+          .optional()
+          .describe('How modify_body is written: "utf-8" text (default), or "base64" for a binary body, sent as the bytes it encodes'),
       }),
     },
-    async ({ flow_id, modify_headers, modify_body }) => {
+    async ({ flow_id, modify_headers, modify_body, modify_body_encoding }) => {
       try {
         const body: Record<string, unknown> = {};
         if (modify_headers) body.modify_headers = modify_headers;
         if (modify_body !== undefined) body.modify_body = modify_body;
+        if (modify_body_encoding !== undefined) body.modify_body_encoding = modify_body_encoding;
 
         const data = await apiRequest(
           "POST",

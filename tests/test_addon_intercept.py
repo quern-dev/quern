@@ -796,3 +796,20 @@ class TestOnlyRealCertificateRejectionsAreReported:
         (event,) = out.of_type("tls_rejected")
         assert event["source_process"] == "MobileSafari"
         assert event["simulator_udid"] == "F5AF3736"
+
+
+def test_a_base64_body_is_released_as_its_bytes(addon, output):
+    """#755: a binary body, as a flow shows one, is set as bytes, not as its
+    base64 text; a text body still sets the text."""
+    import base64
+
+    raw = bytes(range(256))
+    binary, text = _make_mock_flow(), _make_mock_flow()
+    with addon._held_lock:
+        addon._held_flows["f_bin"] = (binary, time.time())
+        addon._held_flows["f_txt"] = (text, time.time())
+    addon._handle_modify_and_release({"flow_id": "f_bin", "modifications": {
+        "body": base64.b64encode(raw).decode(), "body_encoding": "base64"}})
+    addon._handle_modify_and_release({"flow_id": "f_txt", "modifications": {"body": "hi"}})
+    assert binary.request.content == raw
+    assert text.request.text == "hi"
