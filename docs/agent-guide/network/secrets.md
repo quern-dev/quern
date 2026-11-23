@@ -43,7 +43,7 @@ A placeholder this server never showed is refused with a 400, rather than sent o
 
 A mock set from placeholders holds the real values, so `GET /mocks` lists its secret headers and body fields redacted too. Over MCP, such a mock **is recreated on another server** after a session switch, with the real values: the MCP asks for them when it sets the mock (`return_restored`), keeps them for the switch, and does not show them to you (#751).
 
-**Recordings** are redacted by default. A recording made with `redact: false` (`start_recording`) keeps the real values. Use that only for a recording that stays on this machine.
+**Recordings** are redacted by default. A recording made with `redact: false` (`start_recording`, or `quern record start --no-redact`) keeps the real values. Use that only for a recording that stays on this machine.
 
 The manifest's `filters.redact` says what the events hold, fixed when the recording starts:
 - with the owner's `"redact": false` (below), a recording is unredacted whatever was asked, and says `false`;

@@ -1115,3 +1115,40 @@ class TestTheCodeRabbitReview:
         assert light.holes == full.holes and light.holes
         assert (light.stopped, light.warnings) == (full.stopped, full.warnings)
         assert light.flows == [] and light.actions == []
+
+
+class TestNoRedact:
+    """#752: the CLI's way to the start route's `redact: false`."""
+
+    def _start(self, monkeypatch, argv, filters=None):
+        sent = {}
+
+        def call(method, path, body=None):
+            # What was sent, where: a reply to any request would pass a CLI
+            # that posted to the wrong route (review).
+            assert (method, path, body["udid"]) == ("POST", "/api/v1/recordings", SIM)
+            sent.update(body=body)
+            return 200, {"id": "rec_1", "udid": SIM, "output_dir": "/x",
+                         **({"filters": filters} if filters is not None else {})}
+        monkeypatch.setattr(record_cli, "_call", call)
+        assert record_cli.main(["start", "--udid", SIM, *argv]) == 0
+        return sent["body"]
+
+    def test_no_redact_asks_for_real_values(self, monkeypatch, capsys):
+        body = self._start(monkeypatch, ["--no-redact"], {"redact": False})
+        assert body["redact"] is False
+        out, err = capsys.readouterr()
+        assert out.splitlines() == ["rec_1"]                  # stdout keeps its contract
+        assert "real secret values, as asked (--no-redact)" in err
+
+    def test_without_it_the_servers_default_holds(self, monkeypatch, capsys):
+        body = self._start(monkeypatch, [], {"redact": True})
+        assert "redact" not in body
+        assert "real secret values" not in capsys.readouterr().err
+
+    def test_the_owners_switch_is_named_when_it_is_why(self, monkeypatch, capsys):
+        self._start(monkeypatch, [], {"redact": False})
+        assert "proxy.redact is false" in capsys.readouterr().err
+
+    def test_the_usage_names_it(self):
+        assert "--no-redact" in record_cli.USAGE
