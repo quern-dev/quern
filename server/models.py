@@ -1772,7 +1772,9 @@ class ReleaseFlowRequest(BaseModel):
     """Request body for POST /api/v1/proxy/intercept/release."""
 
     flow_id: str
-    modifications: dict | None = None  # {headers?, body?, url?, method?}
+    # {headers?, body?, body_encoding?, url?, method?}. `body_encoding`
+    # "base64" sends `body` as the bytes it encodes (#755); "utf-8" is text.
+    modifications: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1785,6 +1787,10 @@ class ReplayRequest(BaseModel):
 
     modify_headers: dict[str, str] | None = None
     modify_body: str | None = None
+    #: How `modify_body` is written (#755): "utf-8" text, or "base64" for a
+    #: binary body -- a protobuf, an image -- as a flow shows one
+    #: (`body_encoding: "base64"`). Sent as the bytes it encodes.
+    modify_body_encoding: Literal["utf-8", "base64"] = "utf-8"
 
 
 class ReplayResponse(BaseModel):

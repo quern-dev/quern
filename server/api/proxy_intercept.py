@@ -96,6 +96,42 @@ def _restored(headers: dict | None, url: str | None = None
     return headers, url, names
 
 
+def _body_bytes(text: str | None, encoding: str, what: str) -> bytes | None:
+    """A body as the bytes it stands for: base64 decoded, anything else as
+    UTF-8 text. 400 for base64 that does not decode, rather than sending it
+    as text or as part of itself."""
+    if not text:
+        return None
+    if encoding != "base64":
+        return text.encode("utf-8")
+    import base64
+    import binascii
+
+    try:
+        return base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise HTTPException(status_code=400, detail=(
+            f"{what} is marked base64 but does not decode ({e})")) from e
+
+
+def _restored_base64(text: str | None, what: str) -> tuple[str | None, bool]:
+    """A base64 body sent back, with the placeholders in the bytes it encodes
+    put back, re-encoded, and whether any were (#763 review). Restored in the
+    decoded bytes, read with surrogateescape so bytes that are not UTF-8 come
+    back exactly as they were; a placeholder this server never showed is
+    refused (400) as in a text body. 400 too for base64 that does not decode."""
+    import base64
+
+    raw = _body_bytes(text, "base64", what)
+    if raw is None:
+        return text, False
+    decoded = raw.decode("utf-8", "surrogateescape")
+    back, restored = _restored_body(decoded)
+    if not restored:
+        return text, False
+    return base64.b64encode((back or "").encode("utf-8", "surrogateescape")).decode(), True
+
+
 def _restored_body(text: str | None) -> tuple[str | None, bool]:
     """A body an agent sent back, with its placeholders put back to the real
     values (#749), and whether any were. One this server never showed is
@@ -312,7 +348,16 @@ async def release_flow(request: Request, body: ReleaseFlowRequest) -> dict:
         headers, url, restored = _restored(
             modifications.get("headers"),
             modifications.get("url") if isinstance(modifications.get("url"), str) else None)
-        new_body, body_restored = _restored_body(modifications.get("body"))
+        if modifications.get("body_encoding") not in (None, "utf-8", "base64"):
+            raise HTTPException(status_code=400, detail=(
+                'modifications.body_encoding must be "utf-8" or "base64"'))
+        if modifications.get("body_encoding") == "base64":
+            # Decoded here, so a bad one is a 400 rather than an addon error,
+            # and restored as bytes: base64 text never shows a placeholder.
+            new_body, body_restored = _restored_base64(
+                modifications.get("body"), "modifications.body")
+        else:
+            new_body, body_restored = _restored_body(modifications.get("body"))
         if body_restored:
             restored = [*restored, "body"]
         modifications = {**modifications,
@@ -372,7 +417,10 @@ async def replay_flow(
             modify, _, restored = _restored(body.modify_headers)
             headers.update(modify)
         if body.modify_body is not None:
-            request_body, body_restored = _restored_body(body.modify_body)
+            request_body, body_restored = (
+                _restored_base64(body.modify_body, "modify_body")
+                if body.modify_body_encoding == "base64"
+                else _restored_body(body.modify_body))
             if body_restored:
                 restored = [*restored, "body"]
     if req.body_truncated and not (body and body.modify_body is not None):
@@ -387,6 +435,13 @@ async def replay_flow(
                    f"{req.body_size:,} bytes kept), so replaying it would send part of it: "
                    "pass modify_body with the whole body"),
             restored=restored or None, note=redact.restored_note(restored))
+    # The bytes to send (#755). A binary body is stored as base64 text
+    # (`body_encoding: "base64"`), and sent as that text it reached the server
+    # as something else than the app sent, with "success" to say so.
+    edited = body is not None and body.modify_body is not None
+    encoding = body.modify_body_encoding if edited else req.body_encoding
+    content = _body_bytes(request_body, encoding,
+                          "modify_body" if edited else "the captured body")
     # The captured length is the original body's: httpx sets the real one.
     # Kept, any modify_body of another length -- or a placeholder put back
     # to a value of another length -- failed with "Too much data for
@@ -410,7 +465,7 @@ async def replay_flow(
                 method=req.method,
                 url=req.url,
                 headers=headers,
-                content=request_body.encode("utf-8") if request_body else None,
+                content=content,
             )
         from server.proxy import redact
 

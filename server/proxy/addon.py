@@ -1894,7 +1894,11 @@ class IOSDebugAddon:
             for k, v in modifications["headers"].items():
                 flow.request.headers[k] = v
         if "body" in modifications:
-            flow.request.text = modifications["body"]
+            if modifications.get("body_encoding") == "base64":
+                # A binary body, as a flow shows one (#755): its bytes.
+                flow.request.content = base64.b64decode(modifications["body"])
+            else:
+                flow.request.text = modifications["body"]
 
         try:
             flow.resume()
