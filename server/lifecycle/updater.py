@@ -1092,8 +1092,12 @@ def _warn_if_node_cannot_build() -> None:
     only an npm engine warning, and an update that refused over the user's Node
     arrangement would strand a working install on an old release.
     """
-    from server.lifecycle import node_env
+    from server.lifecycle import managed_node, node_env
 
+    # Quern's own Node builds the wrapper whatever this process's PATH holds
+    # (#760); setup, which the update runs next, keeps it current.
+    if managed_node.installed_version() is not None:
+        return
     try:
         site = node_env.here()
     except Exception as exc:  # noqa: BLE001 -- a warning must not stop an update

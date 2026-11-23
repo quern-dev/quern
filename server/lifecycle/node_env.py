@@ -597,8 +597,12 @@ def node_for_clients(
     home: str | None = None,
     resolve: Callable[[str], str] = os.path.realpath,
     exists: Callable[[str], bool] = os.path.exists,
+    managed: bool = True,
 ) -> ClientNode | None:
     """A Node binary meeting `MIN_NODE` that every MCP client can run, by absolute path.
+
+    Quern's own Node (`managed_node`, #760) when it is installed and runs;
+    `managed=False` asks only about the user's.
 
     Registering `"command": "node"` hands the choice to each client's own PATH,
     which for a GUI client is launchd's -- no fnm, no nvm, no Homebrew -- and
@@ -617,6 +621,17 @@ def node_for_clients(
     """
     env = dict(os.environ if env is None else env)
     home = home or env.get("HOME") or str(Path.home())
+    # Quern's own Node first (#760): a fixed path every client can run, with
+    # nothing to resolve. It is still run the way a Dock-launched client would
+    # run it before it is chosen, like every other candidate.
+    if managed:
+        from server.lifecycle import managed_node
+
+        binary = managed_node.current_binary()
+        if exists(str(binary)):
+            version = _runs_without_a_shell(str(binary), run=run, home=home)
+            if version:
+                return ClientNode(str(binary), version, "quern's own Node")
     # From the home directory, not the caller's: run inside a project pinned
     # to Node 20, fnm's `--use-on-cd` and mise answer 20 for every place, and
     # the user's default 22 was never seen (measured). A client does not start

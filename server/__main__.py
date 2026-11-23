@@ -329,13 +329,25 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
         )
     )
 
+    # Quern's own Node when it is installed (#760): its npm by path, and its
+    # bin first on PATH, because npm's launcher finds `node` through
+    # `/usr/bin/env`. Otherwise whatever npm this process can see, as before.
+    from server.lifecycle import managed_node
+
+    npm, npm_env = "npm", None
+    managed_bin = managed_node.current_bin_dir()
+    if (managed_bin / "node").exists() and (managed_bin / "npm").exists():
+        npm = str(managed_bin / "npm")
+        npm_env = dict(os.environ)
+        npm_env["PATH"] = os.pathsep.join([str(managed_bin), npm_env.get("PATH", "")])
+
     try:
         if needs_install:
             if not quiet:
                 print("Installing MCP server dependencies...")
             result = subprocess.run(
-                ["npm", "install", "--prefer-offline"], cwd=str(mcp_dir), timeout=120,
-                capture_output=quiet,
+                [npm, "install", "--prefer-offline"], cwd=str(mcp_dir), timeout=120,
+                capture_output=quiet, env=npm_env,
             )
             if result.returncode != 0:
                 print("Error: npm install failed for MCP server")
@@ -345,8 +357,8 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
         if not quiet:
             print("Building MCP server...")
         result = subprocess.run(
-            ["npm", "run", "build"], cwd=str(mcp_dir), timeout=60,
-            capture_output=quiet,
+            [npm, "run", "build"], cwd=str(mcp_dir), timeout=60,
+            capture_output=quiet, env=npm_env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         # OSError covers the one that reached a user: npm absent from a

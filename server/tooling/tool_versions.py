@@ -124,6 +124,11 @@ def classify_source(path: str | None) -> str:
         return "unknown"
     with contextlib.suppress(OSError):
         path = str(Path(path).resolve())
+    from server.lifecycle import managed_node
+
+    with contextlib.suppress(OSError):
+        if Path(path).is_relative_to(managed_node.node_dir().resolve()):
+            return "quern"
     if "fnm_multishells" in path or "/fnm/" in path:
         return "fnm"
     if "/pipx/" in path:
@@ -407,7 +412,12 @@ async def collect_sites() -> list[ToolSite]:
     ))
 
     # --- node -------------------------------------------------------------
-    node_path = shutil.which("node")
+    # Quern's own Node when it is installed (#760): that is the one the MCP
+    # wrapper runs, whatever `node` the shell finds.
+    from server.lifecycle import managed_node
+
+    managed = managed_node.current_binary()
+    node_path = str(managed) if managed.exists() else shutil.which("node")
     _v_node_path, _d_node_path = (
         await probe_version(node_path, ["--version"]) if node_path else (None, None)
     )

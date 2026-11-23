@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Quern installs its own Node.js (#760).** Setup downloads the official build from nodejs.org into `~/.quern/node`, checks its SHA-256 against the release's `SHASUMS256.txt`, its signature against the Node.js Foundation's Developer ID, and its `--version`, and only then points `~/.quern/node/current` at it. MCP clients are registered with it, the wrapper is built with its npm, and `quern update` keeps it on the newest patch release of its line. It is not added to your PATH.
+  - **Why:** finding a `node` every part of quern can reach took four shell probes and still failed for GUI clients and the menu bar updater when fnm or nvm hid it (#214, #339, #447), and on Intel Macs `brew install node` now builds from source for over an hour (#757). Measured on a 2018 MacBook Pro: the download takes about 2 s.
+  - **Homebrew is no longer offered for Node.** Declining quern's own Node falls back to yours, as before, with a warning saying how to switch.
+  - Intel Macs get the 26 line, the last with an official `darwin-x64` build.
 - **Secrets in captured traffic are redacted in what quern shows (#742).** From a real session: flow detail carried an app's bearer token in full, so to keep it out of its transcript an agent had to read flows over REST and strip the header by hand.
   - **What is redacted:** the headers `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key` and `x-auth-token`, and token-like query parameters (`access_token`, `token`, `key`, `sig` and others).
   - **Where:** every flow answer over MCP and REST (`query_flows` in both detail levels, `get_flow_detail`, `wait_for_flow`, `stop_capture_session`, `get_flow_summary`, `list_held_flows`, pending flows and the stream), the proxy's log lines, the trace, and recordings.

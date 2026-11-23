@@ -284,6 +284,18 @@ def _no_image_mounts(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_node_downloads(monkeypatch):
+    """Never download Node from a test (#760): setup's Node step would fetch
+    ~50 MB from nodejs.org on any machine, CI's Linux runner included, where
+    `platform.machine()` is x86_64. Tests of the download pass `fetch=`."""
+    from server.lifecycle import managed_node
+
+    def refused(url, dest):
+        raise AssertionError(f"a test tried to download {url}; pass fetch= instead")
+    monkeypatch.setattr(managed_node, "_fetch", refused)
+
+
+@pytest.fixture(autouse=True)
 def _default_xcode_available(monkeypatch):
     """Default xcode_available() to True so existing iOS-backend tests work
     regardless of whether the CI runner has Xcode installed. Each consumer

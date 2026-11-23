@@ -78,4 +78,4 @@ never comes. The other two outlive Quern itself.
 quern uninstall
 ```
 
-Removes Homebrew packages, pipx packages, MCP registrations, the wrapper script, and the virtualenv. Only removes packages that were installed by `quern setup` — pre-existing tools (like Node.js) are left untouched. The source code directory is preserved; the command prints instructions to remove it if desired.
+Removes Homebrew packages, pipx packages, quern's own Node.js (`~/.quern/node`), MCP registrations, the wrapper script, and the virtualenv. Only removes packages that were installed by `quern setup` — pre-existing tools (like a Node.js of your own) are left untouched. The source code directory is preserved; the command prints instructions to remove it if desired.

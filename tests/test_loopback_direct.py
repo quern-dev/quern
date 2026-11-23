@@ -129,6 +129,7 @@ MAY_USE_A_PROXY = {
     ("lifecycle/updater.py", "urlopen"): "GitHub and quern.dev",
     ("lifecycle/setup.py", "urlopen"): "GitHub downloads",
     ("profiling/trace_processor.py", "urlopen"): "a release download",
+    ("lifecycle/managed_node.py", "urlopen"): "Node releases on nodejs.org (#760)",
     ("tooling/tool_updates.py", "AsyncClient"): "PyPI",
     ("device/ios/wda_source.py", "AsyncClient"): "WebDriverAgent's tarball on GitHub",
     ("api/proxy_intercept.py", "AsyncClient"): "replays through quern's own proxy",
@@ -136,7 +137,8 @@ MAY_USE_A_PROXY = {
 
 #: urlopen calls each file is allowed: setup.py's two downloads only, so a
 #: loopback check added beside them is not covered by its entry.
-URLOPEN_COUNTS = {"lifecycle/setup.py": 2, "lifecycle/updater.py": 3}
+URLOPEN_COUNTS = {"lifecycle/setup.py": 2, "lifecycle/updater.py": 3,
+                  "lifecycle/managed_node.py": 1}
 
 
 def _clients() -> list[tuple[str, str, int, bool]]:

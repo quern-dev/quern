@@ -2171,6 +2171,86 @@ def _first_run_of_new_node(
                 timeout=FIRST_RUN_TIMEOUT, stdin=subprocess.DEVNULL)
 
 
+def _managed_node_result(outcome) -> CheckResult:
+    """Setup's line for quern's own Node, from `managed_node.ensure`."""
+    from server.lifecycle import managed_node
+
+    where = str(managed_node.node_dir())
+    home = str(Path.home())
+    if where.startswith(home + "/"):
+        where = "~" + where[len(home):]
+    if outcome.version is None:
+        return CheckResult(
+            name="Node.js", status=CheckStatus.WARNING,
+            message="quern's own Node could not be installed",
+            detail=outcome.detail,
+        )
+    message = f"{outcome.version} — quern's own, in {where}"
+    if outcome.action == "updated":
+        message += f" (updated {outcome.detail})"
+    detail = ""
+    if outcome.action == "failed":
+        # A working Node and a failed update check: keep it, and say why the
+        # update did not happen.
+        detail = f"Could not check for a newer release: {outcome.detail}"
+    return CheckResult(name="Node.js", status=CheckStatus.OK, message=message, detail=detail)
+
+
+def _setup_node(*, after_update: bool) -> tuple[list | None, CheckResult]:
+    """The Node step: quern's own Node first, the user's as the fallback (#760).
+
+    Returns the probe of the user's node sites (None when quern's own Node is
+    in use, since then nothing reads them) and the summary line. Homebrew is
+    no longer offered: on an Intel Mac it builds Node from source for over an
+    hour (#757), and a node it installs is one more for `node_env` to find.
+    """
+    from server.lifecycle import managed_node
+
+    if managed_node.machine_arch() is not None:
+        have = managed_node.installed_version()
+        install = have is not None or _prompt_yn(
+            "    Install Node.js for quern? (the official build from nodejs.org, "
+            "about 50 MB, kept in ~/.quern/node and not added to your PATH)",
+            default=True,
+        )
+        if install:
+            if have is None:
+                print("    Downloading Node.js from nodejs.org...")
+            outcome = managed_node.ensure()
+            result = _managed_node_result(outcome)
+            if result.status == CheckStatus.OK:
+                return None, result
+            managed_problem = result.detail
+        else:
+            managed_problem = "declined"
+    else:
+        managed_problem = "no nodejs.org build for this Mac"
+
+    # The user's own Node, as before #760.
+    node_sites = _probe_node_sites()
+    node_result = check_node(node_sites)
+    note = f"quern's own Node: {managed_problem}"
+    if node_result.status == CheckStatus.MISSING:
+        node_result = CheckResult(
+            name="Node.js", status=CheckStatus.ERROR,
+            message="Not installed (needed for the MCP server)",
+            detail=(f"{note}\n" if node_result.fixable else f"{node_result.detail}\n{note}\n")
+                   + f"Run {quern_cmd()} setup again to install quern's own Node.",
+        )
+    elif node_result.status == CheckStatus.OK:
+        node_result = CheckResult(
+            name="Node.js", status=CheckStatus.WARNING,
+            message=f"{node_result.message} (yours; {note})",
+            detail=f"Run {quern_cmd()} setup again to install quern's own Node.",
+        )
+    else:
+        node_result = CheckResult(
+            name=node_result.name, status=node_result.status, message=node_result.message,
+            detail=f"{node_result.detail}\n{note}".strip(),
+        )
+    return node_sites, node_result
+
+
 def mcp_cannot_start(sites: list | None) -> bool:
     """True when node was found and no place has one meeting the floor (#506).
 
@@ -3902,28 +3982,7 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
     report.add(check_security_pins(project_root / ".venv" if project_root else None,
                                    apply=True))
 
-    node_sites = _probe_node_sites()
-    node_result = check_node(node_sites)
-    # `fixable`, not just MISSING. A node that exists and is merely unreachable
-    # from here is MISSING *to this process*, and installing a second one does
-    # not make the first visible -- under `-y` it would silently do exactly
-    # that. The check says whether an install is the answer; this asks it
-    # rather than re-deciding. Without this the report contradicted itself:
-    # "installed by fnm, but not reachable from here" above, and "Node.js not
-    # found. Install via Homebrew?" a few lines below.
-    if node_result.status == CheckStatus.MISSING and node_result.fixable:
-        if _prompt_yn("    Node.js not found. Install via Homebrew?"):
-            if _brew_install("node"):
-                _first_run_of_new_node()
-                node_sites = _probe_node_sites()
-                node_result = check_node(node_sites)  # re-check
-            else:
-                node_result = CheckResult(
-                    name="Node.js",
-                    status=CheckStatus.ERROR,
-                    message="Homebrew install failed",
-                    detail="Try manually: brew install node",
-                )
+    node_sites, node_result = _setup_node(after_update=after_update)
     # Decided before the severity below: a node too old to *run* the wrapper
     # still builds it, and an unbuilt wrapper is stale the moment Node is
     # upgraded -- the error is about starting it, not building it.
@@ -4323,6 +4382,10 @@ def run_uninstall() -> int:
             f"    • pipx --global packages (requires sudo): "
             f"{', '.join(pipx_global_packages)}",
         )
+    from server.lifecycle import managed_node
+
+    if managed_node.node_dir().exists():
+        print("    • Quern's own Node.js (~/.quern/node)")
     print("    • The quern wrapper script (~/.local/bin/quern)")
     print("    • The Python virtual environment (.venv/)")
     print("    • MCP server registrations (claude-code, claude-desktop, cursor, opencode, codex)")
@@ -4444,6 +4507,12 @@ def run_uninstall() -> int:
             print(f"  Removing virtual environment ({venv_path})...")
             shutil.rmtree(venv_path, ignore_errors=True)
             print("    Removed.")
+
+    # ── Remove quern's own Node (#760) ──
+
+    if managed_node.remove():
+        print()
+        print("  Removed quern's own Node.js.")
 
     # ── Remove manifest and quern config dir ──
 
