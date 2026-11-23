@@ -1152,3 +1152,21 @@ class TestNoRedact:
 
     def test_the_usage_names_it(self):
         assert "--no-redact" in record_cli.USAGE
+
+
+class TestEveryEntryPointHandsRecordOff:
+    """`record` parses its own flags: `python -m server`, the console script and
+    `python -m server.main` must all reach it (cleanup review)."""
+
+    @pytest.mark.parametrize("module", ["server", "server.main"])
+    def test_record_list_reaches_the_record_cli(self, module, tmp_path):
+        import os
+        import subprocess
+        import sys
+
+        env = {**os.environ, "QUERN_STATE_DIR": str(tmp_path), "PYTHONPATH": os.getcwd()}
+        r = subprocess.run([sys.executable, "-m", module, "record", "list"],
+                           capture_output=True, text=True, env=env, timeout=60)
+        # No server in the sandbox: the record CLI's own answer, not argparse's.
+        assert "no server answering" in r.stderr, r.stderr
+        assert "unrecognized arguments" not in r.stderr

@@ -3007,6 +3007,13 @@ def _cmd_disable_local_capture() -> None:
 
 def cli() -> None:
     """CLI entry point."""
+    # `record` parses its own flags (server/recording/cli.py), so it is handed
+    # off before this parser runs -- here as in server.__main__, which does the
+    # same, so `python -m server.main record ...` behaves alike (review).
+    if len(sys.argv) >= 2 and sys.argv[1] == "record":
+        from server.recording.cli import main as record_main
+
+        sys.exit(record_main(sys.argv[2:]))
     parser = argparse.ArgumentParser(
         # Without this the usage line reads "__main__.py", because the `quern`
         # wrapper execs `python3 -m server` and argparse takes argv[0].
@@ -3135,10 +3142,11 @@ def cli() -> None:
     remote_sub.add_parser("list")
     remote_sub.add_parser("forget").add_argument("name")
 
-    # Listed for `quern --help` only. `server.__main__` hands `record` to
-    # server/recording/cli.py before this parser runs, on every entry point,
-    # and that module parses its own flags. A copy of them here was never
-    # used, and drifted: it lacked --viewer and --no-redact (#752).
+    # Listed for `quern --help` only. `record` is handed to
+    # server/recording/cli.py before this parser runs -- by server.__main__,
+    # and at the top of cli() -- and that module parses its own flags. A copy
+    # of them here was never used, and drifted: it lacked --viewer and
+    # --no-redact (#752).
     subparsers.add_parser(
         "record", help="Record a device's actions, flows and logs to disk")
     subparsers.add_parser(

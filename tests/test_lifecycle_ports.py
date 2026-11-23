@@ -74,7 +74,9 @@ def test_the_scan_asks_the_real_probe():
         s.bind(("127.0.0.1", 0))
         s.listen(1)
         bound = s.getsockname()[1]
-        assert find_available_port(bound, max_attempts=50) != bound
+        # One attempt, so no other port need be free (or exist past 65535).
+        with pytest.raises(RuntimeError, match="No available port found"):
+            find_available_port(bound, max_attempts=1)
 
 
 class TestWhatCountsAsAQuernProcess:
