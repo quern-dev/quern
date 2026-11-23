@@ -75,6 +75,7 @@ GUI_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 #: current, so an old fnm default cannot displace a working one.
 MENUBAR_EXTRA_PATH = (
     "{home}/.local/bin",
+    "{home}/.quern/node/current/bin",   # quern's own Node (#760)
     "/opt/homebrew/bin",
     "/usr/local/bin",
     "{home}/.local/share/fnm/aliases/default/bin",

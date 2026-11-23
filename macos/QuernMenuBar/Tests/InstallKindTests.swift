@@ -165,6 +165,24 @@ enum InstallKindTests {
                            .absent, "nothing")
         }
 
+        Harness.test("quern's own node comes before every other node (#760)") {
+            let home = "/home/u"
+            let path = QuernCLI.searchPath(home: home)
+            let ours = path.firstIndex(of: "\(home)/.quern/node/current/bin")
+            Harness.expect(ours, 1, "right after the wrapper's directory")
+            for other in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
+                          "\(home)/.local/share/fnm/aliases/default/bin"] {
+                let i = path.firstIndex(of: other)
+                Harness.expect(ours != nil && i != nil && ours! < i!, "before \(other)")
+            }
+            // Visible even with a version manager installed: the case that
+            // sent every update to Terminal (#339).
+            Harness.expect(NodeVisibility.check(home: home,
+                                                isExecutable: { $0 == "\(home)/.quern/node/current/bin/node" },
+                                                exists: { $0 == "\(home)/.nvm" }),
+                           .visible, "quern's node beats nvm's hint")
+        }
+
         Harness.test("fnm's default node is on the app's search path (#447)") {
             let home = "/home/u"
             let path = QuernCLI.searchPath(home: home)

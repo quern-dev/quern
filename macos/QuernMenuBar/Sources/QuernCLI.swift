@@ -108,8 +108,15 @@ enum QuernCLI {
     /// Mirrored by `MENUBAR_EXTRA_PATH` in `server/lifecycle/node_env.py`, which
     /// is how `quern doctor` reports on it; `tests/test_node_env.py` keeps the
     /// two in step.
+    ///
+    /// The wrapper's directory first, for `resolve()`; then quern's own Node
+    /// (#760), ahead of every other node: the one clients are registered with
+    /// and setup builds the wrapper with, at a path that never moves (only its
+    /// `current` link does). Its bin holds node, npm, npx and corepack and no
+    /// `quern`, so it cannot shadow the wrapper.
     static func searchPath(home: String) -> [String] {
-        let extra = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"]
+        let extra = ["\(home)/.local/bin", "\(home)/.quern/node/current/bin",
+                     "/opt/homebrew/bin", "/usr/local/bin"]
             + fnmDataDirs.map { "\(home)/\($0)/aliases/default/bin" }
             + ["/usr/bin", "/bin"]
         let current = ProcessInfo.processInfo.environment["PATH"] ?? ""

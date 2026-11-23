@@ -1,7 +1,9 @@
 // Which kind of install the app is driving, and how a git install updates.
 //
 // A release install updates cleanly from here: the tarball ships the MCP
-// wrapper prebuilt, so nothing needs Node. A git install does not. Its update
+// wrapper prebuilt, and quern's own Node (~/.quern/node, #760) is on the app's
+// search path, so the "a version manager hides node" case below only arises on
+// a machine where setup has not installed it yet. A git install does not. Its update
 // rebuilds the wrapper with npm, and a GUI app gets launchd's PATH, where a
 // Node from fnm or nvm does not exist -- measured on the maintainer's machine,
 // which has Node 22 in every shell and none at all for GUI apps (#214). `git
