@@ -1124,6 +1124,9 @@ class TestNoRedact:
         sent = {}
 
         def call(method, path, body=None):
+            # What was sent, where: a reply to any request would pass a CLI
+            # that posted to the wrong route (review).
+            assert (method, path, body["udid"]) == ("POST", "/api/v1/recordings", SIM)
             sent.update(body=body)
             return 200, {"id": "rec_1", "udid": SIM, "output_dir": "/x",
                          **({"filters": filters} if filters is not None else {})}
