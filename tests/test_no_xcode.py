@@ -932,19 +932,27 @@ class TestTheMountItself:
         assert len(ticks) == 5
 
     async def test_no_second_mount_beside_one_past_its_deadline(self, monkeypatch):
-        import time as clock
+        import threading
+
+        # The mount runs until the test lets it end: a fixed sleep raced the
+        # worker thread's start on a loaded CI runner, and the mount was
+        # still going when the test said it had ended.
+        release = threading.Event()
 
         async def slow(udid, version):
-            clock.sleep(0.4)
+            assert release.wait(10), "never released"
         monkeypatch.setattr(phone_readiness, "_workers", {})
         monkeypatch.setattr(phone_readiness, "_mount", slow)
         monkeypatch.setattr(phone_readiness, "MOUNT_TIMEOUT_S", 0.05)
 
-        with pytest.raises(DeviceError, match="took over"):
-            await phone_readiness.mount_image(PHONE, "27.2.1")
-        with pytest.raises(DeviceError, match="still going"):
-            await phone_readiness.mount_image(PHONE, "27.2.1")
-        await asyncio.sleep(0.5)                                     # it ends
+        try:
+            with pytest.raises(DeviceError, match="took over"):
+                await phone_readiness.mount_image(PHONE, "27.2.1")
+            with pytest.raises(DeviceError, match="still going"):
+                await phone_readiness.mount_image(PHONE, "27.2.1")
+        finally:
+            release.set()
+        await asyncio.wait_for(asyncio.shield(phone_readiness._workers[PHONE]), 10)  # it ends
         monkeypatch.setattr(phone_readiness, "MOUNT_TIMEOUT_S", 5)
         assert await phone_readiness.mount_image(PHONE, "27.2.1") is True
 

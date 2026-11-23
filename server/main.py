@@ -3007,6 +3007,13 @@ def _cmd_disable_local_capture() -> None:
 
 def cli() -> None:
     """CLI entry point."""
+    # `record` parses its own flags (server/recording/cli.py), so it is handed
+    # off before this parser runs -- here as in server.__main__, which does the
+    # same, so `python -m server.main record ...` behaves alike (review).
+    if len(sys.argv) >= 2 and sys.argv[1] == "record":
+        from server.recording.cli import main as record_main
+
+        sys.exit(record_main(sys.argv[2:]))
     parser = argparse.ArgumentParser(
         # Without this the usage line reads "__main__.py", because the `quern`
         # wrapper execs `python3 -m server` and argparse takes argv[0].
@@ -3135,31 +3142,13 @@ def cli() -> None:
     remote_sub.add_parser("list")
     remote_sub.add_parser("forget").add_argument("name")
 
-    record_parser = subparsers.add_parser(
+    # Listed for `quern --help` only. `record` is handed to
+    # server/recording/cli.py before this parser runs -- by server.__main__,
+    # and at the top of cli() -- and that module parses its own flags. A copy
+    # of them here was never used, and drifted: it lacked --viewer and
+    # --no-redact (#752).
+    subparsers.add_parser(
         "record", help="Record a device's actions, flows and logs to disk")
-    record_sub = record_parser.add_subparsers(dest="record_command")
-    record_start = record_sub.add_parser("start")
-    record_start.add_argument("--udid", required=True)
-    record_start.add_argument("--out")
-    record_start.add_argument("--host", action="append")
-    record_start.add_argument("--exclude-host", action="append")
-    record_start.add_argument("--kinds")
-    record_start.add_argument("--include-unattributed", action="store_true")
-    record_start.add_argument("--video", action="store_true")
-    record_start.add_argument("--allow-passthrough", action="store_true")
-    record_start.add_argument("--requested-by")
-    record_start.add_argument("--keyframes")
-    record_start.add_argument("--bodies", choices=("all", "errors", "none"))
-    record_start.add_argument("--max-body-bytes", type=int)
-    record_start.add_argument("--exclude-content-type", action="append")
-    record_keyframe = record_sub.add_parser("keyframe")
-    record_keyframe.add_argument("recording_id")
-    record_keyframe.add_argument("--label")
-    record_stop = record_sub.add_parser("stop")
-    record_stop.add_argument("recording_id")
-    record_stop.add_argument("--require-complete", action="store_true")
-    record_list = record_sub.add_parser("list")
-    record_list.add_argument("--requested-by")
     subparsers.add_parser(
         "url", help="Print the running server's base URL")
     subparsers.add_parser(
@@ -3273,10 +3262,6 @@ def cli() -> None:
         sys.exit(run(getattr(args, "output", None)))
     elif args.command == "check-updates":
         sys.exit(_cmd_check_updates())
-    elif args.command == "record":
-        from server.recording.cli import main as record_main
-
-        sys.exit(record_main(sys.argv[sys.argv.index("record") + 1:]))
     elif args.command == "session":
         from server.session_cli import main as session_main
 

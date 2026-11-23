@@ -165,6 +165,9 @@ class TestTheReadPathDoesNotDropTheEquivalent:
         ctrl._active_udid = "SIM-1"
         ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
         ctrl._ui_cache["SIM-1"] = ([_el("Button", "Home tab"), _el("Slider", "x")], time.time())
+        # About a cache hit, not its expiry: at the default 300 ms a slow CI
+        # runner read past it and fell through to a real idb call.
+        ctrl._cache_ttl = 3600
 
         elements, _ = await ctrl.get_ui_elements("SIM-1", filter_type="RadioButton")
         assert find_element(

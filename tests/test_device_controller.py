@@ -1257,6 +1257,7 @@ class TestGetUIElementsWdaDispatch:
 
         cached_elements = parse_elements(_FAKE_IDB_OUTPUT)
         ctrl._ui_cache["PHYS-0001"] = (cached_elements, time.time())
+        ctrl._cache_ttl = 3600       # a hit, not its expiry: 300 ms is a CI runner's hiccup
         # The on_screen marking's viewport lookup is its own concern
         # (tests/test_wda_tap_reachability.py); stubbed so this test still
         # measures only which path the read took.
