@@ -48,6 +48,10 @@ TAP_HOLD_S = 0.05
 #: Contact samples a swipe sends per second: one a frame at 60 Hz.
 SWIPE_RATE_HZ = 60
 
+#: The most contacts one touchscreen report carries
+#: (pymobiledevice3's TOUCHSCREEN_CONTACT_COUNT_MAXIMUM).
+MAX_CONTACTS = 5
+
 #: A held session idle this long is closed.
 IDLE_CLOSE_S = 60.0
 
@@ -342,10 +346,22 @@ class CoreDeviceInput:
     async def perform_gesture(self, udid: str, plan: Plan) -> str:
         """A gesture `server.device.gestures` laid out, every finger in every
         report: a contact left out of one is lifted. A moving gesture is sent
-        at SWIPE_RATE_HZ along the plan's waypoints, as a swipe is; a tap
-        gesture puts its fingers down, holds TAP_HOLD_MS and lifts them,
-        `count` times. Points off the screen are refused, as WDA refuses
-        them. Returns which of HID and WDA carried it."""
+        at SWIPE_RATE_HZ along the plan's waypoints, paced against the clock
+        so each report's round trip does not stretch it past `duration`; a
+        tap gesture puts its fingers down, holds TAP_HOLD_MS and lifts them,
+        `count` times. Points off the screen, and more fingers than a report
+        carries, are refused. A failure or cancel with fingers down lifts
+        them, best effort, before it is raised. Returns which of HID and WDA
+        carried it."""
+        fingers = len(plan.paths if plan.paths is not None else plan.points or [])
+        if fingers > MAX_CONTACTS:
+            # Refused before anything is sent: building the report would fail
+            # after `progress.reached`, as "may have been partly delivered",
+            # when nothing was (review).
+            raise InvalidDeviceRequestError(
+                f"a gesture of {fingers} fingers: a touchscreen report carries at most "
+                f"{MAX_CONTACTS}", tool=self.TOOL_NAME)
+
         def check(screen: Screen) -> None:
             points = [p for path in plan.paths or [] for p in path] + list(plan.points or [])
             for x, y in points:
@@ -357,17 +373,20 @@ class CoreDeviceInput:
         async def send(lib: SimpleNamespace, session: _Session, screen: Screen,
                        progress: _Progress) -> None:
             check(screen)
+            down: list[tuple[float, float]] | None = None
 
-            def report(points: list[tuple[float, float]], touching: bool = True) -> Any:
-                return session.hid.send_multitouch(
+            async def report(points: list[tuple[float, float]], touching: bool = True) -> None:
+                nonlocal down
+                await _report(session.hid.send_multitouch(
                     [lib.Contact(i, *screen.point(x, y), touching)
-                     for i, (x, y) in enumerate(points)])
+                     for i, (x, y) in enumerate(points)]))
+                down = points if touching else None
 
-            progress.reached = True
-            if plan.paths is not None:
-                paths = plan.paths
+            async def moving(paths: list[list[tuple[float, float]]]) -> None:
                 legs = len(paths[0]) - 1
-                frames = max(legs, round(plan.duration * SWIPE_RATE_HZ))
+                # At most SWIPE_RATE_HZ: a long rotation's waypoints are
+                # interpolated between, not each sent (review).
+                frames = max(1, round(plan.duration * SWIPE_RATE_HZ))
 
                 def at(f: float) -> list[tuple[float, float]]:
                     # Along each finger's waypoints, linearly between them.
@@ -377,19 +396,41 @@ class CoreDeviceInput:
                     return [(p[i][0] + (p[i + 1][0] - p[i][0]) * t,
                              p[i][1] + (p[i + 1][1] - p[i][1]) * t) for p in paths]
 
+                start = time.monotonic()
                 for n in range(frames + 1):
-                    await _report(report(at(n / frames)))
+                    await report(at(n / frames))
                     if n < frames:
-                        await _sleep(plan.duration / frames)
-                await _report(report([p[-1] for p in paths], touching=False))
-            else:
-                points = list(plan.points or [])
+                        # To the frame's own time: a report's round trip is
+                        # taken out of the wait, not added to it (review).
+                        due = start + (n + 1) * plan.duration / frames
+                        await _sleep(max(0.0, due - time.monotonic()))
+                await report([p[-1] for p in paths], touching=False)
+
+            async def tapping(points: list[tuple[float, float]]) -> None:
                 for n in range(plan.count):
-                    await _report(report(points))
+                    await report(points)
                     await _sleep(TAP_HOLD_MS / 1000)
-                    await _report(report(points, touching=False))
+                    await report(points, touching=False)
                     if n < plan.count - 1:
                         await _sleep(plan.interval)
+
+            progress.reached = True
+            try:
+                if plan.paths is not None:
+                    await moving(plan.paths)
+                else:
+                    await tapping(list(plan.points or []))
+            except BaseException:
+                # Fingers left down by a failure or a cancel are lifted where
+                # they were, best effort: dropping the session alone may not
+                # lift them on the phone (review).
+                if down is not None:
+                    lift = down
+                    with contextlib.suppress(Exception):
+                        await asyncio.shield(_report(session.hid.send_multitouch(
+                            [lib.Contact(i, *screen.point(x, y), False)
+                             for i, (x, y) in enumerate(lift)])))
+                raise
 
         return await self._or_fallback(udid, plan.kind, send,
                                        lambda: self._fallback.perform_gesture(udid, plan))

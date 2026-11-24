@@ -159,7 +159,7 @@ emailField.accessibilityIdentifier = "login-email-field"
 
 - **Don't present views over complex screens without truly replacing them.** If you push a simple modal over a complex screen (a list with hundreds of cells, a map view), the elements underneath still appear in the accessibility tree — even though the user can't see them. The agent sees a polluted tree full of irrelevant elements from the screen behind the modal, making it hard to find what's actually on screen. Use proper modal presentation (`.fullScreenCover` in SwiftUI, `modalPresentationStyle = .fullScreen` in UIKit) or remove the underlying view's accessibility when it's covered.
 
-- **Don't rely on complex custom gestures.** WDA supports tap, swipe, and long-press. No pinch-to-zoom, 3D touch, or custom multi-finger gestures. Provide alternative navigation paths if your app uses these.
+- **Don't rely on complex custom gestures.** quern's `gesture` tool sends pinch, rotate, two-finger pan, double tap and two-finger tap, but not 3D Touch or arbitrary multi-finger paths. Provide alternative navigation paths if your app relies on those.
 
 - **Don't make UI state depend on animations completing.** The agent can tap before an animation finishes. It uses `wait_for_element` to wait for targets to appear rather than guessing timing.
 

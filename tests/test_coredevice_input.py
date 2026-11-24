@@ -448,12 +448,91 @@ class TestGestures:
 
     async def test_the_gesture_takes_its_duration(self, lib, wda, monkeypatch):
         from server.device import gestures
-        slept = []
-        monkeypatch.setattr(coredevice_input, "_sleep",
-                            AsyncMock(side_effect=lambda s: slept.append(s)))
+        clock = [0.0]
+        monkeypatch.setattr(coredevice_input.time, "monotonic", lambda: clock[0])
+
+        async def sleep(s):
+            clock[0] += s
+
+        monkeypatch.setattr(coredevice_input, "_sleep", sleep)
         plan = gestures.plan("rotate", 207, 448, degrees=90, duration=0.8)
         await CoreDeviceInput(wda).perform_gesture(PHONE, plan)
-        assert sum(slept) == pytest.approx(plan.duration)   # FIRST_REPORT_S is 0 here
+        assert clock[0] == pytest.approx(plan.duration)   # FIRST_REPORT_S is 0 here
+
+    async def test_report_latency_does_not_stretch_the_gesture(self, lib, wda, monkeypatch):
+        """Sleeping a frame's whole share after each report added every round
+        trip on top: 10 ms each made a 0.6 s pinch take 1.08 s (review)."""
+        from server.device import gestures
+        clock = [0.0]
+        monkeypatch.setattr(coredevice_input.time, "monotonic", lambda: clock[0])
+
+        async def sleep(s):
+            clock[0] += s
+
+        real_report = coredevice_input._report
+
+        async def slow_report(send):
+            clock[0] += 0.010
+            await real_report(send)
+
+        monkeypatch.setattr(coredevice_input, "_sleep", sleep)
+        monkeypatch.setattr(coredevice_input, "_report", slow_report)
+        plan = gestures.plan("pinch", 207, 448, scale=2.0, duration=0.6)
+        await CoreDeviceInput(wda).perform_gesture(PHONE, plan)
+        # The last frame lands on time; then one more round trip lifts.
+        assert clock[0] == pytest.approx(plan.duration + 0.02, abs=0.012)
+
+    async def test_a_long_rotation_is_sent_at_60_hz_not_per_waypoint(
+            self, lib, wda, monkeypatch):
+        from server.device import gestures
+        monkeypatch.setattr(coredevice_input, "_sleep", AsyncMock())
+        plan = gestures.plan("rotate", 207, 448, degrees=3600, distance=40)
+        assert len(plan.paths[0]) - 1 > round(plan.duration * 60)   # more waypoints than frames
+        await CoreDeviceInput(wda).perform_gesture(PHONE, plan)
+        assert len(lib.multis()) == round(plan.duration * 60) + 2
+
+    async def test_a_failure_part_way_lifts_the_fingers_where_they_were(
+            self, lib, wda, monkeypatch):
+        """Dropping the session alone may leave two fingers down (review)."""
+        from server.device import gestures
+        monkeypatch.setattr(coredevice_input, "_sleep", AsyncMock())
+        lib.fail_contact = (5, ConnectionResetError("tunnel dropped"))
+        with pytest.raises(DeviceError):
+            await CoreDeviceInput(wda).perform_gesture(
+                PHONE, gestures.plan("pinch", 207, 448, scale=2.0))
+        reports = lib.multis()
+        assert not any(c[3] for c in reports[-1]), "the fingers were not lifted"
+        assert [c[1:3] for c in reports[-1]] == [c[1:3] for c in reports[-2]]
+
+    async def test_a_cancel_part_way_lifts_the_fingers(self, lib, wda, monkeypatch):
+        from server.device import gestures
+        gate = asyncio.Event()
+        sleeps = []
+
+        async def sleep(s):
+            sleeps.append(s)
+            if len(sleeps) == 3:
+                await gate.wait()           # cancelled here, fingers down
+
+        monkeypatch.setattr(coredevice_input, "_sleep", sleep)
+        task = asyncio.create_task(CoreDeviceInput(wda).perform_gesture(
+            PHONE, gestures.plan("pinch", 207, 448, scale=2.0)))
+        for _ in range(100):
+            if len(sleeps) >= 3:
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert not any(c[3] for c in lib.multis()[-1]), "the fingers were not lifted"
+
+    async def test_more_fingers_than_a_report_carries_are_refused_unsent(self, lib, wda):
+        from server.device.gestures import Plan
+        plan = Plan(kind="two_finger_tap", points=[(10.0 * i, 10.0) for i in range(1, 7)])
+        with pytest.raises(InvalidDeviceRequestError, match="at most 5"):
+            await CoreDeviceInput(wda).perform_gesture(PHONE, plan)
+        assert lib.multis() == [] and lib.connects == 0
+        wda.perform_gesture.assert_not_called()
 
     async def test_a_double_tap_puts_down_and_lifts_twice(self, lib, wda, monkeypatch):
         from server.device import gestures
@@ -852,6 +931,9 @@ def _phone(monkeypatch, reader="coredevice", os_version="iOS 27.2.1"):
     ctrl.wda_client.tap = AsyncMock()
     ctrl.wda_client.swipe = AsyncMock()
     ctrl.wda_client.press_button = AsyncMock()
+    # Never the real one: without it a routing mistake reaches WDA, and the
+    # machine (review).
+    ctrl.wda_client.perform_gesture = AsyncMock()
     return ctrl
 
 

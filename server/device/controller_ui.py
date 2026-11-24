@@ -5832,7 +5832,8 @@ class DeviceControllerUI:
             raise DeviceOperationUnsupportedError(
                 f"{kind} needs several fingers at once, and the {name} backend cannot "
                 f"send them. Multi-finger gestures are implemented for iOS simulators "
-                f"(sim-bridge), physical iPhones (WDA) and Android (#252).", tool=name)
+                f"(sim-bridge), physical iPhones (CoreDevice HID on iOS 27, WDA before) "
+                f"and Android (#252).", tool=name)
         await self._warn_if_input_is_suppressed(resolved)
 
         element = None
