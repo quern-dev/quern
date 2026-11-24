@@ -116,6 +116,9 @@ class Server:
     remote_port: int
     process: subprocess.Popen | None = None
     log: Path | None = None
+    #: Run the proxy too: mocks and capture need it. Off by default, since
+    #: only the MCP tests use it and each one is another mitmdump.
+    proxy: bool = False
 
     @property
     def url(self) -> str:
@@ -153,7 +156,8 @@ class Server:
         handle = self.log.open("ab")
         self.process = subprocess.Popen(  # noqa: S603 - this checkout's own server
             [sys.executable, "-m", "server", "start", "--foreground",
-             "--port", str(self.port), "--proxy-port", str(self.proxy_port), "--no-proxy"],
+             "--port", str(self.port), "--proxy-port", str(self.proxy_port),
+             *([] if self.proxy else ["--no-proxy"])],
             cwd=REPO, env=_env(self.state_dir), stdout=handle, stderr=subprocess.STDOUT)
         handle.close()
         deadline = time.monotonic() + 90
