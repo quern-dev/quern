@@ -12,6 +12,7 @@ import os
 import queue
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -58,10 +59,18 @@ class McpClient:
         threading.Thread(target=self._pump, args=(self.proc.stdout, self._lines),
                          daemon=True).start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
-        self._request("initialize", {
-            "protocolVersion": "2025-06-18", "capabilities": {},
-            "clientInfo": {"name": "quern-conformance", "version": "1"}})
-        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        try:
+            self._request("initialize", {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "quern-conformance", "version": "1"}})
+            self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        except BaseException:
+            # The fixture's finally is not entered yet: an MCP that never
+            # answered would otherwise outlive the run (CR). Killed, not
+            # asked: one that did not answer this will not answer a close.
+            self.proc.kill()
+            self.proc.wait(timeout=5)
+            raise
 
     @staticmethod
     def _pump(stream, out: queue.Queue) -> None:
@@ -81,11 +90,16 @@ class McpClient:
         self._next += 1
         ident = self._next
         self._send({"jsonrpc": "2.0", "id": ident, "method": method, "params": params})
+        limit = timeout or self.timeout
+        # One deadline for the whole request: notifications in between must
+        # not each start the wait again, or a chatty MCP that never answers
+        # holds the test for ever (CR).
+        deadline = time.monotonic() + limit
         while True:
             try:
-                line = self._lines.get(timeout=timeout or self.timeout)
+                line = self._lines.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
-                raise McpError(f"no answer to {method} within {timeout or self.timeout}s; "
+                raise McpError(f"no answer to {method} within {limit}s; "
                                f"stderr: {self.stderr[-5:]}") from None
             if line is None:
                 raise McpError(f"the MCP exited ({self.proc.poll()}) during {method}; "
@@ -106,10 +120,11 @@ class McpClient:
 
     def close(self) -> None:
         """End the agent cleanly: stdin closed, as a client does, which ends
-        its held session -- and the mocks it set -- at once."""
+        its held session -- and the mocks it set -- at once. Killed if it
+        will not go."""
         try:
             self.proc.stdin.close()
             self.proc.wait(timeout=15)
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, ValueError, subprocess.TimeoutExpired):
             self.proc.kill()
             self.proc.wait(timeout=5)
