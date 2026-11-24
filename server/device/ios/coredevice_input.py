@@ -287,6 +287,8 @@ class CoreDeviceInput:
     #: WDA; no flag is involved (#251).
     edge_swipes = True
     edge_flag = False
+    #: A swipe can hold its contact still at the start first (#769).
+    press_drag = True
 
     def __init__(self, fallback: Any) -> None:
         self._fallback = fallback
@@ -311,7 +313,7 @@ class CoreDeviceInput:
 
     async def swipe(self, udid: str, start_x: float, start_y: float, end_x: float,
                     end_y: float, duration: float = 0.5, hold: float = 0.0,
-                    edge: str | None = None) -> str:
+                    edge: str | None = None, press: float = 0.0) -> str:
         async def send(lib: SimpleNamespace, session: _Session, screen: Screen,
                        progress: _Progress) -> None:
             if edge is not None:
@@ -322,6 +324,15 @@ class CoreDeviceInput:
             steps = max(2, round(duration * SWIPE_RATE_HZ))
             interval = duration / steps
             progress.reached = True
+            if press:
+                # Pressed before it moves, the contact reported still at the
+                # start throughout, as a held end is: what drag-and-drop and
+                # reordering wait for (#769).
+                start = screen.point(start_x, start_y)
+                await _report(session.hid.send_touchscreen(lib.CONTACT, *start))
+                for _ in range(max(1, round(press * SWIPE_RATE_HZ))):
+                    await _sleep(1 / SWIPE_RATE_HZ)
+                    await _report(session.hid.send_touchscreen(lib.CONTACT, *start))
             for i in range(steps + 1):
                 f = i / steps
                 await _report(session.hid.send_touchscreen(lib.CONTACT, *screen.point(
@@ -337,7 +348,9 @@ class CoreDeviceInput:
                     await _report(session.hid.send_touchscreen(lib.CONTACT, *end))
             await _report(session.hid.send_touchscreen(lib.RELEASE, *screen.point(end_x, end_y)))
 
-        extra = {"edge": edge} if edge is not None else {}
+        extra: dict = {"edge": edge} if edge is not None else {}
+        if press:
+            extra["press"] = press
         return await self._or_fallback(
             udid, "swipe", send,
             lambda: self._fallback.swipe(udid, start_x, start_y, end_x, end_y,
@@ -377,10 +390,16 @@ class CoreDeviceInput:
 
             async def report(points: list[tuple[float, float]], touching: bool = True) -> None:
                 nonlocal down
+                if touching:
+                    # Before the send, not after: one that reached the phone
+                    # and then failed or was cancelled left these fingers
+                    # down with nothing to lift them (CodeRabbit on #770).
+                    down = points
                 await _report(session.hid.send_multitouch(
                     [lib.Contact(i, *screen.point(x, y), touching)
                      for i, (x, y) in enumerate(points)]))
-                down = points if touching else None
+                if not touching:
+                    down = None
 
             async def moving(paths: list[list[tuple[float, float]]]) -> None:
                 legs = len(paths[0]) - 1

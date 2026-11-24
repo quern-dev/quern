@@ -324,6 +324,8 @@ class WdaBackend:
 
     #: A swipe from the screen edge is the system's on a real device (#251).
     edge_swipes = True
+    #: Its drag is XCUITest's press-for-duration-then-drag already (#769).
+    press_drag = True
 
     def __init__(self) -> None:
         self._connections: dict[str, _WdaConnection] = {}
@@ -1708,8 +1710,14 @@ class WdaBackend:
         duration: float = 0.5,
         hold: float = 0.0,
         edge: str | None = None,
+        press: float = 0.0,
     ) -> None:
         """Swipe gesture via WDA.
+
+        `press` is how long the finger is held at the start before it drags
+        (#769). WDA's drag is XCUITest's `press(forDuration:thenDragTo:)`,
+        whose duration is that press, so `press` is sent as it; without one,
+        `duration` is, as before.
 
         `hold` is accepted for parity with sim-bridge and ignored. WDA's drag is
         XCUITest's press-then-drag, not a flick: measured on an iPhone 11, a
@@ -1728,7 +1736,7 @@ class WdaBackend:
             "fromY": start_y,
             "toX": end_x,
             "toY": end_y,
-            "duration": duration,
+            "duration": press if press else duration,
         })
 
     async def perform_gesture(self, udid: str, plan: Plan) -> None:

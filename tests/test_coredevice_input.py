@@ -504,6 +504,17 @@ class TestGestures:
         assert not any(c[3] for c in reports[-1]), "the fingers were not lifted"
         assert [c[1:3] for c in reports[-1]] == [c[1:3] for c in reports[-2]]
 
+    async def test_a_failure_on_the_first_report_still_lifts(self, lib, wda, monkeypatch):
+        """It may have reached the phone before it failed (CodeRabbit on #770)."""
+        from server.device import gestures
+        monkeypatch.setattr(coredevice_input, "_sleep", AsyncMock())
+        lib.fail_contact = (1, ConnectionResetError("dropped after the write"))
+        with pytest.raises(DeviceError):
+            await CoreDeviceInput(wda).perform_gesture(
+                PHONE, gestures.plan("pinch", 207, 448, scale=2.0))
+        (lift,) = lib.multis()
+        assert not any(c[3] for c in lift), "the first report's fingers were not lifted"
+
     async def test_a_cancel_part_way_lifts_the_fingers(self, lib, wda, monkeypatch):
         from server.device import gestures
         gate = asyncio.Event()

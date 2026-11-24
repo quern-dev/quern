@@ -24,7 +24,7 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR
 from server.device import probing
-from server.device.gestures import Plan
+from server.device.gestures import Plan, press_then_drag
 from server.device.ios import ax_recovery
 from server.models import DeviceError, InvalidDeviceRequestError, SimBridgeSaturatedError
 from server.tooling.tool_probe import probe_stdout
@@ -523,6 +523,8 @@ class SimBridgeBackend:
     #: The flag a simulator needs before it treats a swipe as an edge swipe.
     #: A real device decides from the start position; a simulator does not.
     edge_flag = True
+    #: A press-then-drag as a one-finger touch path (#769).
+    press_drag = True
 
     def __init__(self, manager: SimBridgeManager) -> None:
         self._mgr = manager
@@ -776,11 +778,23 @@ class SimBridgeBackend:
         duration: float = 0.3,
         hold: float = 0.0,
         edge: str | None = None,
+        press: float = 0.0,
     ) -> None:
         """Swipe, optionally holding at the end so the list does not fling.
 
         See `doSwipe` in sim-bridge.swift for the measurements behind `hold`.
+
+        With `press`, a one-finger touch path that stays at the start that
+        long before it moves (#769): the bridge's swipe moves at once.
         """
+        if press:
+            if edge is not None:
+                raise InvalidDeviceRequestError(
+                    "an edge swipe cannot press first: the system takes it from the "
+                    "edge as it moves", tool="sim-bridge")
+            await self.perform_gesture(udid, press_then_drag(
+                (start_x, start_y), (end_x, end_y), press, duration))
+            return
         cmd = {
                 "cmd": "swipe",
                 "udid": udid,

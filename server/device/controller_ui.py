@@ -5743,12 +5743,18 @@ class DeviceControllerUI:
         duration: float = 0.5,
         udid: str | None = None,
         edge: str | None = None,
+        press: float = 0.0,
     ) -> str:
         """Swipe gesture. Returns the resolved udid.
 
         With `edge`, a swipe from that screen edge -- back, home, Control
         Centre, the notification shade (#251). It must start at the edge, on
         every backend, so it means the same thing on each.
+
+        With `press`, the finger is held down at the start that many seconds
+        before it moves: a press-then-drag, which drag-and-drop and reordering
+        need and a plain swipe is not (#769). A backend that cannot hold first
+        (`press_drag`) refuses rather than sending a swipe that does nothing.
         """
         if edge is not None:
             gestures.check_edge(edge)
@@ -5768,8 +5774,14 @@ class DeviceControllerUI:
             raise DeviceOperationUnsupportedError(
                 f"an edge swipe on a simulator needs sim-bridge, which flags the event "
                 f"as one; the {name} backend cannot (#251)", tool=name)
+        if press and getattr(backend, "press_drag", False) is not True:
+            raise DeviceOperationUnsupportedError(
+                f"the {name} backend cannot hold a finger down before it drags, so a "
+                f"press-then-drag would arrive as an ordinary swipe", tool=name)
         await self._warn_if_input_is_suppressed(resolved)
-        extra = {"edge": edge} if edge is not None else {}
+        extra: dict = {"edge": edge} if edge is not None else {}
+        if press:
+            extra["press"] = float(press)
         await backend.swipe(resolved, start_x, start_y, end_x, end_y, duration, **extra)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved

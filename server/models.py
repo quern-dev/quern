@@ -2832,6 +2832,10 @@ class SwipeRequest(BaseModel):
     end_y: float
     duration: float = 0.5
     udid: str | None = None
+    press: float = Field(default=0.0, ge=0, le=10, allow_inf_nan=False, description=(
+        "Hold the finger down at the start this many seconds before moving: a "
+        "press-then-drag, for drag-and-drop, reordering a row by its handle, or "
+        "moving an icon or a pin. 0, the default, is an ordinary swipe. Not on idb."))
     edge: Literal["left", "right", "top", "bottom"] | None = Field(default=None, description=(
         "A swipe from this screen edge, which the system takes: back from the left, "
         "home from the bottom, Control Centre or the notification shade from the top "
