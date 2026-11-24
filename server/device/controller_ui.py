@@ -5823,7 +5823,10 @@ class DeviceControllerUI:
         gestures.plan(kind, 0.0, 0.0, **params)
 
         resolved = await self.resolve_udid(udid)
-        backend = self._ui_backend(resolved)
+        # As a tap or swipe is chosen: over CoreDevice HID on a phone it
+        # serves, which falls back to WDA only for what it cannot send. By
+        # `_ui_backend`, every gesture on an iOS 27 phone went to WDA (#769).
+        backend = self._input_backend(resolved)
         name = getattr(backend, "TOOL_NAME", type(backend).__name__)
         if getattr(backend, "multitouch", False) is not True:
             raise DeviceOperationUnsupportedError(
@@ -5850,7 +5853,9 @@ class DeviceControllerUI:
             defaults = dict(await backend.gesture_defaults(resolved))
         warning = defaults.pop("warning", None)
         laid_out = gestures.plan(kind, float(x), float(y), **defaults, **params)
-        await backend.perform_gesture(resolved, laid_out)
+        carried = await backend.perform_gesture(resolved, laid_out)
+        if isinstance(carried, str):
+            name = carried                  # HID, or the WDA it fell back to
         self._invalidate_ui_cache(resolved)  # UI changed
 
         result = {"udid": resolved, "gesture": kind, "backend": name,

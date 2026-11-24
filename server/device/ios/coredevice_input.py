@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
-from server.device.gestures import check_edge_start
+from server.device.gestures import TAP_HOLD_MS, Plan, check_edge_start
 from server.models import DeviceError, InvalidDeviceRequestError
 
 logger = logging.getLogger(__name__)
@@ -173,6 +173,7 @@ def _pmd3() -> SimpleNamespace:
             DeviceInfoService=DeviceInfoService,
             UniversalHID=hid_service.UniversalHIDServiceService,
             IndigoHID=hid_service.IndigoHIDService,
+            Contact=hid_service.TouchscreenContact,
             CONTACT=hid_service.TOUCHSCREEN_STATE_CONTACT,
             RELEASE=hid_service.TOUCHSCREEN_STATE_RELEASE,
             BUTTON_DOWN=hid_service.HID_BUTTON_STATE_DOWN,
@@ -273,6 +274,10 @@ class CoreDeviceInput:
     #: and 200 pt about 2.3x, while at 250 pt/s 672 pt moved it 647-660
     #: pt, six of six -- the 0.97 WDA's drag travels.
     sweep_drag_pt_s = 250.0
+    #: Several contacts in one report, up to five: pinch, rotate, two-finger
+    #: pan and taps (#252). Without it every gesture on an iOS 27 phone went
+    #: through WDA, starting one where none was running (#769).
+    multitouch = True
     sweep_hold_s = 0.5
     #: A physical device decides an edge swipe from where it starts, as for
     #: WDA; no flag is involved (#251).
@@ -333,6 +338,61 @@ class CoreDeviceInput:
             udid, "swipe", send,
             lambda: self._fallback.swipe(udid, start_x, start_y, end_x, end_y,
                                          duration, hold=hold, **extra))
+
+    async def perform_gesture(self, udid: str, plan: Plan) -> str:
+        """A gesture `server.device.gestures` laid out, every finger in every
+        report: a contact left out of one is lifted. A moving gesture is sent
+        at SWIPE_RATE_HZ along the plan's waypoints, as a swipe is; a tap
+        gesture puts its fingers down, holds TAP_HOLD_MS and lifts them,
+        `count` times. Points off the screen are refused, as WDA refuses
+        them. Returns which of HID and WDA carried it."""
+        def check(screen: Screen) -> None:
+            points = [p for path in plan.paths or [] for p in path] + list(plan.points or [])
+            for x, y in points:
+                if not (0 <= x <= screen.width and 0 <= y <= screen.height):
+                    raise InvalidDeviceRequestError(
+                        f"point ({x:.0f}, {y:.0f}) is off the "
+                        f"{screen.width:.0f}x{screen.height:.0f} screen", tool=self.TOOL_NAME)
+
+        async def send(lib: SimpleNamespace, session: _Session, screen: Screen,
+                       progress: _Progress) -> None:
+            check(screen)
+
+            def report(points: list[tuple[float, float]], touching: bool = True) -> Any:
+                return session.hid.send_multitouch(
+                    [lib.Contact(i, *screen.point(x, y), touching)
+                     for i, (x, y) in enumerate(points)])
+
+            progress.reached = True
+            if plan.paths is not None:
+                paths = plan.paths
+                legs = len(paths[0]) - 1
+                frames = max(legs, round(plan.duration * SWIPE_RATE_HZ))
+
+                def at(f: float) -> list[tuple[float, float]]:
+                    # Along each finger's waypoints, linearly between them.
+                    pos = f * legs
+                    i = min(int(pos), legs - 1)
+                    t = pos - i
+                    return [(p[i][0] + (p[i + 1][0] - p[i][0]) * t,
+                             p[i][1] + (p[i + 1][1] - p[i][1]) * t) for p in paths]
+
+                for n in range(frames + 1):
+                    await _report(report(at(n / frames)))
+                    if n < frames:
+                        await _sleep(plan.duration / frames)
+                await _report(report([p[-1] for p in paths], touching=False))
+            else:
+                points = list(plan.points or [])
+                for n in range(plan.count):
+                    await _report(report(points))
+                    await _sleep(TAP_HOLD_MS / 1000)
+                    await _report(report(points, touching=False))
+                    if n < plan.count - 1:
+                        await _sleep(plan.interval)
+
+        return await self._or_fallback(udid, plan.kind, send,
+                                       lambda: self._fallback.perform_gesture(udid, plan))
 
     async def press_button(self, udid: str, button: str) -> str:
         code = BUTTONS.get(button.lower())

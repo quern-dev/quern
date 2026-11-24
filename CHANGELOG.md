@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Multi-finger gestures on an iPhone on iOS 27 go over CoreDevice HID, not WDA (#769).** `gesture` -- pinch, rotate, two-finger pan, double tap and two-finger tap -- was the one input still sent through WDA on a phone driven without it, and started WDA where none was running, saying only `backend: "wda"`. Now each report carries every finger, up to five, at 60 Hz along the gesture's path, and `backend` says `coredevice`; a turned screen goes through WDA, as taps do, and a point off the screen is refused. Measured on an iPhone 12 on a map: a pinch out and in, a two-finger tap and a double tap each zoomed it, a two-finger pan moved it and a rotation turned it, with no WDA started.
+
 ### Fixed
 - **A held session from `quern session run` no longer sometimes fails to open on a remote server.** The remote listener sent TLS 1.3 session tickets just after the handshake, and the Python websockets client reads its socket on one thread while it writes the upgrade request on another: a ticket arriving then lost the request inside the client, and the listener closed the silent connection five seconds later -- about 1 in 25 opens, measured. The listener no longer sends tickets, which no client used: each pins the certificate and holds one session. The MCP, which connects with Node's WebSocket, was not affected. Found by the conformance suite's remote tier.
 
