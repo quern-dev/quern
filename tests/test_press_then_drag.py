@@ -257,6 +257,34 @@ class TestAndroid:
         device.touch.up.assert_called_once_with(100, 1300)
         device.touch.move.assert_not_called()
 
+    @pytest.mark.parametrize("press", [0.8, 0.0], ids=["press-drag", "plain swipe"])
+    async def test_a_cancel_while_connecting_sends_nothing(self, press):
+        """It went on to press and lift -- a tap -- after the caller had gone
+        (CodeRabbit on #770)."""
+        import asyncio
+        import threading
+
+        device = MagicMock()
+        connecting, release = threading.Event(), threading.Event()
+        backend = TestEachBackendsLongPress._u2(device)
+
+        def connect(serial):
+            connecting.set()
+            release.wait(5)
+            return device
+
+        backend._connect = connect
+        task = asyncio.create_task(
+            backend.swipe("dev", 100, 1300, 100, 400, 0.5, press=press))
+        assert await asyncio.to_thread(connecting.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        device.touch.down.assert_not_called()
+        device.swipe.assert_not_called()
+
     async def test_the_finger_is_lifted_if_the_move_fails(self, monkeypatch):
         import server.device.android.u2_client as u2
 

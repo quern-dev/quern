@@ -1128,6 +1128,11 @@ class U2Backend:
             if edge is not None:
                 width, height = device.window_size()
                 check_edge_start(edge, start_x, start_y, width, height, tool="u2")
+            if stop.is_set():
+                # Cancelled while connecting: sent now, a press-drag would land
+                # as a tap at the start after the caller had gone (CodeRabbit
+                # on #770). Nothing has been sent yet, so nothing to lift.
+                return
             if press or hold:
                 steps = max(2, round(duration * 60))
                 at = (int(start_x), int(start_y))
