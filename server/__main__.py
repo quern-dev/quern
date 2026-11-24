@@ -1219,6 +1219,8 @@ def main() -> None:
         # `main`), so the parsing has to be here.
         rest = sys.argv[2:]
         _check_args("setup", rest, allowed=("-y", "--yes"), usage=_setup_usage)
+        from server.lifecycle.tool_path import add_standard_tool_dirs
+        add_standard_tool_dirs()        # an ssh shell's PATH lacks Homebrew and pipx
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup(assume_yes=bool({"-y", "--yes"} & set(rest))))
 
@@ -1264,6 +1266,10 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "update":
         from server.lifecycle.updater import FINISH_FLAG, finish_update, run_update
         _check_args("update", sys.argv[2:], allowed=("--tools", FINISH_FLAG))
+        from server.lifecycle.tool_path import add_standard_tool_dirs
+        # Before anything runs: the update's setup, its tool upgrades and the
+        # server it restarts all inherit this PATH.
+        add_standard_tool_dirs()
         apply_tools = "--tools" in sys.argv[2:]
         if FINISH_FLAG in sys.argv[2:]:
             sys.exit(finish_update(apply_tools=apply_tools))
