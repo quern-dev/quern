@@ -323,30 +323,49 @@ class CoreDeviceInput:
                                  tool=self.TOOL_NAME)
             steps = max(2, round(duration * SWIPE_RATE_HZ))
             interval = duration / steps
+            down: tuple[int, int] | None = None
+
+            async def contact(point: tuple[int, int]) -> None:
+                nonlocal down
+                down = point        # before the send: it may land, then fail
+                await _report(session.hid.send_touchscreen(lib.CONTACT, *point))
+
             progress.reached = True
-            if press:
-                # Pressed before it moves, the contact reported still at the
-                # start throughout, as a held end is: what drag-and-drop and
-                # reordering wait for (#769).
+            try:
                 start = screen.point(start_x, start_y)
-                await _report(session.hid.send_touchscreen(lib.CONTACT, *start))
-                for _ in range(max(1, round(press * SWIPE_RATE_HZ))):
-                    await _sleep(1 / SWIPE_RATE_HZ)
-                    await _report(session.hid.send_touchscreen(lib.CONTACT, *start))
-            for i in range(steps + 1):
-                f = i / steps
-                await _report(session.hid.send_touchscreen(lib.CONTACT, *screen.point(
-                    start_x + (end_x - start_x) * f, start_y + (end_y - start_y) * f)))
-                if i < steps:
-                    await _sleep(interval)
-            if hold:
-                # Held at the end, so a list stops where the finger does: the
-                # still contact is reported throughout, not just left down.
-                end = screen.point(end_x, end_y)
-                for _ in range(max(1, round(hold * SWIPE_RATE_HZ))):
-                    await _sleep(1 / SWIPE_RATE_HZ)
-                    await _report(session.hid.send_touchscreen(lib.CONTACT, *end))
-            await _report(session.hid.send_touchscreen(lib.RELEASE, *screen.point(end_x, end_y)))
+                if press:
+                    # Pressed before it moves, the contact reported still at
+                    # the start throughout, as a held end is: what
+                    # drag-and-drop and reordering wait for (#769).
+                    await contact(start)
+                    for _ in range(max(1, round(press * SWIPE_RATE_HZ))):
+                        await _sleep(1 / SWIPE_RATE_HZ)
+                        await contact(start)
+                for i in range(steps + 1):
+                    f = i / steps
+                    await contact(screen.point(start_x + (end_x - start_x) * f,
+                                               start_y + (end_y - start_y) * f))
+                    if i < steps:
+                        await _sleep(interval)
+                if hold:
+                    # Held at the end, so a list stops where the finger does:
+                    # the still contact is reported throughout, not just left
+                    # down.
+                    end = screen.point(end_x, end_y)
+                    for _ in range(max(1, round(hold * SWIPE_RATE_HZ))):
+                        await _sleep(1 / SWIPE_RATE_HZ)
+                        await contact(end)
+                await _report(session.hid.send_touchscreen(
+                    lib.RELEASE, *screen.point(end_x, end_y)))
+                down = None
+            except BaseException:
+                # Lifted where it last was, best effort: dropping the session
+                # alone may leave the finger down (CodeRabbit on #770).
+                if down is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.shield(_report(
+                            session.hid.send_touchscreen(lib.RELEASE, *down)))
+                raise
 
         extra: dict = {"edge": edge} if edge is not None else {}
         if press:

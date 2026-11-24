@@ -76,6 +76,42 @@ class TestCoreDeviceHid:
         assert sum(slept[1:31]) == pytest.approx(0.5)
         wda.swipe.assert_not_called()
 
+    async def test_a_swipe_that_fails_part_way_lifts_where_it_was(
+            self, lib, wda, monkeypatch):  # noqa: F811
+        """Dropping the session alone may leave the finger down (CodeRabbit on #770)."""
+        from server.models import DeviceError
+        monkeypatch.setattr(coredevice_input, "_sleep", AsyncMock())
+        lib.fail_contact = (5, ConnectionResetError("dropped after the write"))
+        with pytest.raises(DeviceError):
+            await CoreDeviceInput(wda).swipe(PHONE, 207, 700, 207, 200, duration=0.5)
+        touches = lib.touches()
+        assert touches[-1][1] == RELEASE, "the finger was not lifted"
+        # Where the failed report put it: it may have landed.
+        assert touches[-1][2:] != touches[0][2:]
+        wda.swipe.assert_not_called()
+
+    async def test_a_cancelled_press_lifts_the_finger(self, lib, wda, monkeypatch):  # noqa: F811
+        import asyncio
+        gate = asyncio.Event()
+        sleeps = []
+
+        async def sleep(s):
+            sleeps.append(s)
+            if len(sleeps) == 5:
+                await gate.wait()           # cancelled here, mid-press
+
+        monkeypatch.setattr(coredevice_input, "_sleep", sleep)
+        task = asyncio.create_task(CoreDeviceInput(wda).swipe(
+            PHONE, 207, 700, 207, 200, duration=0.5, press=1.0))
+        for _ in range(100):
+            if len(sleeps) >= 5:
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert lib.touches()[-1][1] == RELEASE, "the finger was not lifted"
+
     async def test_a_plain_swipe_moves_at_once(self, lib, wda, monkeypatch):  # noqa: F811
         monkeypatch.setattr(coredevice_input, "_sleep", AsyncMock())
         await CoreDeviceInput(wda).swipe(PHONE, 207, 700, 207, 200, duration=0.5)
@@ -147,7 +183,13 @@ class TestAndroid:
         device.touch.move.side_effect = lambda *a: order.append("move")
         device.touch.up.side_effect = lambda *a: order.append("up")
         slept = []
-        monkeypatch.setattr(u2.time, "sleep", lambda s: (slept.append(s), order.append("wait")))
+
+        def wait(stop, s):
+            slept.append(s)
+            order.append("wait")
+            return False
+
+        monkeypatch.setattr(u2, "_interruptible_wait", wait)
         backend = TestEachBackendsLongPress._u2(device)
 
         await backend.swipe("dev", 100, 1300, 100, 400, 0.5, press=0.8)
@@ -158,12 +200,45 @@ class TestAndroid:
         device.touch.up.assert_called_once_with(100, 400)
         device.swipe.assert_not_called()
 
+    async def test_a_down_that_raises_is_still_lifted(self, monkeypatch):
+        """It may have reached the device before raising (CodeRabbit on #770)."""
+        import server.device.android.u2_client as u2
+
+        device = MagicMock()
+        device.touch.down.side_effect = RuntimeError("down, then the socket went")
+        monkeypatch.setattr(u2, "_interruptible_wait", lambda stop, s: False)
+        backend = TestEachBackendsLongPress._u2(device)
+        with pytest.raises(Exception):
+            await backend.swipe("dev", 100, 1300, 100, 400, 0.5, press=0.8)
+        device.touch.up.assert_called_once_with(100, 1300)
+        device.touch.move.assert_not_called()
+
+    async def test_a_cancel_stops_the_drag_and_lifts_before_returning(self):
+        """Cancelling the await did not stop the thread: it dragged and held on
+        after the caller had moved on (CodeRabbit on #770). Real waits here."""
+        import asyncio
+        import threading
+
+        device = MagicMock()
+        pressed = threading.Event()
+        device.touch.down.side_effect = lambda *a: pressed.set()
+        backend = TestEachBackendsLongPress._u2(device)
+        task = asyncio.create_task(
+            backend.swipe("dev", 100, 1300, 100, 400, 0.5, press=10.0))
+        assert await asyncio.to_thread(pressed.wait, 5), "the press never started"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        # Lifted by the time the cancel returned, where it was pressed; no drag.
+        device.touch.up.assert_called_once_with(100, 1300)
+        device.touch.move.assert_not_called()
+
     async def test_the_finger_is_lifted_if_the_move_fails(self, monkeypatch):
         import server.device.android.u2_client as u2
 
         device = MagicMock()
         device.touch.move.side_effect = RuntimeError("adb went away")
-        monkeypatch.setattr(u2.time, "sleep", lambda s: None)
+        monkeypatch.setattr(u2, "_interruptible_wait", lambda stop, s: False)
         backend = TestEachBackendsLongPress._u2(device)
         with pytest.raises(Exception):
             await backend.swipe("dev", 100, 1300, 100, 400, 0.5, press=0.8)
@@ -237,7 +312,8 @@ class TestHoldAtTheEnd:
         order: list[str] = []
         device.touch.move.side_effect = lambda *a: order.append("move")
         device.touch.up.side_effect = lambda *a: order.append("up")
-        monkeypatch.setattr(u2.time, "sleep", lambda s: order.append(f"wait {s}"))
+        monkeypatch.setattr(u2, "_interruptible_wait",
+                            lambda stop, s: order.append(f"wait {s}") or False)
         backend = TestEachBackendsLongPress._u2(device)
         await backend.swipe("dev", 100, 1300, 100, 400, 0.5, hold=1.5)
         assert order[-2:] == ["wait 1.5", "up"]

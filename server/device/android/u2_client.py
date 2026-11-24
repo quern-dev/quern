@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
 import re
 import threading
@@ -426,6 +427,12 @@ class _PressMayHaveLanded(Exception):
 
 #: A pinch's default narrow end on Android, past ScaleGestureDetector's 27mm.
 PINCH_NARROW_MM = 30.0
+
+
+def _interruptible_wait(stop: threading.Event, seconds: float) -> bool:
+    """Wait `seconds`, or until `stop` is set: whether it was. A stand-in for
+    `time.sleep` in a swipe the caller may give up on (#769)."""
+    return stop.wait(seconds) if seconds > 0 else stop.is_set()
 
 
 class U2Backend:
@@ -1111,34 +1118,57 @@ class U2Backend:
         moves (#769), through uiautomator2's touch down, move and up; with
         `hold`, it rests at the end that long before lifting."""
 
-        def _do():
+        # Set on every way out of the await: cancelling it does not stop the
+        # thread, which would go on to drag and hold after the caller had
+        # moved on (CodeRabbit on #770), as `scroll_into_view` found.
+        stop = threading.Event()
+
+        def _do() -> None:
             device = self._connect(udid)
             if edge is not None:
                 width, height = device.window_size()
                 check_edge_start(edge, start_x, start_y, width, height, tool="u2")
             if press or hold:
                 steps = max(2, round(duration * 60))
-                device.touch.down(int(start_x), int(start_y))
+                at = (int(start_x), int(start_y))
                 try:
-                    time.sleep(press)
+                    # Inside the try: a down that reached the device and then
+                    # raised is lifted too (CodeRabbit on #770).
+                    device.touch.down(*at)
+                    if _interruptible_wait(stop, press):
+                        return
                     for i in range(1, steps + 1):
                         f = i / steps
-                        device.touch.move(int(start_x + (end_x - start_x) * f),
-                                          int(start_y + (end_y - start_y) * f))
-                        time.sleep(duration / steps)
+                        at = (int(start_x + (end_x - start_x) * f),
+                              int(start_y + (end_y - start_y) * f))
+                        device.touch.move(*at)
+                        if _interruptible_wait(stop, duration / steps):
+                            return
                     if hold:
-                        time.sleep(hold)
+                        _interruptible_wait(stop, hold)
                 finally:
-                    device.touch.up(int(end_x), int(end_y))
+                    # Where the finger last was, best effort: the down may
+                    # not have landed, and lifting is all that is left to do.
+                    with contextlib.suppress(Exception):
+                        device.touch.up(*at)
                 return
             device.swipe(int(start_x), int(start_y), int(end_x), int(end_y), duration=duration)
 
+        work = asyncio.ensure_future(asyncio.to_thread(_do))
         try:
-            await asyncio.to_thread(_do)
+            await asyncio.shield(work)
+        except asyncio.CancelledError:
+            stop.set()
+            # The device stays this swipe's until its finger is lifted.
+            with contextlib.suppress(Exception):
+                await work
+            raise
         except InvalidDeviceRequestError:
             raise
         except Exception as e:
             raise DeviceError(f"Swipe failed: {e}", tool="u2") from e
+        finally:
+            stop.set()
 
     async def type_text(self, udid: str, text: str) -> None:
         """Type text into the focused field. Supports Unicode via clipboard."""
