@@ -2076,7 +2076,7 @@ class TestABareApplication:
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
         tree = coredevice_ax.Tree("AdditionalData", BARE, 711)
 
-        async def newest(queue, held=None):
+        async def newest(queue, held=None, since=None):
             return tree, tree, tree
         monkeypatch.setattr(coredevice_ax, "_newest_tree", newest)
         # No pushes reach the queue here: not a silence to resubscribe over.
@@ -2091,7 +2091,7 @@ class TestABareApplication:
         lib, _ = _fake_lib([])
         monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: lib)
 
-        async def newest(queue, held=None):
+        async def newest(queue, held=None, since=None):
             held["latest"] = coredevice_ax.Tree("AdditionalData", BARE, 711)
             await asyncio.sleep(30)
         monkeypatch.setattr(coredevice_ax, "_newest_tree", newest)
