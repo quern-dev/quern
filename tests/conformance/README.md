@@ -94,9 +94,16 @@ QUERN_CONFORMANCE_SLOW=1 QUERN_CONFORMANCE_REMOTE=1 QUERN_CONFORMANCE_DEVICES=<U
   simulator nobody else is driving: the release tests install and remove the
   probe app on it. Reserving it on the live server too tells other sessions it
   is taken.
+- **The MCP, too.** `test_remote_mcp.py` runs this checkout's MCP over stdio,
+  as an agent's client does, with a sandboxed `HOME` whose `~/.quern` is a
+  second scratch server's state, paired to the first. It switches with
+  `use_remote`, and the servers' owners say where reservations and mocks
+  actually landed. It needs Node 22.19 or later; it builds `mcp/dist` when the
+  build is older than `mcp/src` and `mcp/node_modules` is there, and skips when
+  it can't.
 - **What it can't see:** real networks. Loopback has no IPv6 ULA, no sleep, and
-  no certificate host names to get wrong. The MCP's `use_remote` is a second
-  phase.
+  no certificate host names to get wrong. Session capture following a switch
+  isn't covered: it needs a simulator that trusts the proxy CA.
 
 ### Pointing at a different server
 
@@ -199,7 +206,7 @@ parametrisation; probe-driven tests run once per platform present.
 | 21 | Session attribution (`X-Quern-Session`, #254) | `test_session.py` | **done** — 7 tests; the client sends `conformance-<run id>` on every request, the tests read it back from `/trace`, and check `X-Quern-Session-Warning` (`missing`, `malformed`, none when tagged or public) |
 | 22 | Lazy lists through WDA (#475) | `test_lazy_list.py` | **done** — 4 tests, each on the default backend and through WDA, on the iOS probe's Lazy tab; fail through WDA against the server before #478 |
 | 23 | Which element a tap reached (#511) | `test_taps.py` | **done** — 7 tests on each probe's Taps tab, reading per-button counters: by label and by identifier, two buttons sharing a label, a tap after and during a remount, a button partly covered by an overlay, and a moving target, which must be reached or reported as `target_moving` (#514). The covered button fails on Android until #521 (deferred, P3); the moving target, which slides continuously, passes on both: Android flags it, an iOS simulator refuses it as moving (#529) |
-| 24 | Remote listener, pairing and client keys (#254) | `remote/` | **done** -- 25 tests, opt-in (see *The remote tier*): pairing and the pin, what two real clients may change, release cleanup, the grace period, and `quern remote list` |
+| 24 | Remote listener, pairing, client keys, and the MCP's `use_remote` (#254) | `remote/` | **done** -- 33 tests, opt-in (see *The remote tier*): pairing and the pin, what two real clients may change, release cleanup, the grace period, `quern remote list`, and the real MCP switching between two servers with its mocks and knowledge base |
 
 ### The fixture apps already exist
 
