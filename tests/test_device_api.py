@@ -934,6 +934,7 @@ class TestSwipe:
             udid=None,
             edge=None,
             press=0.0,
+            hold=0.0,
         )
 
     async def test_swipe_with_duration(self, app, auth_headers, mock_controller):
@@ -954,6 +955,7 @@ class TestSwipe:
             udid=None,
             edge=None,
             press=0.0,
+            hold=0.0,
         )
 
     async def test_a_press_reaches_the_controller_and_the_answer(
@@ -964,12 +966,14 @@ class TestSwipe:
             resp = await client.post(
                 "/api/v1/device/ui/swipe",
                 json={"start_x": 60, "start_y": 400, "end_x": 300, "end_y": 400,
-                      "press": 0.8},
+                      "press": 0.8, "hold": 1.5},
                 headers=auth_headers,
             )
         assert resp.status_code == 200
         assert resp.json()["press"] == 0.8
         assert mock_controller.swipe.call_args.kwargs["press"] == 0.8
+        assert resp.json()["hold"] == 1.5
+        assert mock_controller.swipe.call_args.kwargs["hold"] == 1.5
 
     async def test_swipe_no_auth(self, app):
         transport = ASGITransport(app=app)
