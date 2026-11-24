@@ -200,6 +200,12 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
     """Map a DeviceError to an appropriate HTTPException."""
     msg = str(e)
     # Type-based routing for WDA errors (more reliable than string matching)
+    from server.device.ios.coredevice_ax import ScreenTooBusy
+
+    if isinstance(e, ScreenTooBusy):
+        # Not a fault: the screen cannot be read as it is, and the message
+        # says how to make it smaller and read again (#769).
+        return HTTPException(status_code=503, detail=msg)
     if isinstance(e, SimBridgeSaturatedError):
         # 503, not 500: the device is healthy and the request was valid, there is
         # just more queued than is worth serving. Retrying immediately makes it

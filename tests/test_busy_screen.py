@@ -164,3 +164,12 @@ class TestTheScreenContextIsBounded:
             return_value=({"summary": "a screen", "element_count": 3}, [], None))
         context = await device_api._capture_screen_context(controller, PHONE)
         assert "error" not in context and context["summary"] == "a screen"
+
+
+def test_the_route_answers_503_with_the_reason():
+    """A busy screen is not a server fault: 503, with how to make it smaller."""
+    from server.api.device import _handle_device_error
+
+    error = _handle_device_error(ScreenTooBusy(PHONE, 215, 20))
+    assert error.status_code == 503
+    assert "215 elements" in error.detail and "zoom a map in" in error.detail
