@@ -63,6 +63,41 @@ suppression and all ten passed immediately after restoring input, with no code
 change. Pass the **full** UDID; the log truncates to the first segment, and
 handing that back gets `Invalid device` from simctl.
 
+### The remote tier
+
+Everything above talks to this machine's server over its local listener. The
+remote features -- pairing, the pinned certificate, client keys, one client's
+reservation refusing another, what a release cleans up -- are tested in the unit
+suite against fakes. `remote/` tests them for real, on one Mac:
+
+```shell
+QUERN_CONFORMANCE_REMOTE=1 QUERN_CONFORMANCE_DEVICES=<simulator UDID> \
+  .venv/bin/python -m pytest tests/conformance/remote -m integration
+
+# Add the grace-period test, which waits out the shortest grace (120 s):
+QUERN_CONFORMANCE_SLOW=1 QUERN_CONFORMANCE_REMOTE=1 QUERN_CONFORMANCE_DEVICES=<UDID> \
+  .venv/bin/python -m pytest tests/conformance/remote -m integration
+```
+
+- **Its own server.** The tier starts a quern from **this checkout** -- not the
+  one installed -- in a temporary `QUERN_STATE_DIR`, on free ports, with the
+  remote listener bound to `127.0.0.1`. It never asks the live server anything,
+  and it overrides the environment report, which would. A test that needs other
+  settings (blind visibility, a short grace) restarts it and puts the defaults
+  back afterwards.
+- **Real pairings.** Clients pair as a person does: `quern pair` with the
+  server's state, `quern connect` with a client's own. A client's requests then
+  go over TLS with the listener's certificate as the only trust anchor.
+- **A simulator you hand it.** The scratch server sees every simulator on the
+  Mac, and its reservations bind nobody using the live server, so the tests that
+  need one use only `QUERN_CONFORMANCE_DEVICES`, and skip without it. Use a
+  simulator nobody else is driving: the release tests install and remove the
+  probe app on it. Reserving it on the live server too tells other sessions it
+  is taken.
+- **What it can't see:** real networks. Loopback has no IPv6 ULA, no sleep, and
+  no certificate host names to get wrong. The MCP's `use_remote` is a second
+  phase.
+
 ### Pointing at a different server
 
 | Variable | Effect |
@@ -164,6 +199,7 @@ parametrisation; probe-driven tests run once per platform present.
 | 21 | Session attribution (`X-Quern-Session`, #254) | `test_session.py` | **done** — 7 tests; the client sends `conformance-<run id>` on every request, the tests read it back from `/trace`, and check `X-Quern-Session-Warning` (`missing`, `malformed`, none when tagged or public) |
 | 22 | Lazy lists through WDA (#475) | `test_lazy_list.py` | **done** — 4 tests, each on the default backend and through WDA, on the iOS probe's Lazy tab; fail through WDA against the server before #478 |
 | 23 | Which element a tap reached (#511) | `test_taps.py` | **done** — 7 tests on each probe's Taps tab, reading per-button counters: by label and by identifier, two buttons sharing a label, a tap after and during a remount, a button partly covered by an overlay, and a moving target, which must be reached or reported as `target_moving` (#514). The covered button fails on Android until #521 (deferred, P3); the moving target, which slides continuously, passes on both: Android flags it, an iOS simulator refuses it as moving (#529) |
+| 24 | Remote listener, pairing and client keys (#254) | `remote/` | **done** -- 25 tests, opt-in (see *The remote tier*): pairing and the pin, what two real clients may change, release cleanup, the grace period, and `quern remote list` |
 
 ### The fixture apps already exist
 

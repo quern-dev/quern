@@ -209,9 +209,12 @@ class QuernClient:
 
     def __init__(
         self, target: ServerTarget, *, record: list[Call] | None = None,
-        session: str | None = None,
+        session: str | None = None, ssl_context: Any = None,
     ):
         self.target = target
+        #: For a remote listener (the remote tier): its certificate as the only
+        #: trust anchor, which is what pinning it means. None for plain http.
+        self.ssl_context = ssl_context
         self.calls: list[Call] = record if record is not None else []
         #: Sent as `X-Quern-Session` on every request (#254), so this run's
         #: actions are attributed to it rather than read as an unidentified
@@ -224,6 +227,7 @@ class QuernClient:
             # Follow the documented `/` -> `/docs` redirect only when a test
             # asks for it, so the redirect itself stays assertable.
             follow_redirects=False,
+            verify=ssl_context if ssl_context is not None else True,
         )
 
     # -- core ------------------------------------------------------------
@@ -379,7 +383,9 @@ class HeldSession:
         # Entered as a context manager by hand: websockets 17.1 deprecates a
         # bare connect(), and its `legacy=True` way out does not exist before
         # 17.1. `close()` below ends it either way.
-        self._ws = connect(url, additional_headers=headers, open_timeout=10).__enter__()
+        tls = {"ssl": self.client.ssl_context} if self.client.ssl_context is not None else {}
+        self._ws = connect(url, additional_headers=headers, open_timeout=10,
+                           **tls).__enter__()
         first = json.loads(self._ws.recv(timeout=10))
         if first.get("event") != "attached":
             self._ws.close()
