@@ -810,7 +810,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .min(0)
         .max(10)
         .optional()
-        .describe("Rest the finger still at the end this many seconds before lifting. With press, a drag held at the screen edge for about 1 s turns the home-screen page under it, so an icon can move to another page. Alone, a scroll that stops where the finger does instead of flinging on. Omit to lift at once. Not on idb, which answers 400."),
+        .describe("Rest the finger still at the end this many seconds before lifting. With press, a drag held at the screen edge for about 1 s turns the home-screen page under it, so an icon can move to another page. An iPhone turned one page and dropped the icon there; a Pixel launcher keeps turning pages while held and returns an icon released at the edge, so hold briefly and drag again. Alone, a scroll that stops where the finger does instead of flinging on. Omit to lift at once. Not on idb, which answers 400."),
       udid: z
         .string()
         .optional()

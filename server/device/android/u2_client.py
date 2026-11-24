@@ -1131,9 +1131,9 @@ class U2Backend:
             if press or hold:
                 steps = max(2, round(duration * 60))
                 at = (int(start_x), int(start_y))
-                try:
-                    # Inside the try: a down that reached the device and then
-                    # raised is lifted too (CodeRabbit on #770).
+
+                def drag() -> None:
+                    nonlocal at
                     device.touch.down(*at)
                     if _interruptible_wait(stop, press):
                         return
@@ -1146,11 +1146,24 @@ class U2Backend:
                             return
                     if hold:
                         _interruptible_wait(stop, hold)
-                finally:
-                    # Where the finger last was, best effort: the down may
-                    # not have landed, and lifting is all that is left to do.
+
+                try:
+                    # Inside the try: a down that reached the device and then
+                    # raised is lifted too (CodeRabbit on #770).
+                    drag()
+                except BaseException:
+                    # Where the finger last was, best effort: the failure
+                    # being raised is the one to report.
                     with contextlib.suppress(Exception):
                         device.touch.up(*at)
+                    raise
+                if stop.is_set():
+                    with contextlib.suppress(Exception):   # the caller has gone
+                        device.touch.up(*at)
+                    return
+                # Raised, not suppressed: a drag that went through and a finger
+                # that may still be down is not a success (CodeRabbit on #770).
+                device.touch.up(*at)
                 return
             device.swipe(int(start_x), int(start_y), int(end_x), int(end_y), duration=duration)
 

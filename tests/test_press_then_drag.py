@@ -200,6 +200,20 @@ class TestAndroid:
         device.touch.up.assert_called_once_with(100, 400)
         device.swipe.assert_not_called()
 
+    async def test_a_lift_that_fails_after_a_good_drag_is_an_error(self, monkeypatch):
+        """Suppressed, a finger possibly still down read as success (CodeRabbit on #770)."""
+        import server.device.android.u2_client as u2
+        from server.models import DeviceError
+
+        device = MagicMock()
+        device.touch.up.side_effect = RuntimeError("up never acknowledged")
+        monkeypatch.setattr(u2, "_interruptible_wait", lambda stop, s: False)
+        backend = TestEachBackendsLongPress._u2(device)
+        with pytest.raises(DeviceError, match="up never acknowledged"):
+            await backend.swipe("dev", 100, 1300, 100, 400, 0.5, press=0.8)
+        device.touch.up.assert_called_once()          # not replayed
+        assert device.touch.down.call_count == 1
+
     async def test_a_down_that_raises_is_still_lifted(self, monkeypatch):
         """It may have reached the device before raising (CodeRabbit on #770)."""
         import server.device.android.u2_client as u2
