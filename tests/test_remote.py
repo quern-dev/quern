@@ -450,6 +450,27 @@ class TestTheListener:
         status, health = _get(remote, "/health")
         assert status == 200 and len(health["host_id"]) == 32
 
+    def test_no_session_ticket_follows_the_handshake(self, running):
+        """A TLS 1.3 ticket sent just after the handshake reached the
+        websockets client while it wrote its upgrade request from another
+        thread, and the request was lost: 13 of 300 held sessions never
+        opened. Read after a whole response, so a ticket would be in by then."""
+        import socket
+        import ssl
+
+        ctx = ssl.create_default_context(cafile=str(running.listener.cert.cert_path))
+        ctx.check_hostname = False
+        ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+        with socket.create_connection(("127.0.0.1", running.port), timeout=10) as raw, \
+                ctx.wrap_socket(raw, server_hostname="quern.test") as tls:
+            assert tls.version() == "TLSv1.3", "the check needs TLS 1.3, where tickets come unasked"
+            tls.sendall(b"GET /health HTTP/1.1\r\nHost: quern.test\r\nConnection: close\r\n\r\n")
+            answer = b""
+            while chunk := tls.recv(4096):
+                answer += chunk
+            assert answer.startswith(b"HTTP/1.1 200"), answer[:80]
+            assert not tls.session.has_ticket, "the listener sent a session ticket"
+
     def test_the_owners_key_is_refused(self, running):
         remote = client.Remote(name="x", url=running.url,
                                fingerprint=running.listener.cert.fingerprint, key=KEY)

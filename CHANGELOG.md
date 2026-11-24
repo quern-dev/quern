@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A held session from `quern session run` no longer sometimes fails to open on a remote server.** The remote listener sent TLS 1.3 session tickets just after the handshake, and the Python websockets client reads its socket on one thread while it writes the upgrade request on another: a ticket arriving then lost the request inside the client, and the listener closed the silent connection five seconds later -- about 1 in 25 opens, measured. The listener no longer sends tickets, which no client used: each pins the certificate and holds one session. The MCP, which connects with Node's WebSocket, was not affected. Found by the conformance suite's remote tier.
+
 ## [0.26.0-beta.7] - 2026-11-22
 
 ### Changed
