@@ -58,6 +58,30 @@ def test_what_the_user_put_first_still_wins(dirs, monkeypatch) -> None:
     assert _path()[:3] == ["/my/tools", dirs["brew"], "/usr/bin"]
 
 
+@pytest.mark.parametrize("given", [":/usr/bin", "/usr/bin::/bin", "/usr/bin:"])
+def test_empty_entries_are_kept(dirs, monkeypatch, given) -> None:
+    """An empty entry is the current directory: the user's to keep, in
+    its place (CR)."""
+    monkeypatch.setenv("PATH", given)
+
+    added = tool_path.add_standard_tool_dirs()
+
+    assert os.environ["PATH"] == given + os.pathsep + os.pathsep.join(added)
+
+
+@pytest.mark.parametrize("unset", [True, False])
+def test_an_unset_or_empty_path_gains_no_current_directory(dirs, monkeypatch, unset) -> None:
+    if unset:
+        monkeypatch.delenv("PATH")
+    else:
+        monkeypatch.setenv("PATH", "")
+
+    added = tool_path.add_standard_tool_dirs()
+
+    assert os.environ["PATH"] == os.pathsep.join(added)
+    assert "" not in _path()
+
+
 def test_a_directory_that_does_not_exist_is_not_added(dirs, monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(tool_path, "STANDARD_DIRS", (str(tmp_path / "no-such-brew"),))
 

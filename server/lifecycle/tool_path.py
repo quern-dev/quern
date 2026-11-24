@@ -32,8 +32,8 @@ def add_standard_tool_dirs() -> list[str]:
     """Append the standard tool directories this PATH lacks, and return
     them. Appended, never prepended: a directory the user put first still
     wins, so nothing they chose is shadowed. Only directories that exist."""
-    current = os.environ.get("PATH", "")
-    entries = [e for e in current.split(os.pathsep) if e]
+    current = os.environ.get("PATH")
+    entries = current.split(os.pathsep) if current else []
     added = []
     for candidate in (*STANDARD_DIRS, str(_pipx_bin_dir())):
         if candidate in entries or candidate in added:
@@ -41,5 +41,9 @@ def add_standard_tool_dirs() -> list[str]:
         if Path(candidate).is_dir():
             added.append(candidate)
     if added:
-        os.environ["PATH"] = os.pathsep.join([*entries, *added])
+        # The existing PATH kept as it is, empty entries too -- an empty entry
+        # is the current directory, and the user's to keep (CR) -- and an
+        # unset or empty one not given a current-directory entry it never had.
+        tail = os.pathsep.join(added)
+        os.environ["PATH"] = f"{current}{os.pathsep}{tail}" if current else tail
     return added
