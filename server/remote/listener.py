@@ -231,6 +231,16 @@ async def start_remote(app, settings: dict) -> RemoteListener | None:
     gate = RemoteGate(app, allowed_hosts(host, settings.get("hosts", []), lan))
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    # No TLS 1.3 session tickets. The server sends them unasked just after
+    # the handshake, and the websockets sync client -- `quern session run`'s
+    # held session, the conformance suite's -- reads its socket on one thread
+    # while it writes the upgrade request on another. A ticket arriving then
+    # lost the request inside the client's OpenSSL, and the listener closed
+    # the silent connection five seconds later: 13 of 300 upgrades, against 0
+    # of 300 without tickets, and 0 with the client capped at TLS 1.2.
+    # Nothing is lost: a client pins the certificate and holds one session,
+    # so it has no use for resumption.
+    ctx.num_tickets = 0
     ctx.load_cert_chain(str(cert.cert_path), str(cert.key_path))
     server = uvicorn.Server(uvicorn.Config(
         gate, host=host, port=port, lifespan="off",
