@@ -335,10 +335,17 @@ def simulator(server: Server) -> str:
         devices = owner.json_ok("GET", "/api/v1/device/list", timeout=60)["devices"]
     finally:
         owner.close()
-    for dev in devices:
-        if dev.get("device_type") != "simulator":
-            continue
-        if any(dev["udid"].startswith(p) for p in pinned):
+    simulators = [d for d in devices if d.get("device_type") == "simulator"]
+    for pin in pinned:
+        matches = [d for d in simulators if d["udid"].startswith(pin)]
+        if len(matches) > 1:
+            # A prefix two simulators share would quietly use whichever is
+            # listed first: say so, and which ones, rather than guess (CR).
+            pytest.fail(f"QUERN_CONFORMANCE_DEVICES entry {pin!r} matches "
+                        f"{len(matches)} simulators: "
+                        f"{', '.join(d['udid'] for d in matches)}; give more of the UDID")
+        if matches:
+            dev = matches[0]
             if dev.get("state") != "booted":
                 pytest.skip(f"{dev['name']} ({dev['udid']}) is not booted")
             return dev["udid"]

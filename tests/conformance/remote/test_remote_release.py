@@ -134,20 +134,30 @@ def test_a_dropped_client_keeps_its_device_for_the_grace_period_then_loses_it(
                                    json={"udids": [simulator], "auto_boot": False},
                                    headers={"X-Quern-Session": bob_session.name}, timeout=60)
 
+            last_held = time.monotonic()
             assert bob_reserves().status_code == 409, "the drop freed the device at once"
             deadline = dropped + MIN_GRACE_S + 90
             while True:
+                sent = time.monotonic()
                 resp = bob_reserves()
                 if resp.status_code == 200:
                     break
                 assert resp.status_code == 409, resp.text
+                # When the last refusal was sent, not when the grant came
+                # back: the server still held the device when it answered
+                # that request, so the grant cannot be earlier -- while a
+                # slow answer could make an early grant look late (CR).
+                last_held = sent
                 assert time.monotonic() < deadline, (
                     f"still held {time.monotonic() - dropped:.0f}s after the drop")
                 time.sleep(5)
-            waited = time.monotonic() - dropped
+            waited = last_held - dropped
         finally:
             bob_session.close()
     finally:
         as_alice.close()
         as_bob.close()
-    assert waited >= MIN_GRACE_S - 5, f"freed after {waited:.0f}s, inside the grace period"
+    # Still held this long after the drop. The polls are 5 s apart, so the
+    # last refusal can fall up to that much before the grace ends.
+    assert waited >= MIN_GRACE_S - 10, (
+        f"held only {waited:.0f}s after the drop: freed inside the grace period")
