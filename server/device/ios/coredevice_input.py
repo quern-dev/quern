@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
-from server.device.gestures import check_edge_start
+from server.device.gestures import TAP_HOLD_MS, Plan, check_edge_start
 from server.models import DeviceError, InvalidDeviceRequestError
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,10 @@ TAP_HOLD_S = 0.05
 
 #: Contact samples a swipe sends per second: one a frame at 60 Hz.
 SWIPE_RATE_HZ = 60
+
+#: The most contacts one touchscreen report carries
+#: (pymobiledevice3's TOUCHSCREEN_CONTACT_COUNT_MAXIMUM).
+MAX_CONTACTS = 5
 
 #: A held session idle this long is closed.
 IDLE_CLOSE_S = 60.0
@@ -173,6 +177,7 @@ def _pmd3() -> SimpleNamespace:
             DeviceInfoService=DeviceInfoService,
             UniversalHID=hid_service.UniversalHIDServiceService,
             IndigoHID=hid_service.IndigoHIDService,
+            Contact=hid_service.TouchscreenContact,
             CONTACT=hid_service.TOUCHSCREEN_STATE_CONTACT,
             RELEASE=hid_service.TOUCHSCREEN_STATE_RELEASE,
             BUTTON_DOWN=hid_service.HID_BUTTON_STATE_DOWN,
@@ -273,11 +278,17 @@ class CoreDeviceInput:
     #: and 200 pt about 2.3x, while at 250 pt/s 672 pt moved it 647-660
     #: pt, six of six -- the 0.97 WDA's drag travels.
     sweep_drag_pt_s = 250.0
+    #: Several contacts in one report, up to five: pinch, rotate, two-finger
+    #: pan and taps (#252). Without it every gesture on an iOS 27 phone went
+    #: through WDA, starting one where none was running (#769).
+    multitouch = True
     sweep_hold_s = 0.5
     #: A physical device decides an edge swipe from where it starts, as for
     #: WDA; no flag is involved (#251).
     edge_swipes = True
     edge_flag = False
+    #: A swipe can hold its contact still at the start first (#769).
+    press_drag = True
 
     def __init__(self, fallback: Any) -> None:
         self._fallback = fallback
@@ -302,7 +313,7 @@ class CoreDeviceInput:
 
     async def swipe(self, udid: str, start_x: float, start_y: float, end_x: float,
                     end_y: float, duration: float = 0.5, hold: float = 0.0,
-                    edge: str | None = None) -> str:
+                    edge: str | None = None, press: float = 0.0) -> str:
         async def send(lib: SimpleNamespace, session: _Session, screen: Screen,
                        progress: _Progress) -> None:
             if edge is not None:
@@ -312,27 +323,155 @@ class CoreDeviceInput:
                                  tool=self.TOOL_NAME)
             steps = max(2, round(duration * SWIPE_RATE_HZ))
             interval = duration / steps
-            progress.reached = True
-            for i in range(steps + 1):
-                f = i / steps
-                await _report(session.hid.send_touchscreen(lib.CONTACT, *screen.point(
-                    start_x + (end_x - start_x) * f, start_y + (end_y - start_y) * f)))
-                if i < steps:
-                    await _sleep(interval)
-            if hold:
-                # Held at the end, so a list stops where the finger does: the
-                # still contact is reported throughout, not just left down.
-                end = screen.point(end_x, end_y)
-                for _ in range(max(1, round(hold * SWIPE_RATE_HZ))):
-                    await _sleep(1 / SWIPE_RATE_HZ)
-                    await _report(session.hid.send_touchscreen(lib.CONTACT, *end))
-            await _report(session.hid.send_touchscreen(lib.RELEASE, *screen.point(end_x, end_y)))
+            down: tuple[int, int] | None = None
 
-        extra = {"edge": edge} if edge is not None else {}
+            async def contact(point: tuple[int, int]) -> None:
+                nonlocal down
+                down = point        # before the send: it may land, then fail
+                await _report(session.hid.send_touchscreen(lib.CONTACT, *point))
+
+            progress.reached = True
+            try:
+                start = screen.point(start_x, start_y)
+                if press:
+                    # Pressed before it moves, the contact reported still at
+                    # the start throughout, as a held end is: what
+                    # drag-and-drop and reordering wait for (#769).
+                    await contact(start)
+                    for _ in range(max(1, round(press * SWIPE_RATE_HZ))):
+                        await _sleep(1 / SWIPE_RATE_HZ)
+                        await contact(start)
+                for i in range(steps + 1):
+                    f = i / steps
+                    await contact(screen.point(start_x + (end_x - start_x) * f,
+                                               start_y + (end_y - start_y) * f))
+                    if i < steps:
+                        await _sleep(interval)
+                if hold:
+                    # Held at the end, so a list stops where the finger does:
+                    # the still contact is reported throughout, not just left
+                    # down.
+                    end = screen.point(end_x, end_y)
+                    for _ in range(max(1, round(hold * SWIPE_RATE_HZ))):
+                        await _sleep(1 / SWIPE_RATE_HZ)
+                        await contact(end)
+                await _report(session.hid.send_touchscreen(
+                    lib.RELEASE, *screen.point(end_x, end_y)))
+                down = None
+            except BaseException:
+                # Lifted where it last was, best effort: dropping the session
+                # alone may leave the finger down (CodeRabbit on #770).
+                if down is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.shield(_report(
+                            session.hid.send_touchscreen(lib.RELEASE, *down)))
+                raise
+
+        extra: dict = {"edge": edge} if edge is not None else {}
+        if press:
+            extra["press"] = press
         return await self._or_fallback(
             udid, "swipe", send,
             lambda: self._fallback.swipe(udid, start_x, start_y, end_x, end_y,
                                          duration, hold=hold, **extra))
+
+    async def perform_gesture(self, udid: str, plan: Plan) -> str:
+        """A gesture `server.device.gestures` laid out, every finger in every
+        report: a contact left out of one is lifted. A moving gesture is sent
+        at SWIPE_RATE_HZ along the plan's waypoints, paced against the clock
+        so each report's round trip does not stretch it past `duration`; a
+        tap gesture puts its fingers down, holds TAP_HOLD_MS and lifts them,
+        `count` times. Points off the screen, and more fingers than a report
+        carries, are refused. A failure or cancel with fingers down lifts
+        them, best effort, before it is raised. Returns which of HID and WDA
+        carried it."""
+        fingers = len(plan.paths if plan.paths is not None else plan.points or [])
+        if fingers > MAX_CONTACTS:
+            # Refused before anything is sent: building the report would fail
+            # after `progress.reached`, as "may have been partly delivered",
+            # when nothing was (review).
+            raise InvalidDeviceRequestError(
+                f"a gesture of {fingers} fingers: a touchscreen report carries at most "
+                f"{MAX_CONTACTS}", tool=self.TOOL_NAME)
+
+        def check(screen: Screen) -> None:
+            points = [p for path in plan.paths or [] for p in path] + list(plan.points or [])
+            for x, y in points:
+                if not (0 <= x <= screen.width and 0 <= y <= screen.height):
+                    raise InvalidDeviceRequestError(
+                        f"point ({x:.0f}, {y:.0f}) is off the "
+                        f"{screen.width:.0f}x{screen.height:.0f} screen", tool=self.TOOL_NAME)
+
+        async def send(lib: SimpleNamespace, session: _Session, screen: Screen,
+                       progress: _Progress) -> None:
+            check(screen)
+            down: list[tuple[float, float]] | None = None
+
+            async def report(points: list[tuple[float, float]], touching: bool = True) -> None:
+                nonlocal down
+                if touching:
+                    # Before the send, not after: one that reached the phone
+                    # and then failed or was cancelled left these fingers
+                    # down with nothing to lift them (CodeRabbit on #770).
+                    down = points
+                await _report(session.hid.send_multitouch(
+                    [lib.Contact(i, *screen.point(x, y), touching)
+                     for i, (x, y) in enumerate(points)]))
+                if not touching:
+                    down = None
+
+            async def moving(paths: list[list[tuple[float, float]]]) -> None:
+                legs = len(paths[0]) - 1
+                # At most SWIPE_RATE_HZ: a long rotation's waypoints are
+                # interpolated between, not each sent (review).
+                frames = max(1, round(plan.duration * SWIPE_RATE_HZ))
+
+                def at(f: float) -> list[tuple[float, float]]:
+                    # Along each finger's waypoints, linearly between them.
+                    pos = f * legs
+                    i = min(int(pos), legs - 1)
+                    t = pos - i
+                    return [(p[i][0] + (p[i + 1][0] - p[i][0]) * t,
+                             p[i][1] + (p[i + 1][1] - p[i][1]) * t) for p in paths]
+
+                start = time.monotonic()
+                for n in range(frames + 1):
+                    await report(at(n / frames))
+                    if n < frames:
+                        # To the frame's own time: a report's round trip is
+                        # taken out of the wait, not added to it (review).
+                        due = start + (n + 1) * plan.duration / frames
+                        await _sleep(max(0.0, due - time.monotonic()))
+                await report([p[-1] for p in paths], touching=False)
+
+            async def tapping(points: list[tuple[float, float]]) -> None:
+                for n in range(plan.count):
+                    await report(points)
+                    await _sleep(TAP_HOLD_MS / 1000)
+                    await report(points, touching=False)
+                    if n < plan.count - 1:
+                        await _sleep(plan.interval)
+
+            progress.reached = True
+            try:
+                if plan.paths is not None:
+                    await moving(plan.paths)
+                else:
+                    await tapping(list(plan.points or []))
+            except BaseException:
+                # Fingers left down by a failure or a cancel are lifted where
+                # they were, best effort: dropping the session alone may not
+                # lift them on the phone (review).
+                if down is not None:
+                    lift = down
+                    with contextlib.suppress(Exception):
+                        await asyncio.shield(_report(session.hid.send_multitouch(
+                            [lib.Contact(i, *screen.point(x, y), False)
+                             for i, (x, y) in enumerate(lift)])))
+                raise
+
+        return await self._or_fallback(udid, plan.kind, send,
+                                       lambda: self._fallback.perform_gesture(udid, plan))
 
     async def press_button(self, udid: str, button: str) -> str:
         code = BUTTONS.get(button.lower())

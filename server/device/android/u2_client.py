@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
 import re
 import threading
@@ -428,6 +429,12 @@ class _PressMayHaveLanded(Exception):
 PINCH_NARROW_MM = 30.0
 
 
+def _interruptible_wait(stop: threading.Event, seconds: float) -> bool:
+    """Wait `seconds`, or until `stop` is set: whether it was. A stand-in for
+    `time.sleep` in a swipe the caller may give up on (#769)."""
+    return stop.wait(seconds) if seconds > 0 else stop.is_set()
+
+
 class U2Backend:
     """Manages Android UI automation via uiautomator2.
 
@@ -446,6 +453,10 @@ class U2Backend:
 
     #: A swipe from the screen edge is the system's under gesture navigation.
     edge_swipes = True
+
+    #: A swipe can hold its finger at the start first: down, wait, move, up
+    #: through uiautomator2's touch (#769).
+    press_drag = True
 
     #: Seconds a keyboard restore may wait on the device (#513).
     RESTORE_TIMEOUT_S = 15.0
@@ -1096,24 +1107,86 @@ class U2Backend:
         end_y: float,
         duration: float = 0.5,
         edge: str | None = None,
+        press: float = 0.0,
+        hold: float = 0.0,
     ) -> None:
         """Swipe gesture. An `edge` swipe must start at that edge, where
         gesture navigation reads it as the system's: measured on the emulator
-        and a Pixel 5, a swipe from x=1 was a back gesture (#251)."""
+        and a Pixel 5, a swipe from x=1 was a back gesture (#251).
 
-        def _do():
+        With `press`, the finger is held at the start that long before it
+        moves (#769), through uiautomator2's touch down, move and up; with
+        `hold`, it rests at the end that long before lifting."""
+
+        # Set on every way out of the await: cancelling it does not stop the
+        # thread, which would go on to drag and hold after the caller had
+        # moved on (CodeRabbit on #770), as `scroll_into_view` found.
+        stop = threading.Event()
+
+        def _do() -> None:
             device = self._connect(udid)
             if edge is not None:
                 width, height = device.window_size()
                 check_edge_start(edge, start_x, start_y, width, height, tool="u2")
+            if stop.is_set():
+                # Cancelled while connecting: sent now, a press-drag would land
+                # as a tap at the start after the caller had gone (CodeRabbit
+                # on #770). Nothing has been sent yet, so nothing to lift.
+                return
+            if press or hold:
+                steps = max(2, round(duration * 60))
+                at = (int(start_x), int(start_y))
+
+                def drag() -> None:
+                    nonlocal at
+                    device.touch.down(*at)
+                    if _interruptible_wait(stop, press):
+                        return
+                    for i in range(1, steps + 1):
+                        f = i / steps
+                        at = (int(start_x + (end_x - start_x) * f),
+                              int(start_y + (end_y - start_y) * f))
+                        device.touch.move(*at)
+                        if _interruptible_wait(stop, duration / steps):
+                            return
+                    if hold:
+                        _interruptible_wait(stop, hold)
+
+                try:
+                    # Inside the try: a down that reached the device and then
+                    # raised is lifted too (CodeRabbit on #770).
+                    drag()
+                except BaseException:
+                    # Where the finger last was, best effort: the failure
+                    # being raised is the one to report.
+                    with contextlib.suppress(Exception):
+                        device.touch.up(*at)
+                    raise
+                if stop.is_set():
+                    with contextlib.suppress(Exception):   # the caller has gone
+                        device.touch.up(*at)
+                    return
+                # Raised, not suppressed: a drag that went through and a finger
+                # that may still be down is not a success (CodeRabbit on #770).
+                device.touch.up(*at)
+                return
             device.swipe(int(start_x), int(start_y), int(end_x), int(end_y), duration=duration)
 
+        work = asyncio.ensure_future(asyncio.to_thread(_do))
         try:
-            await asyncio.to_thread(_do)
+            await asyncio.shield(work)
+        except asyncio.CancelledError:
+            stop.set()
+            # The device stays this swipe's until its finger is lifted.
+            with contextlib.suppress(Exception):
+                await work
+            raise
         except InvalidDeviceRequestError:
             raise
         except Exception as e:
             raise DeviceError(f"Swipe failed: {e}", tool="u2") from e
+        finally:
+            stop.set()
 
     async def type_text(self, udid: str, text: str) -> None:
         """Type text into the focused field. Supports Unicode via clipboard."""

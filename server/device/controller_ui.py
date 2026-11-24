@@ -2708,6 +2708,11 @@ class DeviceControllerUI:
             own = _sweep_drag(backend)
             duration = abs(y1 - y2) / own[0] if own else 0.3
             hold = own[1] if own else self._SWIPE_HOLD_S
+            if getattr(backend, "TOOL_NAME", "") == "wda":
+                # WDA's drag stops where the finger does, so it never needed
+                # the hold, and ignored it; a hold there is now a different
+                # drag at a different speed (#769). As it always was.
+                hold = 0.0
             await backend.swipe(resolved, mid_x, y1, mid_x, y2, duration, hold=hold)
             self._invalidate_ui_cache(resolved)
 
@@ -5743,12 +5748,22 @@ class DeviceControllerUI:
         duration: float = 0.5,
         udid: str | None = None,
         edge: str | None = None,
+        press: float = 0.0,
+        hold: float = 0.0,
     ) -> str:
         """Swipe gesture. Returns the resolved udid.
 
         With `edge`, a swipe from that screen edge -- back, home, Control
         Centre, the notification shade (#251). It must start at the edge, on
         every backend, so it means the same thing on each.
+
+        With `press`, the finger is held down at the start that many seconds
+        before it moves: a press-then-drag, which drag-and-drop and reordering
+        need and a plain swipe is not (#769). With `hold`, it rests still at
+        the end before it lifts: a drag held at the screen edge, so the page
+        turns under it, or a scroll that stops where the finger does. A
+        backend that cannot hold still at either end (`press_drag`) refuses
+        rather than sending a swipe that does something else.
         """
         if edge is not None:
             gestures.check_edge(edge)
@@ -5768,8 +5783,17 @@ class DeviceControllerUI:
             raise DeviceOperationUnsupportedError(
                 f"an edge swipe on a simulator needs sim-bridge, which flags the event "
                 f"as one; the {name} backend cannot (#251)", tool=name)
+        if (press or hold) and getattr(backend, "press_drag", False) is not True:
+            raise DeviceOperationUnsupportedError(
+                f"the {name} backend cannot hold a finger still before or after it "
+                f"drags, so a swipe with press or hold would arrive as an ordinary "
+                f"one", tool=name)
         await self._warn_if_input_is_suppressed(resolved)
-        extra = {"edge": edge} if edge is not None else {}
+        extra: dict = {"edge": edge} if edge is not None else {}
+        if press:
+            extra["press"] = float(press)
+        if hold:
+            extra["hold"] = float(hold)
         await backend.swipe(resolved, start_x, start_y, end_x, end_y, duration, **extra)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
@@ -5823,13 +5847,17 @@ class DeviceControllerUI:
         gestures.plan(kind, 0.0, 0.0, **params)
 
         resolved = await self.resolve_udid(udid)
-        backend = self._ui_backend(resolved)
+        # As a tap or swipe is chosen: over CoreDevice HID on a phone it
+        # serves, which falls back to WDA only for what it cannot send. By
+        # `_ui_backend`, every gesture on an iOS 27 phone went to WDA (#769).
+        backend = self._input_backend(resolved)
         name = getattr(backend, "TOOL_NAME", type(backend).__name__)
         if getattr(backend, "multitouch", False) is not True:
             raise DeviceOperationUnsupportedError(
                 f"{kind} needs several fingers at once, and the {name} backend cannot "
                 f"send them. Multi-finger gestures are implemented for iOS simulators "
-                f"(sim-bridge), physical iPhones (WDA) and Android (#252).", tool=name)
+                f"(sim-bridge), physical iPhones (CoreDevice HID on iOS 27, WDA before) "
+                f"and Android (#252).", tool=name)
         await self._warn_if_input_is_suppressed(resolved)
 
         element = None
@@ -5850,7 +5878,9 @@ class DeviceControllerUI:
             defaults = dict(await backend.gesture_defaults(resolved))
         warning = defaults.pop("warning", None)
         laid_out = gestures.plan(kind, float(x), float(y), **defaults, **params)
-        await backend.perform_gesture(resolved, laid_out)
+        carried = await backend.perform_gesture(resolved, laid_out)
+        if isinstance(carried, str):
+            name = carried                  # HID, or the WDA it fell back to
         self._invalidate_ui_cache(resolved)  # UI changed
 
         result = {"udid": resolved, "gesture": kind, "backend": name,

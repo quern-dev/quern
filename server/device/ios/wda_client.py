@@ -324,6 +324,8 @@ class WdaBackend:
 
     #: A swipe from the screen edge is the system's on a real device (#251).
     edge_swipes = True
+    #: Its drag is XCUITest's press-for-duration-then-drag already (#769).
+    press_drag = True
 
     def __init__(self) -> None:
         self._connections: dict[str, _WdaConnection] = {}
@@ -1708,10 +1710,18 @@ class WdaBackend:
         duration: float = 0.5,
         hold: float = 0.0,
         edge: str | None = None,
+        press: float = 0.0,
     ) -> None:
         """Swipe gesture via WDA.
 
-        `hold` is accepted for parity with sim-bridge and ignored. WDA's drag is
+        `press` is how long the finger is held at the start before it drags
+        (#769). WDA's drag is XCUITest's `press(forDuration:thenDragTo:)`,
+        whose duration is that press, so `press` is sent as it; without one,
+        `duration` is, as before. That drag cannot rest at the end, so with
+        `hold` it is `pressAndDragWithVelocity`, which can: the press, a speed
+        that covers the distance in `duration`, and the hold.
+
+        Without `hold`, WDA's drag is
         XCUITest's press-then-drag, not a flick: measured on an iPhone 11, a
         358pt drag moved the list 349pt, and nothing was moving once the call
         returned, including at the end of a list.
@@ -1723,12 +1733,22 @@ class WdaBackend:
         if edge is not None:
             width, height = await self._window_size(udid)
             check_edge_start(edge, start_x, start_y, width, height, tool="wda")
+        if hold:
+            distance = ((end_x - start_x) ** 2 + (end_y - start_y) ** 2) ** 0.5
+            await self._write(udid, "/wda/pressAndDragWithVelocity", action="swipe", json={
+                "fromX": start_x, "fromY": start_y, "toX": end_x, "toY": end_y,
+                # XCUITest's press needs a little time to register as one.
+                "pressDuration": press if press else 0.05,
+                "velocity": max(distance / max(duration, 0.05), 1.0),
+                "holdDuration": hold,
+            }, timeout=ACTION_TIMEOUT + press + duration + hold)
+            return
         await self._write(udid, "/wda/dragfromtoforduration", action="swipe", json={
             "fromX": start_x,
             "fromY": start_y,
             "toX": end_x,
             "toY": end_y,
-            "duration": duration,
+            "duration": press if press else duration,
         })
 
     async def perform_gesture(self, udid: str, plan: Plan) -> None:
