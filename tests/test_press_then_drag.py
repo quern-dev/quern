@@ -218,10 +218,18 @@ class TestAndroid:
         after the caller had moved on (CodeRabbit on #770). Real waits here."""
         import asyncio
         import threading
+        import time
 
         device = MagicMock()
         pressed = threading.Event()
+        lifted = threading.Event()
         device.touch.down.side_effect = lambda *a: pressed.set()
+
+        def slow_up(*a):
+            time.sleep(0.3)             # so only a cancel that waits sees it done
+            lifted.set()
+
+        device.touch.up.side_effect = slow_up
         backend = TestEachBackendsLongPress._u2(device)
         task = asyncio.create_task(
             backend.swipe("dev", 100, 1300, 100, 400, 0.5, press=10.0))
@@ -229,7 +237,9 @@ class TestAndroid:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, 5)
-        # Lifted by the time the cancel returned, where it was pressed; no drag.
+        # Lifted by the time the cancel returned -- the device is not the
+        # next caller's while a finger is down -- where it was pressed.
+        assert lifted.is_set(), "the cancel returned before the finger was lifted"
         device.touch.up.assert_called_once_with(100, 1300)
         device.touch.move.assert_not_called()
 
