@@ -1101,20 +1101,22 @@ class U2Backend:
         duration: float = 0.5,
         edge: str | None = None,
         press: float = 0.0,
+        hold: float = 0.0,
     ) -> None:
         """Swipe gesture. An `edge` swipe must start at that edge, where
         gesture navigation reads it as the system's: measured on the emulator
         and a Pixel 5, a swipe from x=1 was a back gesture (#251).
 
         With `press`, the finger is held at the start that long before it
-        moves (#769), through uiautomator2's touch down, move and up."""
+        moves (#769), through uiautomator2's touch down, move and up; with
+        `hold`, it rests at the end that long before lifting."""
 
         def _do():
             device = self._connect(udid)
             if edge is not None:
                 width, height = device.window_size()
                 check_edge_start(edge, start_x, start_y, width, height, tool="u2")
-            if press:
+            if press or hold:
                 steps = max(2, round(duration * 60))
                 device.touch.down(int(start_x), int(start_y))
                 try:
@@ -1124,6 +1126,8 @@ class U2Backend:
                         device.touch.move(int(start_x + (end_x - start_x) * f),
                                           int(start_y + (end_y - start_y) * f))
                         time.sleep(duration / steps)
+                    if hold:
+                        time.sleep(hold)
                 finally:
                     device.touch.up(int(end_x), int(end_y))
                 return

@@ -205,17 +205,20 @@ def two_finger_tap(x: float, y: float, *, distance: float | None = None,
                 interval=_positive("interval", interval, DEFAULT_TAP_INTERVAL))
 
 
-def press_then_drag(start: Point, end: Point, press: float, duration: float) -> Plan:
-    """One finger held still at `start` for `press` seconds, then moved to
-    `end` over `duration` (#769): as touch paths, for a backend whose own
-    swipe moves at once. Waypoints are one a frame at 60 Hz, so the press is
-    held for its whole length rather than one step of it."""
+def press_then_drag(start: Point, end: Point, press: float, duration: float,
+                    hold: float = 0.0) -> Plan:
+    """One finger held still at `start` for `press` seconds, moved to `end`
+    over `duration`, and held there `hold` seconds (#769): as touch paths,
+    for a backend whose own swipe moves at once. Waypoints are one a frame
+    at 60 Hz, so a press or hold is held for its whole length rather than
+    one step of it."""
     still = max(1, round(press * 60))
     moving = max(1, round(duration * 60))
     path = [start] * (still + 1) + [
         (start[0] + (end[0] - start[0]) * i / moving,
          start[1] + (end[1] - start[1]) * i / moving) for i in range(1, moving + 1)]
-    return Plan(kind="drag", paths=[path], duration=press + duration)
+    path += [end] * round(hold * 60)
+    return Plan(kind="drag", paths=[path], duration=press + duration + hold)
 
 
 def plan(kind: str, x: float, y: float, *, scale: float | None = None,

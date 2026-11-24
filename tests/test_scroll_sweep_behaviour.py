@@ -429,6 +429,21 @@ async def test_controlled_swipes_are_held_and_never_settled():
     assert "settle" not in screen.events
 
 
+async def test_a_sweep_through_wda_sends_no_hold():
+    """WDA's drag stops where the finger does, and WDA ignored the hold; now
+    that a hold means a different WDA drag, at another speed, the sweep keeps
+    sending none (#769)."""
+    class WdaScreen(ListScreen):
+        def _ui_backend(self, udid):
+            backend = super()._ui_backend(udid)
+            backend.TOOL_NAME = "wda"
+            return backend
+
+    screen = WdaScreen()
+    await _sweep(screen, "row_150")
+    assert screen.holds and all(h == 0 for h in screen.holds), screen.holds
+
+
 @pytest.mark.asyncio
 async def test_a_simulator_confirms_each_read():
     """M22b — two agreeing reads per swipe where a bounce is possible."""

@@ -1228,6 +1228,7 @@ async def swipe(request: Request, body: SwipeRequest):
                 udid=body.udid,
                 edge=body.edge,
                 press=body.press,
+                hold=body.hold,
             )
             act.udid = udid
             payload = {"status": "ok", "udid": udid}
@@ -1235,6 +1236,8 @@ async def swipe(request: Request, body: SwipeRequest):
                 payload["edge"] = body.edge
             if body.press:
                 payload["press"] = body.press
+            if body.hold:
+                payload["hold"] = body.hold
             return _with_input_warning(controller, udid, payload)
         except DeviceError as e:
             raise _handle_device_error(e)

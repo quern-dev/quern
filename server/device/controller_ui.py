@@ -2708,6 +2708,11 @@ class DeviceControllerUI:
             own = _sweep_drag(backend)
             duration = abs(y1 - y2) / own[0] if own else 0.3
             hold = own[1] if own else self._SWIPE_HOLD_S
+            if getattr(backend, "TOOL_NAME", "") == "wda":
+                # WDA's drag stops where the finger does, so it never needed
+                # the hold, and ignored it; a hold there is now a different
+                # drag at a different speed (#769). As it always was.
+                hold = 0.0
             await backend.swipe(resolved, mid_x, y1, mid_x, y2, duration, hold=hold)
             self._invalidate_ui_cache(resolved)
 
@@ -5744,6 +5749,7 @@ class DeviceControllerUI:
         udid: str | None = None,
         edge: str | None = None,
         press: float = 0.0,
+        hold: float = 0.0,
     ) -> str:
         """Swipe gesture. Returns the resolved udid.
 
@@ -5753,8 +5759,11 @@ class DeviceControllerUI:
 
         With `press`, the finger is held down at the start that many seconds
         before it moves: a press-then-drag, which drag-and-drop and reordering
-        need and a plain swipe is not (#769). A backend that cannot hold first
-        (`press_drag`) refuses rather than sending a swipe that does nothing.
+        need and a plain swipe is not (#769). With `hold`, it rests still at
+        the end before it lifts: a drag held at the screen edge, so the page
+        turns under it, or a scroll that stops where the finger does. A
+        backend that cannot hold still at either end (`press_drag`) refuses
+        rather than sending a swipe that does something else.
         """
         if edge is not None:
             gestures.check_edge(edge)
@@ -5774,14 +5783,17 @@ class DeviceControllerUI:
             raise DeviceOperationUnsupportedError(
                 f"an edge swipe on a simulator needs sim-bridge, which flags the event "
                 f"as one; the {name} backend cannot (#251)", tool=name)
-        if press and getattr(backend, "press_drag", False) is not True:
+        if (press or hold) and getattr(backend, "press_drag", False) is not True:
             raise DeviceOperationUnsupportedError(
-                f"the {name} backend cannot hold a finger down before it drags, so a "
-                f"press-then-drag would arrive as an ordinary swipe", tool=name)
+                f"the {name} backend cannot hold a finger still before or after it "
+                f"drags, so a swipe with press or hold would arrive as an ordinary "
+                f"one", tool=name)
         await self._warn_if_input_is_suppressed(resolved)
         extra: dict = {"edge": edge} if edge is not None else {}
         if press:
             extra["press"] = float(press)
+        if hold:
+            extra["hold"] = float(hold)
         await backend.swipe(resolved, start_x, start_y, end_x, end_y, duration, **extra)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved

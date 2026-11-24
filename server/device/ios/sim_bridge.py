@@ -793,7 +793,7 @@ class SimBridgeBackend:
                     "an edge swipe cannot press first: the system takes it from the "
                     "edge as it moves", tool="sim-bridge")
             await self.perform_gesture(udid, press_then_drag(
-                (start_x, start_y), (end_x, end_y), press, duration))
+                (start_x, start_y), (end_x, end_y), press, duration, hold))
             return
         cmd = {
                 "cmd": "swipe",

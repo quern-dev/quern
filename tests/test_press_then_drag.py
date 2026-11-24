@@ -1,4 +1,5 @@
-"""A swipe that holds its finger at the start before it moves (#769).
+"""A swipe that holds its finger at the start before it moves, or rests at
+the end before it lifts (#769).
 
 Drag-and-drop, reordering a row by its handle, moving an icon or a pin: each
 waits for a press before it follows the finger, and an ordinary swipe moves at
@@ -187,3 +188,56 @@ class TestTheRoute:
         for bad in (-1, 11, float("nan")):
             with pytest.raises(ValidationError):
                 SwipeRequest(start_x=0, start_y=0, end_x=1, end_y=1, press=bad)
+
+
+class TestHoldAtTheEnd:
+    async def test_hold_reaches_the_backend_only_when_given(self):
+        backend = MagicMock(spec=["swipe", "TOOL_NAME", "press_drag"])
+        backend.press_drag = True
+        backend.swipe = AsyncMock()
+        ctrl = _ctrl(backend)
+        await ctrl.swipe(10, 500, 10, 200, press=1.0, hold=1.2)
+        assert backend.swipe.await_args.kwargs == {"press": 1.0, "hold": 1.2}
+        await ctrl.swipe(10, 500, 10, 200, hold=0.4)
+        assert backend.swipe.await_args.kwargs == {"hold": 0.4}
+
+    async def test_a_backend_that_cannot_hold_refuses(self):
+        backend = MagicMock(spec=["swipe", "TOOL_NAME"])
+        backend.TOOL_NAME = "idb"
+        backend.swipe = AsyncMock()
+        with pytest.raises(DeviceOperationUnsupportedError, match="idb backend cannot hold"):
+            await _ctrl(backend).swipe(10, 500, 10, 200, hold=1.0)
+        backend.swipe.assert_not_awaited()
+
+    async def test_wda_rests_with_press_and_drag_with_velocity(self):
+        backend, calls = TestEachBackendsLongPress._wda()
+        await backend.swipe(UDID, 60, 400, 380, 400, 0.8, press=1.0, hold=1.2)
+        path, kwargs = calls[-1]
+        assert path == "/wda/pressAndDragWithVelocity"
+        assert kwargs["json"] == {"fromX": 60, "fromY": 400, "toX": 380, "toY": 400,
+                                  "pressDuration": 1.0, "velocity": pytest.approx(400.0),
+                                  "holdDuration": 1.2}
+
+    async def test_wda_without_hold_keeps_its_drag(self):
+        backend, calls = TestEachBackendsLongPress._wda()
+        await backend.swipe(UDID, 60, 400, 380, 400, 0.8, press=1.0)
+        assert calls[-1][0] == "/wda/dragfromtoforduration"
+
+    async def test_sim_bridge_holds_at_the_end_of_a_press(self):
+        backend, sent = TestSimBridge()._backend()
+        await backend.swipe(UDID, 100, 700, 100, 200, 0.5, press=0.5, hold=1.0)
+        (path,) = sent[-1]["paths"]
+        assert path[-61:] == [[100, 200]] * 61
+        assert sent[-1]["duration"] == pytest.approx(2.0)
+
+    async def test_android_waits_before_lifting(self, monkeypatch):
+        import server.device.android.u2_client as u2
+
+        device = MagicMock()
+        order: list[str] = []
+        device.touch.move.side_effect = lambda *a: order.append("move")
+        device.touch.up.side_effect = lambda *a: order.append("up")
+        monkeypatch.setattr(u2.time, "sleep", lambda s: order.append(f"wait {s}"))
+        backend = TestEachBackendsLongPress._u2(device)
+        await backend.swipe("dev", 100, 1300, 100, 400, 0.5, hold=1.5)
+        assert order[-2:] == ["wait 1.5", "up"]
