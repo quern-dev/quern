@@ -57,6 +57,7 @@ class FakeLib:
         #: Names of calls that never return: "send", "display".
         self.hang: set[str] = set()
         self.contacts = 0
+        self.attempted: list[tuple] = []
         self.keyboards = 0
         self.keys = 0
         #: Fail the keyboard report with this number (1 is the first).
@@ -131,6 +132,10 @@ class FakeLib:
 
             async def send_multitouch(self, contacts):
                 await maybe_hang("send")
+                # Every report tried, the failed one included: it may have
+                # reached the phone before failing.
+                lib.attempted.append(tuple(
+                    (c.identity, c.x, c.y, c.touching) for c in contacts))
                 lib.contacts += 1
                 if lib.fail_contact and lib.fail_contact[0] == lib.contacts:
                     raise lib.fail_contact[1]
@@ -502,7 +507,10 @@ class TestGestures:
                 PHONE, gestures.plan("pinch", 207, 448, scale=2.0))
         reports = lib.multis()
         assert not any(c[3] for c in reports[-1]), "the fingers were not lifted"
-        assert [c[1:3] for c in reports[-1]] == [c[1:3] for c in reports[-2]]
+        # Where the failed report put them: it may have reached the phone
+        # (CodeRabbit on #770). Not the last acknowledged frame.
+        failed = lib.attempted[-2]
+        assert [c[1:3] for c in reports[-1]] == [c[1:3] for c in failed]
 
     async def test_a_failure_on_the_first_report_still_lifts(self, lib, wda, monkeypatch):
         """It may have reached the phone before it failed (CodeRabbit on #770)."""
