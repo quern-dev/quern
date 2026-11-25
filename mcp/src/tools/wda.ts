@@ -91,7 +91,7 @@ ON A SIMULATOR THIS CHANGES WHAT YOU SEE. Simulators are normally read through t
   });
 
   server.registerTool("stop_driver", {
-    description: `Stop the WDA driver on a physical iOS device or a simulator. Deletes the active WDA session and kills the xcodebuild process. On a simulator, its UI goes back to the default backend (reported as "backend"); the first read afterwards may take a second longer while the accessibility bridge recovers from WDA.`,
+    description: `Stop the WDA driver on a physical iOS device or a simulator. Deletes the active WDA session and kills the xcodebuild process. On a simulator, its UI goes back to the default backend (reported as "backend"); the first read afterwards may take a second longer while the accessibility bridge recovers from WDA. On a physical iPhone, WDA then stays stopped: a read the tree push cannot make fails saying so, rather than starting WDA again behind it, until start_driver (the answer's auto_start says so).`,
     inputSchema: strictParams({
       udid: z.string().describe("Physical device or simulator UDID"),
     }),
