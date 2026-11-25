@@ -1188,6 +1188,10 @@ class DeviceControllerUI:
 
         if known_reason():
             return set()
+        if udid in self.wda_client._stopped_on_request:
+            # WDA stopped on purpose is no WDA to send them to: on the push,
+            # or every read went to a WDA that refused it (review).
+            return set()
         return self._push_crashed_apps.get(udid, set())
 
     def _record_push_crash(self, udid: str, app: str) -> None:
@@ -1205,6 +1209,10 @@ class DeviceControllerUI:
         has one, asked afresh (the answer is cached for a minute)."""
         if self._device_type(udid) != DeviceType.DEVICE:
             return None
+        # Stopped on purpose, or its runner just found not answering: a read
+        # the push could not make fell back and started it again (#769).
+        if reason := self.wda_client.no_auto_start_reason(udid):
+            return reason
         from server.tooling.wda_availability import wda_unavailable_reason
 
         return await wda_unavailable_reason()
@@ -3614,14 +3622,20 @@ class DeviceControllerUI:
                 else:
                     if isinstance(failed, AppExitedDuringRead):
                         self._record_push_crash(resolved, failed.app)
-                    raise DeviceError(
+                    message = (
                         f"{failed}. " + ("Nothing was looked up: the screen this lookup "
                                          "was for is gone. "
                                          if isinstance(failed, AppExitedDuringRead) else "")
                         + "There is no WebDriverAgent to read it through instead: "
                         f"{no_wda}. This device stays on the accessibility push; "
-                        "read the screen again." + (f" {said}" if said else ""),
-                        tool=self.coredevice_ax.TOOL_NAME) from failed
+                        "read the screen again." + (f" {said}" if said else ""))
+                    # A WDA stopped on purpose or busy keeps its own type, so
+                    # its status (400, 503) survives the push's context
+                    # (CodeRabbit on #773).
+                    refusal = self.wda_client.auto_start_refusal(resolved, message)
+                    if refusal is not None:
+                        raise refusal from failed
+                    raise DeviceError(message, tool=self.coredevice_ax.TOOL_NAME) from failed
             elif failed is not None:
                 e = failed
                 logger.warning("[coredevice] read of %s failed, using WDA: %s",

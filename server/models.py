@@ -2219,6 +2219,12 @@ class InvalidDeviceRequestError(DeviceError):
     """
 
 
+class WdaRunnerBusyError(DeviceError):
+    """WDA's runner is alive and not answering, and was found so moments ago
+    (#769): refused at once rather than probed again. Transient, like a
+    saturated bridge, so a 503."""
+
+
 class WdaNotSetUpError(DeviceOperationUnsupportedError):
     """WDA has not been built for physical devices on this Mac yet.
 

@@ -177,6 +177,8 @@ async def start_wda_driver(request: Request, body: StartDriverRequest):
 
     from server.device.ios.wda import start_driver
 
+    # Asked for: WDA may be started again, behind reads too (#769).
+    controller.wda_client.note_started(body.udid)
     try:
         result = await start_driver(udid=body.udid, os_version=device.os_version)
     except DeviceError as e:
@@ -206,6 +208,22 @@ async def stop_wda_driver(request: Request, body: StopDriverRequest):
 
     from server.device.ios.wda import stop_driver
 
+    # Recorded before the stop, which can take seconds: a read in that time
+    # passed the check and started a new runner after it (review). Only where
+    # the push reads the phone -- elsewhere WDA is its only reader, and the
+    # next read restarting it is how stop_driver has always reset it.
+    sticky = False
+    if device.device_type == DeviceType.DEVICE:
+        if device.os_version:
+            controller.wda_client._device_os_versions.setdefault(body.udid, device.os_version)
+        sticky = bool(controller._coredevice_serves(body.udid))
+        if sticky:
+            controller.wda_client.note_stopped(body.udid)
+        else:
+            # Its next read restarts WDA, as stop_driver always has: a busy
+            # runner remembered from before the stop must not refuse it
+            # (CodeRabbit on #773).
+            controller.wda_client.forget_unserving(body.udid)
     try:
         result = await stop_driver(udid=body.udid)
     except RuntimeError as e:
@@ -218,6 +236,11 @@ async def stop_wda_driver(request: Request, body: StopDriverRequest):
             controller.wda_client.unregister_simulator(body.udid)
             controller._backend_switched(body.udid)
 
+    if sticky:
+        # Stopped on purpose: the next read the push could not make started
+        # it again, until a second stop_driver (#769).
+        result["auto_start"] = ("off until start_driver: a read the push cannot make "
+                                "fails saying so instead of starting WDA")
     if device.device_type == DeviceType.SIMULATOR:
         # What the router now picks, not a literal: it is idb where sim-bridge
         # is unavailable, and a hardcoded name is the drift #186 removed.

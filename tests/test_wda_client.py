@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -1054,7 +1054,7 @@ class TestDescribeAllTimeoutFallback:
         async def fake_stop(udid):
             pass
 
-        async def fake_start(udid, os_version):
+        async def fake_start(udid, os_version, *, refuse=None):
             nonlocal restarted
             restarted = True
             mock_proc = MagicMock()
@@ -1089,7 +1089,7 @@ class TestDescribeAllTimeoutFallback:
                         result = await backend.describe_all("test-udid")
 
                         mock_stop.assert_called_once_with("test-udid")
-                        mock_start.assert_called_once_with("test-udid", "iOS 17.4")
+                        mock_start.assert_called_once_with("test-udid", "iOS 17.4", refuse=ANY)
                         mock_skel.assert_called_once_with("test-udid")
 
             assert isinstance(result, list)
