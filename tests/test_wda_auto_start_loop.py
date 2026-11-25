@@ -162,6 +162,27 @@ class TestStoppedOnPurpose:
         await backend._restart_wda(PHONE)
         launched.assert_not_called()
 
+    @pytest.mark.parametrize("during", ["wda_unavailable_reason", "refuse_without_xcode"])
+    async def test_a_stop_that_lands_during_an_auto_start_is_honoured(
+            self, backend, monkeypatch, during):
+        """The read path's start had the same gap: checked before its awaits,
+        not where the start is registered (CodeRabbit on #773)."""
+        launched = AsyncMock(return_value={"status": "started", "ready": True})
+        monkeypatch.setattr(wda_module, "_start_driver", launched)
+
+        async def stop_lands(*args, **kwargs):
+            backend.note_stopped(PHONE)
+
+        from server.tooling import wda_availability
+        monkeypatch.setattr(wda_availability, "wda_unavailable_reason", AsyncMock(
+            side_effect=stop_lands if during == "wda_unavailable_reason" else None,
+            return_value=None))
+        monkeypatch.setattr(wda_module, "refuse_without_xcode", AsyncMock(
+            side_effect=stop_lands if during == "refuse_without_xcode" else None))
+        with pytest.raises(WdaNotSetUpError, match="stopped with stop_driver"):
+            await backend._get_base_url(PHONE)
+        launched.assert_not_called()
+
     async def test_a_restart_with_no_stop_still_starts(self, backend, monkeypatch):
         launched = AsyncMock(return_value={"status": "started", "ready": True})
         monkeypatch.setattr(wda_module, "_start_driver", launched)
