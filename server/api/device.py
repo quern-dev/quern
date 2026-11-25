@@ -67,6 +67,7 @@ TOOLS_IN_LIST_MAX_AGE = 5.0
 
 if TYPE_CHECKING:
     from server.device.controller import DeviceController
+    from server.knowledge.landmarks import LandmarkRegistry
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
 logger = logging.getLogger(__name__)
@@ -77,7 +78,29 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-async def _capture_screen_context(controller, udid: str, registry=None) -> dict:
+#: The longest an action's screen context may take. The action has already
+#: happened: a read that runs on -- 107 s after a launch, on a busy map --
+#: only delays saying so (#769).
+SCREEN_CONTEXT_S = 25.0
+
+
+async def _capture_screen_context(controller: DeviceController, udid: str,
+                                  registry: LandmarkRegistry | None = None) -> dict:
+    """`_screen_context`, bounded by SCREEN_CONTEXT_S. A context that could
+    not be read says why in `error` -- the caller asked for it, and an empty
+    one read as a screen with nothing on it -- and never fails the action."""
+    try:
+        return await asyncio.wait_for(_screen_context(controller, udid, registry),
+                                      SCREEN_CONTEXT_S)
+    except TimeoutError:
+        return {"error": f"the screen could not be read within {SCREEN_CONTEXT_S:g}s; "
+                         "the action itself was done"}
+    except Exception as e:  # noqa: BLE001 -- the action stands; the read is extra
+        return {"error": f"the screen could not be read: {e}; the action itself was done"}
+
+
+async def _screen_context(controller: DeviceController, udid: str,
+                          registry: LandmarkRegistry | None = None) -> dict:
     """Best-effort screen context capture for action responses.
 
     When landmarks are loaded, this also says which screen the action landed
@@ -89,40 +112,37 @@ async def _capture_screen_context(controller, udid: str, registry=None) -> dict:
     truncates the *summary*: the list identification runs against is the whole
     tree. With no landmarks loaded nothing is added and nothing is read.
     """
-    try:
-        # A whole-screen read, so on a phone the tree push serves it reads the
-        # push and starts no WDA (#664).
-        summary, elements, _ = await controller.get_screen_summary(
-            max_elements=10, udid=udid, whole_screen=True,
-        )
-        context = {
-            "screen_title": summary.get("screen_title", ""),
-            "summary": summary.get("summary", ""),
-            "element_count": summary.get("element_count", 0),
-            "interactive_elements": summary.get("interactive_elements", []),
-        }
-        # Carried, not dropped. "Tapped, and the screen now has 0 elements" is
-        # the most common way a caller meets a timed-out read, and this
-        # whitelist computed the explanation one frame up and discarded it
-        # (#170). An element count the caller cannot interpret is the whole
-        # defect, so the field that interprets it travels with the count.
-        if summary.get("source_timed_out"):
-            context["source_timed_out"] = True
-            context["degraded"] = summary.get("degraded", "")
-        # Second field this whitelist has dropped: #170 had to reopen it for
-        # `source_timed_out`, and it silently omitted `backend` the same way.
-        # A four-key literal in front of a growing dict loses whatever is
-        # added next, so it copies what it is given.
-        if summary.get("backend"):
-            context["backend"] = summary["backend"]
-        # And a third: the read's own warning -- above all a crash it caused
-        # (#669), after which this context is the screen the crash left.
-        if summary.get("warning"):
-            context["warning"] = summary["warning"]
-        context.update(await _identify_for_context(controller, udid, registry, elements))
-        return context
-    except Exception:
-        return {}
+    # A whole-screen read, so on a phone the tree push serves it reads the
+    # push and starts no WDA (#664).
+    summary, elements, _ = await controller.get_screen_summary(
+        max_elements=10, udid=udid, whole_screen=True,
+    )
+    context = {
+        "screen_title": summary.get("screen_title", ""),
+        "summary": summary.get("summary", ""),
+        "element_count": summary.get("element_count", 0),
+        "interactive_elements": summary.get("interactive_elements", []),
+    }
+    # Carried, not dropped. "Tapped, and the screen now has 0 elements" is
+    # the most common way a caller meets a timed-out read, and this
+    # whitelist computed the explanation one frame up and discarded it
+    # (#170). An element count the caller cannot interpret is the whole
+    # defect, so the field that interprets it travels with the count.
+    if summary.get("source_timed_out"):
+        context["source_timed_out"] = True
+        context["degraded"] = summary.get("degraded", "")
+    # Second field this whitelist has dropped: #170 had to reopen it for
+    # `source_timed_out`, and it silently omitted `backend` the same way.
+    # A four-key literal in front of a growing dict loses whatever is
+    # added next, so it copies what it is given.
+    if summary.get("backend"):
+        context["backend"] = summary["backend"]
+    # And a third: the read's own warning -- above all a crash it caused
+    # (#669), after which this context is the screen the crash left.
+    if summary.get("warning"):
+        context["warning"] = summary["warning"]
+    context.update(await _identify_for_context(controller, udid, registry, elements))
+    return context
 
 
 async def _identify_for_context(controller, udid: str, registry, elements) -> dict:
@@ -183,6 +203,12 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
     """Map a DeviceError to an appropriate HTTPException."""
     msg = str(e)
     # Type-based routing for WDA errors (more reliable than string matching)
+    from server.device.ios.coredevice_ax import ScreenTooBusy
+
+    if isinstance(e, ScreenTooBusy):
+        # Not a fault: the screen cannot be read as it is, and the message
+        # says how to make it smaller and read again (#769).
+        return HTTPException(status_code=503, detail=msg)
     if isinstance(e, SimBridgeSaturatedError):
         # 503, not 500: the device is healthy and the request was valid, there is
         # just more queued than is worth serving. Retrying immediately makes it
