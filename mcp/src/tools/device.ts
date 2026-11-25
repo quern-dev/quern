@@ -103,7 +103,7 @@ export function registerDeviceTools(server: McpServer): void {
   });
 
   server.registerTool("boot_device", {
-    description: `Boot an iOS simulator or Android emulator by UDID or name. Not supported for physical devices.`,
+    description: `Boot an iOS simulator or Android emulator by UDID or name. Not supported for physical devices. For a simulator it returns once the boot has finished and its screen can be read -- iOS keeps SpringBoard starting for some seconds after it reports booted, and reads and taps fail meanwhile. screen_ready says whether it got there (screen_ready_after_s, how long it took); false, with screen_ready_error, means the simulator booted but its screen could not be read within a minute, so taps and reads may fail until it can.`,
     inputSchema: strictParams({
       udid: z.string().optional().describe("Device UDID to boot"),
       name: z
