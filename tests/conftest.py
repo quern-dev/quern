@@ -937,6 +937,23 @@ def _no_real_frame_capture(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_boot_waits(monkeypatch):
+    """A boot waits for `simctl bootstatus` and then for a readable screen:
+    a real subprocess, and real reads of a fake UDID. Tests of those waits
+    call the real methods, captured before this runs."""
+    from server.device.controller import DeviceController
+
+    async def booted(self, udid):
+        return None
+
+    async def readable(self, udid, timeout=None, interval=1.0):
+        return True, 0.0, None
+
+    monkeypatch.setattr(DeviceController, "_wait_for_boot", booted)
+    monkeypatch.setattr(DeviceController, "wait_until_screen_readable", readable)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_screen_mirror_refresh(monkeypatch):
     """Server start brings the screen-mirror app up to date: a real swiftc, a
     real `ps`, and quitting real Quern Preview windows. Tests of the refresh

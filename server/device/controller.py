@@ -1163,6 +1163,9 @@ class DeviceController(DeviceControllerUI):
                 )
             self._require_simulator(udid, "Boot")
             await self.simctl.boot(udid)
+            # `simctl boot` returns as the boot starts: a screen read right
+            # after it failed while iOS was still on its logo.
+            await self._wait_for_boot(udid)
             if set_active:
                 self._active_udid = udid
             await self._restore_input_after_boot(udid)
@@ -1192,12 +1195,49 @@ class DeviceController(DeviceControllerUI):
 
             device_access.check(target.udid)
             await self.simctl.boot(target.udid)
+            await self._wait_for_boot(target.udid)
             if set_active:
                 self._active_udid = target.udid
             await self._restore_input_after_boot(target.udid)
             return target.udid
 
         raise DeviceError("Either udid or name is required to boot", tool="simctl")
+
+    async def _wait_for_boot(self, udid: str) -> None:
+        """A simulator's boot, finished: `simctl bootstatus`, bounded. Its own
+        method so the suite can stand it in without the backend's real one."""
+        await self.simctl.wait_until_booted(udid)
+
+    #: How long `boot_device` waits for a booted simulator's screen to be
+    #: readable. Measured: about 20 s after `bootstatus` said it was up.
+    SCREEN_READY_TIMEOUT = 60.0
+
+    async def wait_until_screen_readable(
+        self, udid: str, timeout: float | None = None, interval: float = 1.0,
+    ) -> tuple[bool, float, str | None]:
+        """Poll a booted simulator's screen until it can be read. Returns
+        `(readable, seconds waited, the last error)`.
+
+        A simulator `bootstatus` calls booted still has SpringBoard starting:
+        its accessibility tree cannot be read for some seconds more, and every
+        read, tap and wait in that window failed (measured ~20 s on iOS 27.2).
+        Only that failure is waited through. Any other is the answer at once,
+        as the read itself would give it.
+        """
+        from server.device.controller_ui import screen_not_ready
+
+        limit = self.SCREEN_READY_TIMEOUT if timeout is None else timeout
+        start = time.monotonic()
+        while True:
+            try:
+                await self.get_ui_elements(udid, use_cache=False)
+                return True, time.monotonic() - start, None
+            except DeviceError as e:
+                if not screen_not_ready(e):
+                    return False, time.monotonic() - start, str(e)
+                if time.monotonic() - start >= limit:
+                    return False, time.monotonic() - start, str(e)
+            await asyncio.sleep(interval)
 
     async def _restore_input_after_boot(self, udid: str) -> None:
         """Take the input services back, if Xcode 27's Device Hub has them.

@@ -536,12 +536,25 @@ async def boot_device(request: Request, body: BootDeviceRequest):
     from server.proxy import sim_tls
     await sim_tls.refresh_after(request.app, "booting a simulator")
 
-    return {
+    answer = {
         "status": "booted",
         "udid": udid,
         "cert_auto_installed": cert_auto_installed,
         "proxy_auto_started": proxy_auto_started,
     }
+    if not controller._is_android(udid):
+        # Booted is not usable: SpringBoard's screen is unreadable for some
+        # seconds after the boot, and every read, tap and wait then failed.
+        # Said, not assumed -- `screen_ready` false carries why.
+        ready, waited, error = await controller.wait_until_screen_readable(udid)
+        answer["screen_ready"] = ready
+        answer["screen_ready_after_s"] = round(waited, 1)
+        if not ready:
+            answer["screen_ready_error"] = error
+            answer["note"] = ("The simulator booted, but its screen could not be read yet: "
+                              "taps and reads may fail until it can. get_screen_summary "
+                              "or wait_for_element will say when it is ready.")
+    return answer
 
 
 @router.post("/shutdown")

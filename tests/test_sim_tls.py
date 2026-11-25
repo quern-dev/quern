@@ -956,6 +956,7 @@ class TestQuernsOwnEventsRefreshAtOnce:
         )
         controller = api.app.state.device_controller
         controller.boot = AsyncMock(return_value=A)
+        controller.wait_until_screen_readable = AsyncMock(return_value=(True, 0.0, None))
         controller._is_android = MagicMock(return_value=False)
 
         r = api.client.post("/api/v1/device/boot", json={"udid": A}, headers=api.headers)

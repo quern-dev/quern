@@ -225,6 +225,19 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
     }
 
 
+#: What a simulator's accessibility read says while SpringBoard is still
+#: starting after a boot (sim-bridge): the screen is not readable *yet*.
+SCREEN_NOT_READY_MARKERS = ("Failed to query accessibility tree",)
+
+
+def screen_not_ready(error: BaseException) -> bool:
+    """Whether a read failed only because the screen is not readable yet,
+    which waiting cures -- not a busy screen, a crash or a missing device,
+    which it does not."""
+    return isinstance(error, DeviceError) and any(
+        m in str(error) for m in SCREEN_NOT_READY_MARKERS)
+
+
 def _build_screen_context(elements: list[UIElement]) -> dict:
     """Build a lightweight screen context dict from an existing elements list.
 
@@ -4089,16 +4102,29 @@ class DeviceControllerUI:
             # Fetch UI elements with filtering for performance
             filter_label = _effective_filter_label(label, label_contains, label_prefix)
             _begin_lookup()
-            elements, _ = await self.get_ui_elements(
-                resolved,
-                filter_label=filter_label,
-                filter_identifier=identifier,
-                filter_type=element_type,
-                mode=mode,
-                snapshot_depth=poll_depth,
-                deepen_on_miss=_deepen_allowed(snapshot_depth, deepen),
-                lookup=True,
-            )
+            try:
+                elements, _ = await self.get_ui_elements(
+                    resolved,
+                    filter_label=filter_label,
+                    filter_identifier=identifier,
+                    filter_type=element_type,
+                    mode=mode,
+                    snapshot_depth=poll_depth,
+                    deepen_on_miss=_deepen_allowed(snapshot_depth, deepen),
+                    lookup=True,
+                )
+            except DeviceError as e:
+                # A screen that cannot be read *yet* -- SpringBoard still
+                # starting after a boot -- is waited through, as the wait's
+                # own timeout allows: it raised at once, on exactly the call
+                # an agent makes after a boot. Never read as "not there", or a
+                # not_exists wait would pass on a screen nobody could see. Any
+                # other failure is raised as before, and this one too when the
+                # screen never became readable.
+                if not screen_not_ready(e) or elapsed >= timeout:
+                    raise
+                await asyncio.sleep(interval)
+                continue
             # Per poll: a push read that cannot be made falls back to WDA.
             pushed = _READ_BY.get() == self.coredevice_ax.TOOL_NAME
             deepened = _DEEPENED.get()

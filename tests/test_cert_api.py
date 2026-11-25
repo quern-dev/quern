@@ -1265,6 +1265,9 @@ class TestBootDoesNotInstallWithoutConsent:
         that never ran, which is the failure this file has hit twice.
         """
         app.state.device_controller.boot = AsyncMock(return_value="AAAA")
+        # The boot now also waits for a readable screen (boot gaps).
+        app.state.device_controller.wait_until_screen_readable = AsyncMock(
+            return_value=(True, 0.0, None))
         app.state.device_controller._is_android = lambda _u: android
         app.state.device_controller.is_cert_installed = AsyncMock(return_value=False)
         return app.state.device_controller
@@ -1482,6 +1485,9 @@ class TestBootAutoStartAsksTheTrustStore:
 
     def _boot(self, app, monkeypatch, tmp_path, *, truststore):
         app.state.device_controller.boot = AsyncMock(return_value="AAAA")
+        # The boot now also waits for a readable screen (boot gaps).
+        app.state.device_controller.wait_until_screen_readable = AsyncMock(
+            return_value=(True, 0.0, None))
         app.state.device_controller._is_android = lambda _u: False
         ca = tmp_path / "mitmproxy-ca-cert.pem"
         ca.write_text("present")
