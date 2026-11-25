@@ -73,17 +73,102 @@ class TestTheDevicesOwnPace:
                 coredevice_ax._newest_tree(q, {}, since=loop.time()), 5)
         assert loop.time() - started < 0.5
 
-    async def test_the_pace_is_timed_from_the_last_initial_dump(self, fast_budget):
-        """A slow first InitialDump, then a second at once and nothing: the
-        quick one is the pace, so it stalls quickly, as #684's do. Timed from
-        the subscription instead, the window would stay long."""
+    async def test_a_quick_initial_dump_does_not_shorten_a_slow_ones_wait(
+            self, fast_budget):
+        """A slow first InitialDump (0.4 s), a second at once, then the
+        complete tree 0.8 s later: the slow pace still counts. Timed from the
+        quick one alone, the map stalled as before (review)."""
         loop = asyncio.get_running_loop()
         since = loop.time() - 0.4
-        q = _queue_later((0.0, INITIAL), (0.05, INITIAL))
+        q = _queue_later((0.0, INITIAL), (0.05, INITIAL), (0.8, SETTINGS))
+        tree, _, _ = await asyncio.wait_for(
+            coredevice_ax._newest_tree(q, {}, since=since), 5)
+        assert tree.dump_type == "AdditionalData"
+
+    async def test_the_pace_is_capped(self, fast_budget, monkeypatch):
+        """A late first push must not hold off recovering a real stall for the
+        whole deadline (review)."""
+        monkeypatch.setattr(coredevice_ax, "STALL_PACE_MAX_S", 0.3)
+        loop = asyncio.get_running_loop()
+        q = _queue_later((0.0, INITIAL))
         started = loop.time()
         with pytest.raises(PushStalled):
-            await asyncio.wait_for(coredevice_ax._newest_tree(q, {}, since=since), 5)
-        assert loop.time() - started < 0.6
+            await asyncio.wait_for(
+                coredevice_ax._newest_tree(q, {}, since=loop.time() - 2.0), 5)
+        assert loop.time() - started < 0.8, "the window was not capped"
+
+
+class TestTheWiring:
+    """The pace tests above call `_newest_tree` directly; a `_settled` that
+    stopped passing the subscription's time passed them all (review)."""
+
+    @staticmethod
+    def _subscribe_slow(first_after: float, complete_after: float):
+        async def subscribe(lib, address, conn, uuid, *, spare=False):
+            loop = asyncio.get_running_loop()
+            conn.rsd = conn.provider = object()
+            conn.subscribed_at = loop.time()
+            return _queue_later((first_after, INITIAL), (complete_after, SETTINGS))
+        return subscribe
+
+    async def test_settled_paces_from_the_subscription(self, fast_budget, monkeypatch):
+        monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 5.0)       # no spare here
+        monkeypatch.setattr(coredevice_ax, "_subscribe", self._subscribe_slow(0.4, 0.6))
+        monkeypatch.setattr(coredevice_ax, "_close", AsyncMock())
+        from types import SimpleNamespace
+        conn = SimpleNamespace(rsd=None, provider=None)
+        tree, _, _ = await asyncio.wait_for(
+            coredevice_ax._settled(PHONE, object(), None, conn, {}), 5)
+        assert tree.dump_type == "AdditionalData"
+
+    async def test_a_spare_that_wins_carries_its_own_time(self, fast_budget, monkeypatch):
+        """The first subscription stays silent; the spare's InitialDump is
+        slow, so its pace must be the spare's subscription, not none."""
+        monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 0.05)
+        calls = []
+
+        async def subscribe(lib, address, conn, uuid, *, spare=False):
+            calls.append(spare)
+            conn.rsd = conn.provider = object()
+            conn.subscribed_at = asyncio.get_running_loop().time()
+            if not spare:
+                return asyncio.Queue()                                # silent
+            return _queue_later((0.4, INITIAL), (0.6, SETTINGS))
+
+        monkeypatch.setattr(coredevice_ax, "_subscribe", subscribe)
+        monkeypatch.setattr(coredevice_ax, "_close", AsyncMock())
+        from types import SimpleNamespace
+        conn = SimpleNamespace(rsd=None, provider=None)
+        tree, _, _ = await asyncio.wait_for(
+            coredevice_ax._settled(PHONE, object(), None, conn, {}), 5)
+        assert calls == [False, True]
+        assert tree.dump_type == "AdditionalData"
+
+    async def test_a_stalled_attempts_tree_is_not_left_for_the_next(
+            self, fast_budget, monkeypatch):
+        """Left in `held`, a big InitialDump from a stalled attempt made a push
+        that then stayed silent read as "too busy" (review)."""
+        monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 5.0)
+        attempts = []
+
+        async def subscribe(lib, address, conn, uuid, *, spare=False):
+            attempts.append(1)
+            conn.rsd = conn.provider = object()
+            conn.subscribed_at = asyncio.get_running_loop().time()
+            if len(attempts) == 1:
+                return _queue_later((0.0, INITIAL))                   # then stalls
+            return asyncio.Queue()                                    # silent
+
+        monkeypatch.setattr(coredevice_ax, "_subscribe", subscribe)
+        monkeypatch.setattr(coredevice_ax, "_close", AsyncMock())
+        from types import SimpleNamespace
+        held: dict = {}
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(coredevice_ax._settled(
+                PHONE, object(), None, SimpleNamespace(rsd=None, provider=None), held), 1.0)
+        assert len(attempts) >= 2
+        assert "newest" not in held, "the stalled attempt's tree was kept"
+        assert held.get("first") is not None                          # kept for #669
 
 
 class TestTooBusyToRead:
@@ -109,6 +194,14 @@ class TestTooBusyToRead:
             await read_tree(PHONE, timeout=0.3)
         assert "zoom a map in" in str(caught.value)
         assert caught.value.elements == 415
+
+    @pytest.mark.parametrize(("elements", "busy"), [(99, False), (100, True)])
+    async def test_the_threshold(self, monkeypatch, phone_address, elements, busy):
+        monkeypatch.setattr(coredevice_ax, "_settled", self._still_describing(elements))
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: object())
+        with pytest.raises(DeviceError) as caught:
+            await read_tree(PHONE, timeout=0.3)
+        assert isinstance(caught.value, ScreenTooBusy) is busy
 
     async def test_a_small_screen_that_times_out_is_not_called_busy(
             self, monkeypatch, phone_address):

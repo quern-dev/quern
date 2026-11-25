@@ -79,6 +79,13 @@ STALL_MIN_S = 2.5
 #: and no read of it ever finished. #684's stall sends its InitialDumps
 #: about 1 s apart, so it is still given up on in STALL_MIN_S.
 STALL_PACE = 2.5
+#: The slowest pace seen on the subscription is what counts: a quick
+#: InitialDump after a slow one does not shorten the wait the slow one earned,
+#: or a map that sent two close together stalled as before (review). #684's
+#: stall sends every InitialDump quickly, so its pace stays small. Capped, so
+#: a late first push cannot hold off recovering a real stall for the whole
+#: deadline (review): the ~119-pin map's 2.5 x 4.4 s is under it.
+STALL_PACE_MAX_S = 12.0
 #: A screen still building at the deadline with at least this many elements
 #: in its InitialDump is too busy to read in time, said as such and not read
 #: through WDA instead, whose /source timed out on the same map (#769).
@@ -827,6 +834,7 @@ async def _newest_tree(queue: asyncio.Queue,
     # When the device was last asked or last answered: the subscription, then
     # each InitialDump. What it took to answer is its pace (#769).
     paced_from = since if since is not None else loop.time()
+    pace = 0.0
     while True:
         if latest is None and stall_by is None:
             selector, args = await queue.get()
@@ -880,9 +888,9 @@ async def _newest_tree(queue: asyncio.Queue,
             # newest one's, is waited for -- not for ever (#684), and not less
             # than the device's own pace allows (#769).
             now = loop.time()
-            took, paced_from = now - paced_from, now
+            pace, paced_from = max(pace, now - paced_from), now
             stall_by = now + max(STALL_PAIRS * _pair_budget(tree), STALL_MIN_S,
-                                 STALL_PACE * took)
+                                 min(STALL_PACE * pace, STALL_PACE_MAX_S))
         elif latest is not None:
             changing = True
             # Its pair gets the time a tree this size takes to build, and
@@ -1375,6 +1383,10 @@ async def _settled(uuid: str, lib: SimpleNamespace, address: Any, conn: SimpleNa
             return tree, first, newest
         except PushStalled:
             first_seen = first_seen or held.get("first")
+            # A stalled attempt's trees are not the next attempt's: a big
+            # InitialDump left in `held` turned a push that then stayed
+            # silent into "too busy" (review). The first is kept, above.
+            held.pop("newest", None)
             if attempt == RESUBSCRIBES:
                 raise
             logger.info("[coredevice] %s stopped pushing before a complete tree: "
