@@ -749,6 +749,19 @@ func panelSelfTest() -> [String] {
     if portrait.panel != nil || portrait.map(continueRaw) != continueRaw {
         failures.append("portrait took the turned path")
     }
+    // The screenshot's display (Xcode 27.2): the built-in one with a surface,
+    // never a surfaceless display listed before it.
+    let displays: [(UInt64?, Bool, Bool, String)] = [
+        (0, true, true, "built-in, with a surface"),
+        (nil, true, true, "properties unreadable, with a surface"),
+        (0, false, false, "built-in, no surface yet (booting)"),
+        (1, false, false, "Xcode 27.2's extra display, no surface"),
+        (1, true, false, "a non-built-in display with a surface"),
+    ]
+    for (type, surface, want, what) in displays
+    where isScreenshotDisplay(screenType: type, hasSurface: surface) != want {
+        failures.append("screenshot display: \(what) -> \(!want), want \(want)")
+    }
     return failures
 }
 
@@ -2110,6 +2123,13 @@ func decomposeCharacter(_ c: Character) -> (UInt32, [UInt32])? {
 
 // MARK: - Screenshot via IOSurface
 
+/// Whether a framebuffer display is the one to screenshot: built in
+/// (`screenType` 0, when the properties can be read at all) and holding a
+/// surface. Pure, so the self-test drives it.
+func isScreenshotDisplay(screenType: UInt64?, hasSurface: Bool) -> Bool {
+    hasSurface && (screenType == nil || screenType == 0)
+}
+
 func doScreenshot(udid: String, quality: Double = 0.8, scale: Int = 1) -> (Data, Int, Int)? {
     guard let device = resolveDevice(udid: udid) else {
         logErr("[screenshot] device not found: \(udid)")
@@ -2134,14 +2154,23 @@ func doScreenshot(udid: String, quality: Double = 0.8, scale: Int = 1) -> (Data,
     let descSel = NSSelectorFromString("descriptor")
     let surfSel = NSSelectorFromString("framebufferSurface")
 
-    // Find framebuffer descriptor
+    // The device's own screen: a built-in display with a surface. Xcode 27.2's
+    // simulators list three more framebuffer displays first -- display class 1
+    // in `simctl io enumerate`, with no surface -- so the first display found
+    // had nothing to read, and every screenshot here failed, taking
+    // verify_changed's frames and the unchanged-screen note with it (measured
+    // on an iPhone 17, iOS 27.2: three surfaceless displays, then the LCD at
+    // 1206x2622). `integratedPanels` already chose this way.
     var descriptor: NSObject?
     for port in ports where port.responds(to: pidSel) {
         guard let pid = port.perform(pidSel)?.takeUnretainedValue(),
               "\(pid)" == "com.apple.framebuffer.display",
               port.responds(to: descSel),
               let desc = port.perform(descSel)?.takeUnretainedValue() as? NSObject,
-              desc.responds(to: surfSel) else { continue }
+              desc.responds(to: surfSel),
+              isScreenshotDisplay(screenType: screenProperties(of: desc)?.screenType,
+                                  hasSurface: desc.perform(surfSel)?.takeUnretainedValue() != nil)
+        else { continue }
         descriptor = desc
         break
     }
