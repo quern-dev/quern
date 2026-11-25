@@ -725,8 +725,10 @@ class TestATimeoutSaysWhoseItWas:
         long_read = asyncio.create_task(read_tree(PHONE, timeout=5))
         await asyncio.sleep(0.05)
 
+        # Room for the turn to come on a slow runner: at 1.2 s the Linux job
+        # timed out still waiting, twice, and the read was never asked (#773 CI).
         with pytest.raises(DeviceError) as caught:
-            await read_tree(PHONE, timeout=1.2)
+            await read_tree(PHONE, timeout=2.5)
         await long_read
 
         assert "sent no complete" in str(caught.value)
