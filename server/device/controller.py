@@ -1228,16 +1228,26 @@ class DeviceController(DeviceControllerUI):
 
         limit = self.SCREEN_READY_TIMEOUT if timeout is None else timeout
         start = time.monotonic()
+        last_error: str | None = None
         while True:
+            # Every read inside the budget, the last one too: checked only after
+            # a failure, a read begun at 59.5 s could run on well past it (CR).
+            left = limit - (time.monotonic() - start)
+            if left <= 0:
+                return False, time.monotonic() - start, (
+                    last_error or f"the screen could not be read within {limit:g}s")
             try:
-                await self.get_ui_elements(udid, use_cache=False)
+                await asyncio.wait_for(self.get_ui_elements(udid, use_cache=False), left)
                 return True, time.monotonic() - start, None
+            except TimeoutError:
+                return False, time.monotonic() - start, (
+                    f"the screen could not be read within {limit:g}s"
+                    + (f"; before that: {last_error}" if last_error else ""))
             except DeviceError as e:
                 if not screen_not_ready(e):
                     return False, time.monotonic() - start, str(e)
-                if time.monotonic() - start >= limit:
-                    return False, time.monotonic() - start, str(e)
-            await asyncio.sleep(interval)
+                last_error = str(e)
+            await asyncio.sleep(min(interval, max(0.0, limit - (time.monotonic() - start))))
 
     async def _restore_input_after_boot(self, udid: str) -> None:
         """Take the input services back, if Xcode 27's Device Hub has them.

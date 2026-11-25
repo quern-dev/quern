@@ -4121,9 +4121,12 @@ class DeviceControllerUI:
                 # not_exists wait would pass on a screen nobody could see. Any
                 # other failure is raised as before, and this one too when the
                 # screen never became readable.
-                if not screen_not_ready(e) or elapsed >= timeout:
+                # Measured now, not at the poll's start: a read that failed
+                # slowly must not buy another past the timeout (CR).
+                left = timeout - (time.time() - start_time)
+                if not screen_not_ready(e) or left <= 0:
                     raise
-                await asyncio.sleep(interval)
+                await asyncio.sleep(min(interval, left))
                 continue
             # Per poll: a push read that cannot be made falls back to WDA.
             pushed = _READ_BY.get() == self.coredevice_ax.TOOL_NAME
