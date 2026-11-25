@@ -1204,6 +1204,10 @@ class DeviceControllerUI:
         has one, asked afresh (the answer is cached for a minute)."""
         if self._device_type(udid) != DeviceType.DEVICE:
             return None
+        # Stopped on purpose, or its runner just found not answering: a read
+        # the push could not make fell back and started it again (#769).
+        if reason := self.wda_client.no_auto_start_reason(udid):
+            return reason
         from server.tooling.wda_availability import wda_unavailable_reason
 
         return await wda_unavailable_reason()

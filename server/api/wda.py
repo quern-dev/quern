@@ -177,6 +177,8 @@ async def start_wda_driver(request: Request, body: StartDriverRequest):
 
     from server.device.ios.wda import start_driver
 
+    # Asked for: WDA may be started again, behind reads too (#769).
+    controller.wda_client.note_started(body.udid)
     try:
         result = await start_driver(udid=body.udid, os_version=device.os_version)
     except DeviceError as e:
@@ -218,6 +220,12 @@ async def stop_wda_driver(request: Request, body: StopDriverRequest):
             controller.wda_client.unregister_simulator(body.udid)
             controller._backend_switched(body.udid)
 
+    if device.device_type == DeviceType.DEVICE:
+        # Stopped on purpose: the next read the push could not make started
+        # it again, until a second stop_driver (#769).
+        controller.wda_client.note_stopped(body.udid)
+        result["auto_start"] = ("off until start_driver: a read the push cannot make "
+                                "fails saying so instead of starting WDA")
     if device.device_type == DeviceType.SIMULATOR:
         # What the router now picks, not a literal: it is idb where sim-bridge
         # is unavailable, and a hardcoded name is the drift #186 removed.

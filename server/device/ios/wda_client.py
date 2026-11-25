@@ -307,6 +307,10 @@ class QueryTimedOut(Exception):
     nothing because it did not finish, not because nothing is there (#470)."""
 
 
+#: How long a runner found alive and not answering is not asked again (#769).
+WDA_UNSERVING_S = 60.0
+
+
 class WdaBackend:
     """Speaks WDA's HTTP API for UI automation on physical iOS devices."""
 
@@ -344,6 +348,12 @@ class WdaBackend:
         self._idle_task: asyncio.Task | None = None
         # Track active snapshotMaxDepth per device to avoid redundant POSTs
         self._current_depth: dict[str, int] = {}
+        #: Phones whose WDA was stopped with stop_driver: not started again
+        #: behind a read until start_driver (#769).
+        self._stopped_on_request: set[str] = set()
+        #: Phones whose runner was found alive and not answering, until when
+        #: it is not asked again, and what it said (#769).
+        self._unserving: dict[str, tuple[float, str]] = {}
         # Per-device lock for session creation (prevents parallel _ensure_session races)
         self._session_locks: dict[str, asyncio.Lock] = {}
         #: Seconds the last `/source` ran before timing out, per device, or
@@ -577,6 +587,10 @@ class WdaBackend:
         except DeviceError:
             pass
 
+        # Not started where it was stopped on purpose, nor probed again where
+        # its runner has just been found alive and not answering (#769).
+        self._refuse_auto_start(udid)
+
         # WDA not reachable — try auto-start if we know the os_version
         os_version = self._device_os_versions.get(udid)
         if not os_version:
@@ -605,6 +619,13 @@ class WdaBackend:
         from server.device.ios.wda import start_driver
 
         result = await start_driver(udid, os_version)
+        if not result.get("ready") and result.get("status") == "already_running":
+            # Alive and not answering: every WDA call asked it again, 3 s a
+            # time, about every 7 s for as long as the call that wanted WDA
+            # lasted -- 94 s once, behind one screen read (#769).
+            error = result.get("error") or "it did not answer"
+            self._unserving[udid] = (time.monotonic() + WDA_UNSERVING_S, error)
+            raise DeviceError(self._unserving_message(udid, error), tool="wda")
         if not result.get("ready"):
             raise DeviceError(
                 f"Auto-started WDA driver on {udid[:8]} but it did not become responsive. "
@@ -613,6 +634,7 @@ class WdaBackend:
             )
 
         # Retry connection after auto-start
+        self._unserving.pop(udid, None)
         base_url = await self._try_tunneld_connection(udid)
         if base_url:
             self._connections[udid] = _WdaConnection(base_url=base_url)
@@ -624,6 +646,44 @@ class WdaBackend:
             base_url=base_url, forward_proc=proc, local_port=port,
         )
         return base_url
+
+    def note_stopped(self, udid: str) -> None:
+        """stop_driver ran: WDA is not started again behind a read (#769)."""
+        self._stopped_on_request.add(udid)
+        self._unserving.pop(udid, None)
+
+    def note_started(self, udid: str) -> None:
+        """start_driver ran: WDA may be used, and started again, as before."""
+        self._stopped_on_request.discard(udid)
+        self._unserving.pop(udid, None)
+
+    def no_auto_start_reason(self, udid: str) -> str | None:
+        """Why WDA would not be started behind a read on this phone now, or
+        None: stopped on purpose, or a runner just found not answering."""
+        if udid in self._stopped_on_request:
+            return (f"WDA on {udid[:8]} was stopped with stop_driver, so it is not "
+                    "started again behind a read; start_driver to use it")
+        unserving = self._unserving.get(udid)
+        if unserving is not None and time.monotonic() < unserving[0]:
+            return self._unserving_message(udid, unserving[1])
+        return None
+
+    def _refuse_auto_start(self, udid: str) -> None:
+        if udid in self._stopped_on_request:
+            from server.models import WdaNotSetUpError
+
+            raise WdaNotSetUpError(self.no_auto_start_reason(udid) or "", tool="wda")
+        reason = self.no_auto_start_reason(udid)
+        if reason:
+            raise DeviceError(reason, tool="wda")
+
+    def _unserving_message(self, udid: str, error: str) -> str:
+        until = self._unserving.get(udid, (time.monotonic() + WDA_UNSERVING_S, ""))[0]
+        left = max(0, round(until - time.monotonic()))
+        return (f"WDA's runner on {udid[:8]} is running but not answering ({error}): "
+                "most likely still working on a slow request, such as reading a "
+                f"screen too busy for it. It is not asked again for {left}s; "
+                "stop_driver resets it")
 
     async def _try_tunneld_connection(self, udid: str) -> str | None:
         """Try to connect to WDA via the tunneld tunnel address."""
