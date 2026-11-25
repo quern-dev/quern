@@ -507,7 +507,7 @@ class TestSettingAValue:
         bare = coredevice_ax.Tree("AdditionalData", [{"type": "Application", "AXLabel": ""}],
                                   711, [(711, 1)])
 
-        async def newest(queue, held=None):
+        async def newest(queue, held=None, since=None):
             return bare, bare, bare
         monkeypatch.setattr(coredevice_ax, "_newest_tree", newest)
         # No pushes reach the queue here: not a silence to resubscribe over.
@@ -525,7 +525,7 @@ class TestSettingAValue:
         first = coredevice_ax.Tree("InitialDump", tree.elements, 711, tree.refs)
         newest_tree = coredevice_ax.Tree("AdditionalData", tree.elements, 99, tree.refs)
 
-        async def newest(queue, held=None):
+        async def newest(queue, held=None, since=None):
             return newest_tree, first, newest_tree
         monkeypatch.setattr(coredevice_ax, "_newest_tree", newest)
         # No pushes reach the queue here: not a silence to resubscribe over.

@@ -19,6 +19,7 @@ from server.device.ios.coredevice_ax import (
     COREDEVICE_MIN_IOS,
     AppExitedDuringRead,
     BareAppTree,
+    ScreenTooBusy,
     TurnNotTaken,
 )
 from server.device.ios.coredevice_input import types_on_us_keys
@@ -3579,11 +3580,15 @@ class DeviceControllerUI:
             said = " ".join(notes)
             if said and failed is None:
                 _READ_NOTE.set(_joined(_READ_NOTE.get(), said))
-            if isinstance(failed, TurnNotTaken):
+            if isinstance(failed, (TurnNotTaken, ScreenTooBusy)):
                 # Busy, not broken: the deadline ran out while another read of
-                # this phone had its turn. Read through WDA, it started WDA
-                # beside a healthy push for every short read queued behind a
-                # long one -- the overlap #734 removed (review on #736).
+                # this phone had its turn, or while the phone was still
+                # describing a screen too big to finish in time. Read through
+                # WDA, the first started WDA beside a healthy push for every
+                # short read queued behind a long one -- the overlap #734
+                # removed (review on #736) -- and the second started a WDA
+                # that could not read the screen either, then looped
+                # restarting it (#769).
                 if said:
                     failed.args = (f"{failed} {said}",)
                 raise failed

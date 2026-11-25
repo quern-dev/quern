@@ -70,6 +70,26 @@ PUSH_SELECTOR = "processDataFromRemoteDevice:"
 RESUBSCRIBES = 2
 STALL_PAIRS = 2.0
 STALL_MIN_S = 2.5
+#: And never less than this many times what the device took to send that
+#: InitialDump, timed from the subscription or the InitialDump before it:
+#: its own pace, where the per-element budget is a guess (#769). A map with
+#: ~119 pins sent its first InitialDump 4.4 s after subscribing and its
+#: complete tree 7.9 s after the newest, three of three; the per-element
+#: budget gave up at 5.6 s and resubscribed, which started the phone over,
+#: and no read of it ever finished. #684's stall sends its InitialDumps
+#: about 1 s apart, so it is still given up on in STALL_MIN_S.
+STALL_PACE = 2.5
+#: The slowest pace seen on the subscription is what counts: a quick
+#: InitialDump after a slow one does not shorten the wait the slow one earned,
+#: or a map that sent two close together stalled as before (review). #684's
+#: stall sends every InitialDump quickly, so its pace stays small. Capped, so
+#: a late first push cannot hold off recovering a real stall for the whole
+#: deadline (review): the ~119-pin map's 2.5 x 4.4 s is under it.
+STALL_PACE_MAX_S = 12.0
+#: A screen still building at the deadline with at least this many elements
+#: in its InitialDump is too busy to read in time, said as such and not read
+#: through WDA instead, whose /source timed out on the same map (#769).
+BUSY_ELEMENTS = 100
 
 #: `associatedRequestType` of the response that carries one element's
 #: attributes, keyed by attribute number.
@@ -234,6 +254,27 @@ class TurnNotTaken(DeviceError):
     the overlap #734 removed, for every short read queued behind a long one
     (review on #736). The caller only needs more time.
     """
+
+
+class ScreenTooBusy(DeviceError):
+    """The screen has too many elements for the phone to send its complete
+    tree within the read's deadline (#769).
+
+    Measured on an iPhone 12, a map: 26 elements answered in 2.6 s, 128 in
+    13 s, and 415 sent no complete tree in 45 s. Not a failure of the push,
+    and not one WDA recovers from -- its /source timed out on the 128 -- so
+    nothing falls back over it; the caller can make the screen smaller."""
+
+    def __init__(self, uuid: str, elements: int, timeout: float) -> None:
+        super().__init__(
+            f"{uuid[:8]}'s screen has {elements} elements, and the phone did not finish "
+            f"sending its accessibility tree within {timeout:g}s: a screen this busy -- "
+            "a map with many pins, a very long list -- takes the phone longer to "
+            "describe than the read allows. Make it smaller and read again: zoom a map "
+            "in until 10-20 pins show, or filter or scroll a list. It was not read "
+            "through WDA, which cannot read a screen this busy either.",
+            tool="coredevice")
+        self.elements = elements
 
 
 class PushNotAnswering(DeviceError):
@@ -750,8 +791,35 @@ def _pair_budget(initial: Tree) -> float:
     return PAIR_BASE_S + PAIR_PER_ELEMENT_S * len(initial.elements)
 
 
+class _ArrivalQueue(asyncio.Queue):
+    """A queue that remembers when each item was put on it, for the device's
+    pace (#772): the moment a push came, not when the reader got to it after
+    parsing the one before -- about 1 s a tree on a CI runner, counted as the
+    phone's pace and, being the slowest, kept. `arrived` is the time of the
+    item last taken."""
+
+    arrived: float | None = None
+
+    def _put(self, item: Any) -> None:
+        super()._put((asyncio.get_running_loop().time(), item))
+
+    def _get(self) -> Any:
+        self.arrived, item = super()._get()
+        return item
+
+
+def _stall_window(tree: Tree, pace: float) -> float:
+    """How long a pending InitialDump's pair is waited for before the push is
+    taken to have stopped (#684): the per-element budget, never less than
+    STALL_MIN_S, and never less than STALL_PACE times the device's slowest
+    pace on this subscription, that part capped at STALL_PACE_MAX_S (#769)."""
+    return max(STALL_PAIRS * _pair_budget(tree), STALL_MIN_S,
+               min(STALL_PACE * pace, STALL_PACE_MAX_S))
+
+
 async def _newest_tree(queue: asyncio.Queue,
-                       held: dict | None = None) -> tuple[Tree, Tree, Tree]:
+                       held: dict | None = None,
+                       since: float | None = None) -> tuple[Tree, Tree, Tree]:
     """Read pushes until a complete tree has had a quiet spell to be replaced.
 
     Returns the newest complete tree, the first tree of the read, and the
@@ -789,6 +857,10 @@ async def _newest_tree(queue: asyncio.Queue,
     pair_by = 0.0  # when a pair under way is given up on
     hard_by = 0.0
     stall_by = None  # before a complete tree: when a pair under way is given up on
+    # When the device was last asked or last answered: the subscription, then
+    # each InitialDump. What it took to answer is its pace (#769).
+    paced_from = since if since is not None else loop.time()
+    pace = 0.0
     while True:
         if latest is None and stall_by is None:
             selector, args = await queue.get()
@@ -810,6 +882,8 @@ async def _newest_tree(queue: asyncio.Queue,
                     queue.get(), remaining if changing else min(quiet, remaining))
             except TimeoutError:
                 return latest, first or latest, newest or latest
+        # When it came: the device's pace, not the Mac's parsing (#772).
+        arrived = getattr(queue, "arrived", None) or loop.time()
         if selector != PUSH_SELECTOR or not args or not isinstance(args[0], bytes):
             continue
         try:
@@ -839,8 +913,13 @@ async def _newest_tree(queue: asyncio.Queue,
                 held["latest"] = latest
         elif latest is None:
             # An InitialDump with no complete tree yet: its pair, or the
-            # newest one's, is waited for -- not for ever (#684).
-            stall_by = loop.time() + max(STALL_PAIRS * _pair_budget(tree), STALL_MIN_S)
+            # newest one's, is waited for -- not for ever (#684), and not less
+            # than the device's own pace allows (#769).
+            pace, paced_from = max(pace, arrived - paced_from), arrived
+            # From now, after parsing: from its arrival, a parse longer than
+            # the window threw away a complete tree already queued
+            # (CodeRabbit on #772).
+            stall_by = loop.time() + _stall_window(tree, pace)
         elif latest is not None:
             changing = True
             # Its pair gets the time a tree this size takes to build, and
@@ -1251,10 +1330,12 @@ async def _subscribe(lib: SimpleNamespace, address: Any, conn: SimpleNamespace,
     conn.rsd = lib.RemoteServiceDiscoveryService(address)
     await conn.rsd.connect()
     await _connect_service(uuid, lib, conn, spare=spare)
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue = _ArrivalQueue()
     conn.provider.dtx.ctx["control_dispatch_queue"] = queue
     await conn.provider.dtx._ctrl_channel.invoke(
         "clientNeedsAccessibility:", True, expects_reply=False)
+    # The device's pace is timed from here (#769).
+    conn.subscribed_at = asyncio.get_running_loop().time()
     return queue
 
 
@@ -1299,11 +1380,17 @@ async def _subscribed(uuid: str, lib: SimpleNamespace, address: Any,
     except BaseException:
         await asyncio.shield(_close(spare.provider, spare.rsd))
         raise
+    # The loser is closed after the winner's first push arrived. That close
+    # is the Mac's time, not the device's, and it is not counted: the queue
+    # stamps each push as it arrives, so the pace runs from the winner's
+    # subscription to that stamp. Moving the start on by the close would cut
+    # real device latency out of it (CodeRabbit on #772, twice).
     if not queue.empty():
         await _close(spare.provider, spare.rsd)
         return queue
     await _close(conn.provider, conn.rsd)
     conn.rsd, conn.provider = spare.rsd, spare.provider
+    conn.subscribed_at = getattr(spare, "subscribed_at", None)
     return spare_queue
 
 
@@ -1322,13 +1409,18 @@ async def _settled(uuid: str, lib: SimpleNamespace, address: Any, conn: SimpleNa
     for attempt in range(RESUBSCRIBES + 1):
         queue = await _subscribed(uuid, lib, address, conn)
         try:
-            tree, first, newest = await _newest_tree(queue, held)
+            tree, first, newest = await _newest_tree(
+                queue, held, since=getattr(conn, "subscribed_at", None))
             if first_seen is not None:
                 first = first_seen
                 held["first"] = first_seen
             return tree, first, newest
         except PushStalled:
             first_seen = first_seen or held.get("first")
+            # A stalled attempt's trees are not the next attempt's: a big
+            # InitialDump left in `held` turned a push that then stayed
+            # silent into "too busy" (review). The first is kept, above.
+            held.pop("newest", None)
             if attempt == RESUBSCRIBES:
                 raise
             logger.info("[coredevice] %s stopped pushing before a complete tree: "
@@ -1541,6 +1633,13 @@ async def read_tree(uuid: str, *, timeout: float = READ_TIMEOUT_S,
                 seen["pid"] = latest.app_pid
                 seen["app"] = latest.elements[0]["AXLabel"] if latest.elements else ""
             return _refuse_bare(latest.elements, uuid)
+        newest = held.get("newest")
+        if (deadline.expired() and not turn.missed and newest is not None
+                and newest.dump_type == "InitialDump"
+                and len(newest.elements) >= BUSY_ELEMENTS):
+            # Still describing a screen this big at the deadline: too busy to
+            # read in time, not broken, and not a read for WDA (#769).
+            raise ScreenTooBusy(uuid, len(newest.elements), timeout) from None
         if deadline.expired():
             # The phone was never asked when the deadline came while this
             # read waited its turn: said as such, not as the phone's fault,
