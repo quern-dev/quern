@@ -865,6 +865,10 @@ async def _newest_tree(queue: asyncio.Queue,
                     queue.get(), remaining if changing else min(quiet, remaining))
             except TimeoutError:
                 return latest, first or latest, newest or latest
+        # When it came, before it is parsed: the device's pace, not the Mac's.
+        # Timed after parsing, a slow parse -- about 1 s on a CI runner -- was
+        # counted as pace and, being the slowest, kept (#772).
+        arrived = loop.time()
         if selector != PUSH_SELECTOR or not args or not isinstance(args[0], bytes):
             continue
         try:
@@ -896,9 +900,8 @@ async def _newest_tree(queue: asyncio.Queue,
             # An InitialDump with no complete tree yet: its pair, or the
             # newest one's, is waited for -- not for ever (#684), and not less
             # than the device's own pace allows (#769).
-            now = loop.time()
-            pace, paced_from = max(pace, now - paced_from), now
-            stall_by = now + _stall_window(tree, pace)
+            pace, paced_from = max(pace, arrived - paced_from), arrived
+            stall_by = arrived + _stall_window(tree, pace)
         elif latest is not None:
             changing = True
             # Its pair gets the time a tree this size takes to build, and

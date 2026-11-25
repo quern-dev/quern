@@ -112,7 +112,28 @@ class TestTheDevicesOwnPace:
         with pytest.raises(PushStalled):
             await asyncio.wait_for(
                 coredevice_ax._newest_tree(q, {}, since=loop.time() - 0.3), 10)
-        assert len(paces) == 3 and paces[-1] < 0.5, paces
+        # Steady, not growing: however slow the runner, the slowest gap is
+        # what counts, where timed from subscribing it rose 0.3 s a dump.
+        assert len(paces) == 3 and paces[-1] - paces[0] < 0.25, paces
+
+    async def test_a_slow_parse_is_not_the_devices_pace(self, fast_budget, paces,
+                                                         monkeypatch):
+        """Parsing took about 1 s on a CI runner, and timed after it, that was
+        counted as the phone's pace and kept (#772)."""
+        import time as clock
+        real = coredevice_ax.parse_tree
+
+        def slow_parse(data):
+            clock.sleep(0.6)
+            return real(data)
+
+        monkeypatch.setattr(coredevice_ax, "parse_tree", slow_parse)
+        loop = asyncio.get_running_loop()
+        q = _queue_later((0.0, INITIAL))
+        with pytest.raises(PushStalled):
+            await asyncio.wait_for(
+                coredevice_ax._newest_tree(q, {}, since=loop.time()), 10)
+        assert paces[0] < 0.3, paces
 
     def test_the_pace_is_capped(self):
         """A late first push must not hold off recovering a real stall for the
