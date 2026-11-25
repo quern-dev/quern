@@ -17,7 +17,7 @@ import pytest
 from server.device.ios import wda as wda_module
 from server.device.ios import wda_client
 from server.device.ios.wda_client import WdaBackend
-from server.models import DeviceError, WdaNotSetUpError
+from server.models import DeviceError, WdaNotSetUpError, WdaRunnerBusyError
 from tests.test_coredevice_ax import PHONE, _phone_controller
 
 NOT_SERVING = {"status": "already_running", "udid": PHONE, "pid": 39842, "ready": False,
@@ -50,7 +50,43 @@ class TestARunnerThatIsNotAnswering:
             await backend._get_base_url(PHONE)
 
         assert start.await_count == 1, "the busy runner was probed again at once"
-        assert "stop_driver resets it" in str(again.value)
+        assert "stop_driver, then start_driver, resets it" in str(again.value)
+
+    async def test_the_refusal_comes_before_the_slow_probes(self, backend, monkeypatch):
+        """Each probe costs seconds against a runner that takes connections
+        and does not answer: only one quick look is allowed (review)."""
+        monkeypatch.setattr(wda_module, "start_driver", AsyncMock(return_value=NOT_SERVING))
+        with pytest.raises(DeviceError):
+            await backend._get_base_url(PHONE)
+        backend._try_tunneld_connection.reset_mock()
+        backend._start_usbmux_forward.reset_mock()
+
+        with pytest.raises(WdaRunnerBusyError):
+            await backend._get_base_url(PHONE)
+
+        backend._try_tunneld_connection.assert_awaited_once_with(
+            PHONE, timeout=wda_client.WDA_RECOVERED_PROBE_S)
+        backend._start_usbmux_forward.assert_not_called()
+
+    async def test_a_runner_that_has_recovered_is_used_at_once(self, backend, monkeypatch):
+        monkeypatch.setattr(wda_module, "start_driver", AsyncMock(return_value=NOT_SERVING))
+        with pytest.raises(DeviceError):
+            await backend._get_base_url(PHONE)
+        backend._try_tunneld_connection = AsyncMock(return_value="http://[fd00::1]:8100")
+
+        assert await backend._get_base_url(PHONE) == "http://[fd00::1]:8100"
+        assert backend.no_auto_start_reason(PHONE) is None
+
+    async def test_a_start_that_then_works_clears_it(self, backend, monkeypatch):
+        start = AsyncMock(side_effect=[NOT_SERVING, {"status": "started", "ready": True}])
+        monkeypatch.setattr(wda_module, "start_driver", start)
+        monkeypatch.setattr(wda_client, "WDA_UNSERVING_S", 0.0)
+        with pytest.raises(DeviceError):
+            await backend._get_base_url(PHONE)
+        backend._try_tunneld_connection = AsyncMock(side_effect=[None, "http://[fd00::1]:8100"])
+
+        assert await backend._get_base_url(PHONE) == "http://[fd00::1]:8100"
+        assert PHONE not in backend._unserving
 
     async def test_after_the_window_it_is_asked_again(self, backend, monkeypatch):
         start = AsyncMock(return_value=NOT_SERVING)
@@ -95,6 +131,27 @@ class TestStoppedOnPurpose:
         assert await backend._get_base_url(PHONE) == "http://[fd00::1]:8100"
         start.assert_awaited_once()
 
+    async def test_a_restart_behind_a_read_in_flight_is_not_made(self, backend, monkeypatch):
+        """A /source timeout in a read already under way when stop_driver
+        landed restarted WDA (review)."""
+        start = AsyncMock(return_value={"status": "started", "ready": True})
+        monkeypatch.setattr(wda_module, "start_driver", start)
+        monkeypatch.setattr(wda_module, "stop_driver", AsyncMock())
+        backend.note_stopped(PHONE)
+        await backend._restart_wda(PHONE)
+        start.assert_not_called()
+
+    async def test_a_crash_latch_does_not_send_reads_to_a_stopped_wda(self, monkeypatch):
+        """After a push crash, reads went to a WDA that refused every one, and
+        the phone could not be read until start_driver (review)."""
+        ctrl = _phone_controller(monkeypatch=monkeypatch)
+        from server.tooling import wda_availability
+        monkeypatch.setattr(wda_availability, "known_reason", lambda: None)
+        ctrl._push_crashed_apps[PHONE] = {"Demo"}
+        assert ctrl._crash_latched(PHONE) == {"Demo"}
+        ctrl.wda_client.note_stopped(PHONE)
+        assert ctrl._crash_latched(PHONE) == set()
+
     async def test_a_push_read_that_fails_does_not_start_it(self, monkeypatch):
         """The read fails saying why, instead of falling back to WDA."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
@@ -116,6 +173,12 @@ class TestStoppedOnPurpose:
         with pytest.raises(DeviceError, match="running but not answering"):
             await ctrl.get_ui_elements(PHONE, use_cache=False, whole_screen=True)
         ctrl.wda_client.describe_all.assert_not_called()
+
+
+def test_a_busy_runner_answers_503():
+    from server.api.device import _handle_device_error
+
+    assert _handle_device_error(WdaRunnerBusyError("busy", tool="wda")).status_code == 503
 
 
 class TestTheRoutes:
@@ -157,3 +220,48 @@ class TestTheRoutes:
         r = await post("/api/v1/device/wda/start")
         assert r.status_code == 200, r.text
         self.controller.wda_client.note_started.assert_called_once_with(PHONE)
+
+
+class TestStickyOnlyWhereThePushReads:
+    """On a phone before iOS 27 WDA is the only reader, and the next read
+    restarting it is how stop_driver has always reset it (review)."""
+
+    async def _stop(self, monkeypatch, device_type, os_version, serves):
+        from httpx import ASGITransport, AsyncClient
+
+        import server.main as m
+        from server.config import ServerConfig
+        from server.models import DeviceInfo, DeviceState
+
+        app = m.create_app(ServerConfig(api_key="k" * 32))
+        device = DeviceInfo(udid=PHONE, name="d", state=DeviceState.BOOTED,
+                            device_type=device_type, os_version=os_version, is_available=True)
+        controller = MagicMock()
+        controller.list_devices = AsyncMock(return_value=[device])
+        controller.wda_client = WdaBackend()             # the real one is told
+        controller.wda_client.delete_session = AsyncMock()
+        controller._coredevice_serves = lambda udid: serves
+        controller._backend_name = lambda udid: "sim-bridge"
+        app.state.device_controller = controller
+        monkeypatch.setattr(wda_module, "stop_driver",
+                            AsyncMock(return_value={"status": "stopped", "udid": PHONE}))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post("/api/v1/device/wda/stop", json={"udid": PHONE},
+                             headers={"Authorization": "Bearer " + "k" * 32})
+        assert r.status_code == 200, r.text
+        return controller.wda_client, r.json()
+
+    async def test_a_phone_the_push_reads_stays_stopped(self, monkeypatch):
+        from server.models import DeviceType
+        client, body = await self._stop(monkeypatch, DeviceType.DEVICE, "27.2.1", True)
+        assert PHONE in client._stopped_on_request and "auto_start" in body
+
+    async def test_an_older_phone_does_not(self, monkeypatch):
+        from server.models import DeviceType
+        client, body = await self._stop(monkeypatch, DeviceType.DEVICE, "18.5", False)
+        assert PHONE not in client._stopped_on_request and "auto_start" not in body
+
+    async def test_a_simulator_does_not(self, monkeypatch):
+        from server.models import DeviceType
+        client, body = await self._stop(monkeypatch, DeviceType.SIMULATOR, "18.5", True)
+        assert PHONE not in client._stopped_on_request and "auto_start" not in body

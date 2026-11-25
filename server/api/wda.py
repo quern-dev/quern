@@ -208,6 +208,17 @@ async def stop_wda_driver(request: Request, body: StopDriverRequest):
 
     from server.device.ios.wda import stop_driver
 
+    # Recorded before the stop, which can take seconds: a read in that time
+    # passed the check and started a new runner after it (review). Only where
+    # the push reads the phone -- elsewhere WDA is its only reader, and the
+    # next read restarting it is how stop_driver has always reset it.
+    sticky = False
+    if device.device_type == DeviceType.DEVICE:
+        if device.os_version:
+            controller.wda_client._device_os_versions.setdefault(body.udid, device.os_version)
+        sticky = bool(controller._coredevice_serves(body.udid))
+        if sticky:
+            controller.wda_client.note_stopped(body.udid)
     try:
         result = await stop_driver(udid=body.udid)
     except RuntimeError as e:
@@ -220,10 +231,9 @@ async def stop_wda_driver(request: Request, body: StopDriverRequest):
             controller.wda_client.unregister_simulator(body.udid)
             controller._backend_switched(body.udid)
 
-    if device.device_type == DeviceType.DEVICE:
+    if sticky:
         # Stopped on purpose: the next read the push could not make started
         # it again, until a second stop_driver (#769).
-        controller.wda_client.note_stopped(body.udid)
         result["auto_start"] = ("off until start_driver: a read the push cannot make "
                                 "fails saying so instead of starting WDA")
     if device.device_type == DeviceType.SIMULATOR:

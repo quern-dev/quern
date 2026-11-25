@@ -1187,6 +1187,10 @@ class DeviceControllerUI:
 
         if known_reason():
             return set()
+        if udid in self.wda_client._stopped_on_request:
+            # WDA stopped on purpose is no WDA to send them to: on the push,
+            # or every read went to a WDA that refused it (review).
+            return set()
         return self._push_crashed_apps.get(udid, set())
 
     def _record_push_crash(self, udid: str, app: str) -> None:

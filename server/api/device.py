@@ -190,6 +190,11 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
         return HTTPException(status_code=503, detail=msg)
     if isinstance(e, WdaElementNotFoundError):
         return HTTPException(status_code=404, detail=msg)
+    from server.models import WdaRunnerBusyError
+
+    if isinstance(e, WdaRunnerBusyError):
+        # Transient: a runner still working on something slow (#769).
+        return HTTPException(status_code=503, detail=msg)
     if isinstance(e, WdaInvalidSessionError):
         return HTTPException(status_code=503, detail=msg)
     if isinstance(e, (WdaKeyboardNotPresentError, WdaElementNotInteractableError)):

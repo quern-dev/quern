@@ -309,6 +309,8 @@ class QueryTimedOut(Exception):
 
 #: How long a runner found alive and not answering is not asked again (#769).
 WDA_UNSERVING_S = 60.0
+#: Inside that window, the one quick look that lets a recovered runner be used.
+WDA_RECOVERED_PROBE_S = 1.0
 
 
 class WdaBackend:
@@ -534,6 +536,20 @@ class WdaBackend:
                     f"WDA on {udid[:8]} did not start: {started.get('error')}",
                     tool="wda",
                 )
+        unserving = self._unserving.get(udid)
+        if unserving is not None and time.monotonic() < unserving[0]:
+            # Before any probe: each costs seconds against a runner that takes
+            # connections and does not answer, so the refusal was not at once
+            # (review). One quick look, so a runner that has recovered is used
+            # straight away rather than refused for the rest of the window.
+            base_url = await self._try_tunneld_connection(udid, timeout=WDA_RECOVERED_PROBE_S)
+            if base_url:
+                self._unserving.pop(udid, None)
+                self._connections[udid] = _WdaConnection(base_url=base_url)
+                return base_url
+            from server.models import WdaRunnerBusyError
+
+            raise WdaRunnerBusyError(self._unserving_message(udid, unserving[1]), tool="wda")
         if udid in self._connections:
             conn = self._connections[udid]
 
@@ -623,9 +639,11 @@ class WdaBackend:
             # Alive and not answering: every WDA call asked it again, 3 s a
             # time, about every 7 s for as long as the call that wanted WDA
             # lasted -- 94 s once, behind one screen read (#769).
+            from server.models import WdaRunnerBusyError
+
             error = result.get("error") or "it did not answer"
             self._unserving[udid] = (time.monotonic() + WDA_UNSERVING_S, error)
-            raise DeviceError(self._unserving_message(udid, error), tool="wda")
+            raise WdaRunnerBusyError(self._unserving_message(udid, error), tool="wda")
         if not result.get("ready"):
             raise DeviceError(
                 f"Auto-started WDA driver on {udid[:8]} but it did not become responsive. "
@@ -675,7 +693,9 @@ class WdaBackend:
             raise WdaNotSetUpError(self.no_auto_start_reason(udid) or "", tool="wda")
         reason = self.no_auto_start_reason(udid)
         if reason:
-            raise DeviceError(reason, tool="wda")
+            from server.models import WdaRunnerBusyError
+
+            raise WdaRunnerBusyError(reason, tool="wda")
 
     def _unserving_message(self, udid: str, error: str) -> str:
         until = self._unserving.get(udid, (time.monotonic() + WDA_UNSERVING_S, ""))[0]
@@ -683,9 +703,9 @@ class WdaBackend:
         return (f"WDA's runner on {udid[:8]} is running but not answering ({error}): "
                 "most likely still working on a slow request, such as reading a "
                 f"screen too busy for it. It is not asked again for {left}s; "
-                "stop_driver resets it")
+                "stop_driver, then start_driver, resets it")
 
-    async def _try_tunneld_connection(self, udid: str) -> str | None:
+    async def _try_tunneld_connection(self, udid: str, timeout: float = 3.0) -> str | None:
         """Try to connect to WDA via the tunneld tunnel address."""
         from server.device.ios.tunneld import get_tunneld_devices, resolve_tunnel_udid
 
@@ -708,7 +728,7 @@ class WdaBackend:
         # Verify WDA is reachable
         try:
             async with httpx.AsyncClient(trust_env=False) as client:
-                resp = await client.get(f"{base_url}/status", timeout=3.0)
+                resp = await client.get(f"{base_url}/status", timeout=timeout)
                 if resp.status_code == 200:
                     logger.info("WDA reachable via tunnel at %s", base_url)
                     return base_url
@@ -1306,6 +1326,11 @@ class WdaBackend:
         """Stop and restart the WDA driver for a device, clearing cached connection."""
         from server.device.ios.wda import start_driver, stop_driver
 
+        if udid in self._stopped_on_request:
+            # A read already in flight when stop_driver landed reached this
+            # and started WDA again behind it (review).
+            logger.info("WDA on %s was stopped with stop_driver: not restarted", udid[:8])
+            return
         _refuse_if_held(udid, "restart")
 
         # Clear cached connection
