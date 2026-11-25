@@ -1351,13 +1351,28 @@ async def _subscribed(uuid: str, lib: SimpleNamespace, address: Any,
     except BaseException:
         await asyncio.shield(_close(spare.provider, spare.rsd))
         raise
+    # The loser is closed after the winner's first push arrived, and that
+    # close is the Mac's time, not the device's: counted as its pace, a slow
+    # close could reach the cap and turn a stall into "too busy" (CodeRabbit
+    # on #772). So the winner's start is moved on by what the close took.
+    loop = asyncio.get_running_loop()
     if not queue.empty():
+        closing = loop.time()
         await _close(spare.provider, spare.rsd)
+        _shift_start(conn, loop.time() - closing)
         return queue
+    closing = loop.time()
     await _close(conn.provider, conn.rsd)
     conn.rsd, conn.provider = spare.rsd, spare.provider
     conn.subscribed_at = getattr(spare, "subscribed_at", None)
+    _shift_start(conn, loop.time() - closing)
     return spare_queue
+
+
+def _shift_start(conn: SimpleNamespace, by: float) -> None:
+    """Move a subscription's recorded start on by `by` seconds, if it has one."""
+    if getattr(conn, "subscribed_at", None) is not None:
+        conn.subscribed_at += by
 
 
 async def _settled(uuid: str, lib: SimpleNamespace, address: Any, conn: SimpleNamespace,

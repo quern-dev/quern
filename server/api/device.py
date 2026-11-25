@@ -67,6 +67,7 @@ TOOLS_IN_LIST_MAX_AGE = 5.0
 
 if TYPE_CHECKING:
     from server.device.controller import DeviceController
+    from server.knowledge.landmarks import LandmarkRegistry
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
 logger = logging.getLogger(__name__)
@@ -83,7 +84,8 @@ logger = logging.getLogger(__name__)
 SCREEN_CONTEXT_S = 25.0
 
 
-async def _capture_screen_context(controller, udid: str, registry=None) -> dict:
+async def _capture_screen_context(controller: DeviceController, udid: str,
+                                  registry: LandmarkRegistry | None = None) -> dict:
     """`_screen_context`, bounded by SCREEN_CONTEXT_S. A context that could
     not be read says why in `error` -- the caller asked for it, and an empty
     one read as a screen with nothing on it -- and never fails the action."""
@@ -97,7 +99,8 @@ async def _capture_screen_context(controller, udid: str, registry=None) -> dict:
         return {"error": f"the screen could not be read: {e}; the action itself was done"}
 
 
-async def _screen_context(controller, udid: str, registry=None) -> dict:
+async def _screen_context(controller: DeviceController, udid: str,
+                          registry: LandmarkRegistry | None = None) -> dict:
     """Best-effort screen context capture for action responses.
 
     When landmarks are loaded, this also says which screen the action landed

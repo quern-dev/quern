@@ -171,6 +171,37 @@ class TestTheWiring:
             PHONE, object(), None, SimpleNamespace(rsd=None, provider=None), {}), 5)
         assert resubscribed_at and resubscribed_at[0] < 1.0, resubscribed_at
 
+    async def test_closing_the_loser_is_not_counted_as_the_devices_pace(
+            self, fast_budget, monkeypatch):
+        """The loser is closed after the spare's first push arrived: counted
+        as the device's pace, a slow close stretched the window over a stall
+        on the spare (CodeRabbit on #772)."""
+        monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 0.05)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        subscribes: list[float] = []
+
+        async def subscribe(lib, address, conn, uuid, *, spare=False):
+            subscribes.append(loop.time() - started)
+            conn.rsd = conn.provider = object()
+            conn.subscribed_at = loop.time()
+            if spare:
+                return _queue_later((0.0, INITIAL))                   # at once, then stalls
+            if len(subscribes) > 1:
+                return _queue_later((0.0, INITIAL), (0.05, SETTINGS))
+            return asyncio.Queue()                                    # silent first
+
+        async def slow_close(provider, rsd):
+            await asyncio.sleep(0.5)
+
+        monkeypatch.setattr(coredevice_ax, "_subscribe", subscribe)
+        monkeypatch.setattr(coredevice_ax, "_close", slow_close)
+        from types import SimpleNamespace
+        await asyncio.wait_for(coredevice_ax._settled(
+            PHONE, object(), None, SimpleNamespace(rsd=None, provider=None), {}), 10)
+        resubscribed = subscribes[2]          # first, spare, then the resubscribe
+        assert resubscribed < 1.8, f"the stall on the spare was recovered at {resubscribed:.2f}s"
+
     async def test_a_stalled_attempts_tree_is_not_left_for_the_next(
             self, fast_budget, monkeypatch):
         """Left in `held`, a big InitialDump from a stalled attempt made a push
