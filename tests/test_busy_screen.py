@@ -144,6 +144,33 @@ class TestTheWiring:
         assert calls == [False, True]
         assert tree.dump_type == "AdditionalData"
 
+    async def test_a_stall_on_the_spare_is_timed_from_the_spare(
+            self, fast_budget, monkeypatch):
+        """Timed from the first, silent subscription, a spare that sent one
+        quick InitialDump and stalled was given 2.5 x the first's silence
+        before the read subscribed again: a stall recovered late."""
+        monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 0.5)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        resubscribed_at = []
+
+        async def subscribe(lib, address, conn, uuid, *, spare=False):
+            conn.rsd = conn.provider = object()
+            conn.subscribed_at = loop.time()
+            if spare:
+                return _queue_later((0.0, INITIAL))                   # then stalls
+            if resubscribed_at or conn.subscribed_at - started > 0.1:
+                resubscribed_at.append(loop.time() - started)
+                return _queue_later((0.0, INITIAL), (0.05, SETTINGS))
+            return asyncio.Queue()                                    # silent first
+
+        monkeypatch.setattr(coredevice_ax, "_subscribe", subscribe)
+        monkeypatch.setattr(coredevice_ax, "_close", AsyncMock())
+        from types import SimpleNamespace
+        await asyncio.wait_for(coredevice_ax._settled(
+            PHONE, object(), None, SimpleNamespace(rsd=None, provider=None), {}), 5)
+        assert resubscribed_at and resubscribed_at[0] < 1.0, resubscribed_at
+
     async def test_a_stalled_attempts_tree_is_not_left_for_the_next(
             self, fast_budget, monkeypatch):
         """Left in `held`, a big InitialDump from a stalled attempt made a push
