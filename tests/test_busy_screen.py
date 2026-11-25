@@ -310,6 +310,35 @@ class TestTheWiring:
             PHONE, object(), None, SimpleNamespace(rsd=None, provider=None), {}), 15)
         assert paces[0] < 0.4, f"the 0.8 s close was counted as pace: {paces}"
 
+    async def test_a_slow_first_push_keeps_its_latency_past_a_slow_close(
+            self, fast_budget, paces, monkeypatch):
+        """The spare's first push took 0.4 s, then closing the loser took
+        0.8 s. Shifting the start by the close cut the device's 0.4 s out of
+        its pace, and its stall window with it (CodeRabbit on #772)."""
+        monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 0.05)
+        loop = asyncio.get_running_loop()
+        subscribes: list[bool] = []
+
+        async def subscribe(lib, address, conn, uuid, *, spare=False):
+            subscribes.append(spare)
+            conn.rsd = conn.provider = object()
+            conn.subscribed_at = loop.time()
+            if spare:
+                return _queue_later((0.4, INITIAL))                   # late, then stalls
+            if len(subscribes) > 1:
+                return _queue_later((0.0, INITIAL), (0.05, SETTINGS))
+            return asyncio.Queue()                                    # silent first
+
+        async def slow_close(provider, rsd):
+            await asyncio.sleep(0.8)
+
+        monkeypatch.setattr(coredevice_ax, "_subscribe", subscribe)
+        monkeypatch.setattr(coredevice_ax, "_close", slow_close)
+        from types import SimpleNamespace
+        await asyncio.wait_for(coredevice_ax._settled(
+            PHONE, object(), None, SimpleNamespace(rsd=None, provider=None), {}), 15)
+        assert 0.35 < paces[0] < 0.7, f"the device's 0.4 s was not its pace: {paces}"
+
     async def test_a_stalled_attempts_tree_is_not_left_for_the_next(
             self, fast_budget, monkeypatch):
         """Left in `held`, a big InitialDump from a stalled attempt made a push
