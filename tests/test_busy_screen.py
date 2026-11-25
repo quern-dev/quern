@@ -126,6 +126,23 @@ class TestTheDevicesOwnPace:
         # what counts, where timed from subscribing it rose 0.3 s a dump.
         assert len(paces) == 3 and paces[-1] - paces[0] < 0.25, paces
 
+    async def test_pushes_already_queued_are_paced_by_when_they_came(
+            self, fast_budget, paces):
+        """The runner read three pushes late, all at once: timed when they
+        were taken off the queue, the first gap was the whole delay, and the
+        later ones nothing (#772 CI)."""
+        loop = asyncio.get_running_loop()
+        q = coredevice_ax._ArrivalQueue()
+        since = loop.time() - 0.3
+        for i in range(3):
+            if i:
+                await asyncio.sleep(0.3)
+            q.put_nowait((PUSH_SELECTOR, [INITIAL]))
+        await asyncio.sleep(0.6)                  # nobody reading yet
+        with pytest.raises(PushStalled):
+            await asyncio.wait_for(coredevice_ax._newest_tree(q, {}, since=since), 10)
+        assert paces and max(paces) < 0.5, paces
+
     async def test_a_slow_parse_is_not_the_devices_pace(self, fast_budget, paces,
                                                          monkeypatch):
         """Parsing took about 1 s on a CI runner, and timed after it, that was
