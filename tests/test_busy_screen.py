@@ -52,50 +52,64 @@ def fast_budget(monkeypatch):
     monkeypatch.setattr(coredevice_ax, "PAIR_PER_ELEMENT_S", 0.0)
 
 
+@pytest.fixture
+def paces(monkeypatch):
+    """Every pace `_stall_window` is given, in order: what the code decided,
+    rather than a wall-clock time a loaded CI runner stretches (CodeRabbit on
+    #772: 1.006 s against a 0.8 s limit on Python 3.14)."""
+    seen: list[float] = []
+    real = coredevice_ax._stall_window
+
+    def record(tree, pace):
+        seen.append(pace)
+        return real(tree, pace)
+
+    monkeypatch.setattr(coredevice_ax, "_stall_window", record)
+    return seen
+
+
 class TestTheDevicesOwnPace:
-    async def test_a_slow_screens_tree_is_waited_for_at_its_pace(self, fast_budget):
-        """Its InitialDump took 0.4 s to come, so its pair gets 2.5 x that."""
+    async def test_a_slow_screens_tree_is_waited_for_at_its_pace(self, fast_budget, paces):
+        """Its InitialDump took 0.8 s to come, so its pair gets 2.5 x that."""
         loop = asyncio.get_running_loop()
-        since = loop.time() - 0.4           # subscribed 0.4 s before this InitialDump
-        q = _queue_later((0.0, INITIAL), (0.6, SETTINGS))
+        since = loop.time() - 0.8           # subscribed 0.8 s before this InitialDump
+        q = _queue_later((0.0, INITIAL), (0.8, SETTINGS))
         tree, _, _ = await asyncio.wait_for(
             coredevice_ax._newest_tree(q, {}, since=since), 5)
         assert tree.dump_type == "AdditionalData"
+        assert paces[0] >= 0.7
 
-    async def test_a_684_stall_is_still_given_up_on_quickly(self, fast_budget):
+    async def test_a_684_stall_is_still_given_up_on_quickly(self, fast_budget, paces):
         """InitialDumps that come at once and then nothing: the window is the
         floor, as before, not stretched."""
         loop = asyncio.get_running_loop()
         q = _queue_later((0.0, INITIAL))
-        started = loop.time()
         with pytest.raises(PushStalled):
             await asyncio.wait_for(
                 coredevice_ax._newest_tree(q, {}, since=loop.time()), 5)
-        assert loop.time() - started < 0.5
+        assert paces[0] < 0.3
 
     async def test_a_quick_initial_dump_does_not_shorten_a_slow_ones_wait(
-            self, fast_budget):
-        """A slow first InitialDump (0.4 s), a second at once, then the
-        complete tree 0.8 s later: the slow pace still counts. Timed from the
-        quick one alone, the map stalled as before (review)."""
+            self, fast_budget, paces):
+        """A slow first InitialDump (0.8 s), a second at once, then the
+        complete tree: the slow pace still counts. Timed from the quick one
+        alone, the map stalled as before (review)."""
         loop = asyncio.get_running_loop()
-        since = loop.time() - 0.4
-        q = _queue_later((0.0, INITIAL), (0.05, INITIAL), (0.8, SETTINGS))
+        since = loop.time() - 0.8
+        q = _queue_later((0.0, INITIAL), (0.05, INITIAL), (1.0, SETTINGS))
         tree, _, _ = await asyncio.wait_for(
             coredevice_ax._newest_tree(q, {}, since=since), 5)
         assert tree.dump_type == "AdditionalData"
+        assert len(paces) == 2 and paces[1] >= 0.7, paces
 
-    async def test_the_pace_is_capped(self, fast_budget, monkeypatch):
+    def test_the_pace_is_capped(self):
         """A late first push must not hold off recovering a real stall for the
         whole deadline (review)."""
-        monkeypatch.setattr(coredevice_ax, "STALL_PACE_MAX_S", 0.3)
-        loop = asyncio.get_running_loop()
-        q = _queue_later((0.0, INITIAL))
-        started = loop.time()
-        with pytest.raises(PushStalled):
-            await asyncio.wait_for(
-                coredevice_ax._newest_tree(q, {}, since=loop.time() - 2.0), 5)
-        assert loop.time() - started < 0.8, "the window was not capped"
+        small = Tree(dump_type="InitialDump", app_pid=1, elements=[{"AXLabel": "a"}])
+        assert coredevice_ax._stall_window(small, 100.0) == coredevice_ax.STALL_PACE_MAX_S
+        assert coredevice_ax._stall_window(small, 2.0) == pytest.approx(
+            coredevice_ax.STALL_PACE * 2.0)
+        assert coredevice_ax._stall_window(small, 0.0) == coredevice_ax.STALL_MIN_S
 
 
 class TestTheWiring:
@@ -111,15 +125,16 @@ class TestTheWiring:
             return _queue_later((first_after, INITIAL), (complete_after, SETTINGS))
         return subscribe
 
-    async def test_settled_paces_from_the_subscription(self, fast_budget, monkeypatch):
+    async def test_settled_paces_from_the_subscription(self, fast_budget, paces, monkeypatch):
         monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 5.0)       # no spare here
-        monkeypatch.setattr(coredevice_ax, "_subscribe", self._subscribe_slow(0.4, 0.6))
+        monkeypatch.setattr(coredevice_ax, "_subscribe", self._subscribe_slow(0.8, 1.6))
         monkeypatch.setattr(coredevice_ax, "_close", AsyncMock())
         from types import SimpleNamespace
         conn = SimpleNamespace(rsd=None, provider=None)
         tree, _, _ = await asyncio.wait_for(
             coredevice_ax._settled(PHONE, object(), None, conn, {}), 5)
         assert tree.dump_type == "AdditionalData"
+        assert paces[0] >= 0.7, paces
 
     async def test_a_spare_that_wins_carries_its_own_time(self, fast_budget, monkeypatch):
         """The first subscription stays silent; the spare's InitialDump is
@@ -133,7 +148,7 @@ class TestTheWiring:
             conn.subscribed_at = asyncio.get_running_loop().time()
             if not spare:
                 return asyncio.Queue()                                # silent
-            return _queue_later((0.4, INITIAL), (0.6, SETTINGS))
+            return _queue_later((0.8, INITIAL), (1.6, SETTINGS))
 
         monkeypatch.setattr(coredevice_ax, "_subscribe", subscribe)
         monkeypatch.setattr(coredevice_ax, "_close", AsyncMock())
@@ -145,22 +160,22 @@ class TestTheWiring:
         assert tree.dump_type == "AdditionalData"
 
     async def test_a_stall_on_the_spare_is_timed_from_the_spare(
-            self, fast_budget, monkeypatch):
+            self, fast_budget, paces, monkeypatch):
         """Timed from the first, silent subscription, a spare that sent one
         quick InitialDump and stalled was given 2.5 x the first's silence
         before the read subscribed again: a stall recovered late."""
-        monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 0.5)
+        monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 1.0)
         loop = asyncio.get_running_loop()
         started = loop.time()
-        resubscribed_at = []
+        subscribes: list[bool] = []
 
         async def subscribe(lib, address, conn, uuid, *, spare=False):
+            subscribes.append(spare)
             conn.rsd = conn.provider = object()
             conn.subscribed_at = loop.time()
             if spare:
                 return _queue_later((0.0, INITIAL))                   # then stalls
-            if resubscribed_at or conn.subscribed_at - started > 0.1:
-                resubscribed_at.append(loop.time() - started)
+            if len(subscribes) > 1 or conn.subscribed_at - started > 0.1:
                 return _queue_later((0.0, INITIAL), (0.05, SETTINGS))
             return asyncio.Queue()                                    # silent first
 
@@ -168,21 +183,22 @@ class TestTheWiring:
         monkeypatch.setattr(coredevice_ax, "_close", AsyncMock())
         from types import SimpleNamespace
         await asyncio.wait_for(coredevice_ax._settled(
-            PHONE, object(), None, SimpleNamespace(rsd=None, provider=None), {}), 5)
-        assert resubscribed_at and resubscribed_at[0] < 1.0, resubscribed_at
+            PHONE, object(), None, SimpleNamespace(rsd=None, provider=None), {}), 10)
+        # The spare's InitialDump came at once: its pace is that, not the
+        # first subscription's 1 s of silence.
+        assert paces[0] < 0.4, paces
 
     async def test_closing_the_loser_is_not_counted_as_the_devices_pace(
-            self, fast_budget, monkeypatch):
+            self, fast_budget, paces, monkeypatch):
         """The loser is closed after the spare's first push arrived: counted
         as the device's pace, a slow close stretched the window over a stall
         on the spare (CodeRabbit on #772)."""
         monkeypatch.setattr(coredevice_ax, "FIRST_PUSH_S", 0.05)
         loop = asyncio.get_running_loop()
-        started = loop.time()
-        subscribes: list[float] = []
+        subscribes: list[bool] = []
 
         async def subscribe(lib, address, conn, uuid, *, spare=False):
-            subscribes.append(loop.time() - started)
+            subscribes.append(spare)
             conn.rsd = conn.provider = object()
             conn.subscribed_at = loop.time()
             if spare:
@@ -192,15 +208,14 @@ class TestTheWiring:
             return asyncio.Queue()                                    # silent first
 
         async def slow_close(provider, rsd):
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.8)
 
         monkeypatch.setattr(coredevice_ax, "_subscribe", subscribe)
         monkeypatch.setattr(coredevice_ax, "_close", slow_close)
         from types import SimpleNamespace
         await asyncio.wait_for(coredevice_ax._settled(
-            PHONE, object(), None, SimpleNamespace(rsd=None, provider=None), {}), 10)
-        resubscribed = subscribes[2]          # first, spare, then the resubscribe
-        assert resubscribed < 1.8, f"the stall on the spare was recovered at {resubscribed:.2f}s"
+            PHONE, object(), None, SimpleNamespace(rsd=None, provider=None), {}), 15)
+        assert paces[0] < 0.4, f"the 0.8 s close was counted as pace: {paces}"
 
     async def test_a_stalled_attempts_tree_is_not_left_for_the_next(
             self, fast_budget, monkeypatch):

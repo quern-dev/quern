@@ -791,6 +791,15 @@ def _pair_budget(initial: Tree) -> float:
     return PAIR_BASE_S + PAIR_PER_ELEMENT_S * len(initial.elements)
 
 
+def _stall_window(tree: Tree, pace: float) -> float:
+    """How long a pending InitialDump's pair is waited for before the push is
+    taken to have stopped (#684): the per-element budget, never less than
+    STALL_MIN_S, and never less than STALL_PACE times the device's slowest
+    pace on this subscription, that part capped at STALL_PACE_MAX_S (#769)."""
+    return max(STALL_PAIRS * _pair_budget(tree), STALL_MIN_S,
+               min(STALL_PACE * pace, STALL_PACE_MAX_S))
+
+
 async def _newest_tree(queue: asyncio.Queue,
                        held: dict | None = None,
                        since: float | None = None) -> tuple[Tree, Tree, Tree]:
@@ -889,8 +898,7 @@ async def _newest_tree(queue: asyncio.Queue,
             # than the device's own pace allows (#769).
             now = loop.time()
             pace, paced_from = max(pace, now - paced_from), now
-            stall_by = now + max(STALL_PAIRS * _pair_budget(tree), STALL_MIN_S,
-                                 min(STALL_PACE * pace, STALL_PACE_MAX_S))
+            stall_by = now + _stall_window(tree, pace)
         elif latest is not None:
             changing = True
             # Its pair gets the time a tree this size takes to build, and
