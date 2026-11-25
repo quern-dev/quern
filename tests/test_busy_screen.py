@@ -107,18 +107,22 @@ class TestTheDevicesOwnPace:
             self, fast_budget, paces):
         """InitialDumps every 0.3 s, then nothing: the pace is 0.3 s. Timed
         from the subscription each time, it grew with every dump and a stall
-        like #684's was given longer and longer. A slow runner reading the
-        pushes late is test_pushes_already_queued_are_paced_by_when_they_came:
-        a parse that blocks the loop here delays this fake device's pushes as
-        well, which is real lateness, not the bug (#772 CI)."""
+        like #684's was given longer and longer.
+
+        The pushes are queued with the times they came, not sent by a task on
+        this loop: on a CI runner a parse held the loop long enough that the
+        fake device's third push went out 0.35 s late, which is real lateness
+        and failed the test on every Python (#773 CI)."""
         loop = asyncio.get_running_loop()
-        q = _queue_later((0.0, INITIAL), (0.3, INITIAL), (0.3, INITIAL))
+        q = coredevice_ax._ArrivalQueue()
+        t0 = loop.time()
+        for k in range(3):
+            asyncio.Queue._put(q, (t0 + 0.3 * k, (PUSH_SELECTOR, [INITIAL])))
         with pytest.raises(PushStalled):
             await asyncio.wait_for(
-                coredevice_ax._newest_tree(q, {}, since=loop.time() - 0.3), 10)
-        # Steady, not growing: however slow the runner, the slowest gap is
-        # what counts, where timed from subscribing it rose 0.3 s a dump.
-        assert len(paces) == 3 and paces[-1] - paces[0] < 0.25, paces
+                coredevice_ax._newest_tree(q, {}, since=t0 - 0.3), 10)
+        # Steady, not growing: timed from subscribing it rose 0.3 s a dump.
+        assert len(paces) == 3 and max(paces) - min(paces) < 0.05, paces
 
     async def test_pushes_already_queued_are_paced_by_when_they_came(
             self, fast_budget, paces):
