@@ -32,7 +32,8 @@ INITIAL = _as("InitialDump", SETTINGS)
 
 def _queue_later(*timed):
     """A queue each (delay, push) lands on that long after the call."""
-    q: asyncio.Queue = asyncio.Queue()
+    # The production queue: it stamps when each push came (#772).
+    q: asyncio.Queue = coredevice_ax._ArrivalQueue()
 
     async def feed():
         for delay, push in timed:
@@ -103,10 +104,19 @@ class TestTheDevicesOwnPace:
         assert len(paces) == 2 and paces[1] >= 0.7, paces
 
     async def test_each_gap_is_its_own_not_the_time_since_subscribing(
-            self, fast_budget, paces):
+            self, fast_budget, paces, monkeypatch):
         """InitialDumps every 0.3 s, then nothing: the pace is 0.3 s. Timed
         from the subscription each time, it grew with every dump and a stall
-        like #684's was given longer and longer."""
+        like #684's was given longer and longer. Parsed slowly, as on the CI
+        runner where it failed twice (#772)."""
+        import time as clock
+        real = coredevice_ax.parse_tree
+
+        def slow_parse(data):
+            clock.sleep(0.3)
+            return real(data)
+
+        monkeypatch.setattr(coredevice_ax, "parse_tree", slow_parse)
         loop = asyncio.get_running_loop()
         q = _queue_later((0.0, INITIAL), (0.3, INITIAL), (0.3, INITIAL))
         with pytest.raises(PushStalled):
@@ -134,6 +144,39 @@ class TestTheDevicesOwnPace:
             await asyncio.wait_for(
                 coredevice_ax._newest_tree(q, {}, since=loop.time()), 10)
         assert paces[0] < 0.3, paces
+
+    async def test_a_slow_parse_does_not_throw_away_a_queued_tree(
+            self, fast_budget, monkeypatch):
+        """Timed from its arrival, a parse longer than the window expired it
+        before the queue was read, and the complete tree already waiting was
+        taken for a stall (CodeRabbit on #772)."""
+        import time as clock
+        real = coredevice_ax.parse_tree
+
+        def slow_parse(data):
+            clock.sleep(0.4)                # longer than the 0.1 s window
+            return real(data)
+
+        monkeypatch.setattr(coredevice_ax, "parse_tree", slow_parse)
+        loop = asyncio.get_running_loop()
+        q = coredevice_ax._ArrivalQueue()
+        q.put_nowait((PUSH_SELECTOR, [INITIAL]))
+        q.put_nowait((PUSH_SELECTOR, [SETTINGS]))       # already there
+        tree, _, _ = await asyncio.wait_for(
+            coredevice_ax._newest_tree(q, {}, since=loop.time()), 10)
+        assert tree.dump_type == "AdditionalData"
+
+    def test_the_arrival_queue_stamps_each_item(self):
+        async def run():
+            q = coredevice_ax._ArrivalQueue()
+            loop = asyncio.get_running_loop()
+            q.put_nowait("a")
+            put_at = loop.time()
+            await asyncio.sleep(0.2)
+            assert await q.get() == "a"
+            return q.arrived, put_at
+        arrived, put_at = asyncio.run(run())
+        assert abs(arrived - put_at) < 0.05
 
     def test_the_pace_is_capped(self):
         """A late first push must not hold off recovering a real stall for the

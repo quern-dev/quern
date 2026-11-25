@@ -791,6 +791,23 @@ def _pair_budget(initial: Tree) -> float:
     return PAIR_BASE_S + PAIR_PER_ELEMENT_S * len(initial.elements)
 
 
+class _ArrivalQueue(asyncio.Queue):
+    """A queue that remembers when each item was put on it, for the device's
+    pace (#772): the moment a push came, not when the reader got to it after
+    parsing the one before -- about 1 s a tree on a CI runner, counted as the
+    phone's pace and, being the slowest, kept. `arrived` is the time of the
+    item last taken."""
+
+    arrived: float | None = None
+
+    def _put(self, item: Any) -> None:
+        super()._put((asyncio.get_running_loop().time(), item))
+
+    def _get(self) -> Any:
+        self.arrived, item = super()._get()
+        return item
+
+
 def _stall_window(tree: Tree, pace: float) -> float:
     """How long a pending InitialDump's pair is waited for before the push is
     taken to have stopped (#684): the per-element budget, never less than
@@ -865,10 +882,8 @@ async def _newest_tree(queue: asyncio.Queue,
                     queue.get(), remaining if changing else min(quiet, remaining))
             except TimeoutError:
                 return latest, first or latest, newest or latest
-        # When it came, before it is parsed: the device's pace, not the Mac's.
-        # Timed after parsing, a slow parse -- about 1 s on a CI runner -- was
-        # counted as pace and, being the slowest, kept (#772).
-        arrived = loop.time()
+        # When it came: the device's pace, not the Mac's parsing (#772).
+        arrived = getattr(queue, "arrived", None) or loop.time()
         if selector != PUSH_SELECTOR or not args or not isinstance(args[0], bytes):
             continue
         try:
@@ -901,7 +916,10 @@ async def _newest_tree(queue: asyncio.Queue,
             # newest one's, is waited for -- not for ever (#684), and not less
             # than the device's own pace allows (#769).
             pace, paced_from = max(pace, arrived - paced_from), arrived
-            stall_by = arrived + _stall_window(tree, pace)
+            # From now, after parsing: from its arrival, a parse longer than
+            # the window threw away a complete tree already queued
+            # (CodeRabbit on #772).
+            stall_by = loop.time() + _stall_window(tree, pace)
         elif latest is not None:
             changing = True
             # Its pair gets the time a tree this size takes to build, and
@@ -1312,7 +1330,7 @@ async def _subscribe(lib: SimpleNamespace, address: Any, conn: SimpleNamespace,
     conn.rsd = lib.RemoteServiceDiscoveryService(address)
     await conn.rsd.connect()
     await _connect_service(uuid, lib, conn, spare=spare)
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue = _ArrivalQueue()
     conn.provider.dtx.ctx["control_dispatch_queue"] = queue
     await conn.provider.dtx._ctrl_channel.invoke(
         "clientNeedsAccessibility:", True, expects_reply=False)
