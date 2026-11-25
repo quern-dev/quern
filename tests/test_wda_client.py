@@ -1054,7 +1054,7 @@ class TestDescribeAllTimeoutFallback:
         async def fake_stop(udid):
             pass
 
-        async def fake_start(udid, os_version):
+        async def fake_start(udid, os_version, *, refuse=None):
             nonlocal restarted
             restarted = True
             mock_proc = MagicMock()
