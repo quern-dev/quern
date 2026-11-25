@@ -104,19 +104,13 @@ class TestTheDevicesOwnPace:
         assert len(paces) == 2 and paces[1] >= 0.7, paces
 
     async def test_each_gap_is_its_own_not_the_time_since_subscribing(
-            self, fast_budget, paces, monkeypatch):
+            self, fast_budget, paces):
         """InitialDumps every 0.3 s, then nothing: the pace is 0.3 s. Timed
         from the subscription each time, it grew with every dump and a stall
-        like #684's was given longer and longer. Parsed slowly, as on the CI
-        runner where it failed twice (#772)."""
-        import time as clock
-        real = coredevice_ax.parse_tree
-
-        def slow_parse(data):
-            clock.sleep(0.3)
-            return real(data)
-
-        monkeypatch.setattr(coredevice_ax, "parse_tree", slow_parse)
+        like #684's was given longer and longer. A slow runner reading the
+        pushes late is test_pushes_already_queued_are_paced_by_when_they_came:
+        a parse that blocks the loop here delays this fake device's pushes as
+        well, which is real lateness, not the bug (#772 CI)."""
         loop = asyncio.get_running_loop()
         q = _queue_later((0.0, INITIAL), (0.3, INITIAL), (0.3, INITIAL))
         with pytest.raises(PushStalled):
