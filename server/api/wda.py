@@ -219,6 +219,11 @@ async def stop_wda_driver(request: Request, body: StopDriverRequest):
         sticky = bool(controller._coredevice_serves(body.udid))
         if sticky:
             controller.wda_client.note_stopped(body.udid)
+        else:
+            # Its next read restarts WDA, as stop_driver always has: a busy
+            # runner remembered from before the stop must not refuse it
+            # (CodeRabbit on #773).
+            controller.wda_client.forget_unserving(body.udid)
     try:
         result = await stop_driver(udid=body.udid)
     except RuntimeError as e:

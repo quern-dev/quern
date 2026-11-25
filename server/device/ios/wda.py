@@ -1257,7 +1257,8 @@ async def refuse_without_xcode(udid: str) -> None:
             "Xcode installed first.", tool="wda")
 
 
-async def start_driver(udid: str, os_version: str) -> dict:
+async def start_driver(udid: str, os_version: str, *,
+                       refuse: Callable[[], str | None] | None = None) -> dict:
     """Start WDA on a physical device via xcodebuild test-without-building.
 
     Spawns xcodebuild as a background process with output redirected to a log file.
@@ -1268,9 +1269,16 @@ async def start_driver(udid: str, os_version: str) -> dict:
     whether it is ready. Shielded, so a caller that gives up does not cancel
     the start for the others.
 
+    `refuse`, when given, is asked after the last await and before the start
+    is registered, with nothing between: a reason means no start, answered as
+    {status: "refused", reason, ready: False}. It is how a restart honours a
+    stop_driver that landed while it was on its way here (#773).
+
     Returns dict with {status, udid, pid, ready}.
     """
     await refuse_without_xcode(udid)
+    if refuse is not None and (reason := refuse()):
+        return {"status": "refused", "udid": udid, "reason": reason, "ready": False}
     task = start_in_flight(udid)
     if task is None:
         task = asyncio.ensure_future(_start_driver(udid, os_version))

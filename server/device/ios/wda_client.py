@@ -686,16 +686,27 @@ class WdaBackend:
             return self._unserving_message(udid, unserving[1])
         return None
 
-    def _refuse_auto_start(self, udid: str) -> None:
-        if udid in self._stopped_on_request:
-            from server.models import WdaNotSetUpError
+    def forget_unserving(self, udid: str) -> None:
+        """Drop a busy runner remembered for this phone: the runner is gone."""
+        self._unserving.pop(udid, None)
 
-            raise WdaNotSetUpError(self.no_auto_start_reason(udid) or "", tool="wda")
+    def auto_start_refusal(self, udid: str, message: str | None = None):
+        """The typed error refusing to start WDA behind a read, or None: a
+        WdaNotSetUpError (400) when stopped on purpose, a WdaRunnerBusyError
+        (503) for a runner just found not answering. `message` replaces the
+        reason, for a caller that adds its own context."""
         reason = self.no_auto_start_reason(udid)
-        if reason:
-            from server.models import WdaRunnerBusyError
+        if reason is None:
+            return None
+        from server.models import WdaNotSetUpError, WdaRunnerBusyError
 
-            raise WdaRunnerBusyError(reason, tool="wda")
+        cls = WdaNotSetUpError if udid in self._stopped_on_request else WdaRunnerBusyError
+        return cls(message or reason, tool="wda")
+
+    def _refuse_auto_start(self, udid: str) -> None:
+        refusal = self.auto_start_refusal(udid)
+        if refusal is not None:
+            raise refusal
 
     def _unserving_message(self, udid: str, error: str) -> str:
         until = self._unserving.get(udid, (time.monotonic() + WDA_UNSERVING_S, ""))[0]
@@ -1346,7 +1357,17 @@ class WdaBackend:
         except Exception:
             logger.debug("stop_driver failed for %s (may already be dead)", udid[:8])
 
-        result = await start_driver(udid, os_version)
+        # Checked again where the start is registered, with no await between:
+        # a stop_driver that landed during the awaits above would otherwise
+        # find no start to wait for, and WDA started behind it (CodeRabbit on
+        # #773).
+        result = await start_driver(
+            udid, os_version,
+            refuse=lambda: ("stopped with stop_driver"
+                            if udid in self._stopped_on_request else None))
+        if result.get("status") == "refused":
+            logger.info("WDA on %s was stopped with stop_driver: not restarted", udid[:8])
+            return
         if not result.get("ready"):
             logger.warning(
                 "WDA restart on %s: driver started but not responsive", udid[:8],

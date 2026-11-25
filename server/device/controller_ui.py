@@ -3622,14 +3622,20 @@ class DeviceControllerUI:
                 else:
                     if isinstance(failed, AppExitedDuringRead):
                         self._record_push_crash(resolved, failed.app)
-                    raise DeviceError(
+                    message = (
                         f"{failed}. " + ("Nothing was looked up: the screen this lookup "
                                          "was for is gone. "
                                          if isinstance(failed, AppExitedDuringRead) else "")
                         + "There is no WebDriverAgent to read it through instead: "
                         f"{no_wda}. This device stays on the accessibility push; "
-                        "read the screen again." + (f" {said}" if said else ""),
-                        tool=self.coredevice_ax.TOOL_NAME) from failed
+                        "read the screen again." + (f" {said}" if said else ""))
+                    # A WDA stopped on purpose or busy keeps its own type, so
+                    # its status (400, 503) survives the push's context
+                    # (CodeRabbit on #773).
+                    refusal = self.wda_client.auto_start_refusal(resolved, message)
+                    if refusal is not None:
+                        raise refusal from failed
+                    raise DeviceError(message, tool=self.coredevice_ax.TOOL_NAME) from failed
             elif failed is not None:
                 e = failed
                 logger.warning("[coredevice] read of %s failed, using WDA: %s",
