@@ -102,6 +102,18 @@ class TestTheDevicesOwnPace:
         assert tree.dump_type == "AdditionalData"
         assert len(paces) == 2 and paces[1] >= 0.7, paces
 
+    async def test_each_gap_is_its_own_not_the_time_since_subscribing(
+            self, fast_budget, paces):
+        """InitialDumps every 0.3 s, then nothing: the pace is 0.3 s. Timed
+        from the subscription each time, it grew with every dump and a stall
+        like #684's was given longer and longer."""
+        loop = asyncio.get_running_loop()
+        q = _queue_later((0.0, INITIAL), (0.3, INITIAL), (0.3, INITIAL))
+        with pytest.raises(PushStalled):
+            await asyncio.wait_for(
+                coredevice_ax._newest_tree(q, {}, since=loop.time() - 0.3), 10)
+        assert len(paces) == 3 and paces[-1] < 0.5, paces
+
     def test_the_pace_is_capped(self):
         """A late first push must not hold off recovering a real stall for the
         whole deadline (review)."""
