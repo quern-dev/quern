@@ -66,6 +66,8 @@ _SHARED_SOURCE_CANDIDATES = [
     _PROJECT_ROOT / "macos" / "QuernMedia" / "Sources" / "QuernMedia"
     / "Capture" / "SimulatorList.swift",
     _PROJECT_ROOT / "macos" / "QuernMedia" / "Sources" / "QuernMedia"
+    / "Capture" / "NetworkPhoneList.swift",
+    _PROJECT_ROOT / "macos" / "QuernMedia" / "Sources" / "QuernMedia"
     / "Sinks" / "StreamRefusal.swift",
 ]
 _RESOURCES_DIR = Path(__file__).resolve().parents[1] / "resources"  # server/device/resources
@@ -188,6 +190,53 @@ async def simulator_entries() -> tuple[list[dict], str | None]:
 
 #: The script that streams a network phone's screen to quern-media's stdin.
 PHONE_BRIDGE = Path(__file__).with_name("phone_bridge.py")
+
+#: What the standalone preview app runs as the phone bridge: beside the
+#: quern-media it also runs, in quern's bin directory.
+PHONE_BRIDGE_LAUNCHER = "quern-phone-bridge"
+
+
+def install_phone_bridge_launcher(
+    bin_dir: Path | None = None, python: str | None = None, bridge: Path | None = None,
+) -> bool:
+    """Write the launcher the standalone preview app runs a phone's stream with.
+
+    The app opened from the menu bar runs without a server, and starts its own
+    quern-media from quern's bin directory. A phone also needs the bridge, a
+    Python script that needs this install's venv, which the app cannot find
+    on its own -- so the server writes a launcher naming both beside
+    quern-media when it starts. Rewritten only when what it names changed;
+    written to a temporary file and renamed, so the app never runs half of one.
+
+    Returns True when it was written.
+    """
+    import shlex
+
+    bin_dir = QUERN_BIN_DIR if bin_dir is None else bin_dir
+    script = (
+        "#!/bin/sh\n"
+        "# Written by the quern server at start: the phone bridge from this\n"
+        "# install, for the preview app when it runs without a server.\n"
+        f"exec {shlex.quote(python or sys.executable)} "
+        f"{shlex.quote(str(bridge or PHONE_BRIDGE))} \"$@\"\n"
+    )
+    target = bin_dir / PHONE_BRIDGE_LAUNCHER
+    try:
+        if target.read_text() == script and os.access(target, os.X_OK):
+            return False
+    except OSError:
+        pass
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(f".{PHONE_BRIDGE_LAUNCHER}.{os.getpid()}")
+    try:
+        partial.write_text(script)
+        partial.chmod(0o755)
+        partial.replace(target)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    return True
+
 
 #: The first iOS whose display service streams the screen (pymobiledevice3's
 #: `VIDEO_STREAM_MIN_VERSION`).

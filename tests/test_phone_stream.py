@@ -570,3 +570,35 @@ class TestMenu:
             "cmd": "open_failed", "key": "CD-GONE",
             "error": "the phone is no longer on the network",
         }
+
+
+# MARK: - the launcher the standalone app runs
+
+
+class TestPhoneBridgeLauncher:
+    def test_it_runs_the_bridge_with_this_install_and_passes_its_arguments(self, tmp_path):
+        """The app runs it by path, beside quern-media; it has to reach this
+        install's Python and bridge, wherever they are -- spaces included."""
+        import subprocess
+
+        bridge_dir = tmp_path / "an install"
+        bridge_dir.mkdir()
+        fake = bridge_dir / "phone_bridge.py"
+        fake.write_text("import sys; print('bridge', *sys.argv[1:])\n")
+        bin_dir = tmp_path / "bin"
+
+        assert preview.install_phone_bridge_launcher(bin_dir, sys.executable, fake)
+        launcher = bin_dir / preview.PHONE_BRIDGE_LAUNCHER
+        ran = subprocess.run(
+            [str(launcher), "--udid", "00008030-X"], capture_output=True, text=True, timeout=30,
+        )
+        assert ran.stdout.strip() == "bridge --udid 00008030-X"
+
+    def test_it_is_rewritten_only_when_it_changes(self, tmp_path):
+        bin_dir = tmp_path / "bin"
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        assert preview.install_phone_bridge_launcher(bin_dir, sys.executable, a)
+        assert not preview.install_phone_bridge_launcher(bin_dir, sys.executable, a)
+        assert preview.install_phone_bridge_launcher(bin_dir, sys.executable, b)
+        assert str(b) in (bin_dir / preview.PHONE_BRIDGE_LAUNCHER).read_text()
+        assert [p.name for p in bin_dir.iterdir()] == [preview.PHONE_BRIDGE_LAUNCHER]

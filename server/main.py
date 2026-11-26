@@ -779,6 +779,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("Rebuilt quern-media: its sources had changed")
 
     async def _refresh_mirror_tools() -> None:
+        # The phone bridge's launcher, which the app runs for a Wi-Fi phone
+        # when it runs without a server. Cheap, and before the app reopens.
+        from server.device.media import preview
+
+        try:
+            if preview.install_phone_bridge_launcher():
+                logger.info("Installed the phone bridge launcher for Screen Mirror")
+        except OSError as exc:
+            logger.warning("Could not install the phone bridge launcher: %s", exc)
         # The engine first: the app starts it, so an app reopened by its own
         # refresh before the engine is rebuilt would start the old one.
         await _refresh_media_engine()
