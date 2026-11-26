@@ -21,6 +21,7 @@ from server.api.device import (
 )
 from server.device import frames
 from server.device.controller import DeviceController
+from server.device.ios.wda_client import ask_for_wda
 from server.knowledge import navigation
 from server.knowledge.landmarks import LandmarkRegistry, needs_page_urls, pushed_container_note
 from server.knowledge.session_landmarks import SessionLandmarks
@@ -384,6 +385,8 @@ async def get_ui_elements(
 
     Optionally scope to children of a specific element using the `children_of` parameter.
     """
+    # Asked for WDA by name: on a phone in no-WDA mode, only this starts it (#780).
+    ask_for_wda(snapshot_depth is not None)
     controller = _get_controller(request)
     with _action("get_ui_tree", category="device.read") as act:
         act.detail = f"mode={mode}" + (f" children_of={children_of}" if children_of else "")
@@ -509,6 +512,8 @@ async def get_element(
     - 200 with element dict (includes match_count if ambiguous)
     - 404 if no element found
     """
+    # Asked for WDA by name: on a phone in no-WDA mode, only this starts it (#780).
+    ask_for_wda(snapshot_depth is not None)
     label_params = [p for p in (label, label_contains, label_prefix) if p is not None]
     if len(label_params) > 1:
         raise HTTPException(
@@ -557,6 +562,8 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
     - elapsed_seconds: float - time spent polling
     - polls: int - number of polls performed
     """
+    # Asked for WDA by name: on a phone in no-WDA mode, only this starts it (#780).
+    ask_for_wda(body.snapshot_depth is not None)
     controller = _get_controller(request)
 
     # Validation
@@ -666,6 +673,8 @@ async def get_screen_summary(
 
     Returns summary with truncated, total_interactive_elements fields.
     """
+    # Asked for WDA by name: on a phone in no-WDA mode, only this starts it (#780).
+    ask_for_wda(snapshot_depth is not None)
     controller = _get_controller(request)
     try:
         summary, elements, resolved_udid = await controller.get_screen_summary(
@@ -895,6 +904,8 @@ async def tap_element(request: Request, body: TapElementRequest):
     - 409 with status "obstructed" when something else would take the tap, or
       the element is off screen -- nothing was tapped (iOS simulators, #435)
     """
+    # Asked for WDA by name: on a phone in no-WDA mode, only this starts it (#780).
+    ask_for_wda(body.snapshot_depth is not None)
     controller = _get_controller(request)
     with _action("tap_element") as act:
         act.detail = body.label or body.identifier or body.label_contains or ""
@@ -1333,6 +1344,8 @@ async def scroll_to_element(request: Request, body: ScrollToElementRequest):
     Supported on Android and iOS (physical + simulator) via a bounded swipe
     loop. Returns 404 when the element never appears after scrolling.
     """
+    # Asked for WDA by name: on a phone in no-WDA mode, only this starts it (#780).
+    ask_for_wda(body.snapshot_depth is not None)
     controller = _get_controller(request)
     try:
         result = await _run_until_client_leaves(
@@ -1364,6 +1377,8 @@ async def scroll_to_element(request: Request, body: ScrollToElementRequest):
 @router.post("/ui/type")
 async def type_text(request: Request, body: TypeTextRequest):
     """Type text into the focused field."""
+    # Asked for WDA by name: on a phone in no-WDA mode, only this starts it (#780).
+    ask_for_wda(body.snapshot_depth is not None)
     controller = _get_controller(request)
     with _action("type_text") as act:
         # The text itself is deliberately not recorded: this is how passwords
@@ -1423,6 +1438,8 @@ async def clear_text(request: Request, body: ClearTextRequest):
     on a sign-in form it finds the email field rather than the password one.
     Focus cannot be detected — the accessibility tree does not report it.
     """
+    # Asked for WDA by name: on a phone in no-WDA mode, only this starts it (#780).
+    ask_for_wda(body.snapshot_depth is not None)
     controller = _get_controller(request)
     with _action("clear_text") as act:
         act.detail = body.label or body.identifier or ""

@@ -2248,6 +2248,17 @@ class WdaNotSetUpError(DeviceOperationUnsupportedError):
     """
 
 
+
+class WdaNotAutoStartedError(WdaNotSetUpError):
+    """On an iPhone the accessibility push serves (iOS 27+), quern does not
+    start WebDriverAgent behind a call that did not ask for it (#780).
+
+    A refusal with a remedy, as its parent: `start_driver` for the phone, or
+    `wda_fallback` in config.json for the Mac. Every implicit WDA launch went
+    through the auto-start this refuses -- a read the push could not make, an
+    input HID could not send -- and each was found only after it had run.
+    """
+
 class AppStateNotFoundError(DeviceError):
     """A checkpoint, container, plist or key that the request named is not there.
 

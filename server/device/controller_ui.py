@@ -845,6 +845,39 @@ _READ_NOTE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "quern_read_note", default=None)
 
 
+#: Said on a children_of answered from the push (#780).
+PUSHED_CHILDREN_NOTE = (
+    "children_of on the accessibility push, which has no hierarchy: these are the "
+    "elements inside the parent's frame.")
+
+
+def children_by_frame(elements: list[UIElement], parent: str) -> list[UIElement]:
+    """The elements inside `parent`'s frame, for a flat tree (#780).
+
+    The parent is found by identifier first, then by label as a lookup finds
+    it on the push; none found is no children, as through WDA. An element is
+    inside when its whole frame is, so a neighbour that only overlaps is not.
+    """
+    found = ([e for e in elements if parent and e.identifier == parent]
+             or find_element(elements, label=parent, merged_labels=True))
+    if not found or found[0].frame is None:
+        return []
+    box = found[0].frame
+    left, top = box["x"], box["y"]
+    right, bottom = left + box["width"], top + box["height"]
+    slack = 0.5
+    inside = []
+    for e in elements:
+        if e is found[0] or e.frame is None:
+            continue
+        f = e.frame
+        if (f["x"] >= left - slack and f["y"] >= top - slack
+                and f["x"] + f["width"] <= right + slack
+                and f["y"] + f["height"] <= bottom + slack):
+            inside.append(e)
+    return inside
+
+
 def _joined(*notes: str | None) -> str:
     """Notes said together, none lost to the one after it."""
     return " ".join(n for n in notes if n)
@@ -1225,11 +1258,14 @@ class DeviceControllerUI:
             return None
         # Stopped on purpose, or its runner just found not answering: a read
         # the push could not make fell back and started it again (#769).
-        if reason := self.wda_client.no_auto_start_reason(udid):
-            return reason
+        if refusal := self.wda_client.auto_start_refusal(udid, mode=False):
+            return str(refusal)
         from server.tooling.wda_availability import wda_unavailable_reason
 
-        return await wda_unavailable_reason()
+        if unavailable := await wda_unavailable_reason():
+            return unavailable
+        # No-WDA mode (#780) last: on a Mac with no WDA, that is the answer.
+        return self.wda_client.no_auto_start_reason(udid)
 
     async def _push_after_a_crash(self, reader, udid: str, crash: DeviceError, no_wda: str,
                                   source_timeout: float | None, probe: bool):
@@ -3656,7 +3692,11 @@ class DeviceControllerUI:
                     # A WDA stopped on purpose or busy keeps its own type, so
                     # its status (400, 503) survives the push's context
                     # (CodeRabbit on #773).
-                    refusal = self.wda_client.auto_start_refusal(resolved, message)
+                    # Typed by the reason given: no-WDA mode only when that
+                    # is what this says, not on a Mac with no WDA at all.
+                    refusal = self.wda_client.auto_start_refusal(
+                        resolved, message,
+                        mode=no_wda == self.wda_client.no_auto_start_reason(resolved))
                     if refusal is not None:
                         raise refusal from failed
                     raise DeviceError(message, tool=self.coredevice_ax.TOOL_NAME) from failed
@@ -3852,6 +3892,15 @@ class DeviceControllerUI:
         then returns its flattened descendants as parsed UIElements.
         """
         resolved = await self.resolve_udid(udid)
+        # On a phone the accessibility push serves, from the push (#780), which
+        # is flat: the elements inside the parent's frame, said on the answer.
+        # Through WDA this read started WDA on every such phone, and the MCP's
+        # own instructions recommend it.
+        if snapshot_depth is None and self._device_tree_reader(resolved) is not None:
+            elements, resolved = await self.get_ui_elements(resolved, whole_screen=True)
+            if self._last_read_backend.get(resolved) == self.coredevice_ax.TOOL_NAME:
+                _READ_NOTE.set(_joined(_READ_NOTE.get(), PUSHED_CHILDREN_NOTE))
+                return children_by_frame(elements, children_of), resolved
         # Selected once and recorded, the same way `get_ui_elements` does it.
         # This was the one read path that did neither, so `get_ui_tree`
         # with `children_of` reported whichever backend an *earlier* read
