@@ -6,7 +6,10 @@ public struct Options: Equatable {
         case simulator(udid: String)
         case device(match: String)
         /// A phone's HEVC screen stream on stdin, written by quern's server.
-        case hevcStdin
+        /// `id` names it to viewers, as a simulator's UDID does: a window
+        /// reconnecting with `?source=` to a port now serving another phone
+        /// is refused rather than shown the wrong screen.
+        case hevcStdin(id: String?)
     }
 
     public var source: Source
@@ -31,6 +34,7 @@ public enum OptionsError: Error, Equatable, CustomStringConvertible {
     case list
     case noSource
     case conflictingSources
+    case sourceIDWithoutStdin
     case missingValue(String)
     case badValue(flag: String, value: String)
     case unknownFlag(String)
@@ -44,6 +48,8 @@ public enum OptionsError: Error, Equatable, CustomStringConvertible {
             return "no source given: pass --sim-udid <UDID>, --device <name> or --hevc-stdin"
         case .conflictingSources:
             return "--sim-udid, --device and --hevc-stdin are mutually exclusive"
+        case .sourceIDWithoutStdin:
+            return "--source-id names a --hevc-stdin stream; a simulator is named by its UDID"
         case .missingValue(let flag): return "\(flag) needs a value"
         case .badValue(let flag, let value): return "\(flag): cannot parse \"\(value)\""
         case .unknownFlag(let flag): return "unknown flag \(flag)"
@@ -56,7 +62,7 @@ public enum OptionsError: Error, Equatable, CustomStringConvertible {
 public enum OptionsParser {
     private static let valueFlags: Set<String> = [
         "--sim-udid", "--device", "--serve", "--fps", "--max-dim",
-        "--quality", "--bitrate", "--record",
+        "--quality", "--bitrate", "--record", "--source-id",
     ]
     private static let boolFlags: Set<String> = [
         "--bind-all", "--h264", "--list", "--help", "-h", "--exit-with-parent",
@@ -102,10 +108,11 @@ public enum OptionsParser {
         switch (values["--sim-udid"], values["--device"], hevc) {
         case (.some(let udid), nil, false): source = .simulator(udid: udid)
         case (nil, .some(let match), false): source = .device(match: match)
-        case (nil, nil, true): source = .hevcStdin
+        case (nil, nil, true): source = .hevcStdin(id: values["--source-id"])
         case (nil, nil, false): throw OptionsError.noSource
         default: throw OptionsError.conflictingSources
         }
+        if values["--source-id"] != nil, !hevc { throw OptionsError.sourceIDWithoutStdin }
 
         func number<T: LosslessStringConvertible>(_ flag: String, default def: T) throws -> T {
             guard let raw = values[flag] else { return def }

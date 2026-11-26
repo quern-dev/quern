@@ -176,14 +176,14 @@ public final class HEVCDecoder {
 
     /// A new decoder only when the parameter sets change -- a turn, a size
     /// change -- and kept when the session can take the new format as it is.
+    /// A unit carrying only some of the three changes nothing: the phone
+    /// sends all three with every keyframe, and one set mixed with another
+    /// picture size's would describe no stream at all.
     private func configure(_ sets: [Data]) throws {
-        let vps = sets.last { HEVCNAL.type($0) == HEVCNAL.vps }
-            ?? parameterSets.first { HEVCNAL.type($0) == HEVCNAL.vps }
-        let sps = sets.last { HEVCNAL.type($0) == HEVCNAL.sps }
-            ?? parameterSets.first { HEVCNAL.type($0) == HEVCNAL.sps }
-        let pps = sets.last { HEVCNAL.type($0) == HEVCNAL.pps }
-            ?? parameterSets.first { HEVCNAL.type($0) == HEVCNAL.pps }
-        guard let vps, let sps, let pps else { return }
+        guard let vps = sets.last(where: { HEVCNAL.type($0) == HEVCNAL.vps }),
+              let sps = sets.last(where: { HEVCNAL.type($0) == HEVCNAL.sps }),
+              let pps = sets.last(where: { HEVCNAL.type($0) == HEVCNAL.pps })
+        else { return }
         let next = [vps, sps, pps]
         if next == parameterSets, format != nil { return }
 
@@ -266,6 +266,10 @@ public final class HEVCStdinSource: FrameSource {
     /// frozen last picture.
     public var onAvailability: ((Bool, String) -> Void)?
 
+    /// How an unavailability reason begins when the stream could not be read,
+    /// as opposed to having ended.
+    public static let unreadablePrefix = "the phone's screen stream could not be read"
+
     private let input: FileHandle
     private let onFrame: (CapturedFrame) -> Void
     private let queue = DispatchQueue(label: "quern.media.hevc", qos: .userInteractive)
@@ -328,7 +332,7 @@ public final class HEVCStdinSource: FrameSource {
                 // Out of step: nothing after this can be trusted to be framed
                 // as it should, so the stream is over rather than garbled.
                 MediaLog.log("[hevc] \(error)")
-                onAvailability?(false, "the phone's screen stream could not be read: \(error)")
+                onAvailability?(false, "\(Self.unreadablePrefix): \(error)")
                 return
             }
         }

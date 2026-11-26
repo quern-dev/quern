@@ -120,6 +120,18 @@ func truncatedUnit() {
     }
 }
 
+@Test("a zero-length NAL unit, or bytes left over after the last, is a stream out of step")
+func malformedBody() {
+    // Each body would otherwise go to VideoToolbox as a NAL unit of nothing,
+    // or lose its tail without a word.
+    for body in [Data([0, 0, 0, 0]),
+                 Data([0, 0, 0, 2, 0x26, 0x01, 0xAA])] {
+        var reader = HEVCFrameReader()
+        let framed = Data([0, 0, 0, UInt8(body.count)]) + body
+        #expect(throws: HEVCFramingError.truncatedUnit) { _ = try reader.feed(framed) }
+    }
+}
+
 @Test("NAL types are read from the header, and only VPS, SPS, PPS are parameter sets")
 func nalTypes() {
     #expect(HEVCNAL.type(Data([0x40, 0x01])) == 32)           // VPS
@@ -260,7 +272,12 @@ func garbageEndsTheStream() throws {
 @Test("--hevc-stdin is a source of its own")
 func hevcOption() throws {
     let o = try OptionsParser.parse(["--hevc-stdin", "--serve", "8430"])
-    #expect(o.source == .hevcStdin)
+    #expect(o.source == .hevcStdin(id: nil))
+    let named = try OptionsParser.parse(["--hevc-stdin", "--source-id", "00008030-X", "--serve", "8430"])
+    #expect(named.source == .hevcStdin(id: "00008030-X"))
+    #expect(throws: OptionsError.sourceIDWithoutStdin) {
+        try OptionsParser.parse(["--sim-udid", "A", "--source-id", "B", "--serve", "8430"])
+    }
     #expect(throws: OptionsError.conflictingSources) {
         try OptionsParser.parse(["--hevc-stdin", "--sim-udid", "X", "--serve", "8430"])
     }
