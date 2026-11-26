@@ -107,3 +107,24 @@ class TestARunnerThatNeverAnswered:
 
         assert stop.await_count == (1 if stopped else 0)
         assert ("stopped again" in str(caught.value)) is stopped
+
+
+    async def test_the_next_read_does_not_start_another_one(self, backend, monkeypatch):
+        """Stopping it must not turn every read into a start and a stop: the
+        next one is refused for a while, saying why (CodeRabbit on #779)."""
+        backend._device_os_versions[PHONE] = "iOS 27.2.1"
+        never = "WDA announced its server, but /status did not answer"
+        start = AsyncMock(return_value={"status": "started", "ready": False, "error": never})
+        monkeypatch.setattr(wda_module, "start_driver", start)
+        stop = AsyncMock(return_value={"status": "stopped"})
+        monkeypatch.setattr(wda_module, "stop_driver", stop)
+
+        with pytest.raises(DeviceError, match="did not become responsive"):
+            await backend._get_base_url(PHONE)
+        with pytest.raises(DeviceError, match="never answered .* so it was stopped") as again:
+            await backend._get_base_url(PHONE)
+
+        assert start.await_count == 1
+        assert "running but not answering" not in str(again.value)
+        backend.note_started(PHONE)
+        assert backend.no_auto_start_reason(PHONE) is None

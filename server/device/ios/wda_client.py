@@ -309,6 +309,10 @@ class QueryTimedOut(Exception):
 
 #: How long a runner found alive and not answering is not asked again (#769).
 WDA_UNSERVING_S = 60.0
+#: Seconds a runner that was started, never answered, and was stopped again
+#: is not started again behind a read: without it every read on that phone
+#: started and stopped one more, 8 s at a time (CodeRabbit on #779).
+WDA_FAILED_START_S = 60.0
 #: Inside that window, the one quick look that lets a recovered runner be used.
 WDA_RECOVERED_PROBE_S = 1.0
 
@@ -356,6 +360,8 @@ class WdaBackend:
         #: Phones whose runner was found alive and not answering, until when
         #: it is not asked again, and what it said (#769).
         self._unserving: dict[str, tuple[float, str]] = {}
+        # udid -> (until, why) for a runner stopped after it never answered.
+        self._failed_start: dict[str, tuple[float, str]] = {}
         # Per-device lock for session creation (prevents parallel _ensure_session races)
         self._session_locks: dict[str, asyncio.Lock] = {}
         #: Seconds the last `/source` ran before timing out, per device, or
@@ -669,7 +675,11 @@ class WdaBackend:
                 from server.device.ios.wda import stop_driver
 
                 await stop_driver(udid)
-                stopped = " It was stopped again rather than left running on the phone."
+                self._failed_start[udid] = (
+                    time.monotonic() + WDA_FAILED_START_S,
+                    result.get("error") or "it did not answer")
+                stopped = (" It was stopped again rather than left running on the phone, "
+                           f"and is not started again behind a read for {WDA_FAILED_START_S:.0f}s.")
             raise DeviceError(
                 f"Auto-started WDA driver on {udid[:8]} but it did not become responsive."
                 f"{stopped} Check log: ~/.quern/wda/runner-{udid[:8]}.log",
@@ -694,11 +704,13 @@ class WdaBackend:
         """stop_driver ran: WDA is not started again behind a read (#769)."""
         self._stopped_on_request.add(udid)
         self._unserving.pop(udid, None)
+        self._failed_start.pop(udid, None)
 
     def note_started(self, udid: str) -> None:
         """start_driver ran: WDA may be used, and started again, as before."""
         self._stopped_on_request.discard(udid)
         self._unserving.pop(udid, None)
+        self._failed_start.pop(udid, None)
 
     def no_auto_start_reason(self, udid: str) -> str | None:
         """Why WDA would not be started behind a read on this phone now, or
@@ -709,6 +721,12 @@ class WdaBackend:
         unserving = self._unserving.get(udid)
         if unserving is not None and time.monotonic() < unserving[0]:
             return self._unserving_message(udid, unserving[1])
+        failed = self._failed_start.get(udid)
+        if failed is not None and time.monotonic() < failed[0]:
+            left = max(0, round(failed[0] - time.monotonic()))
+            return (f"WDA was started on {udid[:8]} and never answered ({failed[1]}), "
+                    "so it was stopped; it is not started again behind a read for "
+                    f"{left}s. start_driver tries again now")
         return None
 
     def forget_unserving(self, udid: str) -> None:
