@@ -1239,6 +1239,10 @@ class DeviceControllerUI:
             # WDA stopped on purpose is no WDA to send them to: on the push,
             # or every read went to a WDA that refused it (review).
             return set()
+        if self.wda_client.in_no_wda_mode(udid):
+            # Nor is no-WDA mode (#780): every later read would be refused,
+            # even once the push had recovered (CodeRabbit on #782).
+            return set()
         return self._push_crashed_apps.get(udid, set())
 
     def _record_push_crash(self, udid: str, app: str) -> None:

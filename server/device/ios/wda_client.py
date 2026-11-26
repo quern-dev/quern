@@ -316,6 +316,14 @@ WDA_UNSERVING_S = 60.0
 _WDA_ASKED: contextvars.ContextVar[bool] = contextvars.ContextVar("_wda_asked", default=False)
 
 
+def _runner_alive(udid: str) -> bool:
+    """Whether a WDA runner recorded for this device is still running."""
+    from server.device.ios.wda import _is_process_alive, read_wda_state
+
+    pid = (read_wda_state().get("runners", {}).get(udid) or {}).get("pid")
+    return bool(pid) and _is_process_alive(pid)
+
+
 def ask_for_wda(asked: bool) -> None:
     """Mark this request as one that asked for WDA, when `asked`. Each request
     runs in a context of its own, so the mark ends with it."""
@@ -782,11 +790,19 @@ class WdaBackend:
             return None
         if _WDA_ASKED.get() or udid in self._started_on_request or get_wda_fallback():
             return None
+        # Only a start is refused: a WDA already there is used. A runner
+        # outlives the server, and start_driver's mark does not (review).
+        if udid in self._connections or _runner_alive(udid):
+            return None
         return (f"{udid[:8]} is in no-WDA mode: on iOS {COREDEVICE_MIN_IOS} and later quern "
                 "does not start WebDriverAgent on its own. If this really needs WDA, call "
                 "start_driver for this device (WDA is then used for it until stop_driver), "
                 "or set \"wda_fallback\": true in ~/.quern/config.json to restore the "
                 "automatic fallback on this Mac")
+
+    def in_no_wda_mode(self, udid: str) -> bool:
+        """Whether WDA would be refused here for want of being asked (#780)."""
+        return self._not_asked_for(udid) is not None
 
     def forget_unserving(self, udid: str) -> None:
         """Drop a busy runner remembered for this phone: the runner is gone."""

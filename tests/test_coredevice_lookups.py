@@ -528,6 +528,7 @@ class TestPushedSweeps:
             assert "tree the device pushes" in result["detail"]
             assert "snapshot_depth" not in result
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_device_the_push_crashed_an_app_on_sweeps_through_wda(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         _wda_depth_spies(ctrl)

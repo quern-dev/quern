@@ -213,6 +213,7 @@ class TestWhatIsNotSet:
 
         setter.assert_not_called()
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_not_after_the_push_crashed_an_app(self, monkeypatch):
         """The set reads the push, which would run the crashing dump again
         (#669): such a device types into a named field through WDA, which
@@ -778,6 +779,7 @@ class TestTheLaunchCheck:
         monkeypatch.setattr("server.device.controller.asyncio.sleep", AsyncMock())
         return ctrl
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_device_the_push_crashed_an_app_on_is_not_read(self, monkeypatch):
         ctrl = self._ctrl(monkeypatch, [])
         ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}

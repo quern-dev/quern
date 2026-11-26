@@ -1802,6 +1802,7 @@ class TestTheOtherIdentifyReads:
         ctrl.coredevice_ax.describe_all.assert_awaited()
         ctrl.wda_client.describe_all.assert_not_called()
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_after_a_crash_it_keeps_the_action_depth(self, monkeypatch):
         """WDA with no depth is the full walk, 34.5 s of a long list."""
         from server.api.device_ui import _identify_now
@@ -1997,6 +1998,7 @@ class TestTheControllerAfterACrash:
         assert "QuernProbeScene (pid 711) exited" in ctrl.read_note()
         assert "QuernProbeScene" in ctrl._push_crashed_apps[PHONE]
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_crashed_app_is_not_read_through_the_push_again(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
@@ -2006,6 +2008,7 @@ class TestTheControllerAfterACrash:
 
         ctrl.coredevice_ax.describe_all.assert_not_called()
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_after_a_crash_the_device_stays_on_wda(self, monkeypatch):
         """The read after a crash sees SpringBoard; relaunching the app must not
         put the next read back on the push (CodeRabbit on #668)."""

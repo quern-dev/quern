@@ -381,6 +381,7 @@ class TestAfterSetup:
         await wda_availability._refreshing
         assert crashed._device_tree_reader(PHONE) is crashed.coredevice_ax
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_wda_built_brings_the_latch_back(self, monkeypatch, crashed):
         monkeypatch.setattr(wda_availability, "_check", AsyncMock(return_value=None))
         wda_availability.forget()

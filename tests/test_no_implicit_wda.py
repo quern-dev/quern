@@ -293,3 +293,28 @@ def test_only_a_literal_true_turns_the_fallback_on(monkeypatch, value, on):
     monkeypatch.setattr(config, "read_user_config",
                         lambda: {} if value is None else {"wda_fallback": value})
     assert config.get_wda_fallback() is on
+
+
+class TestAfterReview:
+    async def test_a_runner_already_there_is_not_refused(self, backend, monkeypatch):
+        """Only a start is refused. A runner outlives the server, and
+        start_driver's mark does not (CodeRabbit on #782)."""
+        monkeypatch.setattr(wda_client, "_runner_alive", lambda udid: True)
+        assert backend.no_auto_start_reason(PHONE) is None
+        assert not backend.in_no_wda_mode(PHONE)
+
+    def test_a_push_crash_in_no_wda_mode_keeps_the_phone_on_the_push(self, monkeypatch):
+        """The crash latch sends reads to WDA; with none to send them to, every
+        later read was refused, even once the push had recovered."""
+        ctrl, _start = _failing_phone(monkeypatch)
+        from server.tooling import wda_availability
+        monkeypatch.setattr(wda_availability, "known_reason", lambda: None)
+        ctrl._record_push_crash(PHONE, "Probe")
+        assert ctrl._device_tree_reader(PHONE) is ctrl.coredevice_ax
+
+    def test_with_the_fallback_on_the_crash_still_moves_it(self, monkeypatch, wda_fallback_on):
+        ctrl, _start = _failing_phone(monkeypatch)
+        from server.tooling import wda_availability
+        monkeypatch.setattr(wda_availability, "known_reason", lambda: None)
+        ctrl._record_push_crash(PHONE, "Probe")
+        assert ctrl._device_tree_reader(PHONE) is None
