@@ -653,9 +653,26 @@ class WdaBackend:
             self._unserving[udid] = (time.monotonic() + WDA_UNSERVING_S, error)
             raise WdaRunnerBusyError(self._unserving_message(udid, error), tool="wda")
         if not result.get("ready"):
+            from server.device.ios.coredevice_ax import COREDEVICE_MIN_IOS
+            from server.device.ios.wda import _parse_ios_major_version
+
+            try:
+                pushed = _parse_ios_major_version(os_version) >= COREDEVICE_MIN_IOS
+            except ValueError:
+                pushed = False  # unknown: left as it was
+            stopped = ""
+            if pushed:
+                # A runner that never answered, on a phone the accessibility
+                # push reads: left running, it held a WDA session on the phone
+                # for six hours, through two server restarts, and no read ever
+                # used it. Stopped, as a simulator's is.
+                from server.device.ios.wda import stop_driver
+
+                await stop_driver(udid)
+                stopped = " It was stopped again rather than left running on the phone."
             raise DeviceError(
-                f"Auto-started WDA driver on {udid[:8]} but it did not become responsive. "
-                f"Check log: ~/.quern/wda/runner-{udid[:8]}.log",
+                f"Auto-started WDA driver on {udid[:8]} but it did not become responsive."
+                f"{stopped} Check log: ~/.quern/wda/runner-{udid[:8]}.log",
                 tool="wda",
             )
 

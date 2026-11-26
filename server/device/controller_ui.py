@@ -41,6 +41,7 @@ from server.models import (
     DeviceOperationUnsupportedError,
     DeviceType,
     InvalidDeviceRequestError,
+    NoTunnelError,
     UIElement,
     WaitCondition,
 )
@@ -3610,6 +3611,16 @@ class DeviceControllerUI:
                 # removed (review on #736) -- and the second started a WDA
                 # that could not read the screen either, then looped
                 # restarting it (#769).
+                if said:
+                    failed.args = (f"{failed} {said}",)
+                raise failed
+            if isinstance(failed, NoTunnelError):
+                # No tunnel to the phone: WDA is reached through that tunnel
+                # too, so falling back started a runner on the phone that
+                # could not be reached, and answered "did not become
+                # responsive" 9 s later instead of this.
+                logger.warning("[coredevice] read of %s failed, not using WDA: %s",
+                               resolved[:8], failed)
                 if said:
                     failed.args = (f"{failed} {said}",)
                 raise failed

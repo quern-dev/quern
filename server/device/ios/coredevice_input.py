@@ -35,7 +35,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from server.device.gestures import TAP_HOLD_MS, Plan, check_edge_start
-from server.models import DeviceError, InvalidDeviceRequestError
+from server.models import DeviceError, InvalidDeviceRequestError, NoTunnelError
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,11 @@ _sleep = asyncio.sleep
 
 class NotSent(Exception):
     """Nothing reached the phone; the caller may do it another way."""
+
+
+class _NoTunnel(NotSent):
+    """Nothing was sent because there is no tunnel to the phone -- which WDA
+    would need too, so it is not handed to WDA (see `NoTunnelError`)."""
 
 
 class _ReadFailed(NotSent):
@@ -567,6 +572,11 @@ class CoreDeviceInput:
                     return self.TOOL_NAME
                 except NotSent as again:
                     e = again
+            if isinstance(e, _NoTunnel):
+                raise NoTunnelError(
+                    f"{what} on {udid[:8]} was not sent: {e}. WebDriverAgent is "
+                    "reached through the same tunnel, so it was not started instead.",
+                    tool=self.TOOL_NAME) from e
             logger.info("[coredevice] %s on %s through WDA: %s", what, udid[:8], e)
             try:
                 await fallback()
@@ -656,6 +666,8 @@ class CoreDeviceInput:
 
             try:
                 address = await _device_address(udid)
+            except NoTunnelError as e:
+                raise _NoTunnel(str(e)) from e
             except Exception as e:
                 # Not only DeviceError: tunneld or a resolver can fail any
                 # way, and nothing has been sent.
