@@ -5,6 +5,8 @@ public struct Options: Equatable {
     public enum Source: Equatable {
         case simulator(udid: String)
         case device(match: String)
+        /// A phone's HEVC screen stream on stdin, written by quern's server.
+        case hevcStdin
     }
 
     public var source: Source
@@ -39,9 +41,9 @@ public enum OptionsError: Error, Equatable, CustomStringConvertible {
         case .help: return "help requested"
         case .list: return "list requested"
         case .noSource:
-            return "no source given: pass --sim-udid <UDID> or --device <name>"
+            return "no source given: pass --sim-udid <UDID>, --device <name> or --hevc-stdin"
         case .conflictingSources:
-            return "--sim-udid and --device are mutually exclusive"
+            return "--sim-udid, --device and --hevc-stdin are mutually exclusive"
         case .missingValue(let flag): return "\(flag) needs a value"
         case .badValue(let flag, let value): return "\(flag): cannot parse \"\(value)\""
         case .unknownFlag(let flag): return "unknown flag \(flag)"
@@ -58,6 +60,7 @@ public enum OptionsParser {
     ]
     private static let boolFlags: Set<String> = [
         "--bind-all", "--h264", "--list", "--help", "-h", "--exit-with-parent",
+        "--hevc-stdin",
     ]
 
     public static func parse(_ args: [String]) throws -> Options {
@@ -95,11 +98,13 @@ public enum OptionsParser {
         if flags.contains("--list") { throw OptionsError.list }
 
         let source: Options.Source
-        switch (values["--sim-udid"], values["--device"]) {
-        case (.some, .some): throw OptionsError.conflictingSources
-        case (.some(let udid), nil): source = .simulator(udid: udid)
-        case (nil, .some(let match)): source = .device(match: match)
-        case (nil, nil): throw OptionsError.noSource
+        let hevc = flags.contains("--hevc-stdin")
+        switch (values["--sim-udid"], values["--device"], hevc) {
+        case (.some(let udid), nil, false): source = .simulator(udid: udid)
+        case (nil, .some(let match), false): source = .device(match: match)
+        case (nil, nil, true): source = .hevcStdin
+        case (nil, nil, false): throw OptionsError.noSource
+        default: throw OptionsError.conflictingSources
         }
 
         func number<T: LosslessStringConvertible>(_ flag: String, default def: T) throws -> T {

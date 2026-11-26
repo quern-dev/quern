@@ -180,6 +180,18 @@ case .device(let match):
     source = CaptureDeviceSource(device: device) { pipeline.consume($0) }
     do { try source.start() } catch { fail("\(error)") }
     MediaLog.log("[capture] streaming \(device.localizedName)")
+
+case .hevcStdin:
+    // A phone's CoreDevice screen stream, written here by quern's server.
+    let phone = HEVCStdinSource { pipeline.consume($0) }
+    // The writer going away is the phone's stream ending: viewers see it go
+    // off air, and the server that started this one restarts it.
+    phone.onAvailability = { available, reason in
+        server?.setSourceAvailable(available, reason: reason)
+    }
+    source = phone
+    do { try source.start() } catch { fail("\(error)") }
+    MediaLog.log("[capture] streaming HEVC from stdin")
 }
 
 // A viewer that has just attached needs a picture, and on an event-driven
