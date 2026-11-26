@@ -134,11 +134,16 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-async def open_stream(port: int, password: str, server: asyncio.Task) -> asyncio.StreamReader:
+async def open_stream(
+    port: int, password: str, server: asyncio.Task
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Connect to `/stream.bin`, waiting while the server comes up.
 
     It refuses connections before it binds and answers 503 until the phone's
     first keyframe; both are waited out. A server that has stopped is not.
+
+    The writer is returned to be held: a StreamWriter that is collected closes
+    its connection, which ended the stream after its first picture.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + FIRST_PICTURE_TIMEOUT
@@ -170,7 +175,7 @@ async def open_stream(port: int, password: str, server: asyncio.Task) -> asyncio
         if code == [b"200"]:
             if "chunked" not in headers.get("transfer-encoding", "").lower():
                 raise StreamError("/stream.bin did not answer chunked")
-            return reader
+            return reader, writer
         writer.close()
         last = f"/stream.bin answered {status.decode('latin-1').strip() or 'nothing'}"
         if code != [b"503"]:
@@ -217,7 +222,10 @@ async def run(udid: str) -> int:
     except ImportError as exc:
         return fail(2, f"this pymobiledevice3 cannot stream a phone's screen: {exc}")
 
-    out = await stdout_writer()
+    try:
+        out = await stdout_writer()
+    except ValueError as exc:  # a regular file: asyncio writes only to pipes
+        return fail(2, f"stdout must be a pipe to quern-media: {exc}")
     password = secrets.token_urlsafe(24)
     port = free_port()
     try:
@@ -228,8 +236,20 @@ async def run(udid: str) -> int:
             )
             server = asyncio.create_task(stream_server.serve(), name="screen-stream")
             try:
-                reader = await open_stream(port, password, server)
-                await relay(reader, out)
+                reader, connection = await open_stream(port, password, server)
+                try:
+                    await relay(reader, out)
+                except StreamError:
+                    # ScreenStreamServer takes SIGTERM and SIGINT over from
+                    # main_async and returns from serve() on them; the stream
+                    # ending then is the stop, not the phone going away. It
+                    # closes the connection before it returns, so wait for it.
+                    await asyncio.wait({server}, timeout=2.0)
+                    if server.done() and not server.cancelled() and server.exception() is None:
+                        raise StreamError("stopped") from None
+                    raise
+                finally:
+                    connection.close()
             finally:
                 server.cancel()
                 with contextlib.suppress(BaseException):

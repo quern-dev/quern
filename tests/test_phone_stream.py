@@ -163,7 +163,8 @@ class TestOpenStream:
         async def run():
             server = asyncio.create_task(self._forever())
             try:
-                reader = await bridge.open_stream(8123, "pw", server)
+                reader, writer = await bridge.open_stream(8123, "pw", server)
+                assert writer is not None
                 return await reader.read()
             finally:
                 server.cancel()
@@ -200,6 +201,15 @@ class TestOpenStream:
 
         with pytest.raises(bridge.StreamError, match="DisplayService is not available"):
             asyncio.run(run())
+
+
+def test_a_stdout_that_is_not_a_pipe_is_reported(tmp_path, monkeypatch, capsys):
+    """asyncio writes only to pipes; a redirect to a file raised past the
+    report, so nothing said why the stream never started."""
+    with open(tmp_path / "out.bin", "wb") as f:
+        monkeypatch.setattr(bridge.sys, "stdout", type("Out", (), {"buffer": f})())
+        assert asyncio.run(bridge.run("00008030-X")) == 2
+    assert "stdout must be a pipe" in capsys.readouterr().err
 
 
 # MARK: - which phones the menu shows
@@ -394,6 +404,24 @@ class TestPhoneStream:
         record = asyncio.run(run())
         assert record.on_air is False
         assert record.off_air_reason == "could not reach the phone over the network: gone"
+
+    def test_a_restart_never_runs_two_bridges_for_one_phone(self, monkeypatch):
+        """quern-media exiting leaves its bridge up until the bridge's next
+        write, which on a still screen may be a long way off; the restart
+        would then start a second one beside it."""
+        async def run():
+            mgr = PreviewManager()
+            feeder = _Proc()  # still running
+            media = _Proc(["[hevc] boom"], exit_code=1)
+            stream = preview._StreamProcess(
+                process=media, port=8500, log=deque(maxlen=20), feeder=feeder,
+            )
+            stream.feeder_drain = asyncio.create_task(mgr._drain_feeder("CD-1", stream))
+            mgr._streams["CD-1"] = stream
+            await mgr._drain_stream("CD-1", stream)  # not wanted: no restart
+            return feeder
+
+        assert asyncio.run(run()).terminated
 
     def test_status_reports_a_phone_off_air(self):
         mgr = PreviewManager()
