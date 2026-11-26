@@ -186,6 +186,35 @@ class TestOpenStream:
         with pytest.raises(bridge.StreamError, match="401"):
             asyncio.run(run())
 
+    def test_a_server_that_accepts_and_says_nothing_is_not_waited_on_forever(
+        self, monkeypatch,
+    ):
+        class _Writer:
+            def write(self, b):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+        async def _connect(host, port):
+            return asyncio.StreamReader(), _Writer()  # never a byte, never EOF
+
+        monkeypatch.setattr(bridge.asyncio, "open_connection", _connect)
+        monkeypatch.setattr(bridge, "FIRST_PICTURE_TIMEOUT", 0.3)
+
+        async def run():
+            server = asyncio.create_task(self._forever())
+            try:
+                await asyncio.wait_for(bridge.open_stream(8123, "pw", server), timeout=5)
+            finally:
+                server.cancel()
+
+        with pytest.raises(bridge.StreamError, match="did not answer"):
+            asyncio.run(run())
+
     def test_a_server_that_stopped_is_not_waited_for(self, monkeypatch):
         """Its reason -- the phone was not found, the service is missing -- is
         the report, not a 40 s timeout."""
@@ -327,7 +356,12 @@ class TestPhoneStream:
                 # Both ends are still open while the children are spawned:
                 # what the bridge writes, quern-media reads.
                 os.write(calls[0][1]["stdout"], b"!")
-                joined.append(os.read(kwargs["stdin"], 1))
+                # Non-blocking: unjoined ends fail the test rather than hang it.
+                os.set_blocking(kwargs["stdin"], False)
+                try:
+                    joined.append(os.read(kwargs["stdin"], 1))
+                except BlockingIOError:
+                    joined.append(b"")
             return _Proc()
 
         monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
@@ -500,6 +534,29 @@ class TestMenu:
         asyncio.run(run())
         assert opened == [phone]
         assert not [c for c in sent if c["cmd"] == "open_failed"]
+
+    def test_a_menu_open_still_pending_at_stop_is_cancelled(self, monkeypatch):
+        """Finishing after the stop, it would launch the app again and start
+        a stream nobody would stop."""
+        mgr, _sent = self._manager(monkeypatch, [])
+        started = []
+
+        async def _slow(_key):
+            started.append(True)
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(mgr, "_open_phone_from_menu", _slow)
+
+        async def run():
+            mgr._dispatch_event({"event": "open_network_phone", "key": "CD-27"})
+            await self._settle()
+            (task,) = mgr._menu_tasks
+            await mgr.stop()
+            await self._settle()
+            return task
+
+        task = asyncio.run(run())
+        assert started and task.cancelled()
 
     def test_a_phone_that_left_the_network_says_so(self, monkeypatch):
         mgr, sent = self._manager(monkeypatch, [])

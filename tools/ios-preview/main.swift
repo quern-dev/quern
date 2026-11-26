@@ -277,6 +277,10 @@ func setupMenuBar(devicesMenuDelegate: DevicesMenuDelegate, quitTarget: AnyObjec
     // Devices menu
     let devicesMenuItem = NSMenuItem()
     let devicesMenu = NSMenu(title: "Devices")
+    // Items say themselves whether they are enabled. Left to AppKit, any item
+    // with a target that implements its action is enabled, which turned a
+    // phone greyed out for its reason back into one that can be picked.
+    devicesMenu.autoenablesItems = false
     devicesMenu.delegate = devicesMenuDelegate
     devicesMenuItem.submenu = devicesMenu
     mainMenu.addItem(devicesMenuItem)

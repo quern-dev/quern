@@ -1274,8 +1274,11 @@ class TestSimulatorStopRouting:
         return _Request()
 
     @staticmethod
-    def _pm(removed, raises=None):
+    def _pm(removed, raises=None, phones=()):
         class _PM:
+            def active_kind(self, key):
+                return "phone" if key in phones else None
+
             async def remove(self, name):
                 if raises is not None:
                     raise raises
@@ -1308,6 +1311,23 @@ class TestSimulatorStopRouting:
         # same name and closes the wrong window.
         assert removed == [udid]
         assert result["status"] == "removed"
+
+    def test_a_network_phone_is_stopped_by_its_key(self):
+        """Physical to the controller, but a stream filed under its key:
+        resolved to a name, it matched no capture device and answered
+        "removed" with the phone still streaming."""
+        from server.api.device import PreviewStopRequest, preview_stop
+
+        key = "B34C4EE9-AF48-53C6-BD13-2BFA66E7EE91"
+        removed: list[str] = []
+        result = asyncio.run(
+            preview_stop(
+                self._request(self._pm(removed, phones={key}), physical=True, list_raises=True),
+                PreviewStopRequest(udid=key),
+            )
+        )
+        assert removed == [key]
+        assert result == {"status": "removed", "udid": key, "kind": "phone"}
 
     def test_a_simulator_stop_does_not_depend_on_the_device_list(self):
         """`list_devices` raising used to 404 a udid that is already the key."""

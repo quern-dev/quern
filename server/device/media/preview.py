@@ -34,9 +34,11 @@ import sys
 import tempfile
 import time
 from collections import deque
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from server import get_version
 from server.config import CONFIG_DIR
@@ -938,6 +940,7 @@ class PreviewManager:
         # The last list sent to the app, so a pick from the menu is checked
         # against what the person was shown.
         self._phone_list: dict[str, NetworkPhone] = {}
+        self._menu_tasks: set[asyncio.Task] = set()
 
     async def ensure_binary(self) -> Path:
         """Lazy-compile ios-preview if needed. Returns path to binary.
@@ -1843,8 +1846,13 @@ class PreviewManager:
             except (OSError, RuntimeError) as send_exc:
                 logger.warning("Could not tell the preview app: %s", send_exc)
 
-    def _spawn(self, coro, name: str) -> None:
+    def _spawn(self, coro: Coroutine[Any, Any, None], name: str) -> None:
+        """Run a menu request in the background, tracked so `stop()` can
+        cancel it: a menu open finishing after a stop would launch the app
+        again and start a stream nobody asked to keep."""
         task = asyncio.create_task(coro, name=name)
+        self._menu_tasks.add(task)
+        task.add_done_callback(self._menu_tasks.discard)
         task.add_done_callback(self._report_background_failure)
 
     async def _send_network_phones(self) -> None:
@@ -2034,6 +2042,8 @@ class PreviewManager:
 
     async def stop(self) -> dict:
         """Stop all previews and kill the process."""
+        for task in list(self._menu_tasks):
+            task.cancel()
         if self._process is None or self._process.returncode is not None:
             for key in list(self._streams):
                 await self._stop_stream(key)
@@ -2051,6 +2061,11 @@ class PreviewManager:
 
         self._cleanup_state()
         return {"status": "stopped", "pid": pid}
+
+    def active_kind(self, key: str) -> str | None:
+        """The kind of the preview filed under this key, or None."""
+        preview = self._active.get(key)
+        return preview.kind if preview is not None else None
 
     def status(self) -> dict:
         """Return current preview state."""

@@ -152,12 +152,38 @@ async def open_stream(
     while loop.time() < deadline:
         if server.done():
             raise StreamError(_server_failure(server))
+        # Each attempt inside what is left of the deadline: a server that
+        # accepts and then says nothing would otherwise hold this for good.
         try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            reader, writer, status, headers = await asyncio.wait_for(
+                _request(port, auth), timeout=max(deadline - loop.time(), 0.01)
+            )
+        except TimeoutError:  # first: it is an OSError too
+            last = "the stream server accepted but did not answer"
+            continue
         except OSError as exc:
             last = f"the stream server is not accepting: {exc}"
             await asyncio.sleep(0.25)
             continue
+        code = status.split(b" ", 2)[1:2]
+        if code == [b"200"]:
+            if "chunked" not in headers.get("transfer-encoding", "").lower():
+                raise StreamError("/stream.bin did not answer chunked")
+            return reader, writer
+        writer.close()
+        last = f"/stream.bin answered {status.decode('latin-1').strip() or 'nothing'}"
+        if code != [b"503"]:
+            raise StreamError(last)
+        await asyncio.sleep(0.5)
+    raise StreamError(f"no picture within {FIRST_PICTURE_TIMEOUT:.0f}s: {last}")
+
+
+async def _request(
+    port: int, auth: str
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, bytes, dict[str, str]]:
+    """One GET of `/stream.bin`, up to the end of its headers."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    try:
         writer.write(
             f"GET /stream.bin HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
             f"Authorization: Basic {auth}\r\nConnection: close\r\n\r\n".encode()
@@ -171,17 +197,10 @@ async def open_stream(
                 break
             key, _, value = line.decode("latin-1").partition(":")
             headers[key.strip().lower()] = value.strip()
-        code = status.split(b" ", 2)[1:2]
-        if code == [b"200"]:
-            if "chunked" not in headers.get("transfer-encoding", "").lower():
-                raise StreamError("/stream.bin did not answer chunked")
-            return reader, writer
+    except BaseException:
         writer.close()
-        last = f"/stream.bin answered {status.decode('latin-1').strip() or 'nothing'}"
-        if code != [b"503"]:
-            raise StreamError(last)
-        await asyncio.sleep(0.5)
-    raise StreamError(f"no picture within {FIRST_PICTURE_TIMEOUT:.0f}s: {last}")
+        raise
+    return reader, writer, status, headers
 
 
 def _server_failure(server: asyncio.Task) -> str:
