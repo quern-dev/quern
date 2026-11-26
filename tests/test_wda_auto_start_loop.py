@@ -191,6 +191,7 @@ class TestStoppedOnPurpose:
         await backend._restart_wda(PHONE)
         launched.assert_awaited_once()
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_crash_latch_does_not_send_reads_to_a_stopped_wda(self, monkeypatch):
         """After a push crash, reads went to a WDA that refused every one, and
         the phone could not be read until start_driver (review)."""

@@ -16,7 +16,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
       children_of: z
         .string()
         .optional()
-        .describe("Only return children of the element with this identifier or label"),
+        .describe("Only return children of the element with this identifier or label. On an iPhone on iOS 27+, answered from the accessibility push, which is flat: the elements inside that element's frame (the answer says so)."),
       snapshot_depth: z
         .coerce.number()
         .min(1)

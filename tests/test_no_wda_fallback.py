@@ -201,6 +201,7 @@ class TestThePushWithNothingBehindIt:
         ctrl.wda_client.find_elements_by_query.assert_not_called()
         assert ctrl._device_tree_reader(PHONE) is ctrl.coredevice_ax
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_with_wda_a_crash_still_moves_the_device(self, monkeypatch):
         """Unchanged where there is a WDA (#669)."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
@@ -380,6 +381,7 @@ class TestAfterSetup:
         await wda_availability._refreshing
         assert crashed._device_tree_reader(PHONE) is crashed.coredevice_ax
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_wda_built_brings_the_latch_back(self, monkeypatch, crashed):
         monkeypatch.setattr(wda_availability, "_check", AsyncMock(return_value=None))
         wda_availability.forget()

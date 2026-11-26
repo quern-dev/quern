@@ -581,6 +581,14 @@ class CoreDeviceInput:
             try:
                 await fallback()
             except DeviceError as wda:
+                from server.models import WdaNotAutoStartedError
+
+                if isinstance(wda, WdaNotAutoStartedError):
+                    # No-WDA mode (#780): why HID could not send it is the
+                    # first thing to say, then that WDA was not started for it.
+                    raise WdaNotAutoStartedError(
+                        f"{what} on {udid[:8]} was not sent over CoreDevice: {e}. {wda}",
+                        tool=self.TOOL_NAME) from wda
                 # WDA's refusal alone named WDA and Xcode, when what was
                 # missing is the image HID needs (#664 phase 5).
                 if missing_image(e):

@@ -144,6 +144,7 @@ class TestGetElementState:
         ctrl.coredevice_ax.describe_all.assert_not_called()
         assert "tree the device pushes" not in str(caught.value)
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_push_that_cannot_be_read_falls_back_with_exact_labels(self, monkeypatch):
         """WDA's read is matched exactly, as it always was: no title rule, and
         the miss is not called the push's. At the action depth, never the
@@ -179,6 +180,7 @@ class TestAPushThatCannotBeRead:
     """A lookup whose push read fails takes the WDA path any lookup takes,
     including its deeper look on a miss (CodeRabbit on #672)."""
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_wait_for_element_looks_deeper_through_wda(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         _wda_depth_spies(ctrl)
@@ -195,6 +197,7 @@ class TestAPushThatCannotBeRead:
         assert ctrl._wda_direct_query.await_args_list            # WDA's filtered query
         ctrl._deeper_query.assert_awaited()
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_tap_element_looks_deeper_through_wda(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         _wda_depth_spies(ctrl)
@@ -288,6 +291,7 @@ class TestWaitForElement:
         assert result["matched"] is False
         assert "tree the device pushes" in result["depth_note"]
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_each_poll_is_matched_by_its_own_reader(self, monkeypatch):
         """A poll WDA made after the push failed matches exactly: WDA's
         "Wi-Fi, Home" is not the "Wi-Fi" the push's title rule found."""
@@ -524,6 +528,7 @@ class TestPushedSweeps:
             assert "tree the device pushes" in result["detail"]
             assert "snapshot_depth" not in result
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_device_the_push_crashed_an_app_on_sweeps_through_wda(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         _wda_depth_spies(ctrl)

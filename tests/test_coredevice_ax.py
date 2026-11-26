@@ -1422,6 +1422,7 @@ class TestACrashAfterTheRead:
 
         assert "alive" not in seen
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_the_controller_records_it_like_any_read_crash(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl.coredevice_ax.describe_all = AsyncMock(
@@ -1640,6 +1641,7 @@ class TestReadsThroughTheController:
         assert ctrl.backend_that_served(PHONE) == CoreDeviceAxReader.TOOL_NAME
         ctrl._mark_on_screen.assert_not_called()
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_failed_push_read_falls_back_to_wda_and_says_so(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl.coredevice_ax.describe_all = AsyncMock(
@@ -1763,6 +1765,7 @@ class TestIdentifyingAfterAPushCrash:
     """identify reads the push now, which can crash the app (#669): the answer
     says so, and which reader made it, as get_ui_tree does."""
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     def test_the_crash_is_on_the_answer(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl.coredevice_ax.describe_all = AsyncMock(
@@ -1799,6 +1802,7 @@ class TestTheOtherIdentifyReads:
         ctrl.coredevice_ax.describe_all.assert_awaited()
         ctrl.wda_client.describe_all.assert_not_called()
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_after_a_crash_it_keeps_the_action_depth(self, monkeypatch):
         """WDA with no depth is the full walk, 34.5 s of a long list."""
         from server.api.device_ui import _identify_now
@@ -1812,6 +1816,7 @@ class TestTheOtherIdentifyReads:
         ctrl.coredevice_ax.describe_all.assert_not_called()
         assert ctrl.wda_client.describe_all.await_args.kwargs.get("snapshot_depth") == 12
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_crash_in_the_context_read_is_on_the_context(self, monkeypatch):
         from server.api.device import _capture_screen_context
 
@@ -1882,6 +1887,7 @@ class TestANavigationCheckThatCrashesTheApp:
                       "navigation_timeout": 1},
                 headers={"Authorization": "Bearer k"})
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_before_the_tap_it_taps_nothing(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl.coredevice_ax.describe_all = AsyncMock(
@@ -1895,6 +1901,7 @@ class TestANavigationCheckThatCrashesTheApp:
         ctrl.coredevice_input.tap.assert_not_called()
         ctrl.wda_client.tap.assert_not_called()
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_after_the_tap_it_says_so(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         tapped = []
@@ -1978,6 +1985,7 @@ class TestReadsInsideActionsStayOnWda:
 
 
 class TestTheControllerAfterACrash:
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_the_read_falls_back_and_says_why(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl.coredevice_ax.describe_all = AsyncMock(
@@ -1990,6 +1998,7 @@ class TestTheControllerAfterACrash:
         assert "QuernProbeScene (pid 711) exited" in ctrl.read_note()
         assert "QuernProbeScene" in ctrl._push_crashed_apps[PHONE]
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_crashed_app_is_not_read_through_the_push_again(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl._push_crashed_apps[PHONE] = {"QuernProbeScene"}
@@ -1999,6 +2008,7 @@ class TestTheControllerAfterACrash:
 
         ctrl.coredevice_ax.describe_all.assert_not_called()
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_after_a_crash_the_device_stays_on_wda(self, monkeypatch):
         """The read after a crash sees SpringBoard; relaunching the app must not
         put the next read back on the push (CodeRabbit on #668)."""
@@ -2037,6 +2047,7 @@ class TestTheControllerAfterACrash:
         await ctrl.get_ui_elements(PHONE, use_cache=False)          # WDA's read
         assert ctrl._last_app[PHONE] == "from WDA"
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_the_summary_carries_the_warning(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl.coredevice_ax.describe_all = AsyncMock(
@@ -2101,6 +2112,7 @@ class TestABareApplication:
         with pytest.raises(coredevice_ax.BareAppTree):
             await asyncio.wait_for(read_tree(PHONE, timeout=0.3), 5)
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_the_controller_reads_through_wda_and_says_why(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl.coredevice_ax.describe_all = AsyncMock(side_effect=coredevice_ax.BareAppTree(PHONE))
@@ -2113,6 +2125,7 @@ class TestABareApplication:
         # Not a crash: the push still serves this device's next read.
         assert not ctrl._push_crashed_apps.get(PHONE)
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_wda_failing_too_reports_the_wedge(self, monkeypatch):
         """Not WDA's error alone, which says nothing about why the push failed;
         and still WDA's exception, so not set up stays a 400 (#681 review)."""
@@ -2140,6 +2153,7 @@ class TestABareApplication:
         with pytest.raises(WdaNotSetUpError, match="empty tree"):
             await ctrl.get_ui_elements(PHONE, filter_label="Wi-Fi", use_cache=False, lookup=True)
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_miss_through_wda_carries_the_reason(self, monkeypatch):
         """WDA read the screen and the element is not there: the miss still says
         the push answered bare, or it is a plain 404 again (#681 review)."""
@@ -2167,6 +2181,7 @@ class TestABareApplication:
         with pytest.raises(coredevice_ax.BareAppTree):
             await CoreDeviceAxReader().describe_all(PHONE)
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_an_unrelated_wda_failure_is_unchanged(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl.coredevice_ax.describe_all = AsyncMock(

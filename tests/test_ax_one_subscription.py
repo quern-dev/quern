@@ -524,6 +524,7 @@ class TestWhenThePhoneIsMarkedDown:
 
 
 class TestTheAnswerSaysSo:
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_fallback_to_wda_says_why(self, monkeypatch):
         """It was said only in the log, so the answer read as the push's."""
         ctrl = _phone_controller(monkeypatch=monkeypatch)
@@ -556,6 +557,7 @@ class TestTheAnswerSaysSo:
 
         assert "restarted" in (ctrl.read_note() or "")
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_restart_is_said_when_the_read_then_falls_back(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl.coredevice_ax.describe_all = self._restarting(
@@ -566,6 +568,7 @@ class TestTheAnswerSaysSo:
         note = ctrl.read_note() or ""
         assert "restarted" in note and "WDA's" in note
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_a_restart_is_said_on_a_bare_tree_fallback_too(self, monkeypatch):
         ctrl = _phone_controller(monkeypatch=monkeypatch)
         ctrl.coredevice_ax.describe_all = self._restarting(

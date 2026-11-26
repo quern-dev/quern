@@ -15,6 +15,7 @@ import asyncio
 import contextvars
 import enum
 import logging
+import re
 import time
 from dataclasses import dataclass
 
@@ -309,6 +310,25 @@ class QueryTimedOut(Exception):
 
 #: How long a runner found alive and not answering is not asked again (#769).
 WDA_UNSERVING_S = 60.0
+
+#: Set for a request whose caller asked for WDA (`snapshot_depth`): on an
+#: iPhone the push serves, only such a request may start it (#780).
+_WDA_ASKED: contextvars.ContextVar[bool] = contextvars.ContextVar("_wda_asked", default=False)
+
+
+def _runner_alive(udid: str) -> bool:
+    """Whether a WDA runner recorded for this device is still running."""
+    from server.device.ios.wda import _is_process_alive, read_wda_state
+
+    pid = (read_wda_state().get("runners", {}).get(udid) or {}).get("pid")
+    return bool(pid) and _is_process_alive(pid)
+
+
+def ask_for_wda(asked: bool) -> None:
+    """Mark this request as one that asked for WDA, when `asked`. Each request
+    runs in a context of its own, so the mark ends with it."""
+    if asked:
+        _WDA_ASKED.set(True)
 #: Seconds a runner that was started, never answered, and was stopped again
 #: is not started again behind a read: without it every read on that phone
 #: started and stopped one more, 8 s at a time (CodeRabbit on #779).
@@ -360,6 +380,9 @@ class WdaBackend:
         #: Phones whose runner was found alive and not answering, until when
         #: it is not asked again, and what it said (#769).
         self._unserving: dict[str, tuple[float, str]] = {}
+        # Phones start_driver was called for: WDA is theirs to use, and to
+        # start again, until stop_driver (#780).
+        self._started_on_request: set[str] = set()
         # udid -> (until, why) for a runner stopped after it never answered.
         self._failed_start: dict[str, tuple[float, str]] = {}
         # Per-device lock for session creation (prevents parallel _ensure_session races)
@@ -611,7 +634,7 @@ class WdaBackend:
 
         # Not started where it was stopped on purpose, nor probed again where
         # its runner has just been found alive and not answering (#769).
-        self._refuse_auto_start(udid)
+        self._refuse_auto_start(udid, mode=False)
 
         # WDA not reachable — try auto-start if we know the os_version
         os_version = self._device_os_versions.get(udid)
@@ -637,6 +660,9 @@ class WdaBackend:
                 + ("; an earlier one needs Xcode installed, then the setup_wda tool."
                    if reason == NO_XCODE else "."),
                 tool="wda")
+        # No-WDA mode (#780), after "there is no WDA here", which is the more
+        # basic answer: start_driver could not help on a Mac without one.
+        self._refuse_auto_start(udid)
         logger.info("WDA not reachable on %s, auto-starting driver...", udid[:8])
         from server.device.ios.wda import start_driver
 
@@ -703,31 +729,80 @@ class WdaBackend:
     def note_stopped(self, udid: str) -> None:
         """stop_driver ran: WDA is not started again behind a read (#769)."""
         self._stopped_on_request.add(udid)
+        self._started_on_request.discard(udid)
         self._unserving.pop(udid, None)
         self._failed_start.pop(udid, None)
 
     def note_started(self, udid: str) -> None:
         """start_driver ran: WDA may be used, and started again, as before."""
         self._stopped_on_request.discard(udid)
+        self._started_on_request.add(udid)
         self._unserving.pop(udid, None)
         self._failed_start.pop(udid, None)
 
     def no_auto_start_reason(self, udid: str) -> str | None:
         """Why WDA would not be started behind a read on this phone now, or
-        None: stopped on purpose, or a runner just found not answering."""
+        None: stopped on purpose, a runner just found not answering or just
+        stopped for never answering, or no-WDA mode (#780)."""
+        refusal = self._refusal(udid)
+        return refusal[0] if refusal else None
+
+    def _refusal(self, udid: str, *, mode: bool = True) -> tuple[str, type[DeviceError]] | None:
+        """The reason WDA is not started behind a read, with the error type
+        it is answered with -- one list, so the two cannot disagree.
+        `mode=False` leaves out no-WDA mode, for a caller that first says WDA
+        is not available on this Mac at all, which is the more basic reason."""
+        from server.models import WdaNotAutoStartedError, WdaNotSetUpError, WdaRunnerBusyError
+
         if udid in self._stopped_on_request:
             return (f"WDA on {udid[:8]} was stopped with stop_driver, so it is not "
-                    "started again behind a read; start_driver to use it")
+                    "started again behind a read; start_driver to use it"), WdaNotSetUpError
         unserving = self._unserving.get(udid)
         if unserving is not None and time.monotonic() < unserving[0]:
-            return self._unserving_message(udid, unserving[1])
+            return self._unserving_message(udid, unserving[1]), WdaRunnerBusyError
+        if mode and (reason := self._not_asked_for(udid)):
+            return reason, WdaNotAutoStartedError
         failed = self._failed_start.get(udid)
         if failed is not None and time.monotonic() < failed[0]:
             left = max(0, round(failed[0] - time.monotonic()))
             return (f"WDA was started on {udid[:8]} and never answered ({failed[1]}), "
                     "so it was stopped; it is not started again behind a read for "
-                    f"{left}s. start_driver tries again now")
+                    f"{left}s. start_driver tries again now"), WdaRunnerBusyError
         return None
+
+    def _not_asked_for(self, udid: str) -> str | None:
+        """Why WDA is not started on its own on this phone, or None (#780).
+
+        On an iPhone the accessibility push serves, WDA starts only for a
+        call that asked for it (`snapshot_depth`), for a phone start_driver
+        was called for, or with `wda_fallback` set. Everything else that would
+        have started it -- a read the push could not make, input HID could not
+        send -- is answered with its own failure and this, instead of a WDA
+        nobody asked for.
+        """
+        from server.config import get_device_ui_reader, get_wda_fallback
+        from server.device.ios.coredevice_ax import COREDEVICE_MIN_IOS
+
+        if self.serves_simulator(udid) or get_device_ui_reader() != "coredevice":
+            return None
+        match = re.search(r"\d+", self._device_os_versions.get(udid) or "")
+        if not match or int(match.group()) < COREDEVICE_MIN_IOS:
+            return None
+        if _WDA_ASKED.get() or udid in self._started_on_request or get_wda_fallback():
+            return None
+        # Only a start is refused: a WDA already there is used. A runner
+        # outlives the server, and start_driver's mark does not (review).
+        if udid in self._connections or _runner_alive(udid):
+            return None
+        return (f"{udid[:8]} is in no-WDA mode: on iOS {COREDEVICE_MIN_IOS} and later quern "
+                "does not start WebDriverAgent on its own. If this really needs WDA, call "
+                "start_driver for this device (WDA is then used for it until stop_driver), "
+                "or set \"wda_fallback\": true in ~/.quern/config.json to restore the "
+                "automatic fallback on this Mac")
+
+    def in_no_wda_mode(self, udid: str) -> bool:
+        """Whether WDA would be refused here for want of being asked (#780)."""
+        return self._not_asked_for(udid) is not None
 
     def forget_unserving(self, udid: str) -> None:
         """Drop a busy runner remembered for this phone: the runner is gone."""
@@ -738,22 +813,20 @@ class WdaBackend:
         so a stop_driver that landed on the way there is honoured (#773)."""
         return "stopped with stop_driver" if udid in self._stopped_on_request else None
 
-    def auto_start_refusal(self, udid: str,
-                           message: str | None = None) -> DeviceError | None:
+    def auto_start_refusal(self, udid: str, message: str | None = None, *,
+                           mode: bool = True) -> DeviceError | None:
         """The typed error refusing to start WDA behind a read, or None: a
         WdaNotSetUpError (400) when stopped on purpose, a WdaRunnerBusyError
         (503) for a runner just found not answering. `message` replaces the
         reason, for a caller that adds its own context."""
-        reason = self.no_auto_start_reason(udid)
-        if reason is None:
+        refusal = self._refusal(udid, mode=mode)
+        if refusal is None:
             return None
-        from server.models import WdaNotSetUpError, WdaRunnerBusyError
-
-        cls = WdaNotSetUpError if udid in self._stopped_on_request else WdaRunnerBusyError
+        reason, cls = refusal
         return cls(message or reason, tool="wda")
 
-    def _refuse_auto_start(self, udid: str) -> None:
-        refusal = self.auto_start_refusal(udid)
+    def _refuse_auto_start(self, udid: str, *, mode: bool = True) -> None:
+        refusal = self.auto_start_refusal(udid, mode=mode)
         if refusal is not None:
             raise refusal
 

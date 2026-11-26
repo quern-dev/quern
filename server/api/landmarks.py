@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from server import config as config_mod
 from server import visibility
 from server.api.actions import logged_action
+from server.device.ios.wda_client import ask_for_wda
 from server.knowledge.landmarks import (
     FileConventions,
     LandmarkRegistry,
@@ -343,6 +344,8 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
 @logged_action("identify_screen", category="knowledge")
 async def identify_screen(request: Request, body: IdentifyRequest):
     """Identify the current screen against loaded landmarks."""
+    # Asked for WDA by name: on a phone in no-WDA mode, only this starts it (#780).
+    ask_for_wda(body.snapshot_depth is not None)
     registry = _get_registry(request)
     controller = _get_controller(request)
 

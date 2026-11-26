@@ -965,3 +965,11 @@ def _no_real_screen_mirror_refresh(monkeypatch):
     from server.device.media import media_engine
 
     monkeypatch.setattr(media_engine, "refresh_at_server_start", lambda: None)
+
+
+@pytest.fixture
+def wda_fallback_on(monkeypatch):
+    """`wda_fallback: true`: the automatic WDA fallback on an iOS 27 phone,
+    off by default since #780. For tests of what that fallback does when it
+    runs -- every other test sees no-WDA mode, as a user does."""
+    monkeypatch.setattr("server.config.get_wda_fallback", lambda: True)

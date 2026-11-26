@@ -91,6 +91,7 @@ def backend(monkeypatch):
 
 
 class TestARunnerThatNeverAnswered:
+    @pytest.mark.usefixtures("wda_fallback_on")
     @pytest.mark.parametrize("os_version, stopped", [("iOS 27.2.1", True), ("18.5", False)])
     async def test_it_is_stopped_on_a_phone_the_push_reads(
             self, backend, monkeypatch, os_version, stopped):
@@ -109,6 +110,7 @@ class TestARunnerThatNeverAnswered:
         assert ("stopped again" in str(caught.value)) is stopped
 
 
+    @pytest.mark.usefixtures("wda_fallback_on")
     async def test_the_next_read_does_not_start_another_one(self, backend, monkeypatch):
         """Stopping it must not turn every read into a start and a stop: the
         next one is refused for a while, saying why (CodeRabbit on #779)."""

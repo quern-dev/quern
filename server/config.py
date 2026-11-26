@@ -691,6 +691,17 @@ def get_auto_install_cert() -> bool:
     return read_user_config().get("auto_install_cert") is True
 
 
+def get_wda_fallback() -> bool:
+    """Whether quern starts WebDriverAgent on its own on an iPhone the
+    accessibility push serves, as it did before #780.
+
+    Off by default: a read or input CoreDevice could not do fails with why,
+    and names `start_driver`. Only a literal ``true`` turns it on -- anything
+    else, a typo included, reads as off.
+    """
+    return read_user_config().get("wda_fallback") is True
+
+
 def get_device_ui_reader() -> str:
     """How quern drives a physical iPhone: ``"coredevice"`` or ``"wda"``.
 
