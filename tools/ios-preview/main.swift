@@ -950,18 +950,33 @@ final class LocalStreamPreview {
     private func exited(_ ended: Process) {
         guard !stopped, ended === process else { return }
         process = nil
+        guard session != nil else {
+            let why = stderrTail.last ?? "exit status \(ended.terminationStatus)"
+            let fallback = "quern-media stopped before serving: \(why)"
+            guard let feeder else {
+                end(error: fallback)
+                return
+            }
+            // The bridge's reason is the one worth showing, and it may still
+            // be on its way: its exit is what ended quern-media's stdin, and
+            // its stderr arrives on its own queue. So wait for it to exit,
+            // briefly, before choosing what to say.
+            self.feeder = nil
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let deadline = Date().addingTimeInterval(2)
+                while feeder.isRunning && Date() < deadline { usleep(50_000) }
+                if feeder.isRunning { feeder.terminate() }
+                usleep(200_000)  // its last line, through the reader's hop to main
+                DispatchQueue.main.async {
+                    guard let self, !self.stopped else { return }
+                    self.end(error: self.feederReason ?? fallback)
+                }
+            }
+            return
+        }
         // A phone's bridge outlives its quern-media only until its next
         // write; stopped now, so a restart never runs two for one phone.
         stopFeeder()
-        guard session != nil else {
-            if let reason = feederReason {
-                end(error: reason)
-                return
-            }
-            let why = stderrTail.last ?? "exit status \(ended.terminationStatus)"
-            end(error: "quern-media stopped before serving: \(why)")
-            return
-        }
         feederReason = nil
         let delay = min(5.0, 1.0 * pow(2.0, Double(min(relaunches, 3))))
         relaunches += 1

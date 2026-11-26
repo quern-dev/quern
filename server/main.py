@@ -784,7 +784,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from server.device.media import preview
 
         try:
-            if preview.install_phone_bridge_launcher():
+            if await asyncio.to_thread(preview.install_phone_bridge_launcher):
                 logger.info("Installed the phone bridge launcher for Screen Mirror")
         except OSError as exc:
             logger.warning("Could not install the phone bridge launcher: %s", exc)
