@@ -132,6 +132,17 @@ func malformedBody() {
     }
 }
 
+@Test("an end of stream partway into an access unit is refused, and a clean one is not")
+func endedMidUnit() throws {
+    var cut = HEVCFrameReader()
+    #expect(try cut.feed(Data([0, 0, 0, 6, 0, 0, 0, 2, 0x26])).isEmpty)
+    #expect(throws: HEVCFramingError.endedMidUnit(9)) { try cut.finish() }
+
+    var clean = HEVCFrameReader()
+    _ = try clean.feed(HEVCAccessUnit(nals: [Data([0x26, 0x01])]).framed())
+    try clean.finish()
+}
+
 @Test("NAL types are read from the header, and only VPS, SPS, PPS are parameter sets")
 func nalTypes() {
     #expect(HEVCNAL.type(Data([0x40, 0x01])) == 32)           // VPS
@@ -265,6 +276,24 @@ func garbageEndsTheStream() throws {
     #expect(ended.wait(timeout: .now() + 10) == .success)
     #expect(reason.withLock { $0 }?.contains("could not be read") == true)
     try? pipe.fileHandleForWriting.close()
+}
+
+@Test("a writer that stops partway into a picture ends the stream as unreadable")
+func cutOffEndsUnreadable() throws {
+    let pipe = Pipe()
+    let ended = DispatchSemaphore(value: 0)
+    let reason = Mutex<String?>(nil)
+    let source = HEVCStdinSource(input: pipe.fileHandleForReading) { _ in }
+    source.onAvailability = { available, why in
+        if !available { reason.withLock { $0 = why }; ended.signal() }
+    }
+    try source.start()
+    defer { source.stop() }
+
+    pipe.fileHandleForWriting.write(Data([0, 0, 0, 6, 0, 0, 0, 2, 0x26]))
+    try pipe.fileHandleForWriting.close()
+    #expect(ended.wait(timeout: .now() + 10) == .success)
+    #expect(reason.withLock { $0 }?.hasPrefix(HEVCStdinSource.unreadablePrefix) == true)
 }
 
 // MARK: - options

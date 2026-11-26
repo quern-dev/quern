@@ -70,9 +70,12 @@ public enum HEVCFramingError: Error, Equatable, CustomStringConvertible {
     case implausibleLength(Int)
     /// A NAL unit whose length runs past its access unit.
     case truncatedUnit
+    /// The stream ended with this many bytes of an access unit unread.
+    case endedMidUnit(Int)
 
     public var description: String {
         switch self {
+        case .endedMidUnit(let n): return "the stream ended \(n) bytes into an access unit"
         case .implausibleLength(let n): return "an access unit of \(n) bytes is not this framing"
         case .truncatedUnit: return "a NAL unit runs past the end of its access unit"
         }
@@ -106,6 +109,12 @@ public struct HEVCFrameReader {
         return out
     }
 
+    /// At the end of the stream: bytes still buffered are a picture the
+    /// writer never finished.
+    public func finish() throws {
+        guard buffer.isEmpty else { throw HEVCFramingError.endedMidUnit(buffer.count) }
+    }
+
     static func units(_ body: Data) throws -> [Data] {
         var nals: [Data] = []
         var i = 0
@@ -118,6 +127,12 @@ public struct HEVCFrameReader {
         guard i == body.count else { throw HEVCFramingError.truncatedUnit }
         return nals
     }
+}
+
+/// stdin could not be read.
+public struct HEVCReadError: Error, CustomStringConvertible {
+    public let errno: Int32
+    public var description: String { "reading stdin failed: \(String(cString: strerror(errno)))" }
 }
 
 public enum HEVCDecoderError: Error, CustomStringConvertible {
@@ -309,18 +324,24 @@ public final class HEVCStdinSource: FrameSource {
         return stopped
     }
 
+    /// Bytes per read. A redirected file would otherwise be read whole, to
+    /// its end, before the first picture.
+    static let readSize = 64 * 1024
+
     private func run() {
         var reader = HEVCFrameReader()
         let decoder = HEVCDecoder()
         defer { decoder.invalidate() }
         while !isStopped {
-            let chunk = input.availableData        // blocks; empty at end of file
-            if chunk.isEmpty {
-                MediaLog.log("[hevc] the stream ended (stdin closed)")
-                onAvailability?(false, "the phone's screen stream ended")
-                return
-            }
             do {
+                // Blocks until some bytes arrive; empty at end of file.
+                guard let chunk = try readSome(), !chunk.isEmpty else {
+                    // A picture cut off by the writer's end is not a clean end.
+                    try reader.finish()
+                    MediaLog.log("[hevc] the stream ended (stdin closed)")
+                    onAvailability?(false, "the phone's screen stream ended")
+                    return
+                }
                 for unit in try reader.feed(chunk) {
                     guard let pixels = try decoder.decode(unit) else { continue }
                     lock.lock()
@@ -329,12 +350,27 @@ public final class HEVCStdinSource: FrameSource {
                     deliver(pixels)
                 }
             } catch {
-                // Out of step: nothing after this can be trusted to be framed
-                // as it should, so the stream is over rather than garbled.
+                // Out of step, or unreadable: nothing after this can be
+                // trusted to be framed as it should, so the stream is over
+                // rather than garbled.
                 MediaLog.log("[hevc] \(error)")
                 onAvailability?(false, "\(Self.unreadablePrefix): \(error)")
                 return
             }
+        }
+    }
+
+    /// What has arrived, up to `readSize`: read(2) rather than FileHandle.
+    /// `availableData` raises an Objective-C exception on a failed read,
+    /// which skipped the report and the recording's finish, and
+    /// `read(upToCount:)` waits for the whole count, holding pictures back.
+    private func readSome() throws -> Data? {
+        var buffer = [UInt8](repeating: 0, count: Self.readSize)
+        while true {
+            let n = buffer.withUnsafeMutableBytes { Darwin.read(input.fileDescriptor, $0.baseAddress, $0.count) }
+            if n >= 0 { return Data(buffer[0..<n]) }
+            if errno == EINTR { continue }
+            throw HEVCReadError(errno: errno)
         }
     }
 
