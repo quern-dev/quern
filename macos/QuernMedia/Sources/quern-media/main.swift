@@ -17,6 +17,10 @@ point the preview app at the stream, or record to a file.
 SOURCE (exactly one required)
   --sim-udid <UDID>      a booted simulator, no Simulator.app needed
   --device <name>        a USB-connected device, matched by name substring
+  --hevc-stdin           a phone's screen as HEVC on stdin, as quern's server
+                         writes it: [4-byte BE length][NAL units, each
+                         [4-byte BE length][NAL]], one picture at a time
+    --source-id <id>     names that stream for ?source=, as a UDID does
   --list                 list connected capture devices and exit
 
 OUTPUT (at least one required; they combine)
@@ -25,7 +29,7 @@ OUTPUT (at least one required; they combine)
                          GET  /frames    the video, one part per frame
                          GET  /stream    the video itself (raw under --h264)
                          ?source=<UDID>  on either: 409 unless this is the
-                                         simulator being streamed
+                                         simulator (or --source-id) streamed
                          POST /keyframe  force an IDR now, answers 204
   --record <path>        write an .mp4. Implies --h264.
 
@@ -136,7 +140,11 @@ if let port = options.servePort {
     // coming up, and a caller arriving in that window must not silently lose
     // its request.
     let sourceID: String?
-    if case .simulator(let udid) = options.source { sourceID = udid } else { sourceID = nil }
+    switch options.source {
+    case .simulator(let udid): sourceID = udid
+    case .hevcStdin(let id): sourceID = id
+    case .device: sourceID = nil
+    }
     let s = HTTPStreamServer(
         port: port, bindAll: options.bindAll, codec: options.codec, sourceID: sourceID
     ) {
@@ -180,6 +188,26 @@ case .device(let match):
     source = CaptureDeviceSource(device: device) { pipeline.consume($0) }
     do { try source.start() } catch { fail("\(error)") }
     MediaLog.log("[capture] streaming \(device.localizedName)")
+
+case .hevcStdin:
+    // A phone's CoreDevice screen stream, written here by quern's server.
+    let phone = HEVCStdinSource { pipeline.consume($0) }
+    // The writer going away is the phone's stream ending, and stdin cannot be
+    // opened again: staying up would serve an off-air page on this port for
+    // good. So this exits, as a simulator stream's quern-media exiting does,
+    // and the server that started it starts another -- 0 when the writer
+    // closed it, 1 when what it wrote could not be read.
+    phone.onAvailability = { available, reason in
+        server?.setSourceAvailable(available, reason: reason)
+        guard !available else { return }
+        DispatchQueue.main.async {
+            let status = shutdownOnce.run()
+            exit(reason.hasPrefix(HEVCStdinSource.unreadablePrefix) ? max(status, 1) : status)
+        }
+    }
+    source = phone
+    do { try source.start() } catch { fail("\(error)") }
+    MediaLog.log("[capture] streaming HEVC from stdin")
 }
 
 // A viewer that has just attached needs a picture, and on an event-driven
