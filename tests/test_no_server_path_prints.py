@@ -47,6 +47,9 @@ _TERMINAL_FACING = {
     "session_cli.py",  # `quern session ...`, run in a shell or a CI step
     "clients_cli.py",  # `quern clients ...`, run by the owner in a shell
     "remote_cli.py",   # `quern pair/connect/remote ...`, run in a shell
+    # Not imported by the server: run as its own process, whose stderr the
+    # preview manager reads for the `phone: <reason>` line.
+    "device/media/phone_bridge.py",
 }
 
 #: The one deliberate exception on a server path: logging from inside the log

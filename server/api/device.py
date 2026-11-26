@@ -1846,6 +1846,17 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
         # This is also why the simulator path must not touch `list_devices`
         # below — a udid that is already the key needs no lookup, and a
         # `DeviceError` from an unavailable simctl used to 404 it.
+        # A phone on the network is physical to the controller, but its
+        # preview is a stream filed under this key, not a capture device:
+        # resolved to a name below, it matched nothing and answered
+        # "removed" with the phone still streaming.
+        if pm.active_kind(udid) == "phone":
+            try:
+                await pm.remove(udid)
+            except RuntimeError as e:
+                raise HTTPException(status_code=500, detail=str(e))
+            return {"status": "removed", "udid": udid, "kind": "phone"}
+
         if not controller._is_physical(udid):
             try:
                 await pm.remove(udid)
