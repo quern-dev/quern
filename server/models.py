@@ -2197,6 +2197,19 @@ class DeviceError(Exception):
         super().__init__(message)
 
 
+class NoTunnelError(DeviceError):
+    """There is no CoreDevice tunnel to this phone, so nothing that needs one
+    can reach it -- WebDriverAgent included.
+
+    On iOS 17 and later WDA is reached at the tunnel's address, so a read or a
+    tap the tunnel could not carry is not rescued by falling back to WDA: the
+    fallback started a runner on the phone that quern then could not talk to,
+    took 9 s, and replaced this reason with "WDA did not become responsive".
+    Measured on an iPhone 11 on Wi-Fi only, where quern's tunneld has no tunnel
+    to it. Typed so the fallbacks can tell it apart from a read that failed.
+    """
+
+
 class DeviceOperationUnsupportedError(DeviceError):
     """This device cannot do what was asked, and no retry will change that.
 

@@ -35,6 +35,7 @@ from server.models import (
     DeviceError,
     FrameStats,
     InvalidDeviceRequestError,
+    NoTunnelError,
     PerformanceSnapshot,
 )
 
@@ -496,7 +497,7 @@ async def _device_address(uuid: str) -> tuple[str, int]:
     tunnel_udid = await resolve_tunnel_udid(uuid) if serving else None
     address = await _tunnel_address(tunnel_udid) if tunnel_udid else None
     if address is None:
-        raise DeviceError(
+        raise NoTunnelError(
             f"no tunnel to {uuid[:8]}{_no_tunnel_hint(None, serving)}",
             tool="pymobiledevice3")
     return address
