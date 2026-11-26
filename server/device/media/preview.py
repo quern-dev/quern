@@ -30,6 +30,7 @@ import plistlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from collections import deque
@@ -181,6 +182,100 @@ async def simulator_entries() -> tuple[list[dict], str | None]:
     except Exception as e:  # noqa: BLE001 -- reported, not swallowed; see above
         return [], f"{type(e).__name__}: {e}"
     return [{"name": n, "id": u, "kind": "simulator"} for u, n in booted], None
+
+
+#: The script that streams a network phone's screen to quern-media's stdin.
+PHONE_BRIDGE = Path(__file__).with_name("phone_bridge.py")
+
+#: The first iOS whose display service streams the screen (pymobiledevice3's
+#: `VIDEO_STREAM_MIN_VERSION`).
+PHONE_STREAM_MIN_IOS = 27
+
+
+@dataclass
+class NetworkPhone:
+    """A phone paired with this Mac and reachable over the network only.
+
+    A USB phone is a capture device, and the preview app finds it itself.
+    One on Wi-Fi is not, so the server lists it for the app's Devices menu.
+    """
+
+    #: quern's id for it: the CoreDevice identifier.
+    key: str
+    #: The hardware UDID, which pymobiledevice3 names it by.
+    hardware_udid: str
+    name: str
+    os_version: str
+    #: Why its screen cannot be streamed, or None when it can. Shown in the
+    #: menu on a greyed-out item: a phone missing from the list reads as
+    #: quern not seeing it at all.
+    unavailable: str | None = None
+
+    def menu_entry(self) -> dict:
+        return {
+            "key": self.key, "name": self.name, "os": self.os_version,
+            "available": self.unavailable is None, "reason": self.unavailable,
+        }
+
+
+def phone_streaming_missing() -> str | None:
+    """Why this pymobiledevice3 cannot stream a phone's screen, or None."""
+    import importlib.util
+
+    for module in ("pymobiledevice3.remote.native_tunnel",
+                   "pymobiledevice3.remote.core_device.screen_stream"):
+        try:
+            found = importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):
+            found = False
+        if not found:
+            return ("needs a newer pymobiledevice3, with CoreDevice screen "
+                    "streaming (run quern update)")
+    return None
+
+
+def _ios_major(os_version: str) -> int | None:
+    digits = os_version.removeprefix("iOS").strip().split(".", 1)[0]
+    return int(digits) if digits.isdigit() else None
+
+
+async def network_phones() -> tuple[list[NetworkPhone], str | None]:
+    """The phones reachable over the network only, and why if they can't be listed.
+
+    From devicectl, which lists a phone on Wi-Fi as `localNetwork` with its
+    iOS version, and records its hardware UDID beside the CoreDevice id.
+    As with `simulator_entries`, "could not ask" is the second value, never
+    an empty list.
+    """
+    from server.device.ios.devicectl import DevicectlBackend, spellings_of
+
+    try:
+        devices = await asyncio.wait_for(
+            DevicectlBackend().list_devices(), SIMULATOR_LIST_TIMEOUT * 2
+        )
+    except TimeoutError:
+        return [], "devicectl did not list devices in time"
+    except Exception as e:  # noqa: BLE001 -- reported in the second value
+        return [], f"{type(e).__name__}: {e}"
+
+    missing = phone_streaming_missing()
+    phones = []
+    for d in devices:
+        if d.connection_type != "localNetwork":
+            continue
+        hardware = next((s for s in spellings_of(d.udid) if s != d.udid), "")
+        major = _ios_major(d.os_version)
+        if not hardware:
+            why = "its hardware UDID is unknown, so it cannot be named to the stream"
+        elif major is not None and major < PHONE_STREAM_MIN_IOS:
+            why = f"needs iOS {PHONE_STREAM_MIN_IOS} or later (this one runs {d.os_version})"
+        else:
+            why = missing
+        phones.append(NetworkPhone(
+            key=d.udid, hardware_udid=hardware, name=d.name,
+            os_version=d.os_version, unavailable=why,
+        ))
+    return phones, None
 
 
 #: Where a release ships its pre-built, signed copies (#662): in the tarball,
@@ -739,8 +834,8 @@ class ActivePreview:
     name: str
     position: int
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    #: "device" for a CoreMediaIO capture device, "simulator" for an MJPEG
-    #: stream served by quern-media.
+    #: "device" for a CoreMediaIO capture device; "simulator", or "phone" for
+    #: a phone on the network, for an MJPEG stream served by quern-media.
     kind: str = "device"
     #: Loopback port quern-media serves on. None for a capture device.
     stream_port: int | None = None
@@ -767,6 +862,10 @@ class ActivePreview:
     opened_by: object | None = field(default=None, repr=False, compare=False)
 
 
+#: Preview kinds whose window shows a quern-media stream, and so can be off air.
+STREAM_KINDS = ("simulator", "phone")
+
+
 @dataclass
 class _StreamProcess:
     """A quern-media subprocess feeding one preview window."""
@@ -778,6 +877,19 @@ class _StreamProcess:
     drain: asyncio.Task | None = None
     #: Restarts since the window last showed a picture; picks the backoff.
     restarts: int = 0
+    #: A network phone's stream: the bridge writing its pictures into
+    #: quern-media's stdin. The two end together through that pipe.
+    feeder: asyncio.subprocess.Process | None = None
+    feeder_drain: asyncio.Task | None = None
+    #: The bridge's last word: why the phone's stream stopped, which says
+    #: more than quern-media's "the stream ended".
+    feeder_reason: str | None = None
+
+    def stopped_because(self) -> str:
+        if self.feeder_reason:
+            return self.feeder_reason
+        why = self.log[-1] if self.log else f"exit status {self.process.returncode}"
+        return f"quern-media exited: {why}"
 
 
 class PreviewManager:
@@ -819,6 +931,13 @@ class PreviewManager:
         # that dies mid-preview says why on the way out, and by the time
         # anyone asks the process is gone.
         self._streams: dict[str, _StreamProcess] = {}
+        # Network phone key -> hardware UDID, for the streams that come from
+        # a phone's bridge rather than a simulator's framebuffer. Kept after
+        # the window closes: a key is one phone for good.
+        self._network_phones: dict[str, str] = {}
+        # The last list sent to the app, so a pick from the menu is checked
+        # against what the person was shown.
+        self._phone_list: dict[str, NetworkPhone] = {}
 
     async def ensure_binary(self) -> Path:
         """Lazy-compile ios-preview if needed. Returns path to binary.
@@ -979,6 +1098,7 @@ class PreviewManager:
                 "Preview ready: %d device(s) available",
                 len(self._available),
             )
+            self._spawn(self._send_network_phones(), "network-phones")
 
         elif evt_type == "added":
             entry = self._take_pending(name, event)
@@ -1058,6 +1178,14 @@ class PreviewManager:
                 name=f"open-simulator[{name}]",
             )
             task.add_done_callback(self._report_background_failure)
+
+        elif evt_type == "network_phones_wanted":
+            # The Devices menu opened. The app cannot see a phone on Wi-Fi,
+            # so it asks; the answer rebuilds the open menu in place.
+            self._spawn(self._send_network_phones(), "network-phones")
+
+        elif evt_type == "open_network_phone":
+            self._spawn(self._open_phone_from_menu(name), f"open-phone[{name}]")
 
         elif evt_type in ("off_air", "on_air"):
             preview = self._active.get(name)
@@ -1354,6 +1482,31 @@ class PreviewManager:
             RuntimeError: if quern-media cannot serve the simulator, or the
                 window does not open.
         """
+        return await self._add_stream(udid, title, kind="simulator", opener=opener)
+
+    async def add_network_phone(
+        self, phone: NetworkPhone, *, opener: object | None = None
+    ) -> ActivePreview:
+        """Open a preview window on a phone reachable over the network only.
+
+        Its screen comes from CoreDevice's display service, through
+        `phone_bridge.py`, as HEVC on quern-media's stdin; from there it is
+        served and shown exactly as a simulator's is. Filed under the phone's
+        key.
+
+        Raises:
+            RuntimeError: if the phone's screen cannot be streamed, or the
+                window does not open.
+        """
+        if phone.unavailable:
+            raise RuntimeError(f"{phone.name} cannot be mirrored: {phone.unavailable}")
+        self._network_phones[phone.key] = phone.hardware_udid
+        return await self._add_stream(phone.key, phone.name, kind="phone", opener=opener)
+
+    async def _add_stream(
+        self, udid: str, title: str | None, *, kind: str, opener: object | None
+    ) -> ActivePreview:
+        """A window on a stream quern-media serves: a simulator, or a phone."""
         await self._ensure_process()
 
         if udid in self._active:
@@ -1418,7 +1571,7 @@ class PreviewManager:
                 raise
 
             preview = ActivePreview(
-                name=udid, position=position, kind="simulator", stream_port=port,
+                name=udid, position=position, kind=kind, stream_port=port,
                 label=title, opened_by=opener,
             )
             self._active[udid] = preview
@@ -1428,13 +1581,18 @@ class PreviewManager:
     async def _start_stream(
         self, udid: str, binary: Path, port: int
     ) -> _StreamProcess:
-        """Launch quern-media against a simulator, draining its stderr."""
-        process = await asyncio.create_subprocess_exec(
-            str(binary), "--sim-udid", udid, "--serve", str(port), *STREAM_ARGS,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stream = _StreamProcess(process=process, port=port, log=deque(maxlen=20))
+        """Launch quern-media against a simulator or a network phone, draining
+        its stderr."""
+        hardware_udid = self._network_phones.get(udid)
+        if hardware_udid is not None:
+            stream = await self._start_phone_stream(udid, hardware_udid, binary, port)
+        else:
+            process = await asyncio.create_subprocess_exec(
+                str(binary), "--sim-udid", udid, "--serve", str(port), *STREAM_ARGS,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stream = _StreamProcess(process=process, port=port, log=deque(maxlen=20))
         # Drained rather than left to fill: a preview runs for as long as
         # someone watches it, and an unread pipe eventually blocks the writer.
         stream.drain = asyncio.create_task(
@@ -1445,6 +1603,85 @@ class PreviewManager:
         stream.drain.add_done_callback(self._report_background_failure)
         self._streams[udid] = stream
         return stream
+
+    async def _start_phone_stream(
+        self, key: str, hardware_udid: str, binary: Path, port: int
+    ) -> _StreamProcess:
+        """The bridge and its quern-media, joined by a pipe.
+
+        The pipe is the whole lifecycle: quern-media gone breaks the bridge's
+        writes and ends it, and the bridge gone ends quern-media's stdin and
+        ends that -- after which the drain restarts the pair. `--source-id`
+        gives the stream the key, so a window reconnecting to a port now
+        serving something else is refused (409), as for a simulator.
+        """
+        read_end, write_end = os.pipe()
+        try:
+            feeder = await asyncio.create_subprocess_exec(
+                sys.executable, str(PHONE_BRIDGE), "--udid", hardware_udid,
+                stdin=asyncio.subprocess.DEVNULL, stdout=write_end,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    str(binary), "--hevc-stdin", "--source-id", key,
+                    "--serve", str(port), *STREAM_ARGS,
+                    stdin=read_end, stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except BaseException:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    feeder.terminate()
+                raise
+        finally:
+            # Each child holds its own end now. Kept open here, the server's
+            # copies would stop either one ever seeing the other go.
+            os.close(read_end)
+            os.close(write_end)
+        stream = _StreamProcess(
+            process=process, port=port, log=deque(maxlen=20), feeder=feeder,
+        )
+        stream.feeder_drain = asyncio.create_task(
+            self._drain_feeder(key, stream), name=f"phone-drain[{key}]"
+        )
+        stream.feeder_drain.add_done_callback(self._report_background_failure)
+        return stream
+
+    async def _drain_feeder(self, key: str, stream: _StreamProcess) -> None:
+        """Keep the bridge's stderr empty, and keep its last word."""
+        feeder = stream.feeder
+        assert feeder is not None and feeder.stderr is not None
+        while True:
+            line = await feeder.stderr.readline()
+            if not line:
+                break
+            text = line.decode(errors="replace").rstrip()
+            if text:
+                logger.debug("phone-bridge[%s]: %s", key[:8], text)
+                if text.startswith("phone: "):
+                    stream.feeder_reason = text.removeprefix("phone: ")
+        await feeder.wait()
+
+    @staticmethod
+    async def _stop_feeder(stream: _StreamProcess) -> None:
+        """Stop a phone stream's bridge, and its drain."""
+        feeder = stream.feeder
+        if feeder is None:
+            return
+        if feeder.returncode is None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                feeder.terminate()
+            try:
+                await asyncio.wait_for(feeder.wait(), timeout=5.0)
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    feeder.kill()
+                await feeder.wait()
+        if stream.feeder_drain is not None and not stream.feeder_drain.done():
+            # Its last line may still be in the pipe; give it a moment.
+            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(stream.feeder_drain), timeout=1.0)
+            stream.feeder_drain.cancel()
 
     async def _drain_stream(self, udid: str, stream: _StreamProcess) -> None:
         """Keep the stderr pipe empty, and keep the last of it."""
@@ -1460,6 +1697,9 @@ class PreviewManager:
                     logger.debug("quern-media[%s]: %s", udid[:8], text)
         except asyncio.CancelledError:
             return
+        # A phone's bridge outlives its quern-media only until its next write;
+        # stopped now, so a restart never runs two streams from one phone.
+        await self._stop_feeder(stream)
         await self._restart_if_still_wanted(udid, stream)
 
     async def _restart_if_still_wanted(self, udid: str, stream: _StreamProcess) -> None:
@@ -1489,15 +1729,15 @@ class PreviewManager:
         # Marked here rather than left to the window's off_air event: the
         # event can be lost -- it can land before the add is recorded -- and
         # then status would go on saying on air for a window that is not.
-        why = stream.log[-1] if stream.log else f"exit status {stream.process.returncode}"
-        self._mark_off_air(udid, f"quern-media exited: {why}")
+        why = stream.stopped_because()
+        self._mark_off_air(udid, why)
 
         attempt = stream.restarts
         while True:
             delays = STREAM_RESTART_DELAYS
             delay = delays[min(attempt, len(delays) - 1)]
             logger.warning(
-                "quern-media for %s exited; restarting in %.0fs: %s", udid[:8], delay, why,
+                "The stream for %s stopped; restarting in %.0fs: %s", udid[:8], delay, why,
             )
             try:
                 await asyncio.sleep(delay)
@@ -1603,6 +1843,50 @@ class PreviewManager:
             except (OSError, RuntimeError) as send_exc:
                 logger.warning("Could not tell the preview app: %s", send_exc)
 
+    def _spawn(self, coro, name: str) -> None:
+        task = asyncio.create_task(coro, name=name)
+        task.add_done_callback(self._report_background_failure)
+
+    async def _send_network_phones(self) -> None:
+        """Tell the app which network phones it can show in its Devices menu.
+
+        A listing that fails is sent as the reason, not as no phones: the
+        menu says it could not look rather than that there is nothing there.
+        """
+        phones, error = await network_phones()
+        self._phone_list = {p.key: p for p in phones}
+        try:
+            await self._send({
+                "cmd": "network_phones",
+                "phones": [p.menu_entry() for p in phones],
+                "error": error,
+            })
+        except (OSError, RuntimeError) as exc:
+            logger.debug("Could not send the network phone list: %s", exc)
+
+    async def _open_phone_from_menu(self, key: str) -> None:
+        """Open a network phone someone picked from the app's Devices menu.
+
+        Checked against the list the menu was built from, then against a
+        fresh one: the phone may have left the network since. A failure goes
+        back to the app, which shows it, as for a simulator.
+        """
+        try:
+            phone = self._phone_list.get(key)
+            if phone is None or phone.unavailable is None:
+                phones, error = await network_phones()
+                self._phone_list = {p.key: p for p in phones}
+                phone = self._phone_list.get(key)
+                if phone is None:
+                    raise RuntimeError(error or "the phone is no longer on the network")
+            await self.add_network_phone(phone)
+        except Exception as exc:
+            logger.warning("Could not open %s from the Devices menu: %s", key, exc)
+            try:
+                await self._send({"cmd": "open_failed", "key": key, "error": str(exc)})
+            except (OSError, RuntimeError) as send_exc:
+                logger.warning("Could not tell the preview app: %s", send_exc)
+
     @staticmethod
     def _report_background_failure(task: asyncio.Task) -> None:
         """Retrieve and log the result of a task nobody awaits.
@@ -1635,6 +1919,7 @@ class PreviewManager:
             except TimeoutError:
                 stream.process.kill()
                 await stream.process.wait()
+        await self._stop_feeder(stream)
 
     def _terminate_streams(self) -> None:
         """Synchronous teardown, for the paths that cannot await.
@@ -1649,6 +1934,11 @@ class PreviewManager:
             if stream.process.returncode is None:
                 with contextlib.suppress(ProcessLookupError, OSError):
                     stream.process.terminate()
+            if stream.feeder is not None and stream.feeder.returncode is None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    stream.feeder.terminate()
+            if stream.feeder_drain is not None and not stream.feeder_drain.done():
+                stream.feeder_drain.cancel()
         self._streams.clear()
 
     async def remove(self, name: str) -> None:
@@ -1773,9 +2063,9 @@ class PreviewManager:
                 "kind": p.kind,
                 **({"name": p.label} if p.label else {}),
                 **({"stream_port": p.stream_port} if p.stream_port else {}),
-                **({"on_air": p.on_air} if p.kind == "simulator" else {}),
+                **({"on_air": p.on_air} if p.kind in STREAM_KINDS else {}),
                 **({"off_air_reason": p.off_air_reason}
-                   if p.kind == "simulator" and not p.on_air and p.off_air_reason else {}),
+                   if p.kind in STREAM_KINDS and not p.on_air and p.off_air_reason else {}),
             }
             for name, p in self._active.items()
         }

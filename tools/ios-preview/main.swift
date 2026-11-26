@@ -342,6 +342,46 @@ protocol PreviewController: AnyObject {
     /// simulator session.
     func toggleSimulator(_ simulator: BootedSimulator, position: Int)
     func nextPosition() -> Int
+    /// Phones on the network, which only the server can see: it holds their
+    /// screen streams. Empty in standalone mode.
+    var networkPhones: [NetworkPhoneEntry] { get }
+    /// Why the server could not list them, when it could not.
+    var networkPhonesError: String? { get }
+    /// Opens or closes a network phone's preview. Keyed by the server's key.
+    func toggleNetworkPhone(key: String)
+    /// The Devices menu is opening: a chance to ask for a fresh list.
+    func devicesMenuWillOpen()
+}
+
+extension PreviewController {
+    var networkPhones: [NetworkPhoneEntry] { [] }
+    var networkPhonesError: String? { nil }
+    func toggleNetworkPhone(key: String) {}
+    func devicesMenuWillOpen() {}
+}
+
+/// A phone the server can mirror over the network, as it lists it.
+struct NetworkPhoneEntry {
+    let key: String
+    let name: String
+    let os: String
+    /// Why it cannot be mirrored, or nil when it can.
+    let unavailable: String?
+
+    init?(_ json: [String: Any]) {
+        guard let key = json["key"] as? String, !key.isEmpty else { return nil }
+        self.key = key
+        name = json["name"] as? String ?? key
+        os = json["os"] as? String ?? ""
+        let available = json["available"] as? Bool ?? false
+        unavailable = available ? nil : (json["reason"] as? String ?? "cannot be mirrored")
+    }
+
+    var menuTitle: String {
+        let base = os.isEmpty ? name : "\(name) (\(os))"
+        if let why = unavailable { return "\(base) — \(why)" }
+        return base
+    }
 }
 
 // MARK: - Devices menu delegate
@@ -364,6 +404,7 @@ class DevicesMenuDelegate: NSObject, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         openMenu = menu
         controller?.simulators.refresh()
+        controller?.devicesMenuWillOpen()
     }
 
     func menuDidClose(_ menu: NSMenu) {
@@ -381,7 +422,8 @@ class DevicesMenuDelegate: NSObject, NSMenuDelegate {
 
         let devices = controller.allDevices
         let simulators = controller.simulators.booted
-        if devices.isEmpty && simulators.isEmpty {
+        let phones = controller.networkPhones
+        if devices.isEmpty && simulators.isEmpty && phones.isEmpty {
             let none = NSMenuItem(title: "No Devices Found", action: nil, keyEquivalent: "")
             none.isEnabled = false
             menu.addItem(none)
@@ -411,6 +453,31 @@ class DevicesMenuDelegate: NSObject, NSMenuDelegate {
             }
         }
 
+        if !phones.isEmpty || controller.networkPhonesError != nil {
+            menu.addItem(.separator())
+            let header = NSMenuItem(title: "On the Network", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for phone in phones {
+                let item = NSMenuItem(title: phone.menuTitle, action: #selector(toggleNetworkPhone(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = phone.key
+                // Shown greyed out with the reason, not left out: a phone
+                // missing from the list reads as quern not seeing it at all.
+                item.isEnabled = phone.unavailable == nil
+                item.toolTip = phone.unavailable
+                if controller.activeSessionKeys.contains(phone.key) {
+                    item.state = .on
+                }
+                menu.addItem(item)
+            }
+            if let error = controller.networkPhonesError {
+                let item = NSMenuItem(title: "Could not list them: \(error)", action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+        }
+
         menu.addItem(.separator())
         let refreshItem = NSMenuItem(title: "Refresh Devices", action: #selector(DevicesMenuDelegate.refreshDevices(_:)), keyEquivalent: "r")
         refreshItem.target = self
@@ -431,11 +498,18 @@ class DevicesMenuDelegate: NSObject, NSMenuDelegate {
         controller.toggleSimulator(simulator, position: controller.nextPosition())
     }
 
+    @objc func toggleNetworkPhone(_ sender: NSMenuItem) {
+        guard let controller = controller,
+              let key = sender.representedObject as? String else { return }
+        controller.toggleNetworkPhone(key: key)
+    }
+
     @objc func refreshDevices(_ sender: NSMenuItem) {
         guard let controller = controller else { return }
         enableScreenCaptureDevices()
         controller.allDevices = discoverDevices()
         controller.simulators.refresh()
+        controller.devicesMenuWillOpen()
     }
 }
 
@@ -1667,6 +1741,9 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     var closedByPerson: Set<String> = []
     let devicesMenuDelegate = DevicesMenuDelegate()
     private var deviceObservers: [NSObjectProtocol] = []
+    /// As the server last listed them; asked for whenever the menu opens.
+    var networkPhones: [NetworkPhoneEntry] = []
+    var networkPhonesError: String?
 
     var activeSessionKeys: Set<String> {
         return Set(sessions.keys).union(localSimulators.keys)
@@ -1778,12 +1855,20 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
             }
             handleRemove(key: key, id: id)
 
+        case "network_phones":
+            let listed = json["phones"] as? [[String: Any]] ?? []
+            networkPhones = listed.compactMap(NetworkPhoneEntry.init)
+            networkPhonesError = json["error"] as? String
+            devicesMenuDelegate.simulatorsChanged()
+
         case "open_failed":
-            // A simulator picked from the Devices menu that the server could
-            // not open. The person is looking at this app, not the server log.
+            // A simulator or phone picked from the Devices menu that the
+            // server could not open. The person is looking at this app, not
+            // the server log.
             let key = (json["key"] as? String) ?? ""
             if closedByPerson.remove(key) != nil { break }
-            let name = simulators.booted.first(where: { $0.udid == key })?.name ?? key
+            let name = simulators.booted.first(where: { $0.udid == key })?.name
+                ?? networkPhones.first(where: { $0.key == key })?.name ?? key
             reportPreviewFailure(name, json["error"] as? String ?? "unknown error")
 
         case "list":
@@ -2042,6 +2127,21 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
             localSimulators[simulator.udid] = preview
             preview.start()
         }
+    }
+
+    func toggleNetworkPhone(key: String) {
+        if sessions[key] != nil {
+            closeFromMenu(key)
+        } else if stdinConnected {
+            // The server holds the phone's stream; the window arrives as an
+            // ordinary add_stream.
+            closedByPerson.remove(key)
+            emit(["event": "open_network_phone", "key": key])
+        }
+    }
+
+    func devicesMenuWillOpen() {
+        if stdinConnected { emit(["event": "network_phones_wanted"]) }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
