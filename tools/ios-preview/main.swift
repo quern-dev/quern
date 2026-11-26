@@ -13,6 +13,7 @@
 // Build: swiftc -o ios-preview tools/ios-preview/main.swift \
 //          macos/QuernMedia/Sources/QuernMedia/Encode/JPEGFraming.swift \
 //          macos/QuernMedia/Sources/QuernMedia/Capture/SimulatorList.swift \
+//          macos/QuernMedia/Sources/QuernMedia/Capture/NetworkPhoneList.swift \
 //          macos/QuernMedia/Sources/QuernMedia/Sinks/StreamRefusal.swift \
 //          -framework AVFoundation -framework CoreMediaIO -framework AppKit
 //
@@ -173,6 +174,64 @@ final class SimulatorWatcher {
         process.waitUntilExit()
         guard process.terminationReason == .exit, process.terminationStatus == 0 else { return nil }
         return SimulatorList.parse(data)
+    }
+}
+
+/// Keeps the list of network phones current, for the standalone app. In a
+/// window the server opened, the server lists them instead.
+///
+/// Asked of `devicectl` every 15 s in the background and again as the menu
+/// opens. A failed ask keeps the last answer, as `SimulatorWatcher` does.
+final class NetworkPhoneWatcher {
+    /// Main thread only.
+    private(set) var phones: [NetworkPhone] = []
+    /// Called on the main thread when `phones` changes.
+    var onChange: (() -> Void)?
+
+    private var timer: Timer?
+    private var refreshing = false
+
+    func start(every interval: TimeInterval = 15) {
+        refresh()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+    }
+
+    func refresh() {
+        guard !refreshing else { return }
+        refreshing = true
+        DispatchQueue.global(qos: .utility).async {
+            let found = Self.query()
+            DispatchQueue.main.async {
+                self.refreshing = false
+                guard let found, found != self.phones else { return }
+                self.phones = found
+                self.onChange?()
+            }
+        }
+    }
+
+    static func query() -> [NetworkPhone]? {
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("quern-preview-devices-\(getpid()).json")
+        defer { try? FileManager.default.removeItem(at: out) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["devicectl", "list", "devices", "--quiet", "--json-output", out.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 15) {
+            if process.isRunning { process.terminate() }
+        }
+        process.waitUntilExit()
+        guard process.terminationReason == .exit, process.terminationStatus == 0,
+              let data = try? Data(contentsOf: out) else { return nil }
+        let bridge = LocalStreamPreview.phoneBridge.path
+        let missing = FileManager.default.isExecutableFile(atPath: bridge)
+            ? nil : "start quern once (quern start) to install the phone bridge"
+        return NetworkPhoneList.parse(data, bridgeMissing: missing)
     }
 }
 
@@ -379,6 +438,13 @@ struct NetworkPhoneEntry {
         os = json["os"] as? String ?? ""
         let available = json["available"] as? Bool ?? false
         unavailable = available ? nil : (json["reason"] as? String ?? "cannot be mirrored")
+    }
+
+    init(_ phone: NetworkPhone) {
+        key = phone.key
+        name = phone.name
+        os = phone.osVersion
+        unavailable = phone.unavailable
     }
 
     var menuTitle: String {
@@ -688,7 +754,10 @@ class PreviewWindow: NSObject, NSWindowDelegate {
 /// and stop the stream. The arguments are the server's (`STREAM_ARGS` in
 /// server/device/media/preview.py), and tests/test_preview.py checks the two
 /// copies agree.
-final class LocalSimulatorPreview {
+/// A preview window on a stream the app runs itself: a simulator's
+/// framebuffer, or a network phone's screen through the phone bridge. For
+/// when there is no quern server to ask.
+final class LocalStreamPreview {
     static let streamArguments = [
         "--max-dim", "0", "--quality", "0.85", "--fps", "60", "--exit-with-parent",
     ]
@@ -698,10 +767,26 @@ final class LocalSimulatorPreview {
         Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("quern-media")
     }
 
-    let simulator: BootedSimulator
+    /// The phone bridge, which the server installs beside quern-media when
+    /// it starts: it runs the bridge from that install.
+    static var phoneBridge: URL {
+        Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("quern-phone-bridge")
+    }
+
+    /// The session key: a simulator's udid, or a phone's CoreDevice id.
+    let key: String
+    let title: String
     let position: Int
+    /// quern-media's source arguments.
+    private let source: [String]
+    /// The process writing a phone's pictures into quern-media's stdin, as
+    /// an executable and its arguments; nil for a simulator.
+    private let feederCommand: [String]?
     private var port: UInt16 = 0
     private var process: Process?
+    private var feeder: Process?
+    /// The bridge's last word: why the phone's stream stopped.
+    private var feederReason: String?
     private var stderrPipe: Pipe?
     private var stderrTail: [String] = []
     private(set) var session: StreamPreviewSession?
@@ -713,8 +798,19 @@ final class LocalSimulatorPreview {
     var onEnded: ((String, String?) -> Void)?
 
     init(simulator: BootedSimulator, position: Int) {
-        self.simulator = simulator
+        key = simulator.udid
+        title = simulator.name
         self.position = position
+        source = ["--sim-udid", simulator.udid]
+        feederCommand = nil
+    }
+
+    init(phone: NetworkPhone, position: Int) {
+        key = phone.key
+        title = phone.name
+        self.position = position
+        source = ["--hevc-stdin", "--source-id", phone.key]
+        feederCommand = [Self.phoneBridge.path, "--udid", phone.hardwareUDID]
     }
 
     func start() {
@@ -724,6 +820,12 @@ final class LocalSimulatorPreview {
             end(error: "quern-media has not been built on this Mac yet. Run "
                 + "`quern setup`, or start quern and open this simulator with "
                 + "preview_device, then try again.")
+            return
+        }
+        if let feeder = feederCommand?.first,
+           !FileManager.default.isExecutableFile(atPath: feeder) {
+            end(error: "The phone bridge is not installed on this Mac yet. Start quern "
+                + "once (`quern start`) and it installs it, then try again.")
             return
         }
         guard let port = Self.freeLoopbackPort() else {
@@ -744,6 +846,7 @@ final class LocalSimulatorPreview {
         process?.terminationHandler = nil
         process?.terminate()
         process = nil
+        stopFeeder()
         // Cleared here as well as at EOF: with the termination handler gone
         // nothing else would, and a readability handler on a closed pipe is
         // called over and over with nothing -- a core spinning per preview.
@@ -751,14 +854,61 @@ final class LocalSimulatorPreview {
         stderrPipe = nil
     }
 
+    private func stopFeeder() {
+        feeder?.terminationHandler = nil
+        if feeder?.isRunning == true { feeder?.terminate() }
+        feeder = nil
+    }
+
+    /// The phone bridge, writing into `pipe`. Its stderr is kept for the
+    /// `phone: <reason>` line it ends with.
+    private func launchFeeder(_ command: [String], into pipe: Pipe) -> Bool {
+        let feeder = Process()
+        feeder.executableURL = URL(fileURLWithPath: command[0])
+        feeder.arguments = Array(command.dropFirst())
+        feeder.standardInput = FileHandle.nullDevice
+        feeder.standardOutput = pipe
+        let err = Pipe()
+        feeder.standardError = err
+        err.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            let lines = String(decoding: data, as: UTF8.self).split(separator: "\n")
+            if let last = lines.last(where: { $0.hasPrefix("phone: ") }) {
+                let reason = String(last.dropFirst("phone: ".count))
+                DispatchQueue.main.async { self?.feederReason = reason }
+            }
+        }
+        do {
+            try feeder.run()
+        } catch {
+            end(error: "Could not start the phone bridge: \(error.localizedDescription)")
+            return false
+        }
+        self.feeder = feeder
+        return true
+    }
+
     private func launch() {
         let process = Process()
         process.executableURL = Self.binary
-        process.arguments = ["--sim-udid", simulator.udid, "--serve", String(port)]
-            + Self.streamArguments
+        process.arguments = source + ["--serve", String(port)] + Self.streamArguments
         let err = Pipe()
         process.standardOutput = FileHandle.nullDevice
         process.standardError = err
+        // A phone: the bridge writes into this pipe and quern-media reads it,
+        // so either one going ends the other -- and quern-media's exit below
+        // restarts both.
+        var feed: Pipe?
+        if let command = feederCommand {
+            let pipe = Pipe()
+            guard launchFeeder(command, into: pipe) else { return }
+            process.standardInput = pipe
+            feed = pipe
+        }
         err.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             // End of file. Left installed, the handler is called again at
@@ -782,8 +932,13 @@ final class LocalSimulatorPreview {
             self.process = process
             stderrPipe = err
         } catch {
+            stopFeeder()
             end(error: "Could not start quern-media: \(error.localizedDescription)")
         }
+        // Each child has its own copy of the pipe now. Kept open here, this
+        // app's copies would stop either one seeing the other go.
+        try? feed?.fileHandleForWriting.close()
+        try? feed?.fileHandleForReading.close()
     }
 
     /// quern-media exited. Before the window opened, that is the reason the
@@ -797,9 +952,32 @@ final class LocalSimulatorPreview {
         process = nil
         guard session != nil else {
             let why = stderrTail.last ?? "exit status \(ended.terminationStatus)"
-            end(error: "quern-media stopped before serving: \(why)")
+            let fallback = "quern-media stopped before serving: \(why)"
+            guard let feeder else {
+                end(error: fallback)
+                return
+            }
+            // The bridge's reason is the one worth showing, and it may still
+            // be on its way: its exit is what ended quern-media's stdin, and
+            // its stderr arrives on its own queue. So wait for it to exit,
+            // briefly, before choosing what to say.
+            self.feeder = nil
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let deadline = Date().addingTimeInterval(2)
+                while feeder.isRunning && Date() < deadline { usleep(50_000) }
+                if feeder.isRunning { feeder.terminate() }
+                usleep(200_000)  // its last line, through the reader's hop to main
+                DispatchQueue.main.async {
+                    guard let self, !self.stopped else { return }
+                    self.end(error: self.feederReason ?? fallback)
+                }
+            }
             return
         }
+        // A phone's bridge outlives its quern-media only until its next
+        // write; stopped now, so a restart never runs two for one phone.
+        stopFeeder()
+        feederReason = nil
         let delay = min(5.0, 1.0 * pow(2.0, Double(min(relaunches, 3))))
         relaunches += 1
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -840,9 +1018,9 @@ final class LocalSimulatorPreview {
     private func openWindow() {
         // By source as well as port, so a reconnect cannot land on another
         // simulator that has taken the port meanwhile: quern-media says 409.
-        let url = URL(string: "http://127.0.0.1:\(port)/stream?source=\(simulator.udid)")!
+        let url = URL(string: "http://127.0.0.1:\(port)/stream?source=\(key)")!
         let session = StreamPreviewSession(
-            sessionKey: simulator.udid, title: simulator.name, url: url, position: position
+            sessionKey: key, title: title, url: url, position: position
         )
         session.onWindowClosed = { [weak self] _ in self?.end(error: nil) }
         session.onFailed = { [weak self] message in self?.end(error: message) }
@@ -857,7 +1035,7 @@ final class LocalSimulatorPreview {
         let wasStopped = stopped
         stop()
         guard !wasStopped else { return }
-        onEnded?(simulator.udid, error)
+        onEnded?(key, error)
     }
 
     /// A loopback port nothing is using, from the kernel. Closed again before
@@ -912,8 +1090,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
     var allDevices: [AVCaptureDevice] = []
     var activePreviews: [String: PreviewWindow] = [:]
     /// Simulator previews, each with its own quern-media. Keyed by udid.
-    var simulatorPreviews: [String: LocalSimulatorPreview] = [:]
+    var simulatorPreviews: [String: LocalStreamPreview] = [:]
     let simulators = SimulatorWatcher()
+    /// Network phones, which this app streams itself through the phone
+    /// bridge. Their previews are in `simulatorPreviews` too, by key.
+    let phones = NetworkPhoneWatcher()
     let devicesMenuDelegate = DevicesMenuDelegate()
     let mode: FilterMode
     private var deviceObservers: [NSObjectProtocol] = []
@@ -933,6 +1114,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
         setupMenuBar(devicesMenuDelegate: devicesMenuDelegate)
         simulators.onChange = { [weak self] in self?.devicesMenuDelegate.simulatorsChanged() }
         simulators.start()
+        phones.onChange = { [weak self] in self?.devicesMenuDelegate.simulatorsChanged() }
+        phones.start()
         enableScreenCaptureDevices()
         watchForDeviceChanges()
         fputs("Waiting for devices...\n", stderr)
@@ -1086,13 +1269,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
             preview.stop()
             return
         }
-        let preview = LocalSimulatorPreview(simulator: simulator, position: position)
+        let preview = LocalStreamPreview(simulator: simulator, position: position)
         preview.onEnded = { [weak self] udid, error in
             self?.simulatorPreviews.removeValue(forKey: udid)
             if let error { reportPreviewFailure(simulator.name, error) }
         }
         simulatorPreviews[simulator.udid] = preview
         preview.start()
+    }
+
+    var networkPhones: [NetworkPhoneEntry] { phones.phones.map(NetworkPhoneEntry.init) }
+
+    func toggleNetworkPhone(key: String) {
+        if let preview = simulatorPreviews.removeValue(forKey: key) {
+            preview.stop()
+            return
+        }
+        guard let phone = phones.phones.first(where: { $0.key == key }) else { return }
+        if let why = phone.unavailable {
+            reportPreviewFailure(phone.name, why)
+            return
+        }
+        let preview = LocalStreamPreview(phone: phone, position: nextPosition())
+        preview.onEnded = { [weak self] key, error in
+            self?.simulatorPreviews.removeValue(forKey: key)
+            if let error { reportPreviewFailure(phone.name, error) }
+        }
+        simulatorPreviews[key] = preview
+        preview.start()
+    }
+
+    func devicesMenuWillOpen() {
+        phones.refresh()
     }
 
     func nextPosition() -> Int {
@@ -1738,7 +1946,7 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     let simulators = SimulatorWatcher()
     /// Simulator previews opened from the menu after the server went away,
     /// each with its own quern-media. Keyed by udid.
-    var localSimulators: [String: LocalSimulatorPreview] = [:]
+    var localSimulators: [String: LocalStreamPreview] = [:]
     /// Previews the person closed while the server may still be opening
     /// them. Closing one mid-add fails that add, and the person should not
     /// then be told their own close was an error.
@@ -2123,7 +2331,7 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
             closedByPerson.remove(simulator.udid)
             emit(["event": "open_simulator", "key": simulator.udid, "name": simulator.name])
         } else {
-            let preview = LocalSimulatorPreview(simulator: simulator, position: position)
+            let preview = LocalStreamPreview(simulator: simulator, position: position)
             preview.onEnded = { [weak self] udid, error in
                 self?.localSimulators.removeValue(forKey: udid)
                 if let error { reportPreviewFailure(simulator.name, error) }

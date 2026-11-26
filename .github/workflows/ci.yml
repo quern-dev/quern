@@ -221,6 +221,7 @@ jobs:
             tools/ios-preview/main.swift \
             macos/QuernMedia/Sources/QuernMedia/Encode/JPEGFraming.swift \
             macos/QuernMedia/Sources/QuernMedia/Capture/SimulatorList.swift \
+            macos/QuernMedia/Sources/QuernMedia/Capture/NetworkPhoneList.swift \
             macos/QuernMedia/Sources/QuernMedia/Sinks/StreamRefusal.swift \
             -framework AVFoundation -framework CoreMediaIO -framework AppKit
 
