@@ -1090,6 +1090,15 @@ class DeviceController(DeviceControllerUI):
         service it talks to, over the device's tunnel (#706)."""
         return self.devicectl if await self.devicectl.is_available() else self.coredevice_apps
 
+    async def crash_service_udid(self, udid: str) -> str | None:
+        """The UDID crash reports are read and cleared by: the USB one, or for
+        a phone on Wi-Fi only its hardware UDID, which `ios_crash` reaches
+        through the tunnel macOS keeps to it (#781). None when neither is known.
+        """
+        from server.device.ios.native_tunnel import hardware_udid
+
+        return await self.get_libimobiledevice_udid(udid) or hardware_udid(udid)
+
     async def get_libimobiledevice_udid(self, coredevice_udid: str) -> str | None:
         """Look up the libimobiledevice UDID for a CoreDevice UUID.
 
@@ -1920,9 +1929,11 @@ class DeviceController(DeviceControllerUI):
         the time in each report's name, which is the phone's local time, so
         the order holds whatever zone the phone and the Mac are in; `since`
         bounds them only loosely, a day back, as `select_recent` does. Read
-        over USB, so a phone quern reaches only over the network has none.
-        A pull that copies some reports and not others gives the ones it
-        copied.
+        over USB, or for a phone on Wi-Fi only through the tunnel macOS keeps
+        to it (#781): None when neither can be had, so the caller stops
+        asking, as it did when only USB could be read. Any other failure is
+        raised, for the caller's bounded retry. A pull that copies some
+        reports and not others gives the ones it copied.
         """
         import tempfile
         from datetime import datetime, timedelta
@@ -1930,13 +1941,21 @@ class DeviceController(DeviceControllerUI):
 
         from server.sources import ios_crash
 
-        lib_udid = await self.get_libimobiledevice_udid(udid)
+        lib_udid = await self.crash_service_udid(udid)
         cmd = ios_crash.command()
         if not lib_udid or not cmd:
             return None
+        from server.device.ios.native_tunnel import NativeTunnelUnavailable
+
         cutoff = datetime.fromtimestamp(since) - timedelta(days=1)
+        try:
+            listed = await ios_crash.list_reports(cmd, lib_udid)
+        except ios_crash.IosCrashError as e:
+            if isinstance(e.__cause__, NativeTunnelUnavailable):
+                return None     # no route to the phone at all: not worth a retry
+            raise
         dated = sorted(
-            ((t, n) for n in await ios_crash.list_reports(cmd, lib_udid)
+            ((t, n) for n in listed
              if (t := ios_crash.report_time(n)) is not None and t >= cutoff),
             reverse=True)
         named = f"{app}-" if app.strip() else None
@@ -2158,7 +2177,8 @@ class DeviceController(DeviceControllerUI):
                 await self._ensure_android_screen_on(resolved)
             return await self.adb.screenshot(resolved)
         if self._is_physical(resolved):
-            return await self.pmd3.screenshot(resolved)
+            return await self.pmd3.screenshot(
+                resolved, os_version=self.wda_client._device_os_versions.get(resolved))
         return await self.simctl.screenshot(resolved, display=await self._lit_display(resolved))
 
     async def _lit_display(self, udid: str) -> int | None:

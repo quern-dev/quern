@@ -246,7 +246,10 @@ async def _device_screenshot(controller, udid: str) -> bytes | None:
         # device's tunnels, which one tap's check must not do. A capture past
         # the timeout is killed, not left running (pmd3.screenshot).
         png = await asyncio.wait_for(
-            controller.pmd3.screenshot(udid, recover_tunneld=False), CAPTURE_TIMEOUT)
+            controller.pmd3.screenshot(
+                udid, recover_tunneld=False,
+                os_version=controller.wda_client._device_os_versions.get(udid)),
+            CAPTURE_TIMEOUT)
     except Exception:  # noqa: BLE001 -- no frame is an answer, never a failure
         logger.debug("device screenshot failed", exc_info=True)
         return None

@@ -6768,7 +6768,8 @@ class DeviceControllerUI:
         if self._is_android(resolved):
             raw_png = await self.adb.screenshot(resolved)
         elif self._is_physical(resolved):
-            raw_png = await self.pmd3.screenshot(resolved)
+            raw_png = await self.pmd3.screenshot(
+                resolved, os_version=self.wda_client._device_os_versions.get(resolved))
         else:
             display = await self._lit_display(resolved)
             raw_png = await self.simctl.screenshot(resolved, display=display)

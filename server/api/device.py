@@ -1517,6 +1517,7 @@ async def _start_device_logging(
             on_entry=dedup.process,
             process_filter=body.process,
             match_filter=body.match,
+            os_version=controller.wda_client._device_os_versions.get(udid),
         )
 
     await adapter.start()

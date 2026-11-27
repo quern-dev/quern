@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import tempfile
 from pathlib import Path
@@ -111,13 +112,19 @@ class Pmd3Backend:
             return False
         return await probe_command(str(binary), "version", tool="pymobiledevice3")
 
-    async def screenshot(self, uuid: str, recover_tunneld: bool = True) -> bytes:
+    async def screenshot(self, uuid: str, recover_tunneld: bool = True,
+                         os_version: str | None = None) -> bytes:
         """Capture a screenshot from a physical device via pymobiledevice3.
 
         iOS 17+: Uses tunneld for RemoteXPC tunnel, then
-                 `pymobiledevice3 developer dvt screenshot --tunnel <udid>`
+                 `pymobiledevice3 developer dvt screenshot --tunnel <udid>`;
+                 with no tunneld tunnel -- a phone on Wi-Fi only -- the tunnel
+                 macOS keeps to it, given as `--rsd` (#781)
         iOS 16-: Falls back to usbmuxd-based connection without tunnel:
                  `pymobiledevice3 developer dvt screenshot`
+
+        `os_version`, when known, keeps a phone before iOS 17 from asking for
+        Apple's tunnel, which it has none of.
 
         `recover_tunneld=False` leaves a wedged tunneld alone: recovery drops
         every connected device's tunnels, which a check on one tap must not do
@@ -144,6 +151,17 @@ class Pmd3Backend:
         if tunneld_serving:
             tunnel_udid = await resolve_tunnel_udid(uuid)
 
+        native, native_why = None, ""
+        from server.device.ios.native_tunnel import may_have_native_tunnel
+
+        if tunnel_udid is None and may_have_native_tunnel(os_version):
+            from server.device.ios.native_tunnel import NativeTunnelUnavailable, native_address
+
+            try:
+                native = await native_address(uuid)
+            except NativeTunnelUnavailable as e:
+                native_why = f" {e}."
+
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             tmp_path = tmp.name
 
@@ -155,6 +173,11 @@ class Pmd3Backend:
                     "--tunnel", tunnel_udid,
                     tmp_path,
                 ]
+            elif native is not None:
+                from server.device.ios.native_tunnel import rsd_args
+
+                cmd = [str(binary), "developer", "dvt", "screenshot",
+                       *rsd_args(native), tmp_path]
             else:
                 # iOS 16-: direct usbmuxd connection (no tunnel needed)
                 # Must pass --udid to avoid interactive device prompt when
@@ -178,19 +201,23 @@ class Pmd3Backend:
                         uuid[:8],
                     )
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                _, stderr = await proc.communicate()
-            except BaseException:
-                # Abandoned -- a caller's timeout, a cancelled request: the
-                # child would otherwise run on after its output file is gone.
-                if proc.returncode is None:
-                    proc.kill()
-                raise
+            from server.device.ios.native_tunnel import holding
+
+            # Apple's tunnel is held for as long as the child uses it.
+            async with holding(native) if native is not None else contextlib.nullcontext():
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    _, stderr = await proc.communicate()
+                except BaseException:
+                    # Abandoned -- a caller's timeout, a cancelled request: the
+                    # child would otherwise run on after its output file is gone.
+                    if proc.returncode is None:
+                        proc.kill()
+                    raise
 
             if proc.returncode != 0:
                 error_msg = stderr.decode().strip()
@@ -202,7 +229,8 @@ class Pmd3Backend:
                     )
                 raise DeviceError(
                     f"pymobiledevice3 screenshot failed: {error_msg}"
-                    + _no_tunnel_hint(tunnel_udid, tunneld_serving),
+                    + ("" if native is not None
+                       else _no_tunnel_hint(tunnel_udid, tunneld_serving) + native_why),
                     tool="pymobiledevice3",
                 )
 

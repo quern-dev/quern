@@ -1065,8 +1065,8 @@ class TestClearDeviceCrashes:
                 assert argv[argv.index("--udid") + 1] == "LIB"
                 return "".join(f"/{n}\n" for n in next(calls)), ""
             if what == "crash delete":
-                assert argv[3] == "LIB"
-                names = argv[4:]
+                assert argv[3:5] == ["--udid", "LIB"]
+                names = argv[5:]
                 removed = [n for n in names if n not in refuse]
                 return json.dumps({"removed": removed, "failed": list(refuse)}), ""
             raise AssertionError(argv)

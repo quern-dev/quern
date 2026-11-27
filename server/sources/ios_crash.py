@@ -25,12 +25,15 @@ Every report's basename carries its capture time, device-local
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import json
+import logging
 import os
 import re
 import shutil
 import sys
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -53,21 +56,39 @@ _BOX = "│╭╰╮╯─ "
 #: Deletes exactly the named reports, one REMOVE_PATH each. The CLI's
 #: `crash clear` removes every child of the crash directory recursively --
 #: DiagnosticLogs and its sysdiagnose archives included -- so it is not used.
+logger = logging.getLogger(__name__)
+
 _REMOVE_SCRIPT = """
 import asyncio, json, sys
 from pymobiledevice3.lockdown import create_using_usbmux
 from pymobiledevice3.services.crash_reports import CrashReportsManager
 
-async def main(udid, names):
-    lockdown = await create_using_usbmux(serial=udid)
+async def provider(args):
+    # `--udid UDID` or `--rsd HOST PORT`, as `_reaching` gives them.
+    if args[0] == "--rsd":
+        from pymobiledevice3.remote.remote_service_discovery import (
+            RemoteServiceDiscoveryService)
+        from pymobiledevice3.remote.remotexpc import rsd_handshake_uuid
+        rsd = RemoteServiceDiscoveryService(
+            (args[1], int(args[2])), handshake_uuid=rsd_handshake_uuid(args[1]))
+        await rsd.connect()
+        return rsd, args[3:], rsd
+    return await create_using_usbmux(serial=args[1]), args[2:], None
+
+async def main(args):
+    lockdown, names, rsd = await provider(args)
     removed, failed = [], []
-    async with CrashReportsManager(lockdown) as manager:
-        for name in names:
-            ok = await manager.afc.rm_single("/" + name, force=True)
-            (removed if ok else failed).append(name)
+    try:
+        async with CrashReportsManager(lockdown) as manager:
+            for name in names:
+                ok = await manager.afc.rm_single("/" + name, force=True)
+                (removed if ok else failed).append(name)
+    finally:
+        if rsd is not None:
+            await rsd.close()
     print(json.dumps({"removed": removed, "failed": failed}))
 
-asyncio.run(main(sys.argv[1], sys.argv[2:]))
+asyncio.run(main(sys.argv[1:]))
 """
 
 
@@ -203,12 +224,56 @@ def _require(udid: str | None) -> str:
     return udid
 
 
+#: How long usbmuxd may take to list its devices.
+USBMUX_LIST_S = 3.0
+
+
+async def _on_usbmux(udid: str) -> bool | None:
+    """Whether usbmuxd lists the phone; None when it could not be asked."""
+    try:
+        from pymobiledevice3 import usbmux
+
+        devices = await asyncio.wait_for(usbmux.list_devices(), USBMUX_LIST_S)
+    except Exception:  # noqa: BLE001 -- could not tell
+        logger.debug("usbmuxd could not be asked for its devices", exc_info=True)
+        return None
+    return any(d.serial == udid for d in devices)
+
+
+@contextlib.asynccontextmanager
+async def _reaching(udid: str) -> AsyncIterator[list[str]]:
+    """pymobiledevice3's arguments to reach the phone, for the length of the block.
+
+    `--udid` through usbmuxd, as always, when it lists the phone or cannot be
+    asked. A phone on Wi-Fi only is not listed there ("usbmux has no device
+    matching udid"), and is reached through the tunnel macOS keeps to it
+    (#781), held while the command runs.
+    """
+    if await _on_usbmux(udid) is not False:
+        yield ["--udid", udid]
+        return
+    from server.device.ios.native_tunnel import (
+        NativeTunnelUnavailable,
+        holding,
+        native_address,
+        rsd_args,
+    )
+
+    try:
+        address = await native_address(udid)
+    except NativeTunnelUnavailable as e:
+        raise IosCrashError(f"usbmuxd does not list {udid[:8]}, and {e}") from e
+    async with holding(address) as held:
+        yield rsd_args(held)
+
+
 async def list_reports(cmd: list[str], udid: str | None) -> list[str]:
     """Basenames of the crash reports at the top of the phone's crash directory."""
-    out, _ = await _run(
-        [*cmd, "crash", "ls", "--udid", _require(udid), "--depth", "1"],
-        "crash ls", LIST_TIMEOUT_S,
-    )
+    async with _reaching(_require(udid)) as target:
+        out, _ = await _run(
+            [*cmd, "crash", "ls", *target, "--depth", "1"],
+            "crash ls", LIST_TIMEOUT_S,
+        )
     names = []
     for line in out.splitlines():
         path = line.strip()
@@ -240,10 +305,11 @@ async def pull_reports(cmd: list[str], udid: str | None, names: list[str], out: 
     pattern = "^(?:" + "|".join(re.escape(n) for n in names) + ")$"
     try:
         try:
-            _, err = await _run(
-                [*cmd, "crash", "pull", "--udid", udid, "--match", pattern, str(staging)],
-                "crash pull", PULL_TIMEOUT_S,
-            )
+            async with _reaching(udid) as target:
+                _, err = await _run(
+                    [*cmd, "crash", "pull", *target, "--match", pattern, str(staging)],
+                    "crash pull", PULL_TIMEOUT_S,
+                )
         except IosCrashError as e:
             copied = _keep_complete(staging, out, names)
             raise IosCrashError(f"{e}; copied {len(copied)} of {len(names)}", copied) from e
@@ -287,9 +353,11 @@ async def remove_reports(udid: str | None, names: list[str]) -> tuple[list[str],
     udid = _require(udid)
     if importlib.util.find_spec("pymobiledevice3") is None:
         raise IosCrashError("deleting single reports needs the pymobiledevice3 library")
-    out, _ = await _run(
-        [sys.executable, "-c", _REMOVE_SCRIPT, udid, *names], "crash delete", REMOVE_TIMEOUT_S,
-    )
+    async with _reaching(udid) as target:
+        out, _ = await _run(
+            [sys.executable, "-c", _REMOVE_SCRIPT, *target, *names],
+            "crash delete", REMOVE_TIMEOUT_S,
+        )
     try:
         result = json.loads(out.strip().splitlines()[-1])
         return list(result["removed"]), list(result["failed"])

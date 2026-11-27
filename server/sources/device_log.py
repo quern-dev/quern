@@ -34,8 +34,16 @@ import os
 import posixpath
 import re
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 
+from server.device.ios.native_tunnel import (
+    NativeTunnelUnavailable,
+    lease,
+    may_have_native_tunnel,
+    native_address,
+    rsd_args,
+)
 from server.device.ios.tunneld import find_pymobiledevice3_binary, resolve_tunnel_udid
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
@@ -169,6 +177,7 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         on_entry: EntryCallback | None = None,
         process_filter: str | None = None,
         match_filter: str | None = None,
+        os_version: str | None = None,
     ) -> None:
         super().__init__(
             adapter_id=f"devlog-{udid[:8]}",
@@ -180,6 +189,12 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         self.process_filter = process_filter
         self.match_filter = match_filter
         self._tunnel_udid: str | None = None
+        #: Gives back the hold on Apple's tunnel the next run's command was
+        #: built for (#781); the run that starts takes it over.
+        self._native_release: Callable[[], None] | None = None
+        #: The phone's iOS version, when known: one before 17 is never asked
+        #: for Apple's tunnel, which it has none of (CodeRabbit on #791).
+        self.os_version = os_version
         #: "json" or "text": what this capture asked pymobiledevice3 for. Only
         #: a JSON capture's lines are read as JSON -- a text capture's
         #: continuation line can be a JSON body of its own (review).
@@ -206,11 +221,16 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
 
         cmd = [str(binary), "syslog", "live"]
 
-        # Try tunnel-first (iOS 17+), fall back to --udid (iOS 16-)
+        # Try tunnel-first (iOS 17+), then the tunnel macOS keeps to a phone
+        # tunneld has none to -- one on Wi-Fi only (#781) -- and fall back to
+        # --udid (iOS 16-)
         tunnel_udid = await resolve_tunnel_udid(self.udid)
         if tunnel_udid:
             self._tunnel_udid = tunnel_udid
             cmd.extend(["--tunnel", tunnel_udid])
+        elif (may_have_native_tunnel(self.os_version)
+              and (native := await self._native_tunnel()) is not None):
+            cmd.extend(rsd_args(native))
         else:
             cmd.extend(["--udid", self.udid])
 
@@ -227,6 +247,23 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
             self._note = TEXT_MODE_WARNING
 
         return cmd
+
+    async def _native_tunnel(self) -> tuple | None:
+        """The phone's address on Apple's own tunnel, held for the run about
+        to start, or None when there is none to be had."""
+        self._give_back_native()
+        try:
+            address = await native_address(self.udid)
+        except NativeTunnelUnavailable as e:
+            logger.info("No tunnel to %s for its log: %s", self.udid[:8], e)
+            return None
+        address, self._native_release = lease(address)
+        return address
+
+    def _give_back_native(self) -> None:
+        release, self._native_release = self._native_release, None
+        if release is not None:
+            release()
 
     async def reconfigure(
         self,
@@ -248,31 +285,40 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
 
     async def start(self) -> None:
         """Spawn pymobiledevice3 syslog live and begin reading output."""
-        cmd = await self._build_command()
-        if cmd is None:
-            return
-
         try:
+            cmd = await self._build_command()
+            if cmd is None:
+                self._give_back_native()
+                return
             self._process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=_LINE_LIMIT,
             )
+        except asyncio.CancelledError:
+            # Before the run took the hold over: nothing else gives it back
+            # (CodeRabbit on #791).
+            self._give_back_native()
+            raise
         except FileNotFoundError:
+            self._give_back_native()
             self._error = (
                 "pymobiledevice3 not found. Install it: pipx install pymobiledevice3"
             )
             logger.error(self._error)
             return
         except Exception as e:
+            self._give_back_native()
             self._error = f"Failed to start pymobiledevice3 syslog: {e}"
             logger.error(self._error)
             return
 
         self._running = True
         self.started_at = self._now()
-        self._read_task = asyncio.create_task(self._read_loop())
+        # This run holds Apple's tunnel, if it rides one, until its output ends.
+        release, self._native_release = self._native_release, None
+        self._read_task = asyncio.create_task(self._read_loop(release))
         self._stderr_tail.clear()
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         logger.info(
@@ -284,6 +330,7 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
     async def stop(self) -> None:
         """Terminate the pymobiledevice3 subprocess and clean up."""
         self._running = False
+        self._give_back_native()      # one built for a run that never started
         # Held before any await, for the reasons given in SimulatorLogAdapter.
         process, read_task, stderr_task = self._process, self._read_task, self._stderr_task
 
@@ -305,8 +352,9 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
             self._stderr_task = None
         logger.info("PhysicalDeviceLog adapter stopped (udid=%s)", self.udid[:8])
 
-    async def _read_loop(self) -> None:
-        """Read lines from pymobiledevice3 stdout and parse them."""
+    async def _read_loop(self, release: Callable[[], None] | None = None) -> None:
+        """Read lines from pymobiledevice3 stdout and parse them. `release`
+        gives back this run's hold on Apple's tunnel when its output ends."""
         assert self._process is not None
         assert self._process.stdout is not None
         process = self._process
@@ -338,6 +386,8 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
             # had already written; a failure there would otherwise leave no trace.
             logger.exception("PhysicalDeviceLog read loop failed")
         finally:
+            if release is not None:
+                release()
             # Only this run's: a loop still finishing after a restart must not
             # mark the new run stopped or give it this one's error.
             if self._process is process:

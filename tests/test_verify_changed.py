@@ -110,7 +110,7 @@ class TestTheCapture:
         """Recovery drops every connected device's tunnels: not for one tap."""
         ctrl = self._phone()
         await frames._device_screenshot(ctrl, "PHONE")
-        assert ctrl.pmd3.screenshot.await_args.kwargs == {"recover_tunneld": False}
+        assert ctrl.pmd3.screenshot.await_args.kwargs["recover_tunneld"] is False
 
     async def test_a_failed_device_screenshot_is_no_frame(self):
         ctrl = self._phone()

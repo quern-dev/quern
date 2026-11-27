@@ -333,6 +333,19 @@ def _no_native_tunnels(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _usbmux_not_asked(monkeypatch):
+    """Never ask the real usbmuxd which phones it lists (#781): crash commands
+    use it to choose between `--udid` and Apple's tunnel. "Could not tell"
+    keeps `--udid`, as before; tests of the choice set an answer."""
+    from server.sources import ios_crash
+
+    async def _could_not_tell(udid):
+        return None
+
+    monkeypatch.setattr(ios_crash, "_on_usbmux", _could_not_tell)
+
+
+@pytest.fixture(autouse=True)
 def _devicectl_failures_forgotten(monkeypatch):
     """A devicectl failure is remembered for a while (#737): per test, so
     one test's failed lookup does not skip the next test's."""
