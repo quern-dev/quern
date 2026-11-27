@@ -701,6 +701,22 @@ async def _answer(provider: Any, queue: asyncio.Queue, payload: bytes,
             return answer
 
 
+async def _native_point(rsd: Any, x: float, y: float) -> tuple[float, float]:
+    """(x, y) on the screen as it is turned, in the panel's native frame.
+
+    Read from the display on the connection the hit-test uses. A turn that
+    cannot be mapped -- upside down, or an orientation that cannot be read --
+    raises, which element_at reports as "could not tell" (#624).
+    """
+    from pymobiledevice3.remote.core_device.device_info import DeviceInfoService
+
+    from server.device.ios.coredevice_input import screen_from_display_info
+
+    async with DeviceInfoService(rsd) as info:
+        screen = screen_from_display_info(await info.get_display_info())
+    return screen.native_point(x, y)
+
+
 async def element_at(uuid: str, x: float, y: float, *,
                      timeout: float = POINT_TIMEOUT_S) -> dict | None:
     """The element a touch at (x, y) would reach, from the phone's own
@@ -726,8 +742,11 @@ async def element_at(uuid: str, x: float, y: float, *,
             # this one waited (CodeRabbit on #735).
             _refuse_if_down(uuid)
             queue = await _subscribe(lib, await _device_address(uuid), conn, uuid)
+            # The hit-test takes the panel's native frame, and (x, y) is the
+            # turned interface's, as the tree's frames are (#624).
+            px, py = await _native_point(conn.rsd, x, y)
             hit = await _answer(conn.provider, queue,
-                                _request(REQUEST_HIT_TEST, 0, 0, point=(x, y)),
+                                _request(REQUEST_HIT_TEST, 0, 0, point=(px, py)),
                                 REQUEST_HIT_TEST)
             found = hit.get("resultData") if hit and not hit.get("error") else None
             if not (isinstance(found, dict) and isinstance(found.get("pid"), int)

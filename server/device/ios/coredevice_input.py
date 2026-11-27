@@ -18,10 +18,11 @@ Two rules shape the module:
   failure after the first report raises DeviceError and is never retried: a
   contact already down and then retried through WDA is two taps, the rule
   WDA's own writes follow (#393).
-- **Portrait only, for now.** Touch coordinates are normalised to the
-  panel's portrait frame, so another orientation needs its rotation, which
-  is calibrated only for one landscape of one iPad (#624). A screen in any
-  orientation but its native one is `NotSent`.
+- **Turned screens are rotated into the panel's frame.** Touch coordinates
+  are normalised to the panel's native frame, whatever the interface's
+  orientation, so a point on a turned screen is rotated into it (#624).
+  Calibrated on an iPhone 11 in both landscapes; upside down is not
+  measured, and is `NotSent`.
 """
 
 from __future__ import annotations
@@ -128,17 +129,66 @@ class _Progress:
 
 @dataclass
 class Screen:
-    """The primary display, in points."""
+    """The primary display, in points, as the interface is turned now."""
 
     width: float
     height: float
     orientation: str  # interface rotation, e.g. "rot0"
+    #: Degrees the interface is turned from the panel's native orientation:
+    #: 0, 90 or 270 (#624).
+    rotation: int = 0
 
     def point(self, x: float, y: float) -> tuple[int, int]:
-        """A point on screen as touchscreen coordinates."""
-        def scale(v: float, extent: float) -> int:
-            return max(0, min(DIGITIZER_MAX, round(v / extent * DIGITIZER_MAX)))
-        return scale(x, self.width), scale(y, self.height)
+        """A point on screen as touchscreen coordinates.
+
+        The point is in the interface's own frame -- the accessibility tree's
+        and the caller's -- and the touchscreen takes the panel's native one,
+        so a turned screen's point is rotated into it. Measured on an iPhone
+        11 (iOS 27.2.1), each landscape by which of two taps landed on a
+        segmented control: home bar on the right (rot270) is (1 - y, x), on
+        the left (rot90) is (y, 1 - x), as an iPad in landscape had shown.
+        """
+        nx, ny = self._native(x, y)
+        return round(nx * DIGITIZER_MAX), round(ny * DIGITIZER_MAX)
+
+    def native_point(self, x: float, y: float) -> tuple[float, float]:
+        """A point on screen in the panel's native frame, in points.
+
+        What the phone's accessibility hit-test takes: measured on an iPhone
+        11 in landscape (home bar on the right), the hit-test at the turned
+        interface's (82, 236) answered with the element at (236, 332), until
+        the point was rotated -- while the frames it answers with, like the
+        tree's, are the turned interface's own (#624).
+        """
+        nx, ny = self._native(x, y)
+        native_w, native_h = ((self.height, self.width) if self.rotation in (90, 270)
+                              else (self.width, self.height))
+        return nx * native_w, ny * native_h
+
+    def _native(self, x: float, y: float) -> tuple[float, float]:
+        """(x, y) normalised and rotated into the panel's native frame."""
+        nx = min(1.0, max(0.0, x / self.width))
+        ny = min(1.0, max(0.0, y / self.height))
+        if self.rotation == 90:
+            return ny, 1 - nx
+        if self.rotation == 270:
+            return 1 - ny, nx
+        return nx, ny
+
+
+#: The rotations touch has been calibrated for (#624), in degrees from the
+#: panel's native orientation. Upside down (180) is not measured: most iPhone
+#: apps do not turn that way, and a guessed mapping taps the wrong place.
+CALIBRATED_ROTATIONS = (0, 90, 270)
+
+
+def _degrees(orientation: Any) -> int | None:
+    """Degrees from an orientation name such as "rot270", or None."""
+    if isinstance(orientation, str) and orientation.startswith("rot"):
+        digits = orientation[3:]
+        if digits.isdigit() and int(digits) % 90 == 0:
+            return int(digits) % 360
+    return None
 
 
 def screen_from_display_info(info: dict) -> Screen:
@@ -163,10 +213,19 @@ def screen_from_display_info(info: dict) -> Screen:
     if native is None or current is None:
         # Not read as portrait: a reply without them may be a turned screen.
         raise NotSent(f"the display's orientation could not be read ({current}, native {native})")
-    if native != current:
-        raise NotSent(f"the screen is turned ({current}, native {native}); "
-                      "touch is mapped in the native orientation only")
-    return Screen(width=size[0] / scale, height=size[1] / scale, orientation=current)
+    native_deg, current_deg = _degrees(native), _degrees(current)
+    if native_deg is None or current_deg is None:
+        raise NotSent(f"the display's orientation could not be read ({current}, native {native})")
+    rotation = (current_deg - native_deg) % 360
+    if rotation not in CALIBRATED_ROTATIONS:
+        raise NotSent(f"the screen is turned {rotation} degrees ({current}, native {native}); "
+                      "touch is calibrated for portrait and both landscapes only")
+    # `size` is the panel's, in its native orientation, whatever the
+    # interface's; a quarter turn swaps the interface's width and height.
+    width, height = size[0] / scale, size[1] / scale
+    if rotation in (90, 270):
+        width, height = height, width
+    return Screen(width=width, height=height, orientation=current, rotation=rotation)
 
 
 def _pmd3() -> SimpleNamespace:

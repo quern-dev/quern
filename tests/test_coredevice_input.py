@@ -277,7 +277,7 @@ class TestTyping:
         wda.select_all_and_delete.assert_not_called()
 
     async def test_clearing_that_cannot_start_goes_through_wda(self, lib, wda):
-        lib.display = _display(orientation="rot90")      # a screen HID can't map
+        lib.display = _display(orientation="rot180")     # upside down: not calibrated (#624)
         hid = CoreDeviceInput(wda)
 
         assert await hid.select_all_and_delete(PHONE, 207, 260, element_type="TextField",
@@ -310,9 +310,10 @@ class TestTheScreen:
         assert screen.point(414, 896) == (65535, 65535)
         assert screen.point(-5, 2000) == (0, 65535)      # clamped, never wrapped
 
-    def test_a_turned_screen_is_not_sent(self):
-        with pytest.raises(NotSent, match="turned"):
-            screen_from_display_info(_display(orientation="rot90"))
+    def test_an_upside_down_screen_is_not_sent(self):
+        """Not measured (#624): a guessed mapping taps the wrong place."""
+        with pytest.raises(NotSent, match="turned 180"):
+            screen_from_display_info(_display(orientation="rot180"))
 
     @pytest.mark.parametrize("info", [
         {}, {"displays": []},
@@ -591,7 +592,7 @@ class TestGestures:
 
     async def test_a_turned_screen_goes_through_wda(self, lib, wda):
         from server.device import gestures
-        lib.display = _display(orientation="rot90")
+        lib.display = _display(orientation="rot180")
         plan = gestures.plan("pinch", 207, 448, scale=0.5)
         assert await CoreDeviceInput(wda).perform_gesture(PHONE, plan) == "wda"
         wda.perform_gesture.assert_awaited_once_with(PHONE, plan)
@@ -678,7 +679,7 @@ class TestNeverReSent:
     """Nothing sent: do it through WDA. Something sent: fail, never redo."""
 
     async def test_a_turned_screen_goes_through_wda(self, lib, wda):
-        lib.display = _display(orientation="rot90")
+        lib.display = _display(orientation="rot180")
         carried_by = await CoreDeviceInput(wda).tap(PHONE, 5, 6, hold=None)
         wda.tap.assert_awaited_once_with(PHONE, 5, 6, hold=None)
         assert lib.touches() == []
@@ -724,7 +725,7 @@ class TestNeverReSent:
 
     async def test_a_turned_screen_keeps_the_session(self, lib, wda):
         """Nothing wrong with the connection: only the screen cannot be mapped."""
-        lib.display = _display(orientation="rot90")
+        lib.display = _display(orientation="rot180")
         hid = CoreDeviceInput(wda)
         await hid.tap(PHONE, 1, 1)
         assert PHONE in hid._sessions
@@ -1048,3 +1049,102 @@ class TestTheControllerRoutes:
         report = await ctrl.tap_and_report(10, 20, udid=PHONE)
         assert "input" not in report
         ctrl.wda_client.tap.assert_awaited_once()
+
+
+
+class TestATurnedScreen:
+    """Both landscapes are rotated into the panel's frame (#624). Calibrated on
+    an iPhone 11 (iOS 27.2.1) by which of two taps landed on a segmented
+    control: home bar on the right (rot270) and on the left (rot90)."""
+
+    def test_a_quarter_turn_swaps_the_interfaces_width_and_height(self):
+        for orientation, rotation in (("rot90", 90), ("rot270", 270)):
+            screen = screen_from_display_info(_display(orientation=orientation))
+            assert (screen.width, screen.height, screen.rotation) == (896, 414, rotation)
+
+    @pytest.mark.parametrize("orientation, expected", [
+        # "Three" at (331, 236) on the 896x414 landscape, and "One" at (82, 236):
+        # the points the phone took.
+        ("rot270", (round((1 - 236 / 414) * 65535), round(331 / 896 * 65535))),
+        ("rot90", (round(236 / 414 * 65535), round((1 - 331 / 896) * 65535))),
+        ("rot0", None),
+    ])
+    def test_the_measured_mappings(self, orientation, expected):
+        screen = screen_from_display_info(_display(orientation=orientation))
+        if expected is None:  # portrait is the panel's own frame
+            assert screen.point(207, 448) == (round(0.5 * 65535), round(0.5 * 65535))
+        else:
+            assert screen.point(331, 236) == expected
+
+    def test_the_corners_land_on_the_panels_corners(self):
+        """The top-left of the turned interface is a corner of the panel."""
+        right = screen_from_display_info(_display(orientation="rot270"))
+        left = screen_from_display_info(_display(orientation="rot90"))
+        assert right.point(0, 0) == (65535, 0)
+        assert left.point(0, 0) == (0, 65535)
+
+    def test_a_panel_whose_native_orientation_is_not_rot0(self):
+        """The turn is counted from the native orientation, not from rot0."""
+        screen = screen_from_display_info(_display(orientation="rot0", native="rot90"))
+        assert screen.rotation == 270
+
+    async def test_a_tap_on_a_turned_screen_goes_over_hid(self, lib, wda):
+        lib.display = _display(orientation="rot270")
+        assert await CoreDeviceInput(wda).tap(PHONE, 331, 236) == "coredevice"
+        wda.tap.assert_not_called()
+        hx, hy = round((1 - 236 / 414) * 65535), round(331 / 896 * 65535)
+        assert [t[2:] for t in lib.touches()] == [(hx, hy), (hx, hy)]
+
+    async def test_off_screen_is_judged_in_the_turned_frame(self, lib, wda):
+        """A gesture's points are checked against the screen as it is turned:
+        (448, 207) is the middle of a landscape screen, and (207, 448) is
+        below its bottom edge, though both are on a portrait one."""
+        from server.device import gestures
+
+        lib.display = _display(orientation="rot90")
+        hid = CoreDeviceInput(wda)
+        middle = gestures.plan("pinch", 448, 207, scale=0.8)
+        assert await hid.perform_gesture(PHONE, middle) == "coredevice"
+        with pytest.raises(InvalidDeviceRequestError, match="off the 896x414 screen"):
+            await hid.perform_gesture(PHONE, gestures.plan("pinch", 207, 448, scale=0.8))
+
+
+class TestTheHitTestsPoint:
+    """The phone's hit-test takes the panel's native frame (#624): measured on
+    an iPhone 11 home bar right (rot270), the turned interface's (82, 236)
+    asked unrotated answered with "Show Alert" at (20, 324, 374 x 44)."""
+
+    def test_the_measured_point_explains_the_wrong_answer(self):
+        """Native (82, 236) is the turned interface's (236, 332): inside
+        Show Alert, which is what came back."""
+        screen = screen_from_display_info(_display(orientation="rot270"))
+        assert screen.native_point(236, 332) == pytest.approx((82, 236))
+
+    @pytest.mark.parametrize("orientation, point, native", [
+        ("rot0", (100, 200), (100, 200)),
+        ("rot270", (82, 236), (414 - 236, 82)),
+        ("rot90", (82, 236), (236, 896 - 82)),
+    ])
+    def test_native_points(self, orientation, point, native):
+        screen = screen_from_display_info(_display(orientation=orientation))
+        assert screen.native_point(*point) == pytest.approx(native)
+
+    async def test_element_at_asks_about_the_rotated_point(self, monkeypatch):
+        from server.device.ios import coredevice_ax
+
+        asked = []
+        monkeypatch.setattr("server.device.performance._device_address",
+                            AsyncMock(return_value=("fd00::1", 51000)))
+        monkeypatch.setattr(coredevice_ax, "_pmd3", lambda: SimpleNamespace())
+        monkeypatch.setattr(coredevice_ax, "_subscribe", AsyncMock(return_value=asyncio.Queue()))
+        monkeypatch.setattr(coredevice_ax, "_native_point", AsyncMock(return_value=(178.0, 82.0)))
+        monkeypatch.setattr(coredevice_ax, "_close", AsyncMock())
+
+        def request(kind, pid, object_id, **kw):
+            asked.append(kw.get("point"))
+            return b""
+
+        monkeypatch.setattr(coredevice_ax, "_request", request)
+        monkeypatch.setattr(coredevice_ax, "_answer", AsyncMock(return_value=None))
+        await coredevice_ax.element_at(PHONE, 82, 236)
+        assert asked[0] == (178.0, 82.0), "the hit-test was asked about the unrotated point"
