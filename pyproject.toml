@@ -86,9 +86,11 @@ dependencies = [
     # constraint is objc.registerMetaDataForSelector for computeDistance's
     # out-param, which lives in pyobjc-core, not here.
     "pyobjc-framework-Vision>=10.0; sys_platform == 'darwin'",
-    # inherited. CLI only -- `idb` is imported in zero Python files; server/device
-    # shells out to the binary. The floor constrains the console script, not an API.
-    "fb-idb>=1.1.0",
+    # fb-idb is deliberately not here. It supplies the `idb` CLI, the simulator
+    # fallback for Xcode before 26 only (sim-bridge serves 26+), and drags in
+    # grpclib and protobuf that nothing else uses. `quern setup` installs it into
+    # the venv where idb is the backend -- see FB_IDB_REQUIREMENT in
+    # server/lifecycle/setup.py, which carries the floor.
     # 3.5.2 is the first with UiObject.info_list, which the Android selector
     # fast path counts its matches with (#512). On an older one every count
     # failed and every tap fell back to the slower tree read.
