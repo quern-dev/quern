@@ -119,7 +119,7 @@ class TestCoreDeviceHid:
 
     async def test_the_press_goes_to_wda_with_it(self, lib, wda):  # noqa: F811
         from tests.test_coredevice_input import _display
-        lib.display = _display(orientation="rot90")
+        lib.display = _display(orientation="rot180")     # upside down: not calibrated (#624)
         await CoreDeviceInput(wda).swipe(PHONE, 1, 2, 3, 4, 0.5, press=0.7)
         wda.swipe.assert_awaited_once_with(PHONE, 1, 2, 3, 4, 0.5, hold=0.0, press=0.7)
 
