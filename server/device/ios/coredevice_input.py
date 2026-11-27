@@ -116,7 +116,13 @@ class _NoTunnel(NotSent):
     would need too, so it is not handed to WDA (see `NoTunnelError`)."""
 
 
-class _ReadFailed(NotSent):
+class _Transient(NotSent):
+    """Nothing was sent because the connection failed, not because of the
+    phone or the request: worth one more try on a fresh session (#780).
+    With no WDA behind HID, a one-off failure here was a refusal."""
+
+
+class _ReadFailed(_Transient):
     """The display could not be read: nothing was sent, and the session is
     not trusted again."""
 
@@ -724,9 +730,11 @@ class CoreDeviceInput:
 
                 if isinstance(wda, WdaNotAutoStartedError):
                     # No-WDA mode (#780): why HID could not send it is the
-                    # first thing to say, then that WDA was not started for it.
+                    # first thing to say, then that WDA was not started for it
+                    # -- the image's own fix when that is what was missing.
+                    why = NO_IMAGE_FIX if missing_image(e) else e
                     raise WdaNotAutoStartedError(
-                        f"{what} on {udid[:8]} was not sent over CoreDevice: {e}. {wda}",
+                        f"{what} on {udid[:8]} was not sent over CoreDevice: {why}. {wda}",
                         tool=self.TOOL_NAME) from wda
                 # WDA's refusal alone named WDA and Xcode, when what was
                 # missing is the image HID needs (#664 phase 5).
@@ -740,6 +748,16 @@ class CoreDeviceInput:
         return self.TOOL_NAME
 
     async def _send(self, udid: str, what: str, send: Any, needs_screen: bool = True) -> None:
+        """Send on the phone's session, once more on a fresh one if the first
+        failed before anything reached the phone (#780). The failed session
+        is already dropped, so the second try opens its own."""
+        try:
+            await self._send_once(udid, what, send, needs_screen)
+        except _Transient as e:
+            logger.info("[coredevice] %s on %s: trying a fresh session: %s", what, udid[:8], e)
+            await self._send_once(udid, what, send, needs_screen)
+
+    async def _send_once(self, udid: str, what: str, send: Any, needs_screen: bool) -> None:
         lib = _pmd3()
         while True:
             session = await self._session(udid, lib)
@@ -778,7 +796,7 @@ class CoreDeviceInput:
             # a fresh one.
             await self._drop(udid, session)
             if not progress.reached:
-                raise NotSent(f"the HID service failed before sending: {e!r}") from e
+                raise _Transient(f"the HID service failed before sending: {e!r}") from e
             raise DeviceError(
                 f"{what} on {udid[:8]} may have been partly delivered, so it is "
                 f"not retried: {e!r}", tool=self.TOOL_NAME) from e
@@ -818,7 +836,7 @@ class CoreDeviceInput:
             except Exception as e:
                 # Not only DeviceError: tunneld or a resolver can fail any
                 # way, and nothing has been sent.
-                raise NotSent(f"the device's tunnel address could not be found: {e!r}") from e
+                raise _Transient(f"the device's tunnel address could not be found: {e!r}") from e
             rsd = lib.RemoteServiceDiscoveryService(address)
             hid = None
             try:
@@ -838,7 +856,7 @@ class CoreDeviceInput:
                 raise
             except Exception as e:
                 await _bounded_close(*(c for c in (getattr(hid, "close", None), rsd.close) if c))
-                raise NotSent(f"the HID service could not be opened: {e!r}") from e
+                raise _Transient(f"the HID service could not be opened: {e!r}") from e
             session = _Session(rsd=rsd, hid=hid)
             self._sessions[udid] = session
             self._ensure_reaper()

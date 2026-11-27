@@ -721,7 +721,8 @@ class TestNeverReSent:
         assert PHONE not in hid._sessions and "rsd" in lib.closed
         lib.fail.clear()
         assert await hid.tap(PHONE, 1, 1) == "coredevice"
-        assert lib.connects == 2
+        # The failing read was tried on a fresh session once more first (#780).
+        assert lib.connects == 3
 
     async def test_a_turned_screen_keeps_the_session(self, lib, wda):
         """Nothing wrong with the connection: only the screen cannot be mapped."""
@@ -1148,3 +1149,86 @@ class TestTheHitTestsPoint:
         monkeypatch.setattr(coredevice_ax, "_answer", AsyncMock(return_value=None))
         await coredevice_ax.element_at(PHONE, 82, 236)
         assert asked[0] == (178.0, 82.0), "the hit-test was asked about the unrotated point"
+
+
+class TestOneMoreTry:
+    """A failure before anything reached the phone is tried once more on a
+    fresh session (#780): with no WDA behind HID, a one-off was a refusal."""
+
+    async def test_a_display_read_that_fails_once_is_tried_again(self, lib, wda, monkeypatch):
+        reads = {"n": 0}
+        real = lib.ns.DeviceInfoService
+
+        class Flaky(real):
+            async def get_display_info(self):
+                reads["n"] += 1
+                if reads["n"] == 1:
+                    raise TimeoutError()
+                return lib.display
+
+        monkeypatch.setattr(lib.ns, "DeviceInfoService", Flaky)
+        assert await CoreDeviceInput(wda).tap(PHONE, 1, 1) == "coredevice"
+        wda.tap.assert_not_called()
+        assert lib.connects == 2
+
+    async def test_a_keyboard_that_will_not_attach_once_is_tried_again(self, lib, wda, monkeypatch):
+        attaches = {"n": 0}
+        real = lib.ns.UniversalHID
+
+        class Flaky(real):
+            async def create_keyboard_service(self):
+                attaches["n"] += 1
+                if attaches["n"] == 1:
+                    raise ConnectionResetError("not attached")
+                return await super().create_keyboard_service()
+
+        monkeypatch.setattr(lib.ns, "UniversalHID", Flaky)
+        assert await CoreDeviceInput(wda).type_text(PHONE, "aA") == "coredevice"
+        wda.type_text.assert_not_called()
+
+    async def test_what_is_not_a_connection_failure_is_not_tried_again(self, lib, wda, monkeypatch):
+        """An upside-down screen is the phone's state: a second try would see
+        the same, and only take longer. Counted by display reads -- the
+        session is kept, so a retry would not open a second connection."""
+        reads = {"n": 0}
+        real = lib.ns.DeviceInfoService
+
+        class Counting(real):
+            async def get_display_info(self):
+                reads["n"] += 1
+                return await super().get_display_info()
+
+        monkeypatch.setattr(lib.ns, "DeviceInfoService", Counting)
+        lib.display = _display(orientation="rot180")
+        await CoreDeviceInput(wda).tap(PHONE, 1, 1)
+        assert reads["n"] == 1, "an upside-down screen was read again"
+        wda.tap.assert_awaited_once()
+
+    async def test_a_failure_after_sending_is_still_never_retried(self, lib, wda):
+        lib.fail["release"] = OSError("gone")
+        with pytest.raises(DeviceError, match="partly delivered"):
+            await CoreDeviceInput(wda).tap(PHONE, 1, 1)
+        assert len(lib.touches()) == 1, "the contact went once, and was not sent again"
+
+
+async def test_a_missing_image_in_no_wda_mode_names_the_image(monkeypatch):
+    """The mount failed and WDA is not started: the answer names the image's
+    fix, not pymobiledevice3's error (#780)."""
+    from server.device.ios import phone_readiness
+    from server.models import WdaNotAutoStartedError
+
+    class DeveloperDiskImageError(Exception):
+        pass
+
+    async def fails(*a, **k):
+        raise NotSent("the HID service could not be opened") from DeveloperDiskImageError("x")
+
+    refused = WdaNotAutoStartedError("is in no-WDA mode", tool="wda")
+    fallback = SimpleNamespace(TOOL_NAME="wda", tap=AsyncMock(side_effect=refused))
+    hid = CoreDeviceInput(fallback)
+    monkeypatch.setattr(hid, "_send", fails)
+    monkeypatch.setattr(phone_readiness, "ensure_image", AsyncMock(return_value=False))
+    with pytest.raises(WdaNotAutoStartedError) as caught:
+        await hid.tap(PHONE, 1, 1)
+    assert phone_readiness.NO_IMAGE_FIX in str(caught.value)
+    assert "no-WDA mode" in str(caught.value)
