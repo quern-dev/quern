@@ -492,7 +492,7 @@ async def _device_address(uuid: str) -> tuple[str, int]:
     """The tunnel endpoint for a physical iPhone, or a DeviceError naming why
     there is none."""
     from server.device.ios.native_tunnel import NativeTunnelUnavailable, native_address
-    from server.device.ios.pmd3 import _no_tunnel_hint, _recover_tunneld_if_wedged
+    from server.device.ios.pmd3 import _recover_tunneld_if_wedged
     from server.device.ios.tunneld import is_tunneld_running, resolve_tunnel_udid
 
     serving = await is_tunneld_running() or await _recover_tunneld_if_wedged()
@@ -506,11 +506,29 @@ async def _device_address(uuid: str) -> tuple[str, int]:
         return await native_address(uuid)
     except NativeTunnelUnavailable as e:
         native = str(e)
-    raise NoTunnelError(
-        f"no tunnel to {uuid[:8]}{_no_tunnel_hint(None, serving)} {native}. A phone "
-        "on Wi-Fi is reached through Apple's own tunnel, which needs it paired "
-        "with this Mac, unlocked, and on the same network.",
-        tool="pymobiledevice3")
+    raise NoTunnelError(no_tunnel_message(uuid, serving, native), tool="pymobiledevice3")
+
+
+#: What a phone on Wi-Fi needs for Apple's tunnel to it to open.
+WIFI_NEEDS = ("A phone on Wi-Fi is reached through Apple's own tunnel, which needs it "
+              "paired with this Mac, unlocked, and on the same network.")
+
+
+def no_tunnel_message(uuid: str, tunneld_serving: bool, native_why: str) -> str:
+    """Why there is no tunnel to a phone, led by the way it was last reached.
+
+    A phone devicectl last saw on Wi-Fi is told about Apple's tunnel alone:
+    tunneld's USB advice ("reconnect it and accept the trust prompt") sent the
+    reader to a cable for a phone that had only left the network (#781). A
+    phone on USB, or not known, is told both, tunneld's first.
+    """
+    from server.device.ios.devicectl import NETWORK_TRANSPORTS, last_transport
+    from server.device.ios.pmd3 import _no_tunnel_hint
+
+    why = native_why.rstrip(".")
+    if last_transport(uuid) in NETWORK_TRANSPORTS:
+        return f"no tunnel to {uuid[:8]}, last seen on Wi-Fi: {why}. {WIFI_NEEDS}"
+    return f"no tunnel to {uuid[:8]}{_no_tunnel_hint(None, tunneld_serving)} {why}. {WIFI_NEEDS}"
 
 
 async def device_snapshot(uuid: str, bundle_id: str, seconds: float) -> PerformanceSnapshot:

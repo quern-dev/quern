@@ -50,6 +50,19 @@ logger = logging.getLogger(__name__)
 #: from the trace looking exactly like a quiet device. See #270.
 _identity_aliases: dict[str, str] = {}
 
+#: How devicectl last saw each paired phone reached, by canonical id: "usb",
+#: "localNetwork", ... Kept after the phone drops off, because that is when
+#: a "no tunnel" answer has to say which way to bring it back (#781).
+_last_transports: dict[str, str] = {}
+
+#: devicectl's names for a phone reached over the network.
+NETWORK_TRANSPORTS = frozenset({"localNetwork", "wifi", "network"})
+
+
+def last_transport(udid: str) -> str:
+    """How devicectl last saw the phone reached, or "" if it never listed it."""
+    return _last_transports.get(canonical_device_id(udid), "")
+
 
 def canonical_device_id(udid: str) -> str:
     """The identifier quern keys a device on, given any of its spellings.
@@ -318,6 +331,8 @@ class DevicectlBackend:
             os_version_str = dev.get("deviceProperties", {}).get("osVersionNumber", "")
             raw_transport = connection_props.get("transportType", "")
             connection_type = "usb" if raw_transport == "wired" else raw_transport
+            if identifier and connection_type:
+                _last_transports[identifier] = connection_type
             tunnel_state = connection_props.get("tunnelState", "")
             hardware_props = dev.get("hardwareProperties", {})
             device_type_str = hardware_props.get("deviceType", "")
