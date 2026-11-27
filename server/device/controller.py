@@ -14,7 +14,7 @@ from server.device import performance, thread_stacks
 from server.device.android.adb import AdbBackend
 from server.device.android.u2_client import U2Backend
 from server.device.controller_ui import DeviceControllerUI
-from server.device.ios import sim_settings
+from server.device.ios import native_tunnel, sim_settings
 from server.device.ios.coredevice_apps import CoreDeviceApps
 from server.device.ios.coredevice_ax import CoreDeviceAxReader
 from server.device.ios.coredevice_input import CoreDeviceInput
@@ -1016,10 +1016,14 @@ class DeviceController(DeviceControllerUI):
                 self.wda_client._device_os_versions[d.udid] = d.os_version
             if d.name:
                 self.wda_client._device_names[d.udid] = d.name
+            if native_tunnel.is_held(d.udid):
+                d.tunnel = "native"
         for d in usbmux_devices:
             self._device_type_cache[d.udid] = DeviceType.DEVICE
             if d.os_version:
                 self.wda_client._device_os_versions[d.udid] = d.os_version
+            if native_tunnel.is_held(d.udid):
+                d.tunnel = "native"
             if d.name:
                 self.wda_client._device_names[d.udid] = d.name
         for d in android_devices:

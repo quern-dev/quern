@@ -43,6 +43,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from server.device.ios.native_tunnel import rsd_for
 from server.models import DeviceCondition, DeviceConditions, DeviceError
 
 logger = logging.getLogger(__name__)
@@ -192,7 +193,7 @@ async def _with_inducer(uuid: str, what: str, fn: Callable[[Any], Any]) -> Any:
                 # Inside the deadline: resolving the tunnel can wait on
                 # devicectl, which has no bound of its own (CodeRabbit).
                 address = await _device_address(uuid)
-                rsd = lib.RemoteServiceDiscoveryService(address)
+                rsd = rsd_for(lib, address)
                 await rsd.connect()
                 async with lib.DvtProvider(rsd) as dvt:
                     async with lib.ConditionInducer(dvt) as inducer:
@@ -323,7 +324,7 @@ async def _run_hold(hold: _Hold, ready: asyncio.Future,
     try:
         lib = _pmd3()
         address = await asyncio.wait_for(_device_address(hold.udid), CALL_TIMEOUT_S)
-        rsd = lib.RemoteServiceDiscoveryService(address)
+        rsd = rsd_for(lib, address)
         await asyncio.wait_for(rsd.connect(), CALL_TIMEOUT_S)
         # Opening is bounded by whoever waits for `ready` (`_held`), which
         # cancels this on a timeout: a step that hung would otherwise hold

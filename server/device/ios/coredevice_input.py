@@ -36,6 +36,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from server.device.gestures import TAP_HOLD_MS, Plan, check_edge_start
+from server.device.ios.native_tunnel import rsd_for
 from server.models import DeviceError, InvalidDeviceRequestError, NoTunnelError
 
 logger = logging.getLogger(__name__)
@@ -837,7 +838,7 @@ class CoreDeviceInput:
                 # Not only DeviceError: tunneld or a resolver can fail any
                 # way, and nothing has been sent.
                 raise _Transient(f"the device's tunnel address could not be found: {e!r}") from e
-            rsd = lib.RemoteServiceDiscoveryService(address)
+            rsd = rsd_for(lib, address)
             hid = None
             try:
                 await asyncio.wait_for(rsd.connect(), CONNECT_S)

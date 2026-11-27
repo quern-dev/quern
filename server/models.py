@@ -2016,6 +2016,10 @@ class DeviceInfo(BaseModel):
     #: "usb", "emulator" (the local console) or "tcp" (`adb connect`).
     #: Empty for simulators and for devices that are not attached.
     connection_type: str = ""
+    #: "native" while this server reaches the phone through the tunnel macOS
+    #: keeps to it itself -- a phone on Wi-Fi only, which quern's tunneld
+    #: (USB only) has no tunnel to (#781). Empty otherwise.
+    tunnel: str = ""
     device_family: str = ""  # "iPhone", "iPad", "Apple Watch", "Apple TV", or ""
     #: The hardware model, as Apple names it ("iPhone 15 Pro", "iPad Pro
     #: 11-inch (M4)"), or "" when unknown. A simulator's `name` is only its

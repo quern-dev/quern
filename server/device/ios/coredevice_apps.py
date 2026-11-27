@@ -66,9 +66,10 @@ class CoreDeviceApps(DevicectlBackend):
     async def _rsd(self, uuid: str) -> AsyncIterator[Any]:
         """A connection to the device over its tunnel, USB or Wi-Fi."""
         from server.device.ios.coredevice_ax import _pmd3
+        from server.device.ios.native_tunnel import rsd_for
         from server.device.performance import _device_address
 
-        rsd = _pmd3().RemoteServiceDiscoveryService(await _device_address(uuid))
+        rsd = rsd_for(_pmd3(), await _device_address(uuid))
         try:
             await rsd.connect()
             yield rsd
