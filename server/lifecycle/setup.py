@@ -141,7 +141,12 @@ def _which(name: str) -> str | None:
 
 
 def _is_apple_silicon() -> bool:
-    """True on arm64 Macs (Apple Silicon). Sim-bridge requires it."""
+    """True on arm64 Macs (Apple Silicon).
+
+    Decides what setup can offer, not what sim-bridge can run on: the patched
+    idb_companion build is arm64-only, and only Apple Silicon Homebrew installs
+    bottles without the Command Line Tools. Sim-bridge runs on Intel too (#748).
+    """
     import platform
     return platform.machine() == "arm64"
 
@@ -169,12 +174,16 @@ def _xcode_major_version() -> int | None:
 def _sim_bridge_supported() -> bool:
     """True when sim-bridge can run — i.e. idb is not required.
 
-    Sim-bridge needs Apple Silicon and Xcode 26+ (for the SimulatorKit /
-    CoreSimulator private symbols it dlopens). When both hold, simulator
-    UI automation runs natively and idb is redundant.
+    Decided by Xcode alone: 26 or later. This used to require Apple Silicon
+    too, on the belief that Intel Macs could not build sim-bridge (dbcd049b).
+    Measured on a 2018 MacBook Pro (x86_64, macOS 15.8.3, Xcode 26.3) for
+    #748: sim-bridge compiled, read the accessibility tree and tapped on an
+    iOS 26.3 simulator, so setup was installing an idb the server never used
+    -- the server routes to sim-bridge whenever it finds SimulatorKit, with
+    no chip check. The Xcode bound stays: Xcode 16.4's SimulatorKit worked
+    there as well, but only beside the newer CoreSimulator Xcode 26.3 had
+    installed, and a Mac with only an older Xcode is untested.
     """
-    if not _is_apple_silicon():
-        return False
     major = _xcode_major_version()
     return major is not None and major >= 26
 
@@ -2689,7 +2698,7 @@ def _setup_idb_companion(*, sim_bridge: bool) -> CheckResult:
             name="idb_companion",
             status=CheckStatus.SKIPPED,
             message="Not required (sim-bridge active)",
-            detail="Xcode 26+ on Apple Silicon: simulator UI runs through "
+            detail="Xcode 26+: simulator UI runs through "
                    "sim-bridge. An existing idb install is kept as a fallback.",
         )
 
@@ -3368,20 +3377,19 @@ def _setup_ios(report: SetupReport) -> IosFacts:
 
     if has_simulators:
         # Simulator UI automation:
-        #   - Xcode 26+ on Apple Silicon → sim-bridge runs natively, idb not needed
-        #   - Older Xcode or Intel → fall back to the patched idb + fb-idb
+        #   - Xcode 26+ → sim-bridge runs natively, idb not needed (#748: on
+        #     Intel too)
+        #   - Older Xcode → fall back to idb + fb-idb
 
         if _sim_bridge_supported():
-            print(
-                "    Xcode 26+ on Apple Silicon detected — "
-                "sim-bridge handles simulator UI natively. Skipping idb."
-            )
-            report.add(_setup_idb_companion(sim_bridge=True))
-            report.add(CheckResult(
-                name="idb (fb-idb)",
-                status=CheckStatus.SKIPPED,
-                message="Not required (sim-bridge active)",
-            ))
+            # Nothing to install and nothing to say: a line per tool setup is
+            # *not* installing is noise in a summary people read for what is
+            # wrong. The one thing worth a line is an outdated idb_companion
+            # from an earlier setup, which is still the fallback and is
+            # offered for update (see _setup_idb_companion).
+            companion = _setup_idb_companion(sim_bridge=True)
+            if companion.status != CheckStatus.SKIPPED:
+                report.add(companion)
         else:
             report.add(_setup_idb_companion(sim_bridge=False))
 
@@ -4217,6 +4225,11 @@ def report_tool_sites(record: bool = False) -> list[CheckResult]:
     for site in sites:
         label = f"{site['name']} ({site['role']})"
         if not site["available"]:
+            # idb is the simulator backend only where sim-bridge cannot run;
+            # elsewhere setup does not install it, and listing it as "not
+            # found" reads as something missing.
+            if site["name"] == "idb" and _sim_bridge_supported():
+                continue
             results.append(CheckResult(
                 name=label, status=CheckStatus.SKIPPED, message="not found",
             ))
