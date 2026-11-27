@@ -18,6 +18,7 @@ from server.lifecycle.setup import (
     CheckResult,
     CheckStatus,
     SetupReport,
+    _brew_install,
     _diagnose_developer_dir,
     _fix_developer_dir_for_setup,
     _home_is_on_external,
@@ -1254,6 +1255,87 @@ class TestBrewInstallTracking:
             assert _brew_install("node") is False
             data = _read_manifest()
             assert "node" not in data.get("brew", [])
+
+
+class TestBrewInstallLongBuilds:
+    """#757: source builds outlast any fixed timer, and a non-zero exit is not
+    the last word on whether the formula got installed."""
+
+    @staticmethod
+    def _runner(install_rc: int, listed: str):
+        calls: list[tuple[list[str], dict]] = []
+
+        def run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            if cmd[:2] == ["brew", "install"]:
+                return _mock_run(returncode=install_rc)
+            if cmd[:3] == ["brew", "list", "--versions"]:
+                return _mock_run(stdout=listed, returncode=0 if listed else 1)
+            raise AssertionError(f"unexpected command {cmd}")
+
+        return run, calls
+
+    def test_install_has_no_timeout(self, tmp_path):
+        """Measured: a 22-minute libimobiledevice build was killed at five."""
+        run, calls = self._runner(install_rc=0, listed="")
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", tmp_path / "m.json"),
+            patch("server.lifecycle.setup.subprocess.run", side_effect=run),
+        ):
+            assert _brew_install("libimobiledevice") is True
+        install = [kw for cmd, kw in calls if cmd[:2] == ["brew", "install"]]
+        assert install and "timeout" not in install[0]
+
+    def test_nonzero_exit_but_installed_is_success(self, tmp_path):
+        manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
+        run, _ = self._runner(install_rc=1, listed="libimobiledevice 1.4.0_3")
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path),
+            patch("server.lifecycle.setup.subprocess.run", side_effect=run),
+        ):
+            assert _brew_install("libimobiledevice") is True
+            assert "libimobiledevice" in _read_manifest()["brew"]
+
+    def test_nonzero_exit_and_not_installed_is_failure(self, tmp_path):
+        manifest_path = tmp_path / ".quern" / "installed-by-setup.json"
+        run, _ = self._runner(install_rc=1, listed="")
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", manifest_path),
+            patch("server.lifecycle.setup.subprocess.run", side_effect=run),
+        ):
+            assert _brew_install("node") is False
+            assert "node" not in _read_manifest().get("brew", [])
+
+    def test_brew_that_cannot_be_executed_is_a_failure_not_a_crash(self, tmp_path):
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", tmp_path / "m.json"),
+            patch("server.lifecycle.setup.subprocess.run",
+                  side_effect=PermissionError("brew lost its exec bit")),
+        ):
+            assert _brew_install("node") is False
+
+    def test_intel_notice_is_printed_once(self, tmp_path, capsys, monkeypatch):
+        run, _ = self._runner(install_rc=0, listed="")
+        monkeypatch.setattr("server.lifecycle.setup._source_build_notice_shown", False)
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", tmp_path / "m.json"),
+            patch("server.lifecycle.setup.subprocess.run", side_effect=run),
+            patch("server.lifecycle.setup._is_apple_silicon", return_value=False),
+        ):
+            _brew_install("libplist")
+            _brew_install("node")
+        assert capsys.readouterr().out.count("builds each one from source") == 1
+
+    def test_no_notice_on_apple_silicon(self, tmp_path, capsys, monkeypatch):
+        run, _ = self._runner(install_rc=0, listed="")
+        monkeypatch.setattr("server.lifecycle.setup._source_build_notice_shown", False)
+        with (
+            patch("server.lifecycle.setup.INSTALL_MANIFEST", tmp_path / "m.json"),
+            patch("server.lifecycle.setup.subprocess.run", side_effect=run),
+            patch("server.lifecycle.setup._is_apple_silicon", return_value=True),
+        ):
+            _brew_install("node")
+        assert "from source" not in capsys.readouterr().out
 
 
 # ── Prompt TTY fallback ───────────────────────────────────────────────
