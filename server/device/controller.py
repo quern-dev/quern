@@ -1022,6 +1022,8 @@ class DeviceController(DeviceControllerUI):
             self._device_type_cache[d.udid] = DeviceType.DEVICE
             if d.os_version:
                 self.wda_client._device_os_versions[d.udid] = d.os_version
+            if native_tunnel.is_held(d.udid):
+                d.tunnel = "native"
             if d.name:
                 self.wda_client._device_names[d.udid] = d.name
         for d in android_devices:

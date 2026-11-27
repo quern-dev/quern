@@ -40,10 +40,13 @@ class FakeRsd:
     def __init__(self, address, handshake_uuid=None):
         self.address, self.handshake_uuid = address, handshake_uuid
         self.fail_connect: BaseException | None = None
+        self.stall = False
         self.closes = 0
         FakeRsd.made.append(self)
 
     async def connect(self):
+        if self.stall:
+            await asyncio.sleep(10)
         if self.fail_connect is not None:
             raise self.fail_connect
 
@@ -60,6 +63,7 @@ def pool(_no_native_tunnels, monkeypatch):
     opened: list[FakeTunnel] = []
 
     async def _open(udid, serial):
+        await asyncio.sleep(0)     # yield, so concurrent callers overlap here
         tunnel = FakeTunnel(62589 + len(opened))
         opened.append(tunnel)
         pool.serials.append(serial)
@@ -147,6 +151,28 @@ class TestTheLease:
         assert pool.opened[0].closed          # closed with its last connection
         assert not pool.opened[1].closed
 
+    async def test_a_connect_that_stalls_retires_it(self, pool, monkeypatch):
+        """A caller's own deadline arrives as a cancellation, which says
+        nothing; the wrapper's shorter one says the tunnel is stale."""
+        monkeypatch.setattr(native_tunnel, "CONNECT_S", 0.05)
+        address = await native_tunnel.native_address(PHONE)
+        rsd = rsd_for(LIB, address)
+        rsd.stall = True
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(rsd.connect(), 5)
+        assert address.held.retired
+
+    async def test_an_address_taken_before_its_tunnel_retired_uses_the_new_one(self, pool):
+        """A retried subscription reuses the address it was given."""
+        old = await native_tunnel.native_address(PHONE)
+        old.held.retired = True
+        new = await native_tunnel.native_address(PHONE)
+
+        rsd = rsd_for(LIB, old)
+
+        assert rsd.address == (new.held.host, new.held.port) != (old.held.host, old.held.port)
+        assert new.held.leases == 1 and old.held.leases == 0
+
     async def test_a_cancelled_connect_does_not_retire_it(self, pool):
         address = await native_tunnel.native_address(PHONE)
         rsd = rsd_for(LIB, address)
@@ -171,7 +197,8 @@ class TestThePool:
         assert native_tunnel.is_held(PHONE) and native_tunnel.is_held(CORE)
 
     async def test_concurrent_calls_open_it_once(self, pool):
-        results = await asyncio.gather(*(native_tunnel.native_address(PHONE) for _ in range(5)))
+        results = await asyncio.wait_for(
+            asyncio.gather(*(native_tunnel.native_address(PHONE) for _ in range(5))), 5)
         assert len(pool.opened) == 1
         assert len({id(r.held) for r in results}) == 1
 
@@ -205,6 +232,20 @@ class TestThePool:
         await _settle()
         assert pool.opened[0].closed
         assert not native_tunnel.is_held(PHONE)
+
+    async def test_a_tunnel_whose_reaper_ended_gets_one_again(self, pool, monkeypatch):
+        """Opened under the image mount's own `asyncio.run`, whose end
+        cancelled the reaper: the next lookup starts one."""
+        monkeypatch.setattr(native_tunnel, "IDLE_S", 0.04)
+        await native_tunnel.native_address(PHONE)
+        pool._reaper.cancel()
+        await _settle()
+        assert pool._reaper.done()
+
+        await native_tunnel.native_address(PHONE)
+        await asyncio.sleep(0.1)
+        await _settle()
+        assert pool.opened[0].closed
 
     async def test_shutdown_gives_every_tunnel_up(self, pool):
         await native_tunnel.native_address(PHONE)
@@ -313,14 +354,19 @@ class TestTheListing:
         other = DeviceInfo(udid="00008101-000A1B2C3D4E5F60", name="iPhone 12",
                            state=DeviceState.BOOTED, device_type=DeviceType.DEVICE,
                            connection_type="usb")
+        usb_only = DeviceInfo(udid="00008020-000B1C2D3E4F5061", name="iPhone XS",
+                              state=DeviceState.BOOTED, device_type=DeviceType.DEVICE,
+                              connection_type="usb")
         await native_tunnel.native_address(PHONE)
+        await native_tunnel.native_address(usb_only.udid)
         ctrl = DeviceController()
         ctrl.simctl.list_devices = AsyncMock(return_value=[])
         ctrl.devicectl.list_devices = AsyncMock(return_value=[phone, other])
-        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[usb_only])
         ctrl.adb.list_devices = AsyncMock(return_value=[])
 
         devices = await ctrl.list_devices()
 
-        tunnels = {d.udid: d.tunnel for d in devices if d.udid in (PHONE, other.udid)}
-        assert tunnels == {PHONE: "native", other.udid: ""}
+        wanted = (PHONE, other.udid, usb_only.udid)
+        tunnels = {d.udid: d.tunnel for d in devices if d.udid in wanted}
+        assert tunnels == {PHONE: "native", other.udid: "", usb_only.udid: "native"}

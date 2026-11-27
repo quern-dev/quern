@@ -49,6 +49,11 @@ OPEN_S = 20.0
 FAILED_S = 10.0
 #: How long closing one may take before it is abandoned.
 CLOSE_S = 5.0
+#: How long a connection through one may take to open before the tunnel is
+#: given up as stale. Measured at 0.1-0.3 s; under the callers' own bounds
+#: (5 s for HID), so a stall reaches this one first and retires the tunnel --
+#: a caller's deadline arrives as a cancellation, which says nothing.
+CONNECT_S = 4.0
 
 
 #: A hardware UDID: "00008030-000C59623A69802E", or 40 hex digits before 2018.
@@ -134,6 +139,11 @@ def rsd_for(lib: Any, address: tuple) -> Any:
     held = getattr(address, "held", None)
     if held is None:
         return lib.RemoteServiceDiscoveryService(address)
+    if held.retired:
+        # An address taken before its tunnel was retired, as a retried
+        # subscription reuses one: the tunnel that replaced it, if there is
+        # one yet (CodeRabbit on #789).
+        held = _POOL.current(held.udid) or held
     rsd = lib.RemoteServiceDiscoveryService((held.host, held.port),
                                             handshake_uuid=held.identity)
     release = held.lease()
@@ -141,7 +151,7 @@ def rsd_for(lib: Any, address: tuple) -> Any:
 
     async def connect_then_check(*args: Any, **kwargs: Any) -> Any:
         try:
-            return await connect(*args, **kwargs)
+            return await asyncio.wait_for(connect(*args, **kwargs), CONNECT_S)
         except Exception:
             # Cancellation says nothing about the tunnel; a failure might.
             if not held.retired:
@@ -174,6 +184,11 @@ class _Pool:
         self._reaper: asyncio.Task | None = None
         self._closing: set[asyncio.Task] = set()
 
+    def current(self, udid: str) -> _Held | None:
+        """The phone's tunnel now, if one is held and not retired."""
+        current = self._held.get(udid)
+        return current if current is not None and not current.retired else None
+
     def held(self, udid: str) -> bool:
         current = self._held.get(_key_and_serial(udid)[0])
         return current is not None and not current.retired
@@ -184,6 +199,10 @@ class _Pool:
         udid, serial = _key_and_serial(udid)
         current = self._held.get(udid)
         if current is not None and not current.retired:
+            # Here too: a tunnel opened on a loop that has since ended (the
+            # image mount's `asyncio.run`) lost its reaper with it
+            # (CodeRabbit on #789).
+            self._ensure_reaper()
             return current.address()
         lock = self._locks.setdefault(udid, asyncio.Lock())
         async with lock:
