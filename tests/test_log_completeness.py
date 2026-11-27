@@ -423,6 +423,7 @@ async def test_starting_device_capture_with_a_preset_reports_what_it_purged(app,
 
     app.state.device_controller = SimpleNamespace(
         resolve_udid=_resolve, _is_android=lambda u: False, _is_physical=lambda u: True,
+        wda_client=SimpleNamespace(_device_os_versions={}),
     )
     app.state.deduplicator = SimpleNamespace(process=lambda entry: None)
     app.state.ingestion_filter = IngestionFilter()
