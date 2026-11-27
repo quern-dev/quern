@@ -205,7 +205,7 @@ class TestScreenshotGoesThroughResolution:
             proc.return_value = (b"ok", "image/png")
             await ctrl.screenshot(udid=HW_UDID)
 
-        ctrl.pmd3.screenshot.assert_awaited_once_with(CD_UUID)
+        ctrl.pmd3.screenshot.assert_awaited_once_with(CD_UUID, os_version=None)
         ctrl.simctl.screenshot.assert_not_called()
 
     async def test_it_does_not_change_the_active_device(self):

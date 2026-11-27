@@ -34,6 +34,7 @@ import logging
 import re
 import time
 import weakref
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -58,6 +59,17 @@ CONNECT_S = 4.0
 
 #: A hardware UDID: "00008030-000C59623A69802E", or 40 hex digits before 2018.
 _HARDWARE_UDID = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}|[0-9A-Fa-f]{40}")
+
+
+def hardware_udid(udid: str) -> str | None:
+    """The phone's hardware UDID ("00008030-..."), from the spellings
+    devicectl recorded for it, or None when none is known."""
+    from server.device.ios.devicectl import canonical_device_id, spellings_of
+
+    for spelling in (udid, *spellings_of(canonical_device_id(udid))):
+        if _HARDWARE_UDID.fullmatch(spelling):
+            return spelling
+    return None
 
 
 def _key_and_serial(udid: str) -> tuple[str, str]:
@@ -172,6 +184,40 @@ def rsd_for(lib: Any, address: tuple) -> Any:
     with contextlib.suppress(TypeError):
         weakref.finalize(rsd, release)
     return rsd
+
+
+def lease(address: tuple) -> tuple[tuple, Any]:
+    """Hold the address's tunnel for something that is not an RSD made here
+    -- a pymobiledevice3 subprocess given `--rsd` -- until the returned
+    function is called (once; again is a no-op). An address on no native
+    tunnel is returned as it is, with nothing to give back.
+
+    The tunnel is reachable from another process while it is held: measured,
+    `crash ls`, `developer dvt screenshot` and `syslog live` given `--rsd`
+    worked through one this process held, and pymobiledevice3 presents
+    remoted's identity on such an address itself (`rsd_handshake_uuid`).
+    """
+    held = getattr(address, "held", None)
+    if held is None:
+        return address, lambda: None
+    if held.retired:
+        held = _POOL.current(held.udid) or held
+    return TunnelAddress(held.host, held.port, held), held.lease()
+
+
+@contextlib.asynccontextmanager
+async def holding(address: tuple) -> AsyncIterator[tuple]:
+    """`lease` for the length of a block."""
+    address, release = lease(address)
+    try:
+        yield address
+    finally:
+        release()
+
+
+def rsd_args(address: tuple) -> list[str]:
+    """pymobiledevice3's arguments for an RSD address."""
+    return ["--rsd", str(address[0]), str(address[1])]
 
 
 class _Pool:

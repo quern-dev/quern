@@ -209,13 +209,14 @@ async def _pull(
             reason="quern does not know this device; list devices to check it is connected",
         )
 
-    lib_udid = await controller.get_libimobiledevice_udid(device)
+    lib_udid = await controller.crash_service_udid(device)
     if not lib_udid:
         # Was a debug log line, while the response looked like "no new
         # crashes". The crash service is reached over USB.
         return CrashPullStatus(
             udid=udid, platform="ios", status="skipped",
-            reason="not connected over USB; crash reports are pulled over USB",
+            reason=("not connected over USB, and no hardware UDID is known to reach "
+                    "it over Wi-Fi; list devices, then pull again"),
         )
     # Report files do not say which phone they came from, so the pull says
     # it: these came from the device asked for.
@@ -388,10 +389,11 @@ async def clear_device_crashes(
             status_code=404,
             detail=f"quern does not know {body.udid}; list devices to check it is connected",
         )
-    lib_udid = await controller.get_libimobiledevice_udid(device)
+    lib_udid = await controller.crash_service_udid(device)
     if not lib_udid:
         raise HTTPException(status_code=409, detail=(
-            "not connected over USB; crash reports are cleared over USB"
+            "not connected over USB, and no hardware UDID is known to reach it "
+            "over Wi-Fi; list devices, then clear again"
         ))
     if lib_udid not in spellings_of(device):
         # Matched by name (the fallback #323 is about), not by the phone's own

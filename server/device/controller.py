@@ -1090,6 +1090,15 @@ class DeviceController(DeviceControllerUI):
         service it talks to, over the device's tunnel (#706)."""
         return self.devicectl if await self.devicectl.is_available() else self.coredevice_apps
 
+    async def crash_service_udid(self, udid: str) -> str | None:
+        """The UDID crash reports are read and cleared by: the USB one, or for
+        a phone on Wi-Fi only its hardware UDID, which `ios_crash` reaches
+        through the tunnel macOS keeps to it (#781). None when neither is known.
+        """
+        from server.device.ios.native_tunnel import hardware_udid
+
+        return await self.get_libimobiledevice_udid(udid) or hardware_udid(udid)
+
     async def get_libimobiledevice_udid(self, coredevice_udid: str) -> str | None:
         """Look up the libimobiledevice UDID for a CoreDevice UUID.
 
@@ -1930,7 +1939,7 @@ class DeviceController(DeviceControllerUI):
 
         from server.sources import ios_crash
 
-        lib_udid = await self.get_libimobiledevice_udid(udid)
+        lib_udid = await self.crash_service_udid(udid)
         cmd = ios_crash.command()
         if not lib_udid or not cmd:
             return None
@@ -2158,7 +2167,8 @@ class DeviceController(DeviceControllerUI):
                 await self._ensure_android_screen_on(resolved)
             return await self.adb.screenshot(resolved)
         if self._is_physical(resolved):
-            return await self.pmd3.screenshot(resolved)
+            return await self.pmd3.screenshot(
+                resolved, os_version=self.wda_client._device_os_versions.get(resolved))
         return await self.simctl.screenshot(resolved, display=await self._lit_display(resolved))
 
     async def _lit_display(self, udid: str) -> int | None:
