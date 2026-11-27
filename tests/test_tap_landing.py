@@ -426,6 +426,28 @@ async def test_a_coordinate_tap_is_never_refused():
     backend.tap.assert_awaited_once()
 
 
+async def test_a_hit_beside_the_point_does_not_refuse_the_tap():
+    """A hit-test answer whose frame misses the point is about somewhere else:
+    the phone answered home-screen icons with their neighbour, and every icon
+    was refused as covered by it."""
+    # Across the field's left edge, short of its centre (196.5, 320): without
+    # the point check, partly over the field reads as on top of it.
+    ctrl, backend = _controller(describe=lambda *a: hit("Calendar", 0, 290, 150, 40))
+    result = await _tap(ctrl, identifier="field_secure")
+    assert result["status"] == "ok", result
+    backend.describe_point.assert_awaited_once()
+    backend.tap.assert_awaited_once()
+
+
+async def test_a_coordinate_tap_does_not_name_a_hit_beside_the_point():
+    """`landed_on` names what is at the point; a neighbour is not that."""
+    ctrl, backend = _controller(describe=lambda *a: hit("Calendar", 124, 273, 72, 92))
+    report = await ctrl.tap_and_report(65, 319, udid=SIM)
+    assert "landed_on" not in report
+    backend.describe_point.assert_awaited_once()
+    backend.tap.assert_awaited_once()
+
+
 # -- the route ------------------------------------------------------------------------------
 
 
@@ -553,7 +575,8 @@ async def test_a_refusal_after_the_target_never_settled_says_why():
     something else: refused, and the answer says the target was moving."""
     ctrl, backend = _moving(settled=False)
     ctrl._ui_backend.return_value.describe_point = AsyncMock(
-        return_value=hit("Behind", 0, 360, 120, 120, "Button"))   # over the point, not the field
+        # Over the point (196.5, 480), neither inside the field nor around it.
+        return_value=hit("Behind", 150, 440, 300, 50, "Button"))
     with patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
         result = await _tap(ctrl, identifier="field_secure", skip=False)
     assert result["status"] == "obstructed"
