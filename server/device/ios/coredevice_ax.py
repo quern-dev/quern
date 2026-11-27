@@ -1346,7 +1346,9 @@ async def _subscribe(lib: SimpleNamespace, address: Any, conn: SimpleNamespace,
     """Connect and subscribe to the tree push, filling `conn.rsd` and
     `conn.provider` as each opens, so the caller's cleanup closes whatever
     did. `spare`: opened beside a subscription still open (#684)."""
-    conn.rsd = lib.RemoteServiceDiscoveryService(address)
+    from server.device.ios.native_tunnel import rsd_for
+
+    conn.rsd = rsd_for(lib, address)
     await conn.rsd.connect()
     await _connect_service(uuid, lib, conn, spare=spare)
     queue: asyncio.Queue = _ArrivalQueue()

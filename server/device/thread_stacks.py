@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from server.device import performance
+from server.device.ios.native_tunnel import rsd_for
 from server.models import (
     CrashFrame,
     CrashImage,
@@ -278,7 +279,7 @@ async def take_stackshot(uuid: str, bundle_id: str) -> tuple[int | None, dict | 
     lib = _pmd3()
     address = await performance._device_address(uuid)
     budget = _STACKSHOT_TIMEOUT_S + _DEVICE_SLACK_S
-    rsd = lib.RemoteServiceDiscoveryService(address)
+    rsd = rsd_for(lib, address)
     deadline = asyncio.timeout(budget)
     try:
         async with deadline:

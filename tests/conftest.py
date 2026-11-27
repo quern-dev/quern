@@ -314,6 +314,25 @@ def _default_xcode_available(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_native_tunnels(monkeypatch):
+    """Never open Apple's own tunnel to a phone from a test (#781): with no
+    tunneld tunnel, `_device_address` asks macOS for one, and a test's UDID
+    can be a real phone's on the network. Each test gets a fresh pool, so no
+    tunnel or remembered failure carries over. Tests of the pool replace
+    `_open` with a fake of their own."""
+    from server.device.ios import native_tunnel
+
+    pool = native_tunnel._Pool()
+
+    async def _refused(udid, serial):
+        raise native_tunnel.NativeTunnelUnavailable("not opened from a test")
+
+    monkeypatch.setattr(pool, "_open", _refused)
+    monkeypatch.setattr(native_tunnel, "_POOL", pool)
+    return pool
+
+
+@pytest.fixture(autouse=True)
 def _devicectl_failures_forgotten(monkeypatch):
     """A devicectl failure is remembered for a while (#737): per test, so
     one test's failed lookup does not skip the next test's."""

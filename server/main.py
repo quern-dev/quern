@@ -1076,6 +1076,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await device_controller.coredevice_input.close()
         except Exception:
             logger.debug("closing CoreDevice input sessions failed", exc_info=True)
+        # Apple's tunnels to Wi-Fi phones this server held open (#781).
+        try:
+            from server.device.ios.native_tunnel import close_all as close_native_tunnels
+
+            await close_native_tunnels()
+        except Exception:
+            logger.debug("giving up the native tunnels failed", exc_info=True)
         # The gesture servers' adb forwards outlive this process otherwise:
         # adb keeps them until it restarts, one per run (#252).
         try:

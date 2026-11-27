@@ -31,6 +31,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+from server.device.ios.native_tunnel import rsd_for
 from server.models import (
     DeviceError,
     FrameStats,
@@ -490,17 +491,26 @@ async def _tunnel_address(tunnel_udid: str) -> tuple[str, int] | None:
 async def _device_address(uuid: str) -> tuple[str, int]:
     """The tunnel endpoint for a physical iPhone, or a DeviceError naming why
     there is none."""
+    from server.device.ios.native_tunnel import NativeTunnelUnavailable, native_address
     from server.device.ios.pmd3 import _no_tunnel_hint, _recover_tunneld_if_wedged
     from server.device.ios.tunneld import is_tunneld_running, resolve_tunnel_udid
 
     serving = await is_tunneld_running() or await _recover_tunneld_if_wedged()
     tunnel_udid = await resolve_tunnel_udid(uuid) if serving else None
     address = await _tunnel_address(tunnel_udid) if tunnel_udid else None
-    if address is None:
-        raise NoTunnelError(
-            f"no tunnel to {uuid[:8]}{_no_tunnel_hint(None, serving)}",
-            tool="pymobiledevice3")
-    return address
+    if address is not None:
+        return address
+    # quern's tunneld builds tunnels over USB only; a phone on Wi-Fi is
+    # reached through the tunnel macOS keeps to it itself (#781).
+    try:
+        return await native_address(uuid)
+    except NativeTunnelUnavailable as e:
+        native = str(e)
+    raise NoTunnelError(
+        f"no tunnel to {uuid[:8]}{_no_tunnel_hint(None, serving)} {native}. A phone "
+        "on Wi-Fi is reached through Apple's own tunnel, which needs it paired "
+        "with this Mac, unlocked, and on the same network.",
+        tool="pymobiledevice3")
 
 
 async def device_snapshot(uuid: str, bundle_id: str, seconds: float) -> PerformanceSnapshot:
@@ -512,7 +522,7 @@ async def device_snapshot(uuid: str, bundle_id: str, seconds: float) -> Performa
         udid=uuid, bundle_id=bundle_id, platform="ios_device", running=False,
         sample_seconds=seconds)
     budget = seconds + _ANSWER_SLACK_S
-    rsd = lib.RemoteServiceDiscoveryService(address)
+    rsd = rsd_for(lib, address)
     deadline = asyncio.timeout(budget)
     try:
         async with deadline:
@@ -567,7 +577,7 @@ async def device_stream(uuid: str, bundle_id: str,
     """
     lib = _pmd3()
     address = await _device_address(uuid)
-    rsd = lib.RemoteServiceDiscoveryService(address)
+    rsd = rsd_for(lib, address)
     try:
         try:
             async with asyncio.timeout(_ANSWER_SLACK_S):

@@ -24,6 +24,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from server.logging_ext import current_action
@@ -224,7 +225,10 @@ async def _mount(udid: str, os_version: str) -> None:
     if _major(os_version) < 17:
         await auto_mount(await _lockdown(udid))
         return
-    rsd = RemoteServiceDiscoveryService(await _device_address(udid))
+    from server.device.ios.native_tunnel import rsd_for
+
+    rsd = rsd_for(SimpleNamespace(RemoteServiceDiscoveryService=RemoteServiceDiscoveryService),
+                  await _device_address(udid))
     try:
         await rsd.connect()
         await auto_mount(rsd)
