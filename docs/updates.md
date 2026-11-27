@@ -25,9 +25,10 @@ Setting the channel only writes `~/.quern/config.json` — nothing changes until
 `quern update` brings its own venv forward eagerly: pip's default strategy leaves
 any version that already satisfies a constraint alone, so a venv drifts arbitrarily
 far behind while every declared floor stays satisfied. Every dependency floor quern
-declares is a `>=` and none is near what currently ships — `pymobiledevice3` sits
-two majors above its own — so "satisfies the constraint" says very little about how
-current the venv is.
+declares is a `>=`, and most are far below what currently ships, so "satisfies the
+constraint" says very little about how current the venv is. `pymobiledevice3` is the
+exception: its floor is the version quern was last verified on (11.63.1, from
+0.26.0-beta.8), so a copy below it is one quern was never tested with.
 
 Starting the server stays non-eager: it compares two mtimes, and invokes pip only when
 the venv is actually stale or a previous install failed — never the eager transitive
