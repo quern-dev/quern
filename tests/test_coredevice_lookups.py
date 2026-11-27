@@ -369,7 +369,7 @@ class TestTapElement:
                     if e["AXUniqueId"] == "com.apple.settings.wifi")
         f = wifi["frame"]
         ctrl = self._covered(monkeypatch, self._hit(
-            "Overlay", f["x"] + 40, f["y"] + 4, 60, f["height"] - 8))
+            "Overlay", f["x"] + f["width"] / 2 - 30, f["y"] + 4, 60, f["height"] - 8))
         # The overlay is on the pushed screen too, smaller than the row, as the
         # probe's is: its title is the overlay's, not the row's.
         overlay = {"type": "Button", "AXLabel": "Overlay", "AXUniqueId": "overlay",
@@ -386,6 +386,23 @@ class TestTapElement:
         assert result["covered_by"]["label"] == "Overlay"
         ctrl.coredevice_input.tap.assert_not_called()
         ctrl.wda_client.tap.assert_not_called()
+
+    async def test_a_hit_beside_the_point_is_no_obstruction(self, monkeypatch):
+        """The phone's hit-test answered home-screen icons with their
+        neighbour, whose frame does not hold the point: every icon tapped by
+        name was refused as covered by the next one (iPhone 11, iOS 27.2.1).
+        An answer away from the point says nothing about it."""
+        wifi = next(e for e in parse_push(SETTINGS)[1]
+                    if e["AXUniqueId"] == "com.apple.settings.wifi")
+        f = wifi["frame"]
+        ctrl = self._covered(monkeypatch, self._hit(
+            "Bluetooth", f["x"], f["y"] + f["height"], f["width"], f["height"], "Button"))
+
+        result = await ctrl.tap_element(label="Wi-Fi", udid=PHONE, scroll_to_find=False)
+
+        assert result["status"] == "ok", result
+        ctrl.coredevice_input.tap.assert_awaited_once()
+        ctrl.coredevice_ax.describe_point.assert_awaited_once()   # it was asked
 
     async def test_its_own_text_or_detail_is_the_target(self, monkeypatch):
         """A pushed row's label is all its texts: its title and its detail

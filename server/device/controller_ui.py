@@ -767,6 +767,21 @@ def _same_place(label: str, frame: dict[str, float], target_label: str | None,
     return smaller > 0 and w * h >= _SAME_PLACE * smaller
 
 
+def _hit_at(hit: dict | None, x: float, y: float) -> dict | None:
+    """A hit-test's answer, if its frame holds the point it was asked about.
+
+    Anything else says nothing about the point. The phone's hit-test answers
+    on the home screen with the icon beside the one there: measured on an
+    iPhone 11 (iOS 27.2.1), FaceTime's centre answered Calendar and Calendar's
+    FaceTime, Photos and Camera likewise, so every icon tapped by name was
+    refused as covered by its neighbour; inside apps it answered correctly.
+    The web probes learned the same of whitespace (`hit_contains`).
+    """
+    from server.device.web.web_probing import hit_contains
+
+    return hit if hit and hit_contains(hit.get("frame"), x, y) else None
+
+
 def _covering_element(target: UIElement, hit: dict | None, *,
                       leaf: bool = False,
                       screen: list[UIElement] | None = None) -> dict | None:
@@ -1858,7 +1873,7 @@ class DeviceControllerUI:
                 }
         try:
             reader = self.coredevice_ax if pushed else self._ui_backend(udid)
-            hit = await reader.describe_point(udid, x, y)
+            hit = _hit_at(await reader.describe_point(udid, x, y), x, y)
         except Exception:
             # Could not ask is not "something is there": tap as before.
             logger.debug("hit-test before tap failed", exc_info=True)
@@ -4446,7 +4461,8 @@ class DeviceControllerUI:
             if settled_ms is not None:
                 report["waited_for_settle_ms"] = settled_ms
             try:
-                hit = await self._ui_backend(resolved).describe_point(resolved, x, y)
+                hit = _hit_at(await self._ui_backend(resolved).describe_point(resolved, x, y),
+                              x, y)
             except Exception:
                 logger.debug("hit-test before tap failed", exc_info=True)
                 hit = None
