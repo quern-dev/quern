@@ -314,7 +314,44 @@ class TestOpening:
 
         with pytest.raises(NativeTunnelUnavailable, match="could not be opened: Could not find"):
             await self._open(monkeypatch, Tunnel)
+        await _settle()                 # closed in the background
         assert made[0].closed
+
+    async def test_the_whole_attempt_and_its_clean_up_fit_one_deadline(self, monkeypatch):
+        """A slow identity lookup, then an open that never comes, then a slow
+        close: the caller still waits about OPEN_S, not a bound per step."""
+        import pymobiledevice3.remote.native_tunnel as pmd3_native
+        import pymobiledevice3.remote.remotexpc as remotexpc
+
+        monkeypatch.setattr(native_tunnel, "OPEN_S", 0.2)
+
+        def slow_identity():
+            native_tunnel.time.sleep(0.15)
+            return IDENTITY
+
+        closed = []
+
+        class Tunnel(FakeTunnel):
+            def __init__(self, serial):
+                super().__init__()
+
+            async def aopen(self):
+                await asyncio.sleep(10)
+
+            async def aclose(self):
+                await asyncio.sleep(0.5)
+                closed.append(True)
+
+        monkeypatch.setattr(pmd3_native, "NativeRemotedTunnel", Tunnel)
+        monkeypatch.setattr(remotexpc, "remoted_handshake_uuid", slow_identity)
+        pool = native_tunnel._Pool()
+        started = native_tunnel.time.monotonic()
+        with pytest.raises(NativeTunnelUnavailable, match="did not open within"):
+            await pool._open(PHONE, PHONE)
+        assert native_tunnel.time.monotonic() - started < 0.4
+        assert closed == []                       # the close is not waited for
+        await asyncio.gather(*pool._closing)
+        assert closed == [True]                   # but it does happen
 
     async def test_one_that_never_opens_is_bounded(self, monkeypatch):
         monkeypatch.setattr(native_tunnel, "OPEN_S", 0.05)
