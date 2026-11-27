@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import gc
-import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -87,28 +87,40 @@ async def _settle():
 
 def _own_connections(root: Path) -> list[str]:
     """Every RSD built under `root` without naming its identity: outside
-    `rsd_for`, a call must pass `handshake_uuid=` itself, as the crash delete
-    script does in its own process (`rsd_handshake_uuid`)."""
+    `rsd_for`, the call itself must pass `handshake_uuid=`, as the crash
+    delete script does in its own process (`rsd_handshake_uuid`). Read from
+    the syntax tree, so a keyword of a nested call does not count, and from
+    any string that holds code, as that script is."""
     found = []
     for path in root.rglob("*.py"):
         if path.name == "native_tunnel.py":
             continue
-        text = path.read_text()
-        for match in re.finditer(r"RemoteServiceDiscoveryService\s*\(", text):
-            if "handshake_uuid=" not in _arguments(text, match.end()):
-                line = text.count("\n", 0, match.start()) + 1
-                found.append(f"{path.relative_to(root)}:{line}")
+        for line in _bare_calls(path.read_text()):
+            found.append(f"{path.relative_to(root)}:{line}")
     return found
 
 
-def _arguments(text: str, start: int) -> str:
-    """The text of a call's arguments, from just past its "(" to its own ")"."""
-    depth = 1
-    for i in range(start, len(text)):
-        depth += {"(": 1, ")": -1}.get(text[i], 0)
-        if depth == 0:
-            return text[start:i]
-    return text[start:]
+def _bare_calls(source: str, offset: int = 0) -> list[int]:
+    lines = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call) and _named(node.func) == "RemoteServiceDiscoveryService":
+            if not any(k.arg == "handshake_uuid" for k in node.keywords):
+                lines.append(offset + node.lineno)
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+              and "RemoteServiceDiscoveryService" in node.value):
+            try:
+                lines += _bare_calls(node.value, offset + node.lineno - 1)
+            except SyntaxError:
+                continue          # prose that mentions the name, not code
+    return lines
+
+
+def _named(func: ast.expr) -> str | None:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
 
 
 class TestOneWayToConnect:
@@ -129,7 +141,15 @@ class TestOneWayToConnect:
         # Named later in the file, outside the call: still a bare one.
         (tmp_path / "device" / "later.py").write_text(
             "rsd = lib.RemoteServiceDiscoveryService((h, p))\nx = f(handshake_uuid=None)\n")
-        assert sorted(_own_connections(tmp_path)) == ["device/later.py:1", "device/planted.py:2"]
+        # Named for a nested call, not this one (CodeRabbit on #791).
+        (tmp_path / "device" / "nested.py").write_text(
+            "rsd = RemoteServiceDiscoveryService(resolve(handshake_uuid=who))\n")
+        # Inside a script run as its own process.
+        (tmp_path / "device" / "script.py").write_text(
+            'S = """\nimport x\nrsd = RemoteServiceDiscoveryService((h, p))\n"""\n')
+        assert sorted(_own_connections(tmp_path)) == [
+            "device/later.py:1", "device/nested.py:1", "device/planted.py:2",
+            "device/script.py:3"]
 
     def test_a_tunneld_address_is_connected_to_as_before(self):
         rsd = rsd_for(LIB, ("fd35::1", 61952))

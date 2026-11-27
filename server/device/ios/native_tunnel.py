@@ -202,6 +202,13 @@ def rsd_for(lib: Any, address: tuple) -> Any:
     return rsd
 
 
+def may_have_native_tunnel(os_version: str | None) -> bool:
+    """Whether a phone could be on a CoreDevice tunnel: iOS 17 or later, or
+    a version not known. One before 17 is reached over usbmux alone."""
+    match = re.search(r"\d+", os_version or "")
+    return match is None or int(match.group()) >= 17
+
+
 def lease(address: tuple) -> tuple[tuple, Any]:
     """Hold the address's tunnel for something that is not an RSD made here
     -- a pymobiledevice3 subprocess given `--rsd` -- until the returned

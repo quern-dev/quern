@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import re
 import tempfile
 from pathlib import Path
 
@@ -101,13 +100,6 @@ def _no_tunnel_hint(tunnel_udid: str | None, tunneld_serving: bool) -> str:
     )
 
 
-def _may_have_native_tunnel(os_version: str | None) -> bool:
-    """Whether a phone could be on a CoreDevice tunnel: iOS 17 or later, or
-    a version not known. One before 17 is reached over usbmux alone."""
-    match = re.search(r"\d+", os_version or "")
-    return match is None or int(match.group()) >= 17
-
-
 class Pmd3Backend:
     """Manages physical iOS device operations via pymobiledevice3 subprocess calls."""
 
@@ -160,7 +152,9 @@ class Pmd3Backend:
             tunnel_udid = await resolve_tunnel_udid(uuid)
 
         native, native_why = None, ""
-        if tunnel_udid is None and _may_have_native_tunnel(os_version):
+        from server.device.ios.native_tunnel import may_have_native_tunnel
+
+        if tunnel_udid is None and may_have_native_tunnel(os_version):
             from server.device.ios.native_tunnel import NativeTunnelUnavailable, native_address
 
             try:

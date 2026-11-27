@@ -166,6 +166,52 @@ class TestDeviceLog:
         assert pool.leases() == 0
         assert "Failed to start" in adapter._error
 
+    def _no_tunneld_here(self, monkeypatch):
+        from server.sources import device_log
+
+        monkeypatch.setattr(device_log, "resolve_tunnel_udid", AsyncMock(return_value=None))
+        monkeypatch.setattr(device_log, "find_pymobiledevice3_binary", lambda: Path("/bin/pmd3"))
+        monkeypatch.setattr(device_log, "_supports_json", AsyncMock(return_value=True))
+
+    async def test_a_phone_before_ios_17_goes_straight_to_udid(self, pool, monkeypatch):
+        from server.sources.device_log import PhysicalDeviceLogAdapter
+
+        self._no_tunneld_here(monkeypatch)
+        adapter = PhysicalDeviceLogAdapter(udid=PHONE, on_entry=AsyncMock(),
+                                           os_version="16.7.10")
+        cmd = await adapter._build_command()
+        assert cmd[3:5] == ["--udid", PHONE]
+        assert pool.opened == []
+
+    async def test_a_cancelled_start_gives_the_hold_back(self, pool, monkeypatch):
+        """Cancelled after the command took the hold, before a run took it over."""
+        from server.sources import device_log
+
+        self._no_tunneld_here(monkeypatch)
+        adapter = self._adapter()
+
+        async def hangs(binary):
+            await asyncio.sleep(10)
+        monkeypatch.setattr(device_log, "_supports_json", hangs)
+        task = asyncio.create_task(adapter.start())
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if pool.leases():
+                break
+        assert pool.leases() == 1
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert pool.leases() == 0
+
+    async def test_stop_gives_back_a_hold_no_run_took(self, pool, monkeypatch):
+        self._no_tunneld_here(monkeypatch)
+        adapter = self._adapter()
+        await adapter._build_command()
+        assert pool.leases() == 1
+        await adapter.stop()
+        assert pool.leases() == 0
+
     async def test_with_no_tunnel_it_falls_back_to_udid(self, _no_native_tunnels, monkeypatch):
         from server.sources import device_log
 
@@ -244,6 +290,35 @@ class TestCrashReports:
         compile(_REMOVE_SCRIPT, "<remove>", "exec")
         assert 'args[0] == "--rsd"' in _REMOVE_SCRIPT
         assert "rsd_handshake_uuid(args[1])" in _REMOVE_SCRIPT
+
+
+class TestTheCrashCheck:
+    """The push reader's check for #669's crash (`_crash_reports_since`)."""
+
+    def _ctrl(self, monkeypatch, error):
+        from server.device import controller as controller_mod
+        from server.sources import ios_crash
+
+        ctrl = controller_mod.DeviceController()
+        ctrl.crash_service_udid = AsyncMock(return_value=PHONE)
+        monkeypatch.setattr(ios_crash, "command", lambda: ["pmd3"])
+        monkeypatch.setattr(ios_crash, "list_reports", AsyncMock(side_effect=error))
+        return ctrl
+
+    async def test_a_phone_with_no_route_at_all_is_not_asked_again(self, monkeypatch):
+        from server.sources import ios_crash
+
+        error = ios_crash.IosCrashError("usbmuxd does not list it, and no tunnel")
+        error.__cause__ = NativeTunnelUnavailable("not there")
+        ctrl = self._ctrl(monkeypatch, error)
+        assert await ctrl._crash_reports_since(PHONE, 0.0) is None
+
+    async def test_any_other_failure_is_raised_for_the_retry(self, monkeypatch):
+        from server.sources import ios_crash
+
+        ctrl = self._ctrl(monkeypatch, ios_crash.IosCrashError("crash ls timed out"))
+        with pytest.raises(ios_crash.IosCrashError, match="timed out"):
+            await ctrl._crash_reports_since(PHONE, 0.0)
 
 
 class TestTheCrashUdid:

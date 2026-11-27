@@ -40,6 +40,7 @@ from datetime import UTC, datetime
 from server.device.ios.native_tunnel import (
     NativeTunnelUnavailable,
     lease,
+    may_have_native_tunnel,
     native_address,
     rsd_args,
 )
@@ -176,6 +177,7 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         on_entry: EntryCallback | None = None,
         process_filter: str | None = None,
         match_filter: str | None = None,
+        os_version: str | None = None,
     ) -> None:
         super().__init__(
             adapter_id=f"devlog-{udid[:8]}",
@@ -190,6 +192,9 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         #: Gives back the hold on Apple's tunnel the next run's command was
         #: built for (#781); the run that starts takes it over.
         self._native_release: Callable[[], None] | None = None
+        #: The phone's iOS version, when known: one before 17 is never asked
+        #: for Apple's tunnel, which it has none of (CodeRabbit on #791).
+        self.os_version = os_version
         #: "json" or "text": what this capture asked pymobiledevice3 for. Only
         #: a JSON capture's lines are read as JSON -- a text capture's
         #: continuation line can be a JSON body of its own (review).
@@ -223,7 +228,8 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         if tunnel_udid:
             self._tunnel_udid = tunnel_udid
             cmd.extend(["--tunnel", tunnel_udid])
-        elif (native := await self._native_tunnel()) is not None:
+        elif (may_have_native_tunnel(self.os_version)
+              and (native := await self._native_tunnel()) is not None):
             cmd.extend(rsd_args(native))
         else:
             cmd.extend(["--udid", self.udid])
@@ -279,18 +285,22 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
 
     async def start(self) -> None:
         """Spawn pymobiledevice3 syslog live and begin reading output."""
-        cmd = await self._build_command()
-        if cmd is None:
-            self._give_back_native()
-            return
-
         try:
+            cmd = await self._build_command()
+            if cmd is None:
+                self._give_back_native()
+                return
             self._process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=_LINE_LIMIT,
             )
+        except asyncio.CancelledError:
+            # Before the run took the hold over: nothing else gives it back
+            # (CodeRabbit on #791).
+            self._give_back_native()
+            raise
         except FileNotFoundError:
             self._give_back_native()
             self._error = (
@@ -320,6 +330,7 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
     async def stop(self) -> None:
         """Terminate the pymobiledevice3 subprocess and clean up."""
         self._running = False
+        self._give_back_native()      # one built for a run that never started
         # Held before any await, for the reasons given in SimulatorLogAdapter.
         process, read_task, stderr_task = self._process, self._read_task, self._stderr_task
 

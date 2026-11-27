@@ -1929,9 +1929,11 @@ class DeviceController(DeviceControllerUI):
         the time in each report's name, which is the phone's local time, so
         the order holds whatever zone the phone and the Mac are in; `since`
         bounds them only loosely, a day back, as `select_recent` does. Read
-        over USB, so a phone quern reaches only over the network has none.
-        A pull that copies some reports and not others gives the ones it
-        copied.
+        over USB, or for a phone on Wi-Fi only through the tunnel macOS keeps
+        to it (#781): None when neither can be had, so the caller stops
+        asking, as it did when only USB could be read. Any other failure is
+        raised, for the caller's bounded retry. A pull that copies some
+        reports and not others gives the ones it copied.
         """
         import tempfile
         from datetime import datetime, timedelta
@@ -1943,9 +1945,17 @@ class DeviceController(DeviceControllerUI):
         cmd = ios_crash.command()
         if not lib_udid or not cmd:
             return None
+        from server.device.ios.native_tunnel import NativeTunnelUnavailable
+
         cutoff = datetime.fromtimestamp(since) - timedelta(days=1)
+        try:
+            listed = await ios_crash.list_reports(cmd, lib_udid)
+        except ios_crash.IosCrashError as e:
+            if isinstance(e.__cause__, NativeTunnelUnavailable):
+                return None     # no route to the phone at all: not worth a retry
+            raise
         dated = sorted(
-            ((t, n) for n in await ios_crash.list_reports(cmd, lib_udid)
+            ((t, n) for n in listed
              if (t := ios_crash.report_time(n)) is not None and t >= cutoff),
             reverse=True)
         named = f"{app}-" if app.strip() else None
