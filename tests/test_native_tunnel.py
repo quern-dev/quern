@@ -83,11 +83,29 @@ async def _settle():
 
 
 def _own_connections(root: Path) -> list[str]:
-    """Every line under `root` that builds an RSD itself, but `rsd_for`'s."""
-    return [f"{path.relative_to(root)}:{n}"
-            for path in root.rglob("*.py") if path.name != "native_tunnel.py"
-            for n, line in enumerate(path.read_text().splitlines(), 1)
-            if re.search(r"RemoteServiceDiscoveryService\s*\(", line)]
+    """Every RSD built under `root` without naming its identity: outside
+    `rsd_for`, a call must pass `handshake_uuid=` itself, as the crash delete
+    script does in its own process (`rsd_handshake_uuid`)."""
+    found = []
+    for path in root.rglob("*.py"):
+        if path.name == "native_tunnel.py":
+            continue
+        text = path.read_text()
+        for match in re.finditer(r"RemoteServiceDiscoveryService\s*\(", text):
+            if "handshake_uuid=" not in _arguments(text, match.end()):
+                line = text.count("\n", 0, match.start()) + 1
+                found.append(f"{path.relative_to(root)}:{line}")
+    return found
+
+
+def _arguments(text: str, start: int) -> str:
+    """The text of a call's arguments, from just past its "(" to its own ")"."""
+    depth = 1
+    for i in range(start, len(text)):
+        depth += {"(": 1, ")": -1}.get(text[i], 0)
+        if depth == 0:
+            return text[start:i]
+    return text[start:]
 
 
 class TestOneWayToConnect:
@@ -103,7 +121,12 @@ class TestOneWayToConnect:
         (tmp_path / "device" / "planted.py").write_text(
             "async def f(lib, address):\n    rsd = lib.RemoteServiceDiscoveryService(address)\n")
         (tmp_path / "native_tunnel.py").write_text("RemoteServiceDiscoveryService(address)\n")
-        assert _own_connections(tmp_path) == ["device/planted.py:2"]
+        (tmp_path / "named.py").write_text(
+            "rsd = RemoteServiceDiscoveryService(\n    (h, int(p)), handshake_uuid=who(h))\n")
+        # Named later in the file, outside the call: still a bare one.
+        (tmp_path / "device" / "later.py").write_text(
+            "rsd = lib.RemoteServiceDiscoveryService((h, p))\nx = f(handshake_uuid=None)\n")
+        assert sorted(_own_connections(tmp_path)) == ["device/later.py:1", "device/planted.py:2"]
 
     def test_a_tunneld_address_is_connected_to_as_before(self):
         rsd = rsd_for(LIB, ("fd35::1", 61952))
