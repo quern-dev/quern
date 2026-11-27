@@ -6245,7 +6245,14 @@ class DeviceControllerUI:
             via = await hid.type_text(udid, text)
             self._invalidate_ui_cache(udid)
             result = {"udid": udid, "verified": False, "input": via}
-            if via == hid.TOOL_NAME:
+            if via == hid.TOOL_NAME and not types_on_us_keys(text):
+                # Pasted (#780): one change to the app, not a keystroke each.
+                result["note"] = _joined(
+                    "Pasted, since the text has a character no US key types: put on the "
+                    "phone's clipboard, pasted with Cmd+V, and the clipboard put back. The "
+                    "app saw one paste rather than a keystroke per character.",
+                    hid.take_note(udid))
+            elif via == hid.TOOL_NAME:
                 # Said, not only documented: WDA inserted text exactly, and
                 # keystrokes may not arrive as typed (#682 review).
                 result["note"] = (
