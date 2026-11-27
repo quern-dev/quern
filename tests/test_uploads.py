@@ -681,12 +681,27 @@ class TestTheFloorAcrossKeys:
             _receive(store, "client:alice", "My.ipa", b"x")
         assert e.value.status == 507 and "could not read" in str(e.value)
 
-    def test_the_volume_is_read_where_the_uploads_will_go(self, tmp_path):
-        """Not yet made: the nearest directory above it, on the same volume."""
-        import shutil
+    def test_the_volume_is_read_where_the_uploads_will_go(self, tmp_path, monkeypatch):
+        """Not yet made: the nearest directory above it, on the same volume.
 
+        Asserted on the path read, not on a second live reading: free space
+        moves between two calls on a busy runner, and the comparison failed CI
+        by 8 KB (#780).
+        """
+        import shutil
+        from collections import namedtuple
+
+        asked = []
+        usage = namedtuple("usage", "total used free")
+
+        def disk_usage(path):
+            asked.append(path)
+            return usage(100, 40, 60)
+
+        monkeypatch.setattr(shutil, "disk_usage", disk_usage)
         store = UploadStore(tmp_path / "not" / "yet", max_bytes=1, min_free_bytes=1)
-        assert store._free_on_volume() == shutil.disk_usage(tmp_path).free
+        assert store._free_on_volume() == 60
+        assert asked == [tmp_path]
 
     def test_the_server_gives_the_store_its_configured_floor(self, monkeypatch):
         import server.main as m
