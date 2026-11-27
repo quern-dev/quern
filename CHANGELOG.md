@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0-beta.8] - 2026-11-27
+
 ### Added
 
 - **Screenshots, device logs and crash reports work on an iPhone on Wi-Fi only (#781).** These go through pymobiledevice3's command line, which reached a phone through tunneld or usbmux. Neither reaches a phone that is only on the network, so `take_screenshot` failed with "Device not found", device logging found no device, and crash pulls were skipped as "not connected over USB". Now each is given `--rsd` into the tunnel macOS keeps to the phone, which quern holds while the command runs: for the length of a log capture, until its process ends. USB phones keep the routes they had: a tunneld tunnel for screenshots and logs, usbmux for crash reports, and usbmux for anything before iOS 17. Measured on an iPhone 11 (iOS 27.2.1) on Wi-Fi only:
@@ -1238,7 +1240,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.7...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.26.0-beta.8...main
+[0.26.0-beta.8]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.8
 [0.26.0-beta.7]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.7
 [0.26.0-beta.6]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.6
 [0.26.0-beta.5]: https://github.com/quern-dev/quern/releases/tag/v0.26.0-beta.5
