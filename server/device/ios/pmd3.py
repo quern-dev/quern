@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import tempfile
 from pathlib import Path
 
@@ -100,6 +101,16 @@ def _no_tunnel_hint(tunnel_udid: str | None, tunneld_serving: bool) -> str:
     )
 
 
+def _beyond_usbmux(uuid: str, os_version: str | None) -> bool:
+    """Whether usbmux cannot reach the phone either: one known to be on iOS 17
+    or later, or last seen on Wi-Fi. usbmux is the way to an older phone."""
+    from server.device.ios.devicectl import NETWORK_TRANSPORTS, last_transport
+
+    major = re.search(r"\d+", os_version or "")
+    return ((major is not None and int(major.group()) >= 17)
+            or last_transport(uuid) in NETWORK_TRANSPORTS)
+
+
 class Pmd3Backend:
     """Manages physical iOS device operations via pymobiledevice3 subprocess calls."""
 
@@ -160,7 +171,15 @@ class Pmd3Backend:
             try:
                 native = await native_address(uuid)
             except NativeTunnelUnavailable as e:
-                native_why = f" {e}."
+                native_why = str(e)
+                if _beyond_usbmux(uuid, os_version):
+                    # usbmux reaches neither: saying "Device not found" from
+                    # it only buried the reason (#781).
+                    from server.device.performance import no_tunnel_message
+
+                    raise DeviceError(
+                        no_tunnel_message(uuid, tunneld_serving, native_why),
+                        tool="pymobiledevice3") from None
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             tmp_path = tmp.name
@@ -182,9 +201,13 @@ class Pmd3Backend:
                 # iOS 16-: direct usbmuxd connection (no tunnel needed)
                 # Must pass --udid to avoid interactive device prompt when
                 # multiple USB devices are connected.
+                # By the hardware UDID: usbmux knows a phone by nothing else,
+                # and a CoreDevice UUID found no device.
+                from server.device.ios.native_tunnel import hardware_udid
+
                 cmd = [
                     str(binary), "developer", "dvt", "screenshot",
-                    "--udid", uuid,
+                    "--udid", hardware_udid(uuid) or uuid,
                     tmp_path,
                 ]
                 if tunneld_serving:
@@ -230,7 +253,8 @@ class Pmd3Backend:
                 raise DeviceError(
                     f"pymobiledevice3 screenshot failed: {error_msg}"
                     + ("" if native is not None
-                       else _no_tunnel_hint(tunnel_udid, tunneld_serving) + native_why),
+                       else _no_tunnel_hint(tunnel_udid, tunneld_serving)
+                       + (f" {native_why.rstrip('.')}." if native_why else "")),
                     tool="pymobiledevice3",
                 )
 

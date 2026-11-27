@@ -333,6 +333,15 @@ def _no_native_tunnels(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _transports_forgotten(monkeypatch):
+    """How devicectl last saw each phone (#781) is per test: one test's
+    listing must not decide another's no-tunnel wording."""
+    from server.device.ios import devicectl
+
+    monkeypatch.setattr(devicectl, "_last_transports", {})
+
+
+@pytest.fixture(autouse=True)
 def _usbmux_not_asked(monkeypatch):
     """Never ask the real usbmuxd which phones it lists (#781): crash commands
     use it to choose between `--udid` and Apple's tunnel. "Could not tell"
