@@ -43,11 +43,14 @@ logger = logging.getLogger(__name__)
 #: How long a tunnel with no connection open is kept for the next call.
 IDLE_S = 60.0
 #: How long opening one may take: browsing the pairing daemon and the RSD
-#: handshake. Measured at 0.3-1.2 s to a phone on the network.
-OPEN_S = 20.0
+#: handshake. Measured at 0.8-1.4 s to a phone on the network. pymobiledevice3
+#: waits 10 s for the pairing daemon to report a phone it does not know, and
+#: that wait is the whole of a miss, so this bounds it: a phone that is not
+#: there must not cost every call 10 s.
+OPEN_S = 5.0
 #: How long a failed open is answered from memory, so a phone that is not
 #: there costs one attempt per window, not one per call.
-FAILED_S = 10.0
+FAILED_S = 30.0
 #: How long closing one may take before it is abandoned.
 CLOSE_S = 5.0
 #: How long a connection through one may take to open before the tunnel is
@@ -82,6 +85,19 @@ def _key_and_serial(udid: str) -> tuple[str, str]:
         if _HARDWARE_UDID.fullmatch(spelling):
             return canonical, spelling
     return canonical, udid
+
+
+def _paired_here(udid: str) -> bool:
+    """Whether devicectl listed this phone, or has listed nothing yet.
+
+    A phone it does not list -- one never paired with this Mac, one before
+    iOS 17 on USB -- costs a whole failed open to ask about, so it is not
+    asked about. Before any listing nothing can be told, and it is asked.
+    """
+    from server.device.ios import devicectl
+
+    known = devicectl._identity_aliases
+    return not known or udid in known
 
 
 class NativeTunnelUnavailable(Exception):
@@ -258,6 +274,10 @@ class _Pool:
             failed = self._failed.get(udid)
             if failed and time.monotonic() - failed[0] < FAILED_S:
                 raise NativeTunnelUnavailable(failed[1])
+            if not _paired_here(udid):
+                raise NativeTunnelUnavailable(
+                    "devicectl lists no phone paired with this Mac by that id, so "
+                    "Apple's tunnel was not asked for")
             try:
                 opened = await self._open(udid, serial)
             except NativeTunnelUnavailable as e:
@@ -281,20 +301,32 @@ class _Pool:
                 f"this pymobiledevice3 cannot ride Apple's tunnel ({e})") from e
         tunnel = NativeRemotedTunnel(serial=serial)
         started = time.monotonic()
+        # One deadline for the whole attempt, and a failed one is closed in
+        # the background: the caller waits OPEN_S at most (CodeRabbit on #790).
+        deadline = asyncio.timeout(OPEN_S)
         try:
-            identity = await asyncio.wait_for(asyncio.to_thread(remoted_handshake_uuid), OPEN_S)
-            rsd = await asyncio.wait_for(tunnel.aopen(), OPEN_S)
+            async with deadline:
+                identity = await asyncio.to_thread(remoted_handshake_uuid)
+                rsd = await tunnel.aopen()
             host, port = rsd.service.address[:2]
         except TimeoutError:
-            await self._close_tunnel(tunnel, udid)
+            self._close_in_background(tunnel, udid)
+            if deadline.expired():
+                raise NativeTunnelUnavailable(
+                    f"Apple's tunnel to it did not open within {OPEN_S:g}s") from None
             raise NativeTunnelUnavailable(
-                f"Apple's tunnel to it did not open within {OPEN_S:g}s") from None
+                "Apple's tunnel to it could not be opened: a step timed out") from None
         except Exception as e:  # noqa: BLE001 -- pymobiledevice3 raises its own kinds
-            await self._close_tunnel(tunnel, udid)
+            self._close_in_background(tunnel, udid)
             raise NativeTunnelUnavailable(f"Apple's tunnel to it could not be opened: {e}") from e
         logger.info("[native-tunnel] opened Apple's tunnel to %s at [%s]:%d in %.1fs",
                     udid[:8], host, port, time.monotonic() - started)
         return _Held(udid=udid, tunnel=tunnel, host=host, port=port, identity=identity)
+
+    def _close_in_background(self, tunnel: Any, udid: str) -> None:
+        task = asyncio.get_running_loop().create_task(self._close_tunnel(tunnel, udid))
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
 
     def close_soon(self, held: _Held) -> None:
         if self._held.get(held.udid) is held:
