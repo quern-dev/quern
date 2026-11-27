@@ -166,7 +166,7 @@ class FakeLib:
             UniversalHID=HID, IndigoHID=Indigo, Contact=Contact,
             CONTACT=CONTACT, RELEASE=RELEASE, BUTTON_DOWN=DOWN, BUTTON_UP=UP,
             KEYS={"a": (0x04, False), "A": (0x04, True), " ": (0x2C, False)}, SHIFT=0xE1,
-            COMMAND=0xE3, KEY_A=0x04, BACKSPACE=0x2A,
+            COMMAND=0xE3, KEY_A=0x04, KEY_V=0x19, BACKSPACE=0x2A,
         )
 
     def __call__(self):
@@ -230,7 +230,10 @@ class TestTyping:
         await hid.type_text(PHONE, "a")
         assert lib.keyboards == 2 and lib.closed.count("keyboard") == 2
 
-    async def test_a_character_with_no_us_key_goes_through_wda(self, lib, wda):
+    async def test_a_character_with_no_us_key_goes_through_wda_without_a_clipboard(
+            self, lib, wda):
+        """The paste needs the clipboard (#780): this fake phone has none to
+        save, so nothing is pasted over it and the text goes to WDA."""
         hid = CoreDeviceInput(wda)
 
         assert await hid.type_text(PHONE, "aé") == "wda"

@@ -57,6 +57,9 @@ IDLE_CLOSE_S = 60.0
 
 #: Each step's bound when opening a session or closing one.
 CONNECT_S = 5.0
+#: Seconds for each step with the phone's pasteboard: saving it, setting it,
+#: putting it back. Measured on an iPhone 11: a set took 0.07 s.
+PASTEBOARD_S = 5.0
 
 #: How long a newly opened HID session waits before its first report. One
 #: sent sooner is dropped: measured on an iPhone 11, a tap on Settings' General
@@ -191,6 +194,7 @@ def _pmd3() -> SimpleNamespace:
             SHIFT=hid_service.KEY_LEFT_SHIFT,
             COMMAND=hid_service.KEY_LEFT_GUI,
             KEY_A=hid_service.KEY_A,
+            KEY_V=hid_service.KEY_V,
             BACKSPACE=hid_service.KEY_BACKSPACE,
         )
     except (ImportError, AttributeError) as e:
@@ -236,6 +240,70 @@ async def _press(lib: SimpleNamespace, session: Any, progress: Any,
             await _sleep(KEY_HOLD_S)
     finally:
         await asyncio.shield(_bounded_close(keyboard.close))
+
+
+def _pasteboard_service() -> Any:
+    """CoreDevice's pasteboard service class, or NotSent where this
+    pymobiledevice3 has none: apart from `_pmd3`, so typing US keys does not
+    depend on it."""
+    try:
+        from pymobiledevice3.remote.core_device.pasteboard_service import PasteboardService
+    except ImportError as e:
+        raise NotSent(f"pymobiledevice3 has no pasteboard service ({e})") from e
+    return PasteboardService
+
+
+def _pasteboard_items(snapshot: Any) -> list | None:
+    """The items of a pasteboard pull, as `set` takes them back, or None when
+    the reply is not that shape -- which is not "the clipboard was empty"."""
+    if not isinstance(snapshot, dict):
+        return None
+    board = snapshot.get("pasteboard", snapshot)
+    items = board.get("items") if isinstance(board, dict) else None
+    return list(items) if isinstance(items, list) else None
+
+
+async def _paste(lib: SimpleNamespace, session: Any, progress: Any, text: str,
+                 restore_failed: Any = None) -> None:
+    """Type `text` by pasting it: set on the phone's clipboard, then Cmd+V on a
+    keyboard of its own, the clipboard put back afterwards (#780).
+
+    For text with a character no US key types, which went through WDA.
+    Measured on an iPhone 11 (iOS 27.2.1): "café 🎉 Ωμέγα" landed exactly in
+    Settings' search, with no "Allow Paste" prompt -- a key-chord paste is the
+    user's -- and the app searched for it as for typing.
+
+    Nothing is pasted over a clipboard that could not be saved: what quern
+    sets on a phone it undoes, and a clipboard it could not read it could
+    not put back. Its contents never leave this function. A clipboard that
+    could not be put back is handed to `restore_failed` -- on the answer,
+    since the text was typed and is not typed again -- and is handed over
+    even when the paste itself raised: the clipboard then holds the text
+    whatever happens to it next (CodeRabbit on #784).
+    """
+    pasteboard = _pasteboard_service()(session.rsd)
+    try:
+        try:
+            await asyncio.wait_for(pasteboard.connect(), CONNECT_S)
+            saved = _pasteboard_items(await asyncio.wait_for(pasteboard.get(), PASTEBOARD_S))
+        except Exception as e:  # noqa: BLE001 -- any failure here sent nothing
+            raise NotSent(f"the clipboard could not be saved, so it was not used to "
+                          f"paste the text: {e!r}") from e
+        if saved is None:
+            raise NotSent("the clipboard's contents could not be read, so it was not used "
+                          "to paste the text")
+        try:
+            await asyncio.wait_for(pasteboard.set_text(text), PASTEBOARD_S)
+            await _press(lib, session, progress, [(lib.COMMAND, lib.KEY_V)])
+        finally:
+            try:
+                await asyncio.shield(asyncio.wait_for(pasteboard.set(saved), PASTEBOARD_S))
+            except Exception as e:  # noqa: BLE001 -- reported, never raised over the paste
+                if restore_failed is not None:
+                    restore_failed(f"The phone's clipboard could not be put back ({e!r}): it "
+                                   "now holds the typed text.")
+    finally:
+        await asyncio.shield(_bounded_close(pasteboard.close))
 
 
 async def _report(send: Any) -> None:
@@ -301,6 +369,13 @@ class CoreDeviceInput:
         self._opening: dict[str, asyncio.Lock] = {}
         self._reaper: asyncio.Task | None = None
         self._dropping: set[asyncio.Task] = set()
+        # udid -> what the last typing on it has to say: a clipboard that
+        # could not be put back after a paste.
+        self._notes: dict[str, str] = {}
+
+    def take_note(self, udid: str) -> str | None:
+        """What the last typing on this phone has to say, once."""
+        return self._notes.pop(udid, None)
 
     # -- the actions -------------------------------------------------------
 
@@ -508,15 +583,20 @@ class CoreDeviceInput:
         """Type `text` as US key positions on a virtual keyboard (#664).
 
         On a keyboard of its own, closed after the text (`_press`). Text
-        with a character no US key types goes through WDA, as anything HID
-        cannot send does; the controller sets such text through the
-        accessibility service instead when it has a field to set it in.
+        with a character no US key types is pasted instead (`_paste`, #780);
+        the controller sets such text through the accessibility service
+        instead when it has a field to set it in. Why the clipboard could not
+        be put back, if it could not, is kept for `take_note`.
         """
+        self._notes.pop(udid, None)
+
         async def send(lib: SimpleNamespace, session: _Session, screen: Screen | None,
                        progress: _Progress) -> None:
             keys = [lib.KEYS.get(ch) for ch in text]
             if None in keys:
-                raise NotSent("the text has a character no US key types")
+                await _paste(lib, session, progress, text,
+                             restore_failed=lambda note: self._notes.__setitem__(udid, note))
+                return
             await _press(lib, session, progress,
                          [(lib.SHIFT if shift else None, usage) for usage, shift in keys])
 

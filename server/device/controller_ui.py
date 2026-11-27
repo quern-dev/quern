@@ -6243,9 +6243,22 @@ class DeviceControllerUI:
             # Untargeted: nothing to read back, so nothing to correct. Text no
             # US key types goes through WDA, as anything HID cannot send does.
             via = await hid.type_text(udid, text)
+            # Taken whatever served it: a clipboard left holding the text is
+            # said even when the typing then went through WDA (#784 review).
+            clipboard = hid.take_note(udid)
             self._invalidate_ui_cache(udid)
             result = {"udid": udid, "verified": False, "input": via}
-            if via == hid.TOOL_NAME:
+            if via == hid.TOOL_NAME and not types_on_us_keys(text):
+                # Pasted (#780): one change to the app, not a keystroke each.
+                result["note"] = _joined(
+                    "Pasted, since the text has a character no US key types: put on the "
+                    "phone's clipboard and pasted with Cmd+V"
+                    + ("." if clipboard else ", and the clipboard put back.")
+                    + " The app saw one paste rather than a keystroke per character.",
+                    clipboard)
+            elif clipboard:
+                result["note"] = clipboard
+            elif via == hid.TOOL_NAME:
                 # Said, not only documented: WDA inserted text exactly, and
                 # keystrokes may not arrive as typed (#682 review).
                 result["note"] = (
@@ -6278,6 +6291,10 @@ class DeviceControllerUI:
         else:
             keys = "".join(ch for ch in text if types_on_us_keys(ch)) or " "
         via = await hid.type_text(udid, keys) if keys else hid.TOOL_NAME
+        # A password with a character no US key types is pasted whole: if the
+        # clipboard could not be put back, it holds the password, and every
+        # answer below says so -- without the text (#784 review).
+        clipboard = hid.take_note(udid)
         self._invalidate_ui_cache(udid)
         await asyncio.sleep(0.3)
         after = await self._read_field_value(udid, target, label, identifier,
@@ -6349,7 +6366,7 @@ class DeviceControllerUI:
                 f"the field back crashed {', '.join(sorted(set(crashed)))} (#669), so what "
                 "was read is the screen the crash left: whether the text stayed is "
                 f"unknown. {self._after_a_crash(udid)} Read the screen again before "
-                "acting.", tool=via)
+                "acting." + (f" {clipboard}" if clipboard else ""), tool=via)
         if outcome != "landed":
             message = self._typing_failure(outcome, before, after, text,
                                            label or identifier, secure)
@@ -6360,9 +6377,11 @@ class DeviceControllerUI:
                            f"{', '.join(sorted(set(crashed)))} (#669), after the keystrokes: "
                            "what was typed is likely gone with it, and nothing was "
                            "corrected. Read the screen again before acting.")
-            raise DeviceError(message, tool=via)
+            raise DeviceError(_joined(message, clipboard), tool=via)
         if not secure:
             result["value"] = after
+        if clipboard:
+            result["note"] = _joined(result.get("note"), clipboard)
         return result
 
     def _refuse_after_a_crash(self, udid: str, before: int, what: str, *,
