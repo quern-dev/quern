@@ -60,6 +60,9 @@ LIB = SimpleNamespace(RemoteServiceDiscoveryService=FakeRsd)
 @pytest.fixture
 def pool(_no_native_tunnels, monkeypatch):
     """The suite's pool, with `_open` handing out fake tunnels and counting."""
+    from server.device.ios import devicectl
+
+    monkeypatch.setattr(devicectl, "_identity_aliases", {})  # nothing listed yet
     opened: list[FakeTunnel] = []
 
     async def _open(udid, serial):
@@ -232,6 +235,25 @@ class TestThePool:
         await _settle()
         assert pool.opened[0].closed
         assert not native_tunnel.is_held(PHONE)
+
+    async def test_a_phone_devicectl_does_not_list_is_not_asked_about(self, pool, monkeypatch):
+        """Asking the pairing daemon about a phone it does not know took
+        pymobiledevice3 10 s to give up: once devicectl has listed the phones,
+        any other id is refused at once, and nothing is opened."""
+        from server.device.ios import devicectl
+
+        monkeypatch.setitem(devicectl._identity_aliases, CORE, CORE)
+        monkeypatch.setitem(devicectl._identity_aliases, PHONE, CORE)
+
+        with pytest.raises(NativeTunnelUnavailable, match="lists no phone paired"):
+            await native_tunnel.native_address("00008030-DEADBEEF00000000")
+        assert pool.opened == []
+        await native_tunnel.native_address(PHONE)          # a listed one still opens
+        assert len(pool.opened) == 1
+
+    async def test_an_open_is_bounded_well_under_the_daemons_wait(self):
+        """pymobiledevice3 waits 10 s for a phone that is not there."""
+        assert native_tunnel.OPEN_S <= 5.0
 
     async def test_a_tunnel_whose_reaper_ended_gets_one_again(self, pool, monkeypatch):
         """Opened under the image mount's own `asyncio.run`, whose end
