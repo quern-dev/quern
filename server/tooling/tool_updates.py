@@ -59,11 +59,12 @@ UNMANAGED_REASONS = {
 CLI_FLOORS: dict[tuple[str, str], str] = {
     # The copy tunneld runs, held to the floor of quern's own (pyproject.toml).
     # What is measured: 11.15.0 gets one RSD session per tunnel on iOS 27.2
-    # (#665), 11.20.0 and 11.55.0 open them freely, and the phone's Web
-    # Inspector features were verified on 11.55.0 only. What is not: a break in
+    # (#665), 11.20.0 and 11.55.0 open them freely, the phone's Web
+    # Inspector features were verified on 11.55.0, and the Wi-Fi iPhone paths
+    # (#789-#791) on 11.63.1 only -- the floor since 0.26.0-beta.8. What is not: a break in
     # tunneld itself between 11.20 and 11.55. One version across the machine is
     # the policy (#725); Romulus ran tunneld on 11.14.0 with nothing saying so.
-    ("pymobiledevice3", "cli"): "11.55.0",
+    ("pymobiledevice3", "cli"): "11.63.1",
 }
 
 # Actions, most urgent first. Ordering is a property of the data, so callers

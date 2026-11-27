@@ -68,9 +68,17 @@ dependencies = [
     # evaluate_web_js and get_web_console on an iPhone (#708, #713, #714) -- were
     # built and live-tested on 11.55.0 only, and pymobiledevice3 reworked its Web
     # Inspector service between 11.20 and 11.55 (11.43 changed ServiceConnection).
-    # So 11.55.0 is the version everything quern ships was verified on. tunneld's
-    # own copy is held to the same floor (tool_updates.CLI_FLOORS).
-    "pymobiledevice3>=11.55.0",
+    # So 11.55.0 was the version everything quern shipped was verified on.
+    #
+    # Raised to 11.63.1 for 0.26.0-beta.8: the Wi-Fi iPhone paths -- reads,
+    # HID, screenshots, device logs and crash reports over Apple's own tunnel
+    # (NativeRemotedTunnel, #789-#791), and Screen Mirror's network listing
+    # (#776-#778) -- were built and live-tested on 11.63.1 only. The four
+    # names they use exist in the 11.55.0 wheel, but a name is not a verified
+    # behaviour. So 11.63.1 is the version everything quern ships was verified
+    # on; the full suite runs at it. tunneld's own copy is held to the same
+    # floor (tool_updates.CLI_FLOORS).
+    "pymobiledevice3>=11.63.1",
     "pydantic>=2.0",                    # inherited; v1 genuinely breaks, but 2.0 exactly is untested
     "sse-starlette>=2.0",               # inherited
     "mitmproxy>=10.0",                  # inherited
