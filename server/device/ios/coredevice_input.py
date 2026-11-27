@@ -263,7 +263,8 @@ def _pasteboard_items(snapshot: Any) -> list | None:
     return list(items) if isinstance(items, list) else None
 
 
-async def _paste(lib: SimpleNamespace, session: Any, progress: Any, text: str) -> str | None:
+async def _paste(lib: SimpleNamespace, session: Any, progress: Any, text: str,
+                 restore_failed: Any = None) -> None:
     """Type `text` by pasting it: set on the phone's clipboard, then Cmd+V on a
     keyboard of its own, the clipboard put back afterwards (#780).
 
@@ -274,9 +275,11 @@ async def _paste(lib: SimpleNamespace, session: Any, progress: Any, text: str) -
 
     Nothing is pasted over a clipboard that could not be saved: what quern
     sets on a phone it undoes, and a clipboard it could not read it could
-    not put back. Its contents never leave this function. Returns None, or
-    why the clipboard could not be put back after the paste -- said on the
-    answer, since the text was typed and is not typed again.
+    not put back. Its contents never leave this function. A clipboard that
+    could not be put back is handed to `restore_failed` -- on the answer,
+    since the text was typed and is not typed again -- and is handed over
+    even when the paste itself raised: the clipboard then holds the text
+    whatever happens to it next (CodeRabbit on #784).
     """
     pasteboard = _pasteboard_service()(session.rsd)
     try:
@@ -295,11 +298,10 @@ async def _paste(lib: SimpleNamespace, session: Any, progress: Any, text: str) -
         finally:
             try:
                 await asyncio.shield(asyncio.wait_for(pasteboard.set(saved), PASTEBOARD_S))
-                restore_failed = None
             except Exception as e:  # noqa: BLE001 -- reported, never raised over the paste
-                restore_failed = (f"the phone's clipboard could not be put back ({e!r}): it "
-                                  "now holds the typed text")
-        return restore_failed
+                if restore_failed is not None:
+                    restore_failed(f"The phone's clipboard could not be put back ({e!r}): it "
+                                   "now holds the typed text.")
     finally:
         await asyncio.shield(_bounded_close(pasteboard.close))
 
@@ -592,8 +594,8 @@ class CoreDeviceInput:
                        progress: _Progress) -> None:
             keys = [lib.KEYS.get(ch) for ch in text]
             if None in keys:
-                if note := await _paste(lib, session, progress, text):
-                    self._notes[udid] = note
+                await _paste(lib, session, progress, text,
+                             restore_failed=lambda note: self._notes.__setitem__(udid, note))
                 return
             await _press(lib, session, progress,
                          [(lib.SHIFT if shift else None, usage) for usage, shift in keys])

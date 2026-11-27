@@ -175,3 +175,47 @@ def test_the_pull_reply_shapes(self=None):
     assert items({"items": SAVED}) == SAVED
     assert items({"pasteboard": {}}) is None
     assert items(SimpleNamespace()) is None
+
+
+# MARK: - a clipboard not put back always reaches the answer (CodeRabbit on #784)
+
+
+async def test_a_paste_that_fails_still_says_the_clipboard_was_not_put_back(lib, wda, board):
+    """The keyboard failed before Cmd+V, so the text went through WDA -- and
+    the clipboard, not put back, held it with nothing to say so."""
+    lib.fail["keyboard"] = OSError("no keyboard")
+    board.fail["set"] = OSError("gone")
+    hid = CoreDeviceInput(wda)
+    assert await hid.type_text(PHONE, "é") == "wda"
+    assert "holds the typed text" in (hid.take_note(PHONE) or "")
+
+
+async def test_the_untargeted_answer_never_says_put_back_when_it_was_not(monkeypatch):
+    from tests.test_no_implicit_wda import PHONE as P27
+    from tests.test_no_implicit_wda import _failing_phone
+
+    ctrl, _start = _failing_phone(monkeypatch)
+    ctrl.coredevice_input.type_text = AsyncMock(return_value="coredevice")
+    warning = "The phone's clipboard could not be put back (x): it now holds the typed text."
+    ctrl.coredevice_input.take_note = lambda udid: warning
+    note = (await ctrl.type_text("café", udid=P27))["note"]
+    assert "put back." not in note.split(warning)[0], "said put back, then the opposite"
+    assert note.endswith(warning)
+
+    ctrl.coredevice_input.type_text = AsyncMock(return_value="wda")
+    assert (await ctrl.type_text("café", udid=P27))["note"] == warning
+
+
+async def test_a_password_left_on_the_clipboard_is_said_on_a_named_field(monkeypatch):
+    """The whole password is pasted into a secure field; a clipboard not put
+    back holds it, and the named answer said nothing. Said now -- without the
+    text."""
+    from tests.test_coredevice_typing import PHONE as TP
+    from tests.test_coredevice_typing import _phone
+
+    ctrl, _ = _phone(monkeypatch, before="", reads=["••"], secure=True)
+    warning = "The phone's clipboard could not be put back (x): it now holds the typed text."
+    ctrl.coredevice_input.take_note = lambda udid: warning
+    result = await ctrl.type_text("é1", udid=TP, identifier="field_default")
+    assert warning in result["note"]
+    assert "é1" not in str(result)
