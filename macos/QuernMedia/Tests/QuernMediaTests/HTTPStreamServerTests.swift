@@ -862,6 +862,12 @@ func anUnavailableSourceDropsAndRefuses() async throws {
     }
     #expect(String(decoding: dropped, as: UTF8.self).hasPrefix("HTTP/1.1 200"))
     #expect(Date().timeIntervalSince(began) < 4, "the viewer was not dropped; its read ran out")
+    // Waited for: the server cancels the connection, and takes it out of
+    // its count in the cancel's own handler, a moment after the client sees
+    // the close. Read at once, it was 1 on a CI VM (#780).
+    await waitFor("the server to take the dropped viewer out of its count") {
+        server.viewers == 0
+    }
     #expect(server.viewers == 0)
 
     let refused = await rawRequest(method: "GET", path: "/frames", port: port)
