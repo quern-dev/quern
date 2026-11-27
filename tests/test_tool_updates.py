@@ -308,7 +308,7 @@ async def test_only_the_documented_cli_floors_are_declared():
     exactly that. A new entry must arrive with a comment saying what breaks
     below it and where that was measured -- as tunneld's pymobiledevice3 did
     (#725), held to quern's own copy's floor."""
-    assert DECLARED_FLOORS == {("pymobiledevice3", "cli"): "11.55.0"}, (
+    assert DECLARED_FLOORS == {("pymobiledevice3", "cli"): "11.63.1"}, (
         "adding a CLI floor is a decision -- document what breaks below it "
         "and at which versions that was verified"
     )
