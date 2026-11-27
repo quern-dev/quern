@@ -1925,8 +1925,12 @@ class DeviceControllerUI:
                 "does not say which.")
         changed = verdict.get("screen_changed")
         if changed is False:
-            said += (" The screen did not change, so the tap most likely reached what "
-                     "is on top: dismiss it, then tap again.")
+            # Not "tap again": a tap can take effect with nothing on screen to
+            # show it, and a repeat is not always harmless (CodeRabbit on #793).
+            said += (" The screen did not change: what is on top may have taken the "
+                     "tap, or it did something the screen does not show. Read the "
+                     "screen before tapping again, and dismiss what is on top if it "
+                     "is still there.")
         elif changed is True:
             said += " The screen changed: read it to see which one took the tap."
         else:

@@ -1059,8 +1059,11 @@ async def tap_element(request: Request, body: TapElementRequest):
                         result["warning"] = " ".join(
                             w for w in (result.get("warning"), warning, advisory) if w)
 
+            # Not over a shared-point tap's own check: its warning is worded
+            # from that verdict, and a second one could contradict it
+            # (CodeRabbit on #793).
             if (verify_before is not None and isinstance(result, dict)
-                    and result.get("status") == "ok"):
+                    and result.get("status") == "ok" and "shares_point_with" not in result):
                 result.update(await _verify_changed(controller, resolved, verify_before, result))
 
             # Remembered for the next miss only when the tap was not already

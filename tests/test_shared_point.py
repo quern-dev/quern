@@ -99,7 +99,9 @@ class TestTheTap:
         ctrl.coredevice_input.tap.assert_awaited_once()
         assert [o["label"] for o in result["shares_point_with"]] == ["Accessibility"]
         assert result["screen_changed"] is False
-        assert "did not change" in result["warning"] and "dismiss it" in result["warning"]
+        assert "did not change" in result["warning"]
+        assert "Read the screen before tapping again" in result["warning"]
+        assert "then tap again" not in result["warning"]
         assert len(captured) == 2                 # a frame before the tap, one after
 
     async def test_a_changed_screen_says_to_read_which_took_it(self, monkeypatch):
