@@ -739,6 +739,40 @@ def _encloses(e: UIElement, frame: dict[str, float]) -> bool:
     return _contains(ef, frame)
 
 
+def _sharing_the_point(target: UIElement, x: float, y: float,
+                       screen: list[UIElement] | None) -> list[UIElement]:
+    """The other controls on a pushed screen that also hold the tap point,
+    overlapping the target without one holding the other.
+
+    A phone's tree push lists an overlay's rows and the rows hidden beneath
+    it, and its hit-test calls both reachable: measured on an iPhone 11 with
+    Settings' search open, the "Wi-Fi" row behind it hit-tested as itself,
+    and `tap_element` answered ok for a tap the search took. Rows sit edge to
+    edge and a control's own parts sit inside it, so two controls that
+    cross like this are layered. Which is on top the push does not say, so
+    this is a warning, never a refusal: it would refuse the visible one too.
+    """
+    if not screen or not target.frame:
+        return []
+    try:
+        tframe = {k: float(target.frame[k]) for k in ("x", "y", "width", "height")}
+    except (KeyError, TypeError, ValueError):
+        return []
+    found = []
+    for other in screen:
+        if other.type not in _CONTROL_TYPES or not other.frame or _same_element(other, target):
+            continue
+        try:
+            oframe = {k: float(other.frame[k]) for k in ("x", "y", "width", "height")}
+        except (KeyError, TypeError, ValueError):
+            continue
+        holds = (oframe["x"] <= x <= oframe["x"] + oframe["width"]
+                 and oframe["y"] <= y <= oframe["y"] + oframe["height"])
+        if holds and not _contains(tframe, oframe) and not _contains(oframe, tframe):
+            found.append(other)
+    return found
+
+
 def _same_element(a: UIElement, b: UIElement) -> bool:
     return (a.type, a.identifier, a.label, a.frame) == (b.type, b.identifier, b.label, b.frame)
 
@@ -1850,6 +1884,59 @@ class DeviceControllerUI:
             if now >= deadline:
                 return lit, False
             await asyncio.sleep(0.25)
+
+    async def _frame_for_check(self, udid: str) -> tuple | None:
+        """A frame of the screen for a before-and-after check, or None."""
+        from server.device import frames
+
+        try:
+            return await frames.capture_for_check(self, udid)
+        except Exception:  # noqa: BLE001 -- no frame is "could not tell"
+            logger.debug("frame before a shared-point tap failed", exc_info=True)
+            return None
+
+    async def _note_shared_point(self, udid: str, result: dict, target: UIElement,
+                                 x: float, y: float, shared: list[UIElement],
+                                 before: tuple | None) -> None:
+        """Say which controls shared the tap point, and whether the tap
+        changed the screen: the one sign of which of them took it."""
+        from server.device import frames
+
+        verdict: dict = {"screen_changed": None, "screen_change": {
+            "waited_s": 0.0, "reason": "no frame of the screen could be taken before the tap"}}
+        if before is not None and before[0] is not None:
+            await asyncio.sleep(frames.VERIFY_WAIT_S)
+            try:
+                after = await frames.capture_for_check(self, udid, source=before[2])
+                verdict = frames.changed_verdict(before, after)
+            except Exception:  # noqa: BLE001 -- the tap is delivered; the check is advice
+                logger.debug("shared-point check after the tap failed", exc_info=True)
+                verdict = {"screen_changed": None, "screen_change": {
+                    "waited_s": frames.VERIFY_WAIT_S,
+                    "reason": "the frames could not be compared"}}
+        result.update(verdict)
+        result["shares_point_with"] = [
+            {"type": o.type, "label": o.label or "", "identifier": o.identifier,
+             "frame": o.frame} for o in shared]
+        name = target.label or target.identifier or target.type
+        others = ", ".join(f"{o.type} '{o.label}'".replace(" ''", "") for o in shared[:3])
+        said = (f"'{name}' shares ({x:.0f}, {y:.0f}) with {others}: one is drawn over "
+                "the other -- a search, sheet or menu over the screen -- and the tree "
+                "does not say which.")
+        changed = verdict.get("screen_changed")
+        if changed is False:
+            # Not "tap again": a tap can take effect with nothing on screen to
+            # show it, and a repeat is not always harmless (CodeRabbit on #793).
+            said += (" The screen did not change: what is on top may have taken the "
+                     "tap, or it did something the screen does not show. Read the "
+                     "screen before tapping again, and dismiss what is on top if it "
+                     "is still there.")
+        elif changed is True:
+            said += " The screen changed: read it to see which one took the tap."
+        else:
+            said += (" Whether the screen changed could not be told: read it before "
+                     "relying on this tap.")
+        result["warning"] = " ".join(w for w in (result.get("warning"), said) if w)
 
     async def _obstruction(self, udid: str, target: UIElement,
                            x: float, y: float, *, pushed: bool = False) -> dict | None:
@@ -5200,6 +5287,19 @@ class DeviceControllerUI:
                         result["scroll"] = _scroll_report(sweep, scroll_to_find)
                     return result
 
+            # Another control holding the point, layered with the target: the
+            # push cannot say which is on top, so the tap goes ahead and says
+            # whether the screen changed (#781's dropped-phone run).
+            shared: list[UIElement] = []
+            shared_before: tuple | None = None
+            if pushed:
+                cached = self._ui_cache.get(resolved)
+                screen = (cached[0] if cached and self._ui_cache_backend.get(resolved)
+                          == self.coredevice_ax.TOOL_NAME else None)
+                shared = _sharing_the_point(el, cx, cy, screen)
+                if shared:
+                    shared_before = await self._frame_for_check(resolved)
+
             await self._input_backend(resolved).tap(resolved, cx, cy, **hold)
             self._invalidate_ui_cache(resolved)  # UI changed
 
@@ -5238,6 +5338,9 @@ class DeviceControllerUI:
                     f"The target was still moving after {unsettled_ms}ms; it was "
                     f"tapped where it was last read, which may not be where it is "
                     f"now -- check the screen before relying on this tap.")
+            if shared:
+                await self._note_shared_point(resolved, result, el, cx, cy, shared,
+                                              shared_before)
             _note_collapsed(result, folded)
             _note_equivalence(result, element_type, el)
             _note_merged_label(result, label, el, pushed)

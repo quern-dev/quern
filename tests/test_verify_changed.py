@@ -180,6 +180,22 @@ class TestTheRoutes:
                                                    "note_unchanged": False})
         assert body["status"] == "ok" and body["screen_changed"] is False
 
+    async def test_a_shared_point_taps_own_verdict_is_not_overwritten(
+            self, app, controller, frames_shown):
+        """Its warning is worded from its verdict; the route's later frames
+        must not leave screen_changed saying the opposite (CodeRabbit on #793)."""
+        frames_shown["pngs"] = [SAME, CHANGED]           # the route would say "changed"
+        controller.tap_element.return_value = {
+            "status": "ok", "tapped": {"label": "Go", "type": "Button", "x": 1, "y": 2},
+            "shares_point_with": [{"type": "Button", "label": "Over", "identifier": None,
+                                   "frame": None}],
+            "screen_changed": False, "screen_change": {"fraction": 0.0},
+            "warning": "'Go' shares (1, 2) with Button 'Over' ... The screen did not change"}
+        _, body = await _post(app, "tap-element", {"label": "Go", "verify_changed": True,
+                                                   "note_unchanged": False})
+        assert body["screen_changed"] is False
+        assert "did not change" in body["warning"]
+
     async def test_tap_element_reuses_the_notes_frame(self, app, controller, frames_shown,
                                                       monkeypatch):
         """The frame #502 already takes before the tap is the before-frame."""
